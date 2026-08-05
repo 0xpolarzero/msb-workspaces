@@ -121,6 +121,13 @@ keychain_delete() {
 
 metadata_file() { printf '%s/%s.conf\n' "$GITHUB_META_DIR" "$1"; }
 
+metadata_access() {
+  local file
+  file="$(metadata_file "$1")"
+  [[ -f "$file" ]] || return 1
+  sed -n 's/^access=//p' "$file" | head -n 1
+}
+
 metadata_repo() {
   local file
   file="$(metadata_file "$1")"
@@ -129,11 +136,11 @@ metadata_repo() {
 }
 
 write_metadata() {
-  local box="$1" repo="$2"
+  local box="$1" repo="$2" access="${3:-host-write}"
   mkdir -p "$GITHUB_META_DIR"
   chmod 700 "$GITHUB_META_DIR"
   umask 077
-  printf 'verification_repo=%s\nconfigured_at=%s\n' "$repo" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(metadata_file "$box")"
+  printf 'verification_repo=%s\naccess=%s\nconfigured_at=%s\n' "$repo" "$access" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(metadata_file "$box")"
 }
 
 sandbox_exists() { "$MSB_BIN" inspect "$1" >/dev/null 2>&1; }
@@ -225,7 +232,8 @@ set -Eeuo pipefail
 relative="$1"
 root="${MSW_GUEST_WORKSPACE_ROOT:-/workspace}"
 candidate="$root/$relative"
-resolved="$(realpath -e -- "$candidate")" || { echo "repository path does not exist: $relative" >&2; exit 2; }
+resolved="$(realpath -- "$candidate")" || { echo "repository path does not exist: $relative" >&2; exit 2; }
+[[ -e "$resolved" ]] || { echo "repository path does not exist: $relative" >&2; exit 2; }
 case "$resolved" in
   "$root"|"$root"/*) ;;
   *) echo "repository path escapes /workspace" >&2; exit 3 ;;
@@ -896,12 +904,20 @@ read_hidden_token() {
 }
 
 cmd_github_verify() {
-  local box="$1" repo="${2:-}" id temp_rel branch repo_root canonical remote_sha=""
+  local box="$1" repo="${2:-}" mode="${3:-}" id temp_rel branch repo_root canonical remote_sha="" host_write=1
   validate_workspace "$box"
+  if [[ -z "$mode" ]]; then mode="$(metadata_access "$box" 2>/dev/null || printf 'host-write')"; fi
+  case "$mode" in
+    host-write) ;;
+    read-only) host_write=0 ;;
+    *) fatal "unknown GitHub access mode '$mode'" ;;
+  esac
   if [[ -z "$repo" ]]; then repo="$(metadata_repo "$box")" || fatal "no verification repository recorded for $box"; fi
   validate_github_repo "$repo"
   keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
-  keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "write token missing for $box"
+  if (( host_write )); then
+    keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "write token missing for $box"
+  fi
 
   bind_github_read_token "$box"
   ensure_running "$box"
@@ -925,40 +941,63 @@ cmd_github_verify() {
     guest_exec_w "$box" "$repo_root" git commit --allow-empty -m "MSW permission verification" >/dev/null
 
     if guest_exec_w "$box" "$repo_root" git push origin "HEAD:refs/heads/$branch" >/dev/null 2>&1; then
-      host_delete_branch "$box" "$canonical" "$branch" >/dev/null 2>&1 || true
+      if (( host_write )); then
+        host_delete_branch "$box" "$canonical" "$branch" >/dev/null 2>&1 || true
+      else
+        guest_exec_w "$box" "$repo_root" git push origin --delete "$branch" >/dev/null 2>&1 || true
+      fi
       fatal "the guest token can push. Replace it with a Contents: read-only fine-grained token"
     fi
     ok "guest push rejected"
 
-    note "Verifying the host-only push path"
-    push_impl "$box" "$temp_rel" 0 1 1
-    remote_sha="$(guest_exec_w "$box" "$repo_root" bash -c 'git ls-remote --exit-code origin "refs/heads/$1" | awk '\''NR==1 {print $1}'\''' _ "$branch")"
-    [[ "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || fatal "host push could not be confirmed"
-    host_delete_branch "$box" "$canonical" "$branch" >/dev/null
-    if guest_exec_w "$box" "$repo_root" git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
-      fatal "temporary verification branch could not be deleted"
+    if (( host_write )); then
+      note "Verifying the host-only push path"
+      push_impl "$box" "$temp_rel" 0 1 1
+      remote_sha="$(guest_exec_w "$box" "$repo_root" bash -c 'git ls-remote --exit-code origin "refs/heads/$1" | awk '\''NR==1 {print $1}'\''' _ "$branch")"
+      [[ "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || fatal "host push could not be confirmed"
+      host_delete_branch "$box" "$canonical" "$branch" >/dev/null
+      if guest_exec_w "$box" "$repo_root" git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+        fatal "temporary verification branch could not be deleted"
+      fi
+      ok "host push and cleanup succeeded"
     fi
-    ok "host push and cleanup succeeded"
   )
-  ok "GitHub permissions verified for $box using $repo"
+  if (( host_write )); then
+    ok "GitHub permissions verified for $box using $repo"
+  else
+    ok "Read-only GitHub access verified for $box using $repo"
+  fi
 }
 
 cmd_github_setup() {
-  local box="$1" repo="$2" read_token write_token
+  local box="$1" repo="$2" mode="${3:-host-write}" read_token="" write_token="" host_write=1
   validate_workspace "$box"
   validate_github_repo "$repo"
   sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+  if [[ "$mode" == "--read-only" ]]; then mode="read-only"; host_write=0; fi
+  [[ "$mode" == host-write || "$mode" == read-only ]] || fatal "usage: msw github setup WORKSPACE OWNER/REPO [--read-only]"
 
-  cat <<INFO
+  if (( host_write )); then
+    cat <<INFO
 Create two fine-grained GitHub tokens restricted to the repositories this workspace may use:
   1. Guest token: Contents = Read-only
   2. Host token:  Contents = Read and write
 Add Workflows = Read and write to the host token only when you need to push .github/workflows files.
 Verification repository: $repo
 INFO
+  else
+    cat <<INFO
+Create one fine-grained GitHub token restricted to the repositories this workspace may read:
+  Guest token: Contents = Read-only
+Verification repository: $repo
+This workspace will not have a host-side push credential.
+INFO
+  fi
   read_token="$(read_hidden_token 'Paste the READ-ONLY token: ' MSW_GITHUB_READ_TOKEN_INPUT)"
-  write_token="$(read_hidden_token 'Paste the HOST WRITE token: ' MSW_GITHUB_WRITE_TOKEN_INPUT)"
-  [[ "$read_token" != "$write_token" ]] || fatal "use two different tokens"
+  if (( host_write )); then
+    write_token="$(read_hidden_token 'Paste the HOST WRITE token: ' MSW_GITHUB_WRITE_TOKEN_INPUT)"
+    [[ "$read_token" != "$write_token" ]] || fatal "use two different tokens"
+  fi
 
   local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta=""
   meta_file="$(metadata_file "$box")"
@@ -967,14 +1006,14 @@ INFO
   if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
 
   keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$read_token"
-  keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$write_token"
+  if (( host_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$write_token"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
   unset read_token write_token
-  write_metadata "$box" "$repo"
+  write_metadata "$box" "$repo" "$mode"
 
   # Run verification in a fresh process. Bash disables errexit inside functions
   # used directly as an `if` condition; a child process keeps every internal
   # failure fatal while still allowing this parent to roll credentials back.
-  if ! "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo"; then
+  if ! "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode"; then
     warn "verification failed; restoring the previous GitHub configuration"
     if (( had_read )); then keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$old_read"; else keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; fi
     if (( had_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$old_write"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
@@ -984,7 +1023,7 @@ INFO
     return 1
   fi
   unset old_read old_write
-  ok "GitHub configured for $box"
+  ok "GitHub configured for $box ($mode)"
 }
 
 cmd_github_status() {
@@ -1012,11 +1051,11 @@ cmd_github() {
   local sub="${1:-status}"; shift || true
   case "$sub" in
     setup)
-      (( $# == 2 )) || fatal "usage: msw github setup WORKSPACE OWNER/REPO"
-      cmd_github_setup "$1" "$2"
+      (( $# >= 2 && $# <= 3 )) || fatal "usage: msw github setup WORKSPACE OWNER/REPO [--read-only]"
+      cmd_github_setup "$1" "$2" "${3:-}"
       ;;
     verify)
-      (( $# >= 1 && $# <= 2 )) || fatal "usage: msw github verify WORKSPACE [OWNER/REPO]"
+      (( $# >= 1 && $# <= 2 )) || fatal "usage: msw github verify WORKSPACE [REPO]"
       cmd_github_verify "$1" "${2:-}"
       ;;
     status)
@@ -1439,10 +1478,11 @@ Repositories
   msw identity "NAME" EMAIL [TARGET]    Set commit identity
 
 GitHub permissions
-  msw github setup WORKSPACE OWNER/REPO Store tokens and run the full permission test
-  msw github verify WORKSPACE [REPO]    Rerun the permission test
-  msw github status [WORKSPACE|all]     Show credential presence
-  msw github remove WORKSPACE           Remove that workspace's tokens
+  msw github setup WORKSPACE OWNER/REPO [--read-only]
+                                      Store tokens and run the permission test
+  msw github verify WORKSPACE [REPO]  Rerun the configured permission test
+  msw github status [WORKSPACE|all]   Show credential presence
+  msw github remove WORKSPACE         Remove that workspace's tokens
 
 Websites
   msw open WORKSPACE [PORT] [SCHEME]    Start VM and open published URL
@@ -1544,9 +1584,9 @@ main() {
       cmd_host_repair
       ;;
     __github-verify-transaction)
-      (( $# == 2 )) || fatal "internal GitHub verification arguments missing"
+      (( $# >= 2 && $# <= 3 )) || fatal "internal GitHub verification arguments missing"
       bind_github_read_token "$1"
-      cmd_github_verify "$1" "$2"
+      cmd_github_verify "$1" "$2" "${3:-}"
       ;;
     backup) (( $# <= 1 )) || fatal "usage: msw backup [DIRECTORY]"; cmd_backup "${1:-$MSW_BACKUP_DIR}" ;;
     restore) cmd_restore "$@" ;;

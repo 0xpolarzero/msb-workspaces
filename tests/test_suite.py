@@ -199,6 +199,15 @@ class TestEnv:
         if extra_env:
             env.update(extra_env)
         return self.msw("github", "setup", box, repo, extra_env=env, check=check, timeout=90)
+    def configure_read_only(self, box: str, repo: str, *, read: str | None = None,
+                            extra_env: dict[str, str] | None = None,
+                            check: bool = True) -> subprocess.CompletedProcess[str]:
+        read = read or f"github_pat_READ_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
+        env = {"MSW_GITHUB_READ_TOKEN_INPUT": read}
+        if extra_env:
+            env.update(extra_env)
+        return self.msw("github", "setup", box, repo, "--read-only",
+                        extra_env=env, check=check, timeout=90)
 
     def init_remote(self, owner: str = "acme", repo: str = "demo", *, files: dict[str, str] | None = None) -> Path:
         bare = self.root / "remotes" / owner / f"{repo}.git"
@@ -512,6 +521,29 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
         self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
         self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
+    def test_read_only_setup_keeps_guest_access_without_host_token(self) -> None:
+        self.env.init_remote()
+        proc = self.env.configure_read_only("playgrounds", "acme/demo")
+        self.assertIn("guest push rejected", proc.stdout)
+        self.assertIn("Read-only GitHub access verified", proc.stdout)
+        self.assertNotIn("host-only push", proc.stdout)
+        self.assertTrue(self.env.key_file("msw.github.read", "playgrounds").exists())
+        self.assertFalse(self.env.key_file("msw.github.write", "playgrounds").exists())
+        metadata = (self.env.home / ".config/msw/github/playgrounds.conf").read_text()
+        self.assertIn("verification_repo=acme/demo", metadata)
+        self.assertIn("access=read-only", metadata)
+        self.assertEqual(
+            self.env.state()["sandboxes"]["playgrounds"]["secrets"]["GH_TOKEN"],
+            "GH_TOKEN@github.com,api.github.com",
+        )
+        self.assertIn("playgrounds   present    missing", self.env.msw("github", "status", "playgrounds").stdout)
+        verify = self.env.msw("github", "verify", "playgrounds")
+        self.assertIn("Read-only GitHub access verified", verify.stdout)
+        self.assertFailed(
+            self.env.msw("push", "playgrounds", "repo", "--yes", check=False),
+            "host write token missing",
+        )
+
 
     def test_same_token_is_rejected_without_mutation(self) -> None:
         self.env.init_remote()

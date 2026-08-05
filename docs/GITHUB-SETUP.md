@@ -7,6 +7,14 @@ This setup uses two different fine-grained personal access tokens for each works
 
 Agents can create branches, edit, commit, merge, rebase, and inspect history locally without any write credential.
 
+For a workspace that only needs private read access, omit the host credential:
+
+```bash
+msw github setup playgrounds OWNER/msw-verification --read-only
+```
+
+The command stores only the guest read token and removes any host write token for that workspace.
+
 ## Before creating tokens
 
 Choose one repository that will be used to verify permissions. It must:
@@ -83,6 +91,14 @@ msw github setup dev OWNER/msw-verification
 
 Paste the guest read token, then the host write token. Input is hidden.
 
+For a read-only workspace, add `--read-only`:
+
+```bash
+msw github setup playgrounds OWNER/msw-verification --read-only
+```
+
+This prompts for only the guest token. `msw github verify playgrounds` reruns the read-only check.
+
 The command performs all of these checks automatically:
 
 1. Stores both tokens in macOS Keychain under separate services.
@@ -106,6 +122,8 @@ msw github setup personal OWNER/msw-verification
 ```
 
 Using different selected-repository lists for each pair provides meaningful separation. You may use tokens from the same GitHub account.
+
+A workspace that does not use GitHub needs no `msw github setup` command.
 
 ## Check or rotate credentials
 
