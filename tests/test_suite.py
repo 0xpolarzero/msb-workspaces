@@ -329,6 +329,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         self.assertIn("--force-with-lease=$ref:$remote_sha", msw)
         self.assertIn("failed SHA-256 verification", msw)
         self.assertIn('"$LOCKF_BIN" -s -t 0 9', msw)
+        self.assertIn("MSW_GITHUB_VERIFY_INHERITED=1", msw)
         self.assertNotIn("tar -x", msw[msw.index("copy_lfs_objects"):msw.index("cmd_github_setup")])
         self.assertNotIn("ForwardAgent", setup + proxy)
         self.assertNotIn("/var/run/docker.sock", setup)
@@ -548,6 +549,86 @@ class GitHubAndPushTests(MSWTestCase):
         configured = self.env.configure_tokens("dev", "acme/demo")
         self.assertIn("GitHub configured for dev", configured.stdout)
         self.assertTrue(stale_lock.is_file())
+
+    def test_verification_lock_blocks_remove_until_sigkill(self) -> None:
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        pause_file = self.env.root / "verify-lock.ready"
+        env = self.env.env.copy()
+        env["MSW_FAKE_VERIFY_PAUSE_FILE"] = str(pause_file)
+        proc = subprocess.Popen(
+            [str(self.env.msw_bin), "github", "verify", "dev"],
+            env=env,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            for _ in range(100):
+                if pause_file.exists():
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("verification did not reach the injected pause")
+            blocked = self.env.msw("github", "remove", "dev", check=False)
+            self.assertFailed(blocked, "already in progress")
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=15)
+        finally:
+            pause_file.unlink(missing_ok=True)
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
+        self.env.msw("github", "remove", "dev")
+
+    def test_orphaned_setup_verifier_keeps_remove_locked_after_parent_sigkill(self) -> None:
+        self.env.init_remote()
+        pause_file = self.env.root / "orphaned-verify.ready"
+        env = self.env.env.copy()
+        env.update(
+            {
+                "MSW_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_dev_abcdefghijklmnopqrstuvwxyz0123456789",
+                "MSW_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789",
+                "MSW_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
+            }
+        )
+        proc = subprocess.Popen(
+            [str(self.env.msw_bin), "github", "setup", "dev", "acme/demo"],
+            env=env,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            for _ in range(100):
+                if pause_file.exists():
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("setup verification did not reach the injected pause")
+            os.kill(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=15)
+            blocked = self.env.msw("github", "remove", "dev", check=False)
+            self.assertFailed(blocked, "already in progress")
+            os.killpg(proc.pid, signal.SIGKILL)
+            pause_file.unlink(missing_ok=True)
+            for _ in range(100):
+                removed = self.env.msw("github", "remove", "dev", check=False)
+                if removed.returncode == 0:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("orphaned verification lock was not released")
+        finally:
+            pause_file.unlink(missing_ok=True)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if proc.poll() is None:
+                proc.wait(timeout=5)
 
     def test_read_only_setup_keeps_guest_access_without_host_token(self) -> None:
         self.env.init_remote()

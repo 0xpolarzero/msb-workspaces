@@ -1112,8 +1112,12 @@ read_hidden_token() {
 }
 
 cmd_github_verify() {
-  local box="$1" repo="${2:-}" mode="${3:-}" id temp_rel branch repo_root canonical remote_sha="" host_write=1
+  local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_sha="" host_write=1
   validate_workspace "$box"
+  if (( inherited_lock == 0 )); then
+    if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
+    lock_acquired=1
+  fi
   assert_not_quarantined "$box"
   if [[ -z "$mode" ]]; then mode="$(metadata_access "$box" 2>/dev/null || printf 'host-write')"; fi
   case "$mode" in
@@ -1137,9 +1141,17 @@ cmd_github_verify() {
 
   (
     cleanup_verify() {
+      local event="${1:-EXIT}" status="${2:-0}"
+      if [[ "$event" != EXIT ]]; then
+        trap - EXIT INT TERM HUP
+        exit "$status"
+      fi
       guest_exec "$box" rm -rf "/workspace/$temp_rel" >/dev/null 2>&1 || true
     }
-    trap cleanup_verify EXIT INT TERM HUP
+    trap 'cleanup_verify EXIT' EXIT
+    trap 'cleanup_verify INT 130' INT
+    trap 'cleanup_verify TERM 143' TERM
+    trap 'cleanup_verify HUP 129' HUP
 
     note "Verifying read-only guest access in $box"
     cmd_clone "$box" "$repo" "$temp_rel" >/dev/null
@@ -1171,6 +1183,7 @@ cmd_github_verify() {
       ok "host push and cleanup succeeded"
     fi
   )
+  if (( lock_acquired )); then github_lock_release; fi
   if (( host_write )); then
     ok "GitHub permissions verified for $box using $repo"
   else
@@ -1234,7 +1247,7 @@ INFO
   # Run verification in a fresh process. Bash disables errexit inside functions
   # used directly as an `if` condition; a child process keeps every internal
   # failure fatal while still allowing this parent to roll credentials back.
-  if ! ( exec 9>&-; MSW_ALLOW_QUARANTINED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" ); then
+  if ! ( MSW_ALLOW_QUARANTINED=1 MSW_GITHUB_VERIFY_INHERITED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" ); then
     if (( preexisting_quarantine )); then
       warn "verification failed; revoking untrusted repair credentials and keeping the workspace quarantined"
     else
@@ -1866,7 +1879,9 @@ main() {
       ;;
     __github-verify-transaction)
       (( $# >= 2 && $# <= 3 )) || fatal "internal GitHub verification arguments missing"
-      cmd_github_verify "$1" "$2" "${3:-}"
+      [[ "${MSW_GITHUB_VERIFY_INHERITED:-0}" == 1 ]] || fatal "internal GitHub verification lock missing"
+      "$LOCKF_BIN" -s -t 0 9 >/dev/null 2>&1 || fatal "internal GitHub verification lock missing"
+      cmd_github_verify "$1" "$2" "${3:-}" 1
       ;;
     backup) (( $# <= 1 )) || fatal "usage: msw backup [DIRECTORY]"; cmd_backup "${1:-$MSW_BACKUP_DIR}" ;;
     restore) cmd_restore "$@" ;;

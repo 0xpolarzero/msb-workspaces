@@ -151,7 +151,7 @@ Remove both credentials and the guest secret binding:
 msw github remove dev
 ```
 
-Setup and removal are serialized per workspace. The lock file may remain after a command, but its kernel-held `lockf` ownership is released automatically on exit or crash, so stale files do not block later operations.
+Setup, verification, and removal are serialized per workspace. Setup's verifier retains the inherited lock if its parent exits unexpectedly. The lock file may remain after a command, but its kernel-held `lockf` ownership is released automatically on exit or crash, so stale files do not block later operations.
 
 ## Clone and pull from the VM
 
