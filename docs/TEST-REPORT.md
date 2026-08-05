@@ -2,9 +2,9 @@
 
 ## Result
 
-**35 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
+**41 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
 
-After the final least-privilege change to restrict guest-token substitution to `github.com` and `api.github.com`, and after adding strict 1–65535 tunnel-port validation, every directly affected scenario was rerun successfully. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
+The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, and quarantine when guest-secret removal fails. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
 
 ## Automated coverage
 
@@ -36,7 +36,7 @@ After the final least-privilege change to restrict guest-token substitution to `
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub and host-only push — 15 scenarios
+### GitHub and host-only push — 21 scenarios
 
 - Complete GitHub setup transaction: read token binding, guest push rejection, host push success, temporary-branch cleanup, token secrecy, status, and removal.
 - Identical read/write token rejection.
@@ -53,6 +53,12 @@ After the final least-privilege change to restrict guest-token substitution to `
 - Missing LFS object rejection.
 - Corrupted LFS transfer rejection by SHA-256.
 - Symlink/nonregular LFS object rejection.
+- Read-only setup retains guest read access without a host token and blocks stale write-token pushes using workspace metadata.
+- Read-only conversion revokes existing host-write metadata before downgrade cleanup; failure leaves subsequent pushes blocked.
+- Keychain deletion rejects delete failures, post-delete lookup failures, and still-present items while accepting explicit missing-item results.
+- Remove revokes host-write metadata before credential cleanup; a failed Keychain delete leaves subsequent pushes blocked.
+- Failed setup rollback revokes active metadata before credential cleanup; deletion failures leave subsequent pushes blocked.
+- Failed guest-secret removal stops and quarantines the workspace so normal starts and guest commands cannot rebind or use the secret.
 
 ### Backup and restore — 6 scenarios
 
@@ -74,17 +80,26 @@ After the final least-privilege change to restrict guest-token substitution to `
 - The real guest read token is absent from simulated VM state; only the MicroSandbox placeholder is visible in the guest.
 - The write token is retrieved only by the host askpass helper from macOS Keychain.
 - The privileged push process uses an empty environment, temporary home, no system/global Git config, no custom hooks, no SSH agent, and no ambient GitHub token.
+- Push authorization requires both host-write workspace metadata and the host write credential.
+- Remove revokes host-write metadata before secret and Keychain cleanup, so cleanup failures cannot leave pushes authorized.
+- Failed setup rollback restores old metadata only after all credential operations succeed; any rollback failure leaves the metadata gate absent.
+- Failed rollback secret cleanup stops and quarantines the workspace; normal start, restart, and exec paths refuse the quarantined workspace.
 - Git bundles are verified and checked against the exact guest commit before push.
 - Git LFS object IDs, file types, and SHA-256 contents are verified on the host.
 - GitHub setup and restore are transactional and roll back on failure.
+- Keychain deletion accepts only an explicit missing-item result or confirmed removal; other failures abort the transaction.
 - Normal Docker cleanup never deletes volumes unless explicitly requested.
 - Backups exclude macOS Keychain tokens and remove partial output on failure.
 
-## What cannot be reproduced in this Linux execution environment
+## Environment boundaries
 
-The release environment cannot instantiate Apple's Virtualization framework, alter macOS loopback/LaunchDaemon state, access macOS Keychain, open Ghostty/Zed, or contact GitHub with your real tokens.
+### Portable simulator coverage
 
-Those interfaces are tested automatically on your Mac by the normal setup commands; no separate manual test plan is required.
+The portable simulator suite cannot instantiate Apple's Virtualization framework, alter macOS loopback/LaunchDaemon state, access macOS Keychain, open Ghostty/Zed, or contact GitHub with real credentials. It validates the packaged shell/Python behavior, state transitions, local Git flows, and security boundaries using simulated MicroSandbox state, a fake `security(1)` command, and local remotes.
+
+### Real macOS canary
+
+A real Apple Silicon macOS run against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. The full host setup did not complete workspace recreation: it reached browser/loopback configuration and then stopped because `sudo` requires an interactive terminal and password. Rerun `./setup.sh --recreate-workspaces` from an interactive terminal.
 
 ## The only checks you need to run
 

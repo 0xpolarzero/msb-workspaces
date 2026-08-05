@@ -28,8 +28,9 @@ FAKE_SSH = PACKAGE / "tests" / "fake_ssh.sh"
 FAKE_CURL = PACKAGE / "tests" / "fake_curl.py"
 FAKE_ZED = PACKAGE / "tests" / "fake_zed.sh"
 FAKE_OPEN = PACKAGE / "tests" / "fake_open.sh"
+FAKE_SECURITY = PACKAGE / "tests" / "fake_security.py"
 SYSTEM_GIT = shutil.which("git") or "/usr/bin/git"
-SYSTEM_TAR = shutil.which("tar") or "/usr/bin/tar"
+SYSTEM_TAR = shutil.which("gtar") or shutil.which("tar") or "/usr/bin/tar"
 SYSTEM_ZSTD = shutil.which("zstd") or "/usr/bin/zstd"
 SYSTEM_SHASUM = shutil.which("shasum") or "/usr/bin/shasum"
 
@@ -287,7 +288,7 @@ class SyntaxAndStaticTests(MSWTestCase):
             run_cmd(["bash", "-n", script])
         for script in [PACKAGE / "bin/msw-ssh-proxy", PACKAGE / "bin/msw-git-askpass"]:
             run_cmd(["sh", "-n", script])
-        run_cmd(["/usr/bin/python3", "-m", "py_compile", FAKE_MSB, FAKE_CURL])
+        run_cmd(["/usr/bin/python3", "-m", "py_compile", FAKE_MSB, FAKE_CURL, FAKE_SECURITY])
         config = (PACKAGE / "config.sh").read_text()
         self.assertIn("24678-24679", config)
         self.assertIn("3000-3010", config)
@@ -313,9 +314,13 @@ class SyntaxAndStaticTests(MSWTestCase):
     def test_static_security_invariants(self) -> None:
         msw = (PACKAGE / "bin/msw").read_text()
         setup = (PACKAGE / "setup.sh").read_text()
+        proxy = (PACKAGE / "bin/msw-ssh-proxy").read_text()
         self.assertIn('"$MSB_BIN" run --detach', setup)
         self.assertIn("-- sleep infinity", setup)
-        proxy = (PACKAGE / "bin/msw-ssh-proxy").read_text()
+        self.assertIn("wait_for_guest_systemd", setup)
+        self.assertIn('--secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start', setup)
+        self.assertIn('--secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart', msw)
+        self.assertIn("--secret-rm GH_TOKEN --restart", msw)
         self.assertIn("env -i", msw)
         self.assertIn("GIT_CONFIG_NOSYSTEM=1", msw)
         self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", msw)
@@ -546,6 +551,122 @@ class GitHubAndPushTests(MSWTestCase):
             "host write token missing",
         )
 
+    def test_read_only_metadata_blocks_stale_write_token(self) -> None:
+        bare = self.env.init_remote()
+        self.env.configure_read_only("playgrounds", "acme/demo")
+        self.env.key_file("msw.github.write", "playgrounds").write_text("stale-write-token")
+        self.env.msw("clone", "playgrounds", "acme/demo", "repo")
+        before = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
+        proc = self.env.msw("push", "playgrounds", "repo", "--yes", check=False)
+        self.assertFailed(proc, "workspace is read-only")
+        after = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
+        self.assertEqual(after, before)
+
+    def test_keychain_delete_security_outcomes(self) -> None:
+        command = 'source "$1"; keychain_delete "msw.github.write" "dev"'
+        cases = (
+            ("delete-failure", True, "could not delete Keychain item"),
+            ("post-delete-lookup-failure", True, "could not verify Keychain item removal"),
+            ("still-present", True, "Keychain item still exists"),
+            ("missing-item", False, None),
+        )
+        state_path = self.env.root / "fake-security-state.json"
+        for mode, should_fail, message in cases:
+            with self.subTest(mode=mode):
+                items = {} if mode == "missing-item" else {"msw.github.write/dev": "write-token"}
+                state_path.write_text(json.dumps(items))
+                proc = self.env.run(
+                    "bash",
+                    "-c",
+                    command,
+                    "msw-keychain-test",
+                    str(PACKAGE / "bin/msw"),
+                    check=False,
+                    extra_env={
+                        "MSW_SOURCE_ONLY": "1",
+                        "MSW_TEST_KEYCHAIN_DIR": "",
+                        "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+                        "MSW_FAKE_SECURITY_STATE": str(state_path),
+                        "MSW_FAKE_SECURITY_MODE": mode,
+                    },
+                )
+                if should_fail:
+                    self.assertFailed(proc, message)
+                else:
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+
+    def test_github_remove_failure_revokes_metadata_first(self) -> None:
+        self.env.init_remote()
+        state_path = self.env.root / "fake-security-remove-state.json"
+        fake_env = {
+            "MSW_TEST_KEYCHAIN_DIR": "",
+            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+            "MSW_FAKE_SECURITY_STATE": str(state_path),
+            "MSW_FAKE_SECURITY_MODE": "normal",
+        }
+        self.env.configure_tokens("dev", "acme/demo", extra_env=fake_env)
+        self.env.msw("clone", "dev", "acme/demo", "repo", extra_env=fake_env)
+        metadata = self.env.home / ".config/msw/github/dev.conf"
+        self.assertIn("access=host-write", metadata.read_text())
+
+        failed_env = {**fake_env, "MSW_FAKE_SECURITY_MODE": "delete-failure"}
+        proc = self.env.msw("github", "remove", "dev", check=False, extra_env=failed_env)
+        self.assertFailed(proc, "could not delete Keychain item")
+        self.assertFalse(metadata.exists())
+        self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
+
+        push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
+        self.assertFailed(push, "host write access is not enabled")
+
+    def test_setup_rollback_failure_revokes_metadata_first(self) -> None:
+        self.env.init_remote()
+        state_path = self.env.root / "fake-security-rollback-state.json"
+        fake_env = {
+            "MSW_TEST_KEYCHAIN_DIR": "",
+            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+            "MSW_FAKE_SECURITY_STATE": str(state_path),
+            "MSW_FAKE_SECURITY_MODE": "delete-failure",
+            "MSW_FAKE_GUEST_PUSH_ALLOWED": "1",
+            "MSW_FAKE_SECRET_REMOVE_FAIL": "1",
+        }
+        proc = self.env.configure_tokens("dev", "acme/demo", extra_env=fake_env, check=False)
+        self.assertFailed(proc, "guest token can push")
+        metadata = self.env.home / ".config/msw/github/dev.conf"
+        self.assertFalse(metadata.exists())
+        self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
+        state = self.env.state()
+        self.assertEqual(state["sandboxes"]["dev"]["secrets"]["GH_TOKEN"], "GH_TOKEN@github.com,api.github.com")
+        self.assertFalse(state["sandboxes"]["dev"]["running"])
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        self.assertTrue(quarantine.exists())
+        start = self.env.msw("start", "dev", check=False, extra_env=fake_env)
+        self.assertFailed(start, "quarantined")
+
+        guest_push = self.env.msw("exec", "dev", "git", "push", "origin", "main", check=False, extra_env=fake_env)
+        self.assertFailed(guest_push, "quarantined")
+
+    def test_read_only_conversion_failure_revokes_metadata_first(self) -> None:
+        self.env.init_remote()
+        state_path = self.env.root / "fake-security-read-only-state.json"
+        normal_env = {
+            "MSW_TEST_KEYCHAIN_DIR": "",
+            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+            "MSW_FAKE_SECURITY_STATE": str(state_path),
+            "MSW_FAKE_SECURITY_MODE": "normal",
+        }
+        self.env.configure_tokens("dev", "acme/demo", extra_env=normal_env)
+        self.env.msw("clone", "dev", "acme/demo", "repo", extra_env=normal_env)
+
+        failed_env = {**normal_env, "MSW_FAKE_SECURITY_MODE": "delete-failure"}
+        proc = self.env.configure_read_only("dev", "acme/demo", extra_env=failed_env, check=False)
+        self.assertFailed(proc, "could not delete Keychain item")
+        metadata = self.env.home / ".config/msw/github/dev.conf"
+        self.assertFalse(metadata.exists())
+        self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
+
+        push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
+        self.assertFailed(push, "host write access is not enabled")
 
     def test_same_token_is_rejected_without_mutation(self) -> None:
         self.env.init_remote()

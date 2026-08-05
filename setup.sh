@@ -188,8 +188,18 @@ check_port_conflicts() {
   [[ -z "$conflicts" ]] || fatal "$workspace cannot start because these ports are already used on $bind_ip:$conflicts"
 }
 
+wait_for_guest_systemd() {
+  local box="$1" attempt=0
+  until "$MSB_BIN" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    (( attempt < 120 )) || fatal "$box systemd bus did not become ready"
+    sleep 1
+  done
+}
+
 configure_workspace_guest() {
   local box="$1" browser_host="$2"
+  wait_for_guest_systemd "$box"
   "$MSB_BIN" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" <<'GUEST'
 set -Eeuo pipefail
 workspace="$1"; browser_host="$2"
@@ -270,7 +280,7 @@ create_workspace() {
       -- sleep infinity
     configure_workspace_guest "$box" "$browser_host"
     if token="$(keychain_read_token "$box" 2>/dev/null)"; then
-      GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" >/dev/null
+      GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
       unset token
     fi
     "$MSB_BIN" stop -t 90 "$box"

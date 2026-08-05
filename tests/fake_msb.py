@@ -481,6 +481,8 @@ def main() -> int:
             state["sandboxes"][box].setdefault("secrets", {})[name] = spec
         if "--secret-rm" in rest:
             name = rest[rest.index("--secret-rm") + 1]
+            if os.environ.get("MSW_FAKE_SECRET_REMOVE_FAIL") == "1":
+                return fail("fake secret removal failure")
             state["sandboxes"][box].setdefault("secrets", {}).pop(name, None)
         for option, key in (("--memory", "memory"), ("--cpus", "cpus"), ("--root-disk", "root_disk")):
             if option in rest:

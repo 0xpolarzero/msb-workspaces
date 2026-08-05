@@ -110,13 +110,41 @@ keychain_set() {
   fi
 }
 
+keychain_item_not_found() {
+  local status="$1" error="$2"
+  [[ "$status" == 44 ]] && return 0
+  case "$error" in
+    *"The specified item could not be found in the keychain."*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 keychain_delete() {
-  local service="$1" account="$2"
+  local service="$1" account="$2" error="" status
   if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
     rm -f "$(keychain_test_file "$service" "$account")"
   else
-    "$SECURITY_BIN" delete-generic-password -s "$service" -a "$account" >/dev/null 2>&1 || true
+    if error="$("$SECURITY_BIN" delete-generic-password -s "$service" -a "$account" 2>&1)"; then
+      status=0
+    else
+      status=$?
+    fi
+    if (( status != 0 )) && ! keychain_item_not_found "$status" "$error"; then
+      printf 'msw: could not delete Keychain item %s/%s: %s\n' "$service" "$account" "${error:-security exited $status}" >&2
+      return 1
+    fi
+    if error="$("$SECURITY_BIN" find-generic-password -w -s "$service" -a "$account" 2>&1)"; then
+      printf 'msw: Keychain item still exists %s/%s\n' "$service" "$account" >&2
+      return 1
+    else
+      status=$?
+    fi
+    if ! keychain_item_not_found "$status" "$error"; then
+      printf 'msw: could not verify Keychain item removal %s/%s: %s\n' "$service" "$account" "${error:-security exited $status}" >&2
+      return 1
+    fi
   fi
+  return 0
 }
 
 metadata_file() { printf '%s/%s.conf\n' "$GITHUB_META_DIR" "$1"; }
@@ -146,11 +174,43 @@ write_metadata() {
 sandbox_exists() { "$MSB_BIN" inspect "$1" >/dev/null 2>&1; }
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
+quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
+
+assert_not_quarantined() {
+  local box="$1" file
+  [[ "${MSW_ALLOW_QUARANTINED:-0}" == 1 ]] && return 0
+  file="$(quarantine_file "$box")"
+  [[ ! -e "$file" ]] || fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
+}
+
+quarantine_workspace() {
+  local box="$1" reason="${2:-GitHub credential cleanup failed}" file
+  file="$(quarantine_file "$box")"
+  mkdir -p "$GITHUB_META_DIR"
+  chmod 700 "$GITHUB_META_DIR"
+  umask 077
+  printf '%s\n' "$reason" >"$file" || return 1
+  if sandbox_exists "$box" && "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+    if ! "$MSB_BIN" stop -q -t 60 "$box" >/dev/null 2>&1; then
+      warn "could not stop quarantined workspace '$box'"
+    fi
+  fi
+  return 0
+}
+
+clear_quarantine() {
+  local file
+  file="$(quarantine_file "$1")"
+  rm -f "$file"
+  [[ ! -e "$file" ]]
+}
+
 
 read_token_for_workspace() { keychain_get "$READ_KEYCHAIN_SERVICE" "$1"; }
 
 start_sandbox() {
   local box="$1" token=""
+  assert_not_quarantined "$box"
   if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
     GH_TOKEN="$token" "$MSB_BIN" start -q "$box"
     unset token
@@ -162,11 +222,24 @@ start_sandbox() {
   fi
 }
 
+wait_for_guest_systemd() {
+  local box="$1" attempt=0
+  until "$MSB_BIN" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    (( attempt < 120 )) || fatal "$box systemd bus did not become ready"
+    sleep 1
+  done
+}
+
 ensure_running() {
   local box="$1" attempt=0 output=""
   validate_workspace "$box"
+  assert_not_quarantined "$box"
   sandbox_exists "$box" || fatal "workspace '$box' does not exist; rerun setup.sh"
-  "$MSB_BIN" ping -q "$box" >/dev/null 2>&1 && return 0
+  if "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+    wait_for_guest_systemd "$box"
+    return 0
+  fi
   note "Starting $box"
   if ! output="$(start_sandbox "$box" 2>&1)"; then
     sleep 1
@@ -180,6 +253,7 @@ ensure_running() {
     (( attempt < 120 )) || fatal "workspace '$box' did not become ready"
     sleep 1
   done
+  wait_for_guest_systemd "$box"
 }
 
 guest_exec() {
@@ -350,6 +424,7 @@ cmd_restart() {
   local target="${1:-all}" box token=""
   while IFS= read -r box; do
     sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+    assert_not_quarantined "$box"
     note "Restarting $box"
     if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
       GH_TOKEN="$token" "$MSB_BIN" restart -q -t 60 "$box"
@@ -669,15 +744,15 @@ cmd_clean() {
 
 bind_github_read_token() {
   local box="$1" token
-  token="$(read_token_for_workspace "$box")" || fatal "read token missing from Keychain for $box"
-  GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" >/dev/null
+  token="$(read_token_for_workspace "$box")" || fatal "read token missing for $box"
+  GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart >/dev/null
   unset token
 }
 
 remove_github_secret() {
   local box="$1"
   sandbox_exists "$box" || return 0
-  "$MSB_BIN" modify "$box" --secret-rm GH_TOKEN >/dev/null 2>&1 || true
+  "$MSB_BIN" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
 }
 
 host_safe_path() {
@@ -781,6 +856,9 @@ push_impl() {
   local box="$1" relative="$2" force_mode="$3" assume_yes="$4" quiet_mode="${5:-0}"
   validate_workspace "$box"
   validate_relative_path "$relative"
+  local access
+  access="$(metadata_access "$box" 2>/dev/null || true)"
+  [[ "$access" == host-write ]] || fatal "host write access is not enabled (host write token missing or workspace is read-only); run: msw github setup $box OWNER/REPO"
   keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "host write token missing; run: msw github setup $box OWNER/REPO"
   [[ -x "$ASKPASS_BIN" ]] || fatal "host askpass helper missing; rerun setup.sh"
   require_command_path git "$GIT_BIN"
@@ -851,7 +929,7 @@ SUMMARY
 
     "$GIT_BIN" init -q "$host_repo"
     "$GIT_BIN" -C "$host_repo" -c core.hooksPath=/dev/null bundle verify "$host_bundle" >/dev/null
-    "$GIT_BIN" -C "$host_repo" -c core.hooksPath=/dev/null fetch -q "$host_bundle" "$ref:$ref"
+    "$GIT_BIN" -C "$host_repo" -c core.hooksPath=/dev/null fetch -q --update-head-ok "$host_bundle" "$ref:$ref"
     [[ "$("$GIT_BIN" -C "$host_repo" rev-parse "$ref")" == "$local_sha" ]] || fatal "bundle commit did not match the guest commit"
     "$GIT_BIN" -C "$host_repo" remote add origin "$remote_url"
 
@@ -906,6 +984,7 @@ read_hidden_token() {
 cmd_github_verify() {
   local box="$1" repo="${2:-}" mode="${3:-}" id temp_rel branch repo_root canonical remote_sha="" host_write=1
   validate_workspace "$box"
+  assert_not_quarantined "$box"
   if [[ -z "$mode" ]]; then mode="$(metadata_access "$box" 2>/dev/null || printf 'host-write')"; fi
   case "$mode" in
     host-write) ;;
@@ -999,11 +1078,13 @@ INFO
     [[ "$read_token" != "$write_token" ]] || fatal "use two different tokens"
   fi
 
-  local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta=""
+  local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta="" rollback_failed=0
   meta_file="$(metadata_file "$box")"
   if old_read="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_read=1; fi
   if old_write="$(keychain_get "$WRITE_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_write=1; fi
   if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
+  if ! rm -f "$meta_file"; then fatal "could not revoke existing GitHub metadata for $box"; fi
+  if [[ -e "$meta_file" ]]; then fatal "could not revoke existing GitHub metadata for $box"; fi
 
   keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$read_token"
   if (( host_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$write_token"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
@@ -1013,15 +1094,38 @@ INFO
   # Run verification in a fresh process. Bash disables errexit inside functions
   # used directly as an `if` condition; a child process keeps every internal
   # failure fatal while still allowing this parent to roll credentials back.
-  if ! "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode"; then
+  if ! MSW_ALLOW_QUARANTINED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode"; then
     warn "verification failed; restoring the previous GitHub configuration"
-    if (( had_read )); then keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$old_read"; else keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; fi
-    if (( had_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$old_write"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
-    if [[ -n "$old_meta" ]]; then printf '%s\n' "$old_meta" >"$meta_file"; else rm -f "$meta_file"; fi
-    if (( had_read )); then bind_github_read_token "$box" >/dev/null 2>&1 || true; else remove_github_secret "$box"; fi
+    if ! rm -f "$meta_file"; then rollback_failed=1; fi
+    if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
+    if (( had_read )); then
+      if ! keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$old_read"; then rollback_failed=1; fi
+    else
+      if ! keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; then rollback_failed=1; fi
+    fi
+    if (( had_write )); then
+      if ! keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$old_write"; then rollback_failed=1; fi
+    else
+      if ! keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; then rollback_failed=1; fi
+    fi
+    if (( had_read )); then
+      if ! bind_github_read_token "$box" >/dev/null 2>&1; then rollback_failed=1; fi
+    else
+      if ! remove_github_secret "$box"; then rollback_failed=1; fi
+    fi
+    if (( rollback_failed == 0 )) && [[ -n "$old_meta" ]]; then
+      if ! printf '%s\n' "$old_meta" >"$meta_file"; then rollback_failed=1; fi
+    fi
+    if (( rollback_failed )); then
+      if ! rm -f "$meta_file"; then rollback_failed=1; fi
+      if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
+      if ! quarantine_workspace "$box" "GitHub setup rollback failed"; then rollback_failed=1; fi
+      warn "previous GitHub configuration could not be fully restored"
+    fi
     unset old_read old_write
     return 1
   fi
+  if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
   unset old_read old_write
   ok "GitHub configured for $box ($mode)"
 }
@@ -1038,12 +1142,21 @@ cmd_github_status() {
 }
 
 cmd_github_remove() {
-  local box="$1"
+  local box="$1" meta_file cleanup_failed=0
   validate_workspace "$box"
-  keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"
-  keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"
-  rm -f "$(metadata_file "$box")"
-  remove_github_secret "$box"
+  meta_file="$(metadata_file "$box")"
+  rm -f "$meta_file"
+  [[ ! -e "$meta_file" ]] || fatal "could not revoke GitHub host-write metadata for $box"
+  if ! remove_github_secret "$box"; then cleanup_failed=1; fi
+  if ! keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
+  if ! keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
+  if (( cleanup_failed )); then
+    if ! quarantine_workspace "$box" "GitHub credential removal failed"; then
+      fatal "GitHub credential removal failed and workspace quarantine could not be recorded"
+    fi
+    fatal "GitHub credential removal failed; workspace quarantined"
+  fi
+  if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
   ok "removed GitHub credentials for $box"
 }
 
@@ -1152,7 +1265,7 @@ SCRIPT
   guest_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
 
   if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
-    guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
+    guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
       echo "$box: GitHub secret is not represented by a guest placeholder" >&2; failed=1;
     }
   fi
@@ -1198,15 +1311,16 @@ running_workspaces() {
 }
 
 cmd_backup() {
-  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info temp running_file box rel
+  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info temp running_file box rel home_real
   require_command_path gtar "$GTAR_BIN"
   require_command_path zstd "$ZSTD_BIN"
   require_command_path shasum "$SHASUM_BIN"
 
   mkdir -p "$destination"
   destination="$(cd "$destination" && pwd -P)"
+  home_real="$(cd "$HOME" && pwd -P)"
   case "$destination/" in
-    "$HOME/.microsandbox/"*|"$HOME/.config/msw/"*|"$HOME/.local/share/msw/"*)
+    "$home_real/.microsandbox/"*|"$home_real/.config/msw/"*|"$home_real/.local/share/msw/"*)
       fatal "backup destination may not be inside managed state"
       ;;
   esac
@@ -1585,7 +1699,6 @@ main() {
       ;;
     __github-verify-transaction)
       (( $# >= 2 && $# <= 3 )) || fatal "internal GitHub verification arguments missing"
-      bind_github_read_token "$1"
       cmd_github_verify "$1" "$2" "${3:-}"
       ;;
     backup) (( $# <= 1 )) || fatal "usage: msw backup [DIRECTORY]"; cmd_backup "${1:-$MSW_BACKUP_DIR}" ;;
