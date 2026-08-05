@@ -15,6 +15,9 @@ readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/msw/github"
 SETUP_TRANSACTION_ACTIVE=0
 SETUP_TRANSACTION_BOX=""
+GITHUB_LOCK_HELD=0
+GITHUB_LOCK_BOX=""
+GITHUB_LOCK_DIR=""
 
 MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 SSH_BIN="${MSW_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
@@ -183,6 +186,49 @@ sandbox_inspect_state() {
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
+github_lock_file() { printf '%s/%s.lock\n' "$GITHUB_META_DIR" "$1"; }
+github_lock_release() {
+  local lock="$GITHUB_LOCK_DIR"
+  if (( GITHUB_LOCK_HELD )); then
+    rm -f "$lock/pid" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+    GITHUB_LOCK_HELD=0
+    GITHUB_LOCK_BOX=""
+    GITHUB_LOCK_DIR=""
+  fi
+  trap - EXIT
+}
+
+github_lock_exit() {
+  local status="${1:-1}"
+  trap - EXIT
+  github_lock_release
+  exit "$status"
+}
+
+github_lock_acquire() {
+  local box="$1" lock owner="" acquired=0
+  mkdir -p "$GITHUB_META_DIR" || return 1
+  chmod 700 "$GITHUB_META_DIR" || return 1
+  lock="$(github_lock_file "$box")"
+  if mkdir "$lock" 2>/dev/null; then
+    acquired=1
+  elif [[ -f "$lock/pid" ]]; then
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      if rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null; then acquired=1; fi
+    fi
+  fi
+  (( acquired )) || fatal "GitHub operation already in progress for workspace '$box'"
+  if ! printf '%s\n' "$$" >"$lock/pid"; then
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  fi
+  GITHUB_LOCK_HELD=1
+  GITHUB_LOCK_BOX="$box"
+  GITHUB_LOCK_DIR="$lock"
+  trap 'github_lock_exit $?' EXIT
+}
 
 assert_not_quarantined() {
   local box="$1" file
@@ -255,6 +301,7 @@ setup_transaction_disarm() {
   SETUP_TRANSACTION_ACTIVE=0
   SETUP_TRANSACTION_BOX=""
   trap - EXIT INT TERM HUP
+  if (( GITHUB_LOCK_HELD )); then trap 'github_lock_exit $?' EXIT; fi
 }
 
 setup_transaction_trap() {
@@ -265,6 +312,7 @@ setup_transaction_trap() {
     SETUP_TRANSACTION_ACTIVE=0
     quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
   fi
+  github_lock_release
   trap - INT TERM HUP
   exit "$status"
 }
@@ -1126,6 +1174,7 @@ cmd_github_setup() {
   validate_workspace "$box"
   validate_github_repo "$repo"
   sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
   if [[ "$mode" == "--read-only" ]]; then mode="read-only"; host_write=0; fi
   [[ "$mode" == host-write || "$mode" == read-only ]] || fatal "usage: msw github setup WORKSPACE OWNER/REPO [--read-only]"
 
@@ -1212,23 +1261,27 @@ INFO
       else
         warn "previous GitHub configuration could not be fully restored"
       fi
+      github_lock_release
       unset old_read old_write
       return 1
     fi
     if (( preexisting_quarantine )); then
       quarantine_workspace "$box" "GitHub repair verification failed" >/dev/null 2>&1 || true
       setup_transaction_disarm
+      github_lock_release
       warn "GitHub repair verification failed; workspace remains quarantined"
       unset old_read old_write
       return 1
     fi
     if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
     setup_transaction_disarm
+    github_lock_release
     unset old_read old_write
     return 1
   fi
   if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
   setup_transaction_disarm
+  github_lock_release
   unset old_read old_write
   ok "GitHub configured for $box ($mode)"
 }
@@ -1247,6 +1300,7 @@ cmd_github_status() {
 cmd_github_remove() {
   local box="$1" meta_file cleanup_failed=0
   validate_workspace "$box"
+  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
   meta_file="$(metadata_file "$box")"
   rm -f "$meta_file"
   [[ ! -e "$meta_file" ]] || fatal "could not revoke GitHub host-write metadata for $box"
@@ -1260,6 +1314,7 @@ cmd_github_remove() {
     fatal "GitHub credential removal failed; workspace quarantined"
   fi
   if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
+  github_lock_release
   ok "removed GitHub credentials for $box"
 }
 

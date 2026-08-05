@@ -712,6 +712,8 @@ class GitHubAndPushTests(MSWTestCase):
                 time.sleep(0.05)
             else:
                 self.fail("verification did not reach the injected pause")
+            overlap = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+            self.assertFailed(overlap, "already in progress")
             os.killpg(proc.pid, signal.SIGTERM)
             pause_file.unlink(missing_ok=True)
             proc.wait(timeout=15)
