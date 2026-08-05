@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+host="${1:?missing SSH host alias}"
+box="${host%.msb}"
+case "$box" in dev|playgrounds|personal) ;; *) echo "msw: unknown workspace '$box'" >&2; exit 64 ;; esac
+
+config="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
+[ -f "$config" ] || { echo "msw: configuration missing; rerun setup.sh" >&2; exit 1; }
+
+MSB="${MSW_MSB_BIN:-$HOME/.local/bin/msb}"
+if [ ! -x "$MSB" ]; then MSB="$(command -v msb 2>/dev/null || true)"; fi
+[ -n "$MSB" ] && [ -x "$MSB" ] || { echo "msw: msb was not found; rerun setup.sh" >&2; exit 127; }
+
+keychain_read() {
+  if [ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]; then
+    safe_service=$(printf '%s' msw.github.read | tr -c 'A-Za-z0-9_.-' '_')
+    safe_account=$(printf '%s' "$box" | tr -c 'A-Za-z0-9_.-' '_')
+    file="$MSW_TEST_KEYCHAIN_DIR/${safe_service}__${safe_account}"
+    [ -f "$file" ] || return 1
+    cat "$file"
+  else
+    /usr/bin/security find-generic-password -w -s msw.github.read -a "$box" 2>/dev/null
+  fi
+}
+
+if ! "$MSB" ping -q "$box" >/dev/null 2>&1; then
+  token=""
+  if token="$(keychain_read 2>/dev/null)"; then
+    if ! output="$(GH_TOKEN="$token" "$MSB" start -q "$box" 2>&1)"; then
+      sleep 1
+      "$MSB" ping -q "$box" >/dev/null 2>&1 || { [ -n "$output" ] && echo "$output" >&2; exit 1; }
+    fi
+    unset token
+  else
+    if [ -f "$HOME/.config/msw/github/$box.conf" ]; then
+      echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
+      echo "run: msw github setup $box OWNER/REPO" >&2
+      exit 1
+    fi
+    if ! output="$("$MSB" start -q "$box" 2>&1)"; then
+      sleep 1
+      "$MSB" ping -q "$box" >/dev/null 2>&1 || { [ -n "$output" ] && echo "$output" >&2; exit 1; }
+    fi
+  fi
+
+  attempt=0
+  until "$MSB" ping -q "$box" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 120 ]; then
+      echo "msw: '$box' did not become ready" >&2
+      "$MSB" logs "$box" --source system --tail 50 2>/dev/null || true
+      exit 1
+    fi
+    sleep 1
+  done
+fi
+
+exec "$MSB" ssh serve "$box" --stdio

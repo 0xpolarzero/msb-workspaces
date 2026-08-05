@@ -1,0 +1,1559 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CONFIG_FILE="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  printf 'msw: missing %s\nRun the MicroSandbox Workspaces setup installer.\n' "$CONFIG_FILE" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+readonly WORKSPACES=(dev playgrounds personal)
+readonly READ_KEYCHAIN_SERVICE="msw.github.read"
+readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
+readonly GITHUB_META_DIR="$HOME/.config/msw/github"
+
+MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
+SSH_BIN="${MSW_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
+CURL_BIN="${MSW_CURL_BIN:-$(command -v curl 2>/dev/null || true)}"
+GIT_BIN="${MSW_GIT_BIN:-$(command -v git 2>/dev/null || true)}"
+JQ_BIN="${MSW_JQ_BIN:-$(command -v jq 2>/dev/null || true)}"
+OPEN_BIN="${MSW_OPEN_BIN:-/usr/bin/open}"
+SECURITY_BIN="${MSW_SECURITY_BIN:-/usr/bin/security}"
+ASKPASS_BIN="${MSW_ASKPASS_BIN:-$HOME/.local/libexec/msw-git-askpass}"
+GTAR_BIN="${MSW_GTAR_BIN:-$(command -v gtar 2>/dev/null || command -v tar 2>/dev/null || true)}"
+ZSTD_BIN="${MSW_ZSTD_BIN:-$(command -v zstd 2>/dev/null || true)}"
+SHASUM_BIN="${MSW_SHASUM_BIN:-$(command -v shasum 2>/dev/null || true)}"
+
+fatal() { printf 'msw: %s\n' "$*" >&2; exit 1; }
+note() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33mwarning: %s\033[0m\n' "$*" >&2; }
+ok() { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
+
+require_command_path() {
+  local label="$1" value="$2"
+  [[ -n "$value" && -x "$value" ]] || fatal "'$label' is required"
+}
+
+is_workspace() {
+  case "${1:-}" in dev|playgrounds|personal) return 0 ;; *) return 1 ;; esac
+}
+
+validate_workspace() {
+  is_workspace "${1:-}" || fatal "workspace must be dev, playgrounds, or personal"
+}
+
+for_targets() {
+  local target="${1:-all}" box
+  if [[ "$target" == all ]]; then
+    for box in "${WORKSPACES[@]}"; do printf '%s\n' "$box"; done
+  else
+    validate_workspace "$target"
+    printf '%s\n' "$target"
+  fi
+}
+
+workspace_ip() {
+  case "$1" in
+    dev) printf '%s\n' "$MSW_DEV_IP" ;;
+    playgrounds) printf '%s\n' "$MSW_PLAYGROUNDS_IP" ;;
+    personal) printf '%s\n' "$MSW_PERSONAL_IP" ;;
+  esac
+}
+
+workspace_host() {
+  case "$1" in
+    dev) printf '%s\n' "$MSW_DEV_HOST" ;;
+    playgrounds) printf '%s\n' "$MSW_PLAYGROUNDS_HOST" ;;
+    personal) printf '%s\n' "$MSW_PERSONAL_HOST" ;;
+  esac
+}
+
+workspace_ssh_host() { printf '%s.msb\n' "$1"; }
+workspace_volume() { printf 'msw-%s-%s\n' "$1" "$2"; }
+
+safe_key_component() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'; }
+
+keychain_test_file() {
+  local service account
+  service="$(safe_key_component "$1")"
+  account="$(safe_key_component "$2")"
+  printf '%s/%s__%s\n' "$MSW_TEST_KEYCHAIN_DIR" "$service" "$account"
+}
+
+keychain_get() {
+  local service="$1" account="$2"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    local file
+    file="$(keychain_test_file "$service" "$account")"
+    [[ -f "$file" ]] || return 1
+    cat "$file"
+  else
+    "$SECURITY_BIN" find-generic-password -w -s "$service" -a "$account" 2>/dev/null
+  fi
+}
+
+keychain_has() { keychain_get "$1" "$2" >/dev/null 2>&1; }
+
+keychain_set() {
+  local service="$1" account="$2" value="$3"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    local file
+    mkdir -p "$MSW_TEST_KEYCHAIN_DIR"
+    chmod 700 "$MSW_TEST_KEYCHAIN_DIR"
+    file="$(keychain_test_file "$service" "$account")"
+    umask 077
+    printf '%s' "$value" >"$file"
+  else
+    "$SECURITY_BIN" add-generic-password -U -s "$service" -a "$account" -w "$value" >/dev/null
+  fi
+}
+
+keychain_delete() {
+  local service="$1" account="$2"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    rm -f "$(keychain_test_file "$service" "$account")"
+  else
+    "$SECURITY_BIN" delete-generic-password -s "$service" -a "$account" >/dev/null 2>&1 || true
+  fi
+}
+
+metadata_file() { printf '%s/%s.conf\n' "$GITHUB_META_DIR" "$1"; }
+
+metadata_repo() {
+  local file
+  file="$(metadata_file "$1")"
+  [[ -f "$file" ]] || return 1
+  sed -n 's/^verification_repo=//p' "$file" | head -n 1
+}
+
+write_metadata() {
+  local box="$1" repo="$2"
+  mkdir -p "$GITHUB_META_DIR"
+  chmod 700 "$GITHUB_META_DIR"
+  umask 077
+  printf 'verification_repo=%s\nconfigured_at=%s\n' "$repo" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(metadata_file "$box")"
+}
+
+sandbox_exists() { "$MSB_BIN" inspect "$1" >/dev/null 2>&1; }
+snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
+volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
+
+read_token_for_workspace() { keychain_get "$READ_KEYCHAIN_SERVICE" "$1"; }
+
+start_sandbox() {
+  local box="$1" token=""
+  if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
+    GH_TOKEN="$token" "$MSB_BIN" start -q "$box"
+    unset token
+  else
+    if [[ -f "$(metadata_file "$box")" ]]; then
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
+    fi
+    "$MSB_BIN" start -q "$box"
+  fi
+}
+
+ensure_running() {
+  local box="$1" attempt=0 output=""
+  validate_workspace "$box"
+  sandbox_exists "$box" || fatal "workspace '$box' does not exist; rerun setup.sh"
+  "$MSB_BIN" ping -q "$box" >/dev/null 2>&1 && return 0
+  note "Starting $box"
+  if ! output="$(start_sandbox "$box" 2>&1)"; then
+    sleep 1
+    if ! "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+      [[ -n "$output" ]] && printf '%s\n' "$output" >&2
+      fatal "workspace '$box' could not start; run 'msw logs $box'"
+    fi
+  fi
+  until "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    (( attempt < 120 )) || fatal "workspace '$box' did not become ready"
+    sleep 1
+  done
+}
+
+guest_exec() {
+  local box="$1"; shift
+  ensure_running "$box"
+  "$MSB_BIN" exec --no-tty "$box" -- "$@"
+}
+
+guest_exec_w() {
+  local box="$1" workdir="$2"; shift 2
+  ensure_running "$box"
+  "$MSB_BIN" exec --no-tty -w "$workdir" "$box" -- "$@"
+}
+
+guest_script() {
+  local box="$1" script="$2"; shift 2
+  ensure_running "$box"
+  printf '%s\n' "$script" | "$MSB_BIN" exec --no-tty "$box" -- bash -s -- "$@"
+}
+
+validate_relative_path() {
+  local path="${1:-}" component
+  [[ -n "$path" ]] || fatal "path cannot be empty"
+  [[ "$path" != /* ]] || fatal "path must be relative to /workspace"
+  [[ "$path" != *$'\n'* && "$path" != *$'\r'* && "$path" != *$'\t'* ]] || fatal "path contains a control character"
+  if [[ "$path" == . ]]; then return 0; fi
+  IFS='/' read -r -a _parts <<<"$path"
+  for component in "${_parts[@]}"; do
+    [[ -n "$component" && "$component" != . && "$component" != .. ]] || fatal "path may not contain empty, '.' or '..' components"
+  done
+}
+
+resolve_workspace_path() {
+  local requested="${1:-}"
+  if [[ -z "$requested" || "$requested" == . ]]; then
+    printf '/workspace\n'
+  else
+    validate_relative_path "$requested"
+    printf '/workspace/%s\n' "$requested"
+  fi
+}
+
+resolve_guest_repo() {
+  local box="$1" relative="$2"
+  validate_workspace "$box"
+  validate_relative_path "$relative"
+  local script
+  read -r -d '' script <<'SCRIPT' || true
+set -Eeuo pipefail
+relative="$1"
+root="${MSW_GUEST_WORKSPACE_ROOT:-/workspace}"
+candidate="$root/$relative"
+resolved="$(realpath -e -- "$candidate")" || { echo "repository path does not exist: $relative" >&2; exit 2; }
+case "$resolved" in
+  "$root"|"$root"/*) ;;
+  *) echo "repository path escapes /workspace" >&2; exit 3 ;;
+esac
+repo="$(git -C "$resolved" rev-parse --show-toplevel 2>/dev/null)" || { echo "not a Git repository: $relative" >&2; exit 4; }
+case "$repo" in
+  "$root"|"$root"/*) ;;
+  *) echo "Git repository escapes /workspace" >&2; exit 5 ;;
+esac
+printf '%s\n' "$repo"
+SCRIPT
+  guest_script "$box" "$script" "$relative"
+}
+
+expand_ports() {
+  local token start end p old_ifs="$IFS"
+  IFS=','
+  for token in $MSW_PUBLISHED_PORTS; do
+    if [[ "$token" == *-* ]]; then
+      start="${token%-*}"; end="${token#*-}"
+      for ((p=start; p<=end; p++)); do printf '%s\n' "$p"; done
+    else
+      printf '%s\n' "$token"
+    fi
+  done
+  IFS="$old_ifs"
+}
+
+port_is_published() {
+  local wanted="$1" p
+  while IFS= read -r p; do [[ "$p" == "$wanted" ]] && return 0; done < <(expand_ports)
+  return 1
+}
+
+validate_port() {
+  local port="${1:-}" label="${2:-port}" numeric
+  [[ "$port" =~ ^[0-9]+$ ]] || fatal "$label must be an integer from 1 to 65535"
+  numeric=$((10#$port))
+  (( numeric >= 1 && numeric <= 65535 )) || fatal "$label must be an integer from 1 to 65535"
+}
+
+cmd_shell() {
+  local box="$1" path
+  validate_workspace "$box"
+  path="$(resolve_workspace_path "${2:-}")"
+  ensure_running "$box"
+  local quoted
+  printf -v quoted '%q' "$path"
+  exec "$SSH_BIN" -t "$(workspace_ssh_host "$box")" "cd $quoted && export TERM=xterm-256color && exec zsh -l"
+}
+
+cmd_zed() {
+  local box="$1" path zed_bin
+  validate_workspace "$box"
+  path="$(resolve_workspace_path "${2:-}")"
+  ensure_running "$box"
+  zed_bin="${MSW_ZED_BIN:-$(command -v zed 2>/dev/null || true)}"
+  [[ -n "$zed_bin" && -x "$zed_bin" ]] || fatal "Zed CLI missing. In Zed run: cli: install cli binary"
+  "$zed_bin" "ssh://root@$(workspace_ssh_host "$box")${path}"
+}
+
+cmd_url() {
+  local box="$1" port="${2:-3000}" scheme="${3:-http}"
+  validate_workspace "$box"
+  validate_port "$port" port
+  [[ "$scheme" == http || "$scheme" == https ]] || fatal "scheme must be http or https"
+  port_is_published "$port" || fatal "port $port is not pre-published; use: msw tunnel $box $port"
+  printf '%s://%s:%s\n' "$scheme" "$(workspace_host "$box")" "$port"
+}
+
+cmd_open() {
+  local box="$1" port="${2:-3000}" scheme="${3:-http}" url
+  ensure_running "$box"
+  url="$(cmd_url "$box" "$port" "$scheme")"
+  note "Opening $url"
+  "$OPEN_BIN" "$url"
+}
+
+cmd_ports() {
+  local target="${1:-all}" box
+  printf 'Published TCP ports\n  %s\n\n' "$MSW_PUBLISHED_PORTS"
+  for box in $(for_targets "$target"); do
+    printf '%-12s %s\n' "$box" "http://$(workspace_host "$box"):<port>"
+  done
+  cat <<'MSG'
+
+Examples
+  http://dev.msw.test:3000
+  http://playgrounds.msw.test:5173
+  http://personal.msw.test:8080
+
+The service inside the VM must listen on 0.0.0.0.
+MSG
+}
+
+cmd_start() {
+  local target="${1:-all}" box
+  while IFS= read -r box; do ensure_running "$box"; echo "$box: running"; done < <(for_targets "$target")
+}
+
+cmd_stop() {
+  local target="${1:-all}" box
+  while IFS= read -r box; do
+    if sandbox_exists "$box" && "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+      note "Stopping $box"
+      "$MSB_BIN" stop -q -t 60 "$box"
+    else
+      echo "$box: already stopped"
+    fi
+  done < <(for_targets "$target")
+}
+
+cmd_restart() {
+  local target="${1:-all}" box token=""
+  while IFS= read -r box; do
+    sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+    note "Restarting $box"
+    if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
+      GH_TOKEN="$token" "$MSB_BIN" restart -q -t 60 "$box"
+      unset token
+    else
+      if [[ -f "$(metadata_file "$box")" ]]; then
+        fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
+      fi
+      "$MSB_BIN" restart -q -t 60 "$box"
+    fi
+  done < <(for_targets "$target")
+}
+
+cmd_status() {
+  "$MSB_BIN" ps -a --label msw.managed=true
+  echo
+  cmd_ports all
+}
+
+cmd_metrics() {
+  local target="${1:-all}"
+  if [[ "$target" == all ]]; then exec "$MSB_BIN" metrics --watch; fi
+  validate_workspace "$target"
+  exec "$MSB_BIN" metrics --watch "$target"
+}
+
+cmd_logs() {
+  local box="$1"; shift
+  validate_workspace "$box"
+  "$MSB_BIN" logs "$box" "$@"
+}
+
+cmd_exec() {
+  local box="$1"; shift
+  validate_workspace "$box"
+  (( $# > 0 )) || fatal "usage: msw exec WORKSPACE COMMAND [ARG ...]"
+  guest_exec_w "$box" /workspace "$@"
+}
+
+cmd_disk() {
+  local target="${1:-all}" box
+  while IFS= read -r box; do
+    ensure_running "$box"
+    printf '\n\033[1;36m[%s]\033[0m\n' "$box"
+    guest_exec "$box" bash -lc 'df -h / /workspace /var/lib/msw-runtime; echo; docker system df'
+  done < <(for_targets "$target")
+}
+
+cmd_resize() {
+  local box="$1" memory="${2:-}" cpus="${3:-}"
+  validate_workspace "$box"
+  [[ -n "$memory" ]] || fatal "usage: msw resize WORKSPACE MEMORY [CPUS]"
+  if [[ -n "$cpus" ]]; then "$MSB_BIN" modify "$box" --memory "$memory" --cpus "$cpus"; else "$MSB_BIN" modify "$box" --memory "$memory"; fi
+}
+
+cmd_upgrade() {
+  local target="${1:-all}" box
+  while IFS= read -r box; do
+    note "Upgrading Ubuntu packages in $box"
+    guest_exec "$box" bash -lc 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y && apt-get autoremove -y && apt-get clean'
+  done < <(for_targets "$target")
+}
+
+cmd_update() {
+  if command -v brew >/dev/null 2>&1 && brew list --versions superradcompany/tap/microsandbox >/dev/null 2>&1; then
+    note "Updating MicroSandbox through Homebrew"
+    brew update
+    brew upgrade superradcompany/tap/microsandbox || true
+  else
+    note "Updating MicroSandbox"
+    "$MSB_BIN" self update
+  fi
+  "$MSB_BIN" doctor
+}
+
+cmd_tunnel() {
+  local box="$1" remote_port="${2:-}" local_port="${3:-$remote_port}"
+  validate_workspace "$box"
+  validate_port "$remote_port" "remote port"
+  validate_port "$local_port" "local port"
+  ensure_running "$box"
+  note "http://localhost:$local_port -> $box:$remote_port (Ctrl-C closes it)"
+  exec "$SSH_BIN" -N -o ExitOnForwardFailure=yes -L "${local_port}:127.0.0.1:${remote_port}" "$(workspace_ssh_host "$box")"
+}
+
+cmd_host_repair_test() {
+  local root="$HOME/.config/msw/test-host"
+  mkdir -p "$root" "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
+  printf '%s\n%s\n%s\n' "$MSW_DEV_IP $MSW_DEV_HOST" "$MSW_PLAYGROUNDS_IP $MSW_PLAYGROUNDS_HOST" "$MSW_PERSONAL_IP $MSW_PERSONAL_HOST" >"$root/hosts"
+  printf '%s\n%s\n%s\n' "$MSW_DEV_IP" "$MSW_PLAYGROUNDS_IP" "$MSW_PERSONAL_IP" >"$root/loopback"
+  if [[ ! -f "$HOME/.ssh/msw_ed25519" ]]; then
+    printf 'fake-private-key\n' >"$HOME/.ssh/msw_ed25519"
+    printf 'ssh-ed25519 AAAATEST microsandbox-workspaces\n' >"$HOME/.ssh/msw_ed25519.pub"
+  fi
+  cat "$HOME/.ssh/msw_ed25519.pub" >"$HOME/.microsandbox/ssh/authorized_keys"
+  cat >"$HOME/.ssh/config.d/msw.conf" <<SSH
+Host dev.msb playgrounds.msb personal.msb
+  User root
+  IdentityFile $HOME/.ssh/msw_ed25519
+  IdentitiesOnly yes
+  ProxyCommand $HOME/.local/bin/msw-ssh-proxy %h
+SSH
+  chmod 600 "$HOME/.ssh/config.d/msw.conf"
+}
+
+cmd_host_repair() {
+  if [[ "${MSW_TEST_MODE:-0}" == 1 ]]; then cmd_host_repair_test; ok "test host integration configured"; return; fi
+  [[ "$(uname -s)" == Darwin ]] || fatal "host repair is only supported on macOS"
+  require_command_path msb "$MSB_BIN"
+  note "Configuring local browser addresses"
+  sudo -v
+  local loop_script loop_plist hosts_tmp
+  loop_script="$(mktemp "${TMPDIR:-/tmp}/msw-loopback.XXXXXX")"
+  cat >"$loop_script" <<LOOP
+#!/bin/sh
+set -eu
+for ip in "$MSW_DEV_IP" "$MSW_PLAYGROUNDS_IP" "$MSW_PERSONAL_IP"; do
+  /sbin/ifconfig lo0 | /usr/bin/grep -q "inet \${ip} " || /sbin/ifconfig lo0 alias "\${ip}" up
+done
+LOOP
+  sudo /usr/bin/install -d -o root -g wheel -m 0755 /usr/local/libexec
+  sudo /usr/bin/install -o root -g wheel -m 0755 "$loop_script" /usr/local/libexec/msw-loopback-aliases
+  rm -f "$loop_script"
+
+  loop_plist="$(mktemp "${TMPDIR:-/tmp}/msw-loopback.XXXXXX.plist")"
+  cat >"$loop_plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.msw.loopback-aliases</string>
+<key>ProgramArguments</key><array><string>/usr/local/libexec/msw-loopback-aliases</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+  /usr/bin/plutil -lint "$loop_plist" >/dev/null
+  sudo /usr/bin/install -o root -g wheel -m 0644 "$loop_plist" /Library/LaunchDaemons/dev.msw.loopback-aliases.plist
+  rm -f "$loop_plist"
+  sudo /usr/local/libexec/msw-loopback-aliases
+  sudo /bin/launchctl bootout system /Library/LaunchDaemons/dev.msw.loopback-aliases.plist >/dev/null 2>&1 || true
+  sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/dev.msw.loopback-aliases.plist
+
+  hosts_tmp="$(mktemp "${TMPDIR:-/tmp}/msw-hosts.XXXXXX")"
+  /usr/bin/awk '/^# BEGIN MSW WORKSPACES$/{skip=1;next}/^# END MSW WORKSPACES$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
+  cat >>"$hosts_tmp" <<HOSTS
+
+# BEGIN MSW WORKSPACES
+$MSW_DEV_IP $MSW_DEV_HOST
+$MSW_PLAYGROUNDS_IP $MSW_PLAYGROUNDS_HOST
+$MSW_PERSONAL_IP $MSW_PERSONAL_HOST
+# END MSW WORKSPACES
+HOSTS
+  sudo /usr/bin/install -o root -g wheel -m 0644 "$hosts_tmp" /etc/hosts
+  rm -f "$hosts_tmp"
+  sudo /usr/bin/dscacheutil -flushcache
+  sudo /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
+
+  note "Configuring SSH for Ghostty and Zed"
+  mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
+  chmod 700 "$HOME/.ssh" "$HOME/.ssh/config.d"
+  if [[ ! -f "$HOME/.ssh/msw_ed25519" ]]; then
+    ssh-keygen -t ed25519 -f "$HOME/.ssh/msw_ed25519" -N '' -C microsandbox-workspaces
+  fi
+  chmod 600 "$HOME/.ssh/msw_ed25519"
+  chmod 644 "$HOME/.ssh/msw_ed25519.pub"
+  local public_key authorized
+  public_key="$(cat "$HOME/.ssh/msw_ed25519.pub")"
+  authorized="$HOME/.microsandbox/ssh/authorized_keys"
+  if [[ ! -f "$authorized" ]] || ! grep -qxF "$public_key" "$authorized"; then
+    "$MSB_BIN" ssh authorize --file "$HOME/.ssh/msw_ed25519.pub"
+  fi
+  cat >"$HOME/.ssh/config.d/msw.conf" <<SSH
+Host dev.msb playgrounds.msb personal.msb
+  User root
+  IdentityFile $HOME/.ssh/msw_ed25519
+  IdentitiesOnly yes
+  ProxyCommand $HOME/.local/bin/msw-ssh-proxy %h
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  StrictHostKeyChecking accept-new
+  SetEnv TERM=xterm-256color
+SSH
+  chmod 600 "$HOME/.ssh/config.d/msw.conf"
+  touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
+  local include_line="Include $HOME/.ssh/config.d/*"
+  if ! grep -qxF "$include_line" "$HOME/.ssh/config"; then
+    local ssh_tmp
+    ssh_tmp="$(mktemp "${TMPDIR:-/tmp}/msw-ssh.XXXXXX")"
+    { printf '%s\n\n' "$include_line"; cat "$HOME/.ssh/config"; } >"$ssh_tmp"
+    mv "$ssh_tmp" "$HOME/.ssh/config"
+    chmod 600 "$HOME/.ssh/config"
+  fi
+  ok "host browser names and SSH integration configured"
+}
+
+validate_github_repo() {
+  local repo="${1:-}"
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fatal "GitHub repository must be OWNER/REPOSITORY"
+}
+
+normalize_github_remote() {
+  local raw="$1" owner repo
+  case "$raw" in
+    https://github.com/*)
+      raw="${raw#https://github.com/}"
+      ;;
+    git@github.com:*)
+      raw="${raw#git@github.com:}"
+      ;;
+    ssh://git@github.com:22/*)
+      raw="${raw#ssh://git@github.com:22/}"
+      ;;
+    ssh://git@github.com/*)
+      raw="${raw#ssh://git@github.com/}"
+      ;;
+    *)
+      fatal "origin must point to github.com over HTTPS or SSH"
+      ;;
+  esac
+  raw="${raw%.git}"
+  [[ "$raw" != *'?'* && "$raw" != *'#'* && "$raw" != */*/* ]] || fatal "unsupported GitHub origin URL"
+  owner="${raw%%/*}"; repo="${raw#*/}"
+  validate_github_repo "$owner/$repo"
+  printf 'https://github.com/%s/%s.git\n' "$owner" "$repo"
+}
+
+cmd_identity() {
+  local name="${1:-}" email="${2:-}" target="${3:-all}" box
+  [[ -n "$name" && -n "$email" ]] || fatal 'usage: msw identity "NAME" EMAIL [WORKSPACE|all]'
+  while IFS= read -r box; do
+    guest_exec "$box" git config --global user.name "$name"
+    guest_exec "$box" git config --global user.email "$email"
+    printf '%-12s %s <%s>\n' "$box" "$name" "$email"
+  done < <(for_targets "$target")
+}
+
+cmd_clone() {
+  local box="$1" repo="${2:-}" destination="${3:-}" remote repo_name parent
+  validate_workspace "$box"
+  validate_github_repo "$repo"
+  repo_name="${repo#*/}"
+  if [[ -z "$destination" ]]; then destination="$repo_name"; fi
+  validate_relative_path "$destination"
+  parent="${destination%/*}"
+  [[ "$parent" == "$destination" ]] && parent=.
+  remote="https://github.com/${repo}.git"
+  ensure_running "$box"
+  note "Cloning $repo into $box:/workspace/$destination"
+  local script
+  read -r -d '' script <<'SCRIPT' || true
+set -Eeuo pipefail
+remote="$1" destination="$2" parent="$3"
+root="${MSW_GUEST_WORKSPACE_ROOT:-/workspace}"
+mkdir -p -- "$root/$parent"
+if [ -e "$root/$destination" ]; then
+  echo "destination already exists: $destination" >&2
+  exit 2
+fi
+git -C "$root" clone -- "$remote" "$destination"
+SCRIPT
+  guest_script "$box" "$script" "$remote" "$destination" "$parent"
+}
+
+cmd_repos() {
+  local box="$1"
+  validate_workspace "$box"
+  local script
+  read -r -d '' script <<'SCRIPT' || true
+set -Eeuo pipefail
+root="${MSW_GUEST_WORKSPACE_ROOT:-/workspace}"
+find "$root" -mindepth 2 \( -type d -o -type f \) -name .git -prune -print 2>/dev/null |
+  sed -e 's#/.git$##' -e "s#^$root/##" | sort
+SCRIPT
+  guest_script "$box" "$script"
+}
+
+pull_one() {
+  local box="$1" relative="$2" repo_root
+  repo_root="$(resolve_guest_repo "$box" "$relative")"
+  note "$box:$relative"
+  guest_exec_w "$box" "$repo_root" git pull --ff-only --prune
+}
+
+cmd_pull() {
+  local box="$1" target="${2:-all}" repo failed=0
+  validate_workspace "$box"
+  if [[ "$target" != all ]]; then pull_one "$box" "$target"; return; fi
+  while IFS= read -r repo; do
+    [[ -n "$repo" ]] || continue
+    if ! pull_one "$box" "$repo"; then failed=1; fi
+  done < <(cmd_repos "$box")
+  (( failed == 0 )) || fatal "one or more repositories could not fast-forward"
+}
+
+cmd_clean() {
+  local target="all" remove_volumes=0 arg box
+  for arg in "$@"; do
+    case "$arg" in
+      dev|playgrounds|personal|all)
+        [[ "$target" == all ]] || fatal "only one cleanup target may be specified"
+        target="$arg"
+        ;;
+      --volumes) remove_volumes=1 ;;
+      *) fatal "usage: msw clean [WORKSPACE|all] [--volumes]" ;;
+    esac
+  done
+  while IFS= read -r box; do
+    note "Pruning unused Docker images, containers, networks, and build cache in $box"
+    if (( remove_volumes == 1 )); then
+      warn "$box: also deleting every unused Docker volume"
+      guest_exec "$box" docker system prune -af --volumes
+    else
+      guest_exec "$box" docker system prune -af
+    fi
+    guest_exec "$box" docker builder prune -af
+  done < <(for_targets "$target")
+}
+
+bind_github_read_token() {
+  local box="$1" token
+  token="$(read_token_for_workspace "$box")" || fatal "read token missing from Keychain for $box"
+  GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" >/dev/null
+  unset token
+}
+
+remove_github_secret() {
+  local box="$1"
+  sandbox_exists "$box" || return 0
+  "$MSB_BIN" modify "$box" --secret-rm GH_TOKEN >/dev/null 2>&1 || true
+}
+
+host_safe_path() {
+  local path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin" dir tool
+  for tool in "$GIT_BIN" "$(command -v git-lfs 2>/dev/null || true)" "$ASKPASS_BIN"; do
+    [[ -n "$tool" ]] || continue
+    dir="$(dirname "$tool")"
+    case ":$path:" in *":$dir:"*) ;; *) path="$dir:$path" ;; esac
+  done
+  printf '%s\n' "$path"
+}
+
+host_git_run() {
+  local temp_home="$1" box="$2"; shift 2
+  mkdir -p "$temp_home"
+  env -i \
+    HOME="$temp_home" \
+    XDG_CONFIG_HOME="$temp_home/.config" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    PATH="$(host_safe_path)" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS="$ASKPASS_BIN" \
+    GIT_ASKPASS_REQUIRE=force \
+    SSH_ASKPASS="$ASKPASS_BIN" \
+    MSW_KEYCHAIN_SERVICE="$WRITE_KEYCHAIN_SERVICE" \
+    MSW_KEYCHAIN_ACCOUNT="$box" \
+    MSW_TEST_KEYCHAIN_DIR="${MSW_TEST_KEYCHAIN_DIR:-}" \
+    GIT_LFS_SKIP_SMUDGE=1 \
+    "$@"
+}
+
+host_remote_url() {
+  local canonical="$1" path owner repo
+  if [[ -n "${MSW_TEST_GITHUB_REMOTE_ROOT:-}" ]]; then
+    path="${canonical#https://github.com/}"
+    path="${path%.git}"
+    owner="${path%%/*}"; repo="${path#*/}"
+    printf '%s/%s/%s.git\n' "$MSW_TEST_GITHUB_REMOTE_ROOT" "$owner" "$repo"
+  else
+    printf '%s\n' "$canonical"
+  fi
+}
+
+host_delete_branch() {
+  local box="$1" canonical_url="$2" branch="$3" temp temp_home repo remote
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/msw-delete.XXXXXX")"
+  temp_home="$temp/home"; repo="$temp/repo"; remote="$(host_remote_url "$canonical_url")"
+  "$GIT_BIN" init -q "$repo"
+  host_git_run "$temp_home" "$box" "$GIT_BIN" -C "$repo" \
+    -c credential.helper= -c core.hooksPath=/dev/null \
+    push "$remote" ":refs/heads/$branch"
+  rm -rf "$temp"
+}
+
+collect_lfs_oids() {
+  local box="$1" repo_root="$2" local_sha="$3" script
+  read -r -d '' script <<'SCRIPT' || true
+set -Eeuo pipefail
+sha="$1"
+git rev-list --objects "$sha" --not --remotes=origin |
+  awk '{print $1}' | sort -u |
+  while IFS= read -r object; do
+    [ -n "$object" ] || continue
+    [ "$(git cat-file -t "$object" 2>/dev/null || true)" = blob ] || continue
+    size="$(git cat-file -s "$object")"
+    [ "$size" -le 4096 ] || continue
+    content="$(git cat-file blob "$object")"
+    first="$(printf '%s\n' "$content" | sed -n '1p')"
+    [ "$first" = 'version https://git-lfs.github.com/spec/v1' ] || continue
+    oid="$(printf '%s\n' "$content" | sed -n 's/^oid sha256:\([0-9a-f]\{64\}\)$/\1/p' | head -n 1)"
+    [ -n "$oid" ] || { echo "invalid Git LFS pointer in Git blob $object" >&2; exit 9; }
+    printf '%s\n' "$oid"
+  done | sort -u
+SCRIPT
+  guest_exec_w "$box" "$repo_root" bash -s -- "$local_sha" <<<"$script"
+}
+
+copy_lfs_objects() {
+  local box="$1" repo_root="$2" host_repo="$3" oid_list="$4" oid count=0 guest_path dest actual
+  [[ -s "$oid_list" ]] || return 0
+  while IFS= read -r oid; do
+    [[ -n "$oid" ]] || continue
+    [[ "$oid" =~ ^[0-9a-f]{64}$ ]] || fatal "guest returned an invalid Git LFS object id"
+    count=$((count + 1))
+    (( count <= 10000 )) || fatal "more than 10,000 new Git LFS objects; use a narrower push"
+    guest_path="$(guest_exec_w "$box" "$repo_root" git rev-parse --path-format=absolute --git-path "lfs/objects/${oid:0:2}/${oid:2:2}/$oid")"
+    dest="$host_repo/.git/lfs/objects/${oid:0:2}/${oid:2:2}/$oid"
+    mkdir -p "$(dirname "$dest")"
+    "$MSB_BIN" copy -q "$box:$guest_path" "$dest.partial"
+    [[ -f "$dest.partial" && ! -L "$dest.partial" ]] || fatal "Git LFS object $oid was not a regular file"
+    require_command_path shasum "$SHASUM_BIN"
+    actual="$("$SHASUM_BIN" -a 256 "$dest.partial" | awk '{print $1}')"
+    [[ "$actual" == "$oid" ]] || fatal "Git LFS object $oid failed SHA-256 verification"
+    mv "$dest.partial" "$dest"
+  done <"$oid_list"
+}
+
+push_impl() {
+  local box="$1" relative="$2" force_mode="$3" assume_yes="$4" quiet_mode="${5:-0}"
+  validate_workspace "$box"
+  validate_relative_path "$relative"
+  keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "host write token missing; run: msw github setup $box OWNER/REPO"
+  [[ -x "$ASKPASS_BIN" ]] || fatal "host askpass helper missing; rerun setup.sh"
+  require_command_path git "$GIT_BIN"
+
+  local repo_root branch local_sha remote_raw canonical_url remote_sha ff_status commits
+  repo_root="$(resolve_guest_repo "$box" "$relative")"
+  remote_raw="$(guest_exec_w "$box" "$repo_root" git config --get remote.origin.url)"
+  canonical_url="$(normalize_github_remote "$remote_raw")"
+  guest_exec_w "$box" "$repo_root" git fetch --prune origin
+  branch="$(guest_exec_w "$box" "$repo_root" git symbolic-ref --quiet --short HEAD)" || fatal "detached HEAD cannot be pushed"
+  guest_exec_w "$box" "$repo_root" git check-ref-format --branch "$branch" >/dev/null
+  local_sha="$(guest_exec_w "$box" "$repo_root" git rev-parse --verify HEAD)"
+  remote_sha="$(guest_exec_w "$box" "$repo_root" bash -c 'git ls-remote --exit-code origin "refs/heads/$1" 2>/dev/null | awk '\''NR==1 {print $1}'\''' _ "$branch" || true)"
+  [[ -z "$remote_sha" || "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || fatal "origin returned an invalid branch SHA"
+
+  ff_status=new
+  if [[ -n "$remote_sha" ]]; then
+    if guest_exec_w "$box" "$repo_root" git merge-base --is-ancestor "$remote_sha" "$local_sha"; then ff_status=fast-forward; else ff_status=non-fast-forward; fi
+  fi
+  if [[ "$ff_status" == non-fast-forward && "$force_mode" != 1 ]]; then
+    fatal "push is not a fast-forward. Review it, then use: msw push $box $relative --force-with-lease"
+  fi
+
+  if [[ -n "$remote_sha" ]]; then
+    commits="$(guest_exec_w "$box" "$repo_root" git log --oneline --decorate --max-count=30 "$remote_sha..$local_sha" || true)"
+  else
+    commits="$(guest_exec_w "$box" "$repo_root" git log --oneline --decorate --max-count=15 "$local_sha" || true)"
+  fi
+  if [[ "$quiet_mode" != 1 ]]; then
+    cat <<SUMMARY
+Workspace:   $box
+Repository:  ${canonical_url#https://github.com/}
+Path:        $relative
+Branch:      $branch
+Commit:      $local_sha
+Mode:        $ff_status$([[ "$force_mode" == 1 ]] && printf ' (exact force-with-lease)' || true)
+
+Commits:
+${commits:-  (no new commits)}
+SUMMARY
+  fi
+  if [[ "$assume_yes" != 1 ]]; then
+    printf '\nType PUSH to continue: '
+    local answer; read -r answer
+    [[ "$answer" == PUSH ]] || fatal "push cancelled"
+  fi
+
+  local temp guest_bundle host_bundle host_repo temp_home lfs_oids remote_url ref lease_arg
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/msw-push.XXXXXX")"
+  guest_bundle="/tmp/msw-push-$(date +%s)-$RANDOM.bundle"
+  host_bundle="$temp/branch.bundle"
+  host_repo="$temp/repo"
+  temp_home="$temp/home"
+  lfs_oids="$temp/lfs-oids"
+  ref="refs/heads/$branch"
+  remote_url="$(host_remote_url "$canonical_url")"
+
+  (
+    cleanup_push() {
+      guest_exec "$box" rm -f "$guest_bundle" >/dev/null 2>&1 || true
+      rm -rf "$temp"
+    }
+    trap cleanup_push EXIT INT TERM HUP
+
+    guest_exec_w "$box" "$repo_root" git bundle create "$guest_bundle" "$ref"
+    "$MSB_BIN" copy -q "$box:$guest_bundle" "$host_bundle"
+    [[ -f "$host_bundle" && ! -L "$host_bundle" ]] || fatal "invalid Git bundle transfer"
+
+    "$GIT_BIN" init -q "$host_repo"
+    "$GIT_BIN" -C "$host_repo" -c core.hooksPath=/dev/null bundle verify "$host_bundle" >/dev/null
+    "$GIT_BIN" -C "$host_repo" -c core.hooksPath=/dev/null fetch -q "$host_bundle" "$ref:$ref"
+    [[ "$("$GIT_BIN" -C "$host_repo" rev-parse "$ref")" == "$local_sha" ]] || fatal "bundle commit did not match the guest commit"
+    "$GIT_BIN" -C "$host_repo" remote add origin "$remote_url"
+
+    collect_lfs_oids "$box" "$repo_root" "$local_sha" >"$lfs_oids"
+    if [[ -s "$lfs_oids" ]]; then
+      command -v git-lfs >/dev/null 2>&1 || fatal "Git LFS objects are present but git-lfs is not installed on the Mac"
+      copy_lfs_objects "$box" "$repo_root" "$host_repo" "$lfs_oids"
+      host_git_run "$temp_home" "$box" "$GIT_BIN" -C "$host_repo" \
+        -c credential.helper= -c core.hooksPath=/dev/null \
+        lfs push --object-id origin --stdin <"$lfs_oids"
+    fi
+
+    local push_args=(push origin "$ref:$ref")
+    if [[ "$force_mode" == 1 ]]; then
+      if [[ -n "$remote_sha" ]]; then lease_arg="--force-with-lease=$ref:$remote_sha"; else lease_arg="--force-with-lease=$ref:"; fi
+      push_args=(push "$lease_arg" origin "$ref:$ref")
+    fi
+    host_git_run "$temp_home" "$box" "$GIT_BIN" -C "$host_repo" \
+      -c credential.helper= -c core.hooksPath=/dev/null "${push_args[@]}"
+
+    guest_exec_w "$box" "$repo_root" git fetch --prune origin "$ref"
+  )
+  ok "pushed $branch from $box:$relative"
+}
+
+cmd_push() {
+  local box="$1" relative="$2"; shift 2
+  local force_mode=0 assume_yes=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --force-with-lease) force_mode=1 ;;
+      --yes|-y) assume_yes=1 ;;
+      *) fatal "unknown push option: $arg" ;;
+    esac
+  done
+  push_impl "$box" "$relative" "$force_mode" "$assume_yes" 0
+}
+
+read_hidden_token() {
+  local prompt="$1" env_name="$2" value=""
+  if [[ -n "${!env_name:-}" ]]; then
+    value="${!env_name}"
+  else
+    printf '%s' "$prompt" >&2
+    IFS= read -r -s value
+    printf '\n' >&2
+  fi
+  [[ ${#value} -ge 20 ]] || fatal "token looks too short"
+  printf '%s' "$value"
+}
+
+cmd_github_verify() {
+  local box="$1" repo="${2:-}" id temp_rel branch repo_root canonical remote_sha=""
+  validate_workspace "$box"
+  if [[ -z "$repo" ]]; then repo="$(metadata_repo "$box")" || fatal "no verification repository recorded for $box"; fi
+  validate_github_repo "$repo"
+  keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
+  keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "write token missing for $box"
+
+  bind_github_read_token "$box"
+  ensure_running "$box"
+  id="$(date +%Y%m%d%H%M%S)-$RANDOM"
+  temp_rel=".msw-verification/$id"
+  branch="msw-permission-test-$id"
+  canonical="https://github.com/$repo.git"
+
+  (
+    cleanup_verify() {
+      guest_exec "$box" rm -rf "/workspace/$temp_rel" >/dev/null 2>&1 || true
+    }
+    trap cleanup_verify EXIT INT TERM HUP
+
+    note "Verifying read-only guest access in $box"
+    cmd_clone "$box" "$repo" "$temp_rel" >/dev/null
+    repo_root="$(resolve_guest_repo "$box" "$temp_rel")"
+    guest_exec_w "$box" "$repo_root" git config user.name "MSW Permission Test"
+    guest_exec_w "$box" "$repo_root" git config user.email "msw-permission-test@localhost"
+    guest_exec_w "$box" "$repo_root" git switch -c "$branch" >/dev/null
+    guest_exec_w "$box" "$repo_root" git commit --allow-empty -m "MSW permission verification" >/dev/null
+
+    if guest_exec_w "$box" "$repo_root" git push origin "HEAD:refs/heads/$branch" >/dev/null 2>&1; then
+      host_delete_branch "$box" "$canonical" "$branch" >/dev/null 2>&1 || true
+      fatal "the guest token can push. Replace it with a Contents: read-only fine-grained token"
+    fi
+    ok "guest push rejected"
+
+    note "Verifying the host-only push path"
+    push_impl "$box" "$temp_rel" 0 1 1
+    remote_sha="$(guest_exec_w "$box" "$repo_root" bash -c 'git ls-remote --exit-code origin "refs/heads/$1" | awk '\''NR==1 {print $1}'\''' _ "$branch")"
+    [[ "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || fatal "host push could not be confirmed"
+    host_delete_branch "$box" "$canonical" "$branch" >/dev/null
+    if guest_exec_w "$box" "$repo_root" git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+      fatal "temporary verification branch could not be deleted"
+    fi
+    ok "host push and cleanup succeeded"
+  )
+  ok "GitHub permissions verified for $box using $repo"
+}
+
+cmd_github_setup() {
+  local box="$1" repo="$2" read_token write_token
+  validate_workspace "$box"
+  validate_github_repo "$repo"
+  sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+
+  cat <<INFO
+Create two fine-grained GitHub tokens restricted to the repositories this workspace may use:
+  1. Guest token: Contents = Read-only
+  2. Host token:  Contents = Read and write
+Add Workflows = Read and write to the host token only when you need to push .github/workflows files.
+Verification repository: $repo
+INFO
+  read_token="$(read_hidden_token 'Paste the READ-ONLY token: ' MSW_GITHUB_READ_TOKEN_INPUT)"
+  write_token="$(read_hidden_token 'Paste the HOST WRITE token: ' MSW_GITHUB_WRITE_TOKEN_INPUT)"
+  [[ "$read_token" != "$write_token" ]] || fatal "use two different tokens"
+
+  local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta=""
+  meta_file="$(metadata_file "$box")"
+  if old_read="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_read=1; fi
+  if old_write="$(keychain_get "$WRITE_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_write=1; fi
+  if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
+
+  keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$read_token"
+  keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$write_token"
+  unset read_token write_token
+  write_metadata "$box" "$repo"
+
+  # Run verification in a fresh process. Bash disables errexit inside functions
+  # used directly as an `if` condition; a child process keeps every internal
+  # failure fatal while still allowing this parent to roll credentials back.
+  if ! "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo"; then
+    warn "verification failed; restoring the previous GitHub configuration"
+    if (( had_read )); then keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$old_read"; else keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; fi
+    if (( had_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$old_write"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
+    if [[ -n "$old_meta" ]]; then printf '%s\n' "$old_meta" >"$meta_file"; else rm -f "$meta_file"; fi
+    if (( had_read )); then bind_github_read_token "$box" >/dev/null 2>&1 || true; else remove_github_secret "$box"; fi
+    unset old_read old_write
+    return 1
+  fi
+  unset old_read old_write
+  ok "GitHub configured for $box"
+}
+
+cmd_github_status() {
+  local target="${1:-all}" box repo read_state write_state
+  printf '%-13s %-10s %-10s %s\n' WORKSPACE GUEST_READ HOST_WRITE VERIFICATION_REPO
+  while IFS= read -r box; do
+    if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
+    if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
+    repo="$(metadata_repo "$box" 2>/dev/null || printf '-')"
+    printf '%-13s %-10s %-10s %s\n' "$box" "$read_state" "$write_state" "$repo"
+  done < <(for_targets "$target")
+}
+
+cmd_github_remove() {
+  local box="$1"
+  validate_workspace "$box"
+  keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"
+  keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"
+  rm -f "$(metadata_file "$box")"
+  remove_github_secret "$box"
+  ok "removed GitHub credentials for $box"
+}
+
+cmd_github() {
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    setup)
+      (( $# == 2 )) || fatal "usage: msw github setup WORKSPACE OWNER/REPO"
+      cmd_github_setup "$1" "$2"
+      ;;
+    verify)
+      (( $# >= 1 && $# <= 2 )) || fatal "usage: msw github verify WORKSPACE [OWNER/REPO]"
+      cmd_github_verify "$1" "${2:-}"
+      ;;
+    status)
+      cmd_github_status "${1:-all}"
+      ;;
+    remove)
+      (( $# == 1 )) || fatal "usage: msw github remove WORKSPACE"
+      cmd_github_remove "$1"
+      ;;
+    *) fatal "unknown github command '$sub'" ;;
+  esac
+}
+
+host_network_check() {
+  local failed=0 box ip host
+  if [[ "${MSW_TEST_MODE:-0}" == 1 ]]; then
+    local root="$HOME/.config/msw/test-host"
+    [[ -f "$root/hosts" && -f "$root/loopback" ]] || return 1
+    return 0
+  fi
+  for box in "${WORKSPACES[@]}"; do
+    ip="$(workspace_ip "$box")"; host="$(workspace_host "$box")"
+    /sbin/ifconfig lo0 | /usr/bin/grep -q "inet ${ip} " || { echo "$box: loopback $ip missing" >&2; failed=1; }
+    /usr/bin/dscacheutil -q host -a name "$host" | /usr/bin/grep -q "$ip" || { echo "$box: hostname $host missing" >&2; failed=1; }
+  done
+  return "$failed"
+}
+
+cmd_check_quick() {
+  local failed=0 box
+  note "MicroSandbox runtime"
+  "$MSB_BIN" doctor || failed=1
+  note "Host browser and SSH integration"
+  host_network_check || failed=1
+  [[ -f "$HOME/.ssh/config.d/msw.conf" ]] || { echo "SSH config missing" >&2; failed=1; }
+  [[ -x "$HOME/.local/bin/msw-ssh-proxy" ]] || { echo "SSH proxy missing" >&2; failed=1; }
+  [[ -x "$ASKPASS_BIN" ]] || { echo "Git askpass helper missing" >&2; failed=1; }
+  note "Base snapshot and workspace storage"
+  snapshot_exists "$MSW_BASE_SNAPSHOT" || { echo "snapshot $MSW_BASE_SNAPSHOT missing" >&2; failed=1; }
+  for box in "${WORKSPACES[@]}"; do
+    sandbox_exists "$box" || { echo "$box: sandbox missing" >&2; failed=1; }
+    volume_exists "$(workspace_volume "$box" workspace)" || { echo "$box: workspace volume missing" >&2; failed=1; }
+    volume_exists "$(workspace_volume "$box" runtime)" || { echo "$box: runtime volume missing" >&2; failed=1; }
+  done
+  (( failed == 0 )) || fatal "one or more checks failed; rerun setup.sh"
+  ok "quick checks passed"
+}
+
+check_one_deep() {
+  local box="$1" was_running=0 failed=0 host direct_url docker_url direct_unit docker_name
+  "$MSB_BIN" ping -q "$box" >/dev/null 2>&1 && was_running=1
+  ensure_running "$box"
+  host="$(workspace_host "$box")"
+  direct_unit="msw-health-direct-${box}"
+  docker_name="msw-health-docker-${box}"
+  direct_url="http://${host}:24678/msw-health.txt"
+  docker_url="http://${host}:24679/"
+
+  note "Deep-checking $box"
+  local script
+  read -r -d '' script <<'SCRIPT' || true
+set -Eeuo pipefail
+[ "$(uname -m)" = aarch64 ]
+[ "$(cat /proc/1/comm)" = systemd ]
+[ "$(findmnt -n -o FSTYPE /workspace)" = ext4 ]
+[ "$(findmnt -n -o FSTYPE /var/lib/msw-runtime)" = ext4 ]
+systemctl is-active --quiet docker
+systemctl is-active --quiet containerd
+docker info >/dev/null
+docker compose version >/dev/null
+docker buildx version >/dev/null
+curl -fsS --max-time 20 https://github.com/robots.txt >/dev/null
+SCRIPT
+  guest_script "$box" "$script" || failed=1
+
+  "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=20 "$(workspace_ssh_host "$box")" true || failed=1
+
+  guest_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
+  guest_exec "$box" bash -lc "printf '%s\\n' '$box-direct-ok' >/tmp/msw-health.txt && systemd-run --quiet --unit='$direct_unit' --collect python3 -m http.server 24678 --bind 0.0.0.0 --directory /tmp" || failed=1
+  local attempt=0 body=""
+  until body="$("$CURL_BIN" -fsS --max-time 2 "$direct_url" 2>/dev/null)"; do
+    attempt=$((attempt + 1)); (( attempt < 30 )) || break; sleep 0.2
+  done
+  [[ "$body" == "$box-direct-ok" ]] || { echo "$box: direct published port failed" >&2; failed=1; }
+  guest_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
+
+  guest_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
+  guest_exec "$box" docker run -d --name "$docker_name" -p 24679:80 nginx:alpine >/dev/null || failed=1
+  attempt=0; body=""
+  until body="$("$CURL_BIN" -fsS --max-time 2 "$docker_url" 2>/dev/null)"; do
+    attempt=$((attempt + 1)); (( attempt < 60 )) || break; sleep 0.5
+  done
+  [[ "$body" == *"Welcome to nginx"* ]] || { echo "$box: Docker published port failed" >&2; failed=1; }
+  guest_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
+
+  if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
+    guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
+      echo "$box: GitHub secret is not represented by a guest placeholder" >&2; failed=1;
+    }
+  fi
+
+  if (( was_running == 0 )); then "$MSB_BIN" stop -q -t 60 "$box" >/dev/null 2>&1 || failed=1; fi
+  (( failed == 0 )) || return 1
+  ok "$box passed"
+}
+
+cmd_check() {
+  local deep=0 arg failed=0 box
+  for arg in "$@"; do case "$arg" in --deep) deep=1 ;; *) fatal "unknown check option: $arg" ;; esac; done
+  cmd_check_quick
+  (( deep == 1 )) || return 0
+  require_command_path ssh "$SSH_BIN"
+  require_command_path curl "$CURL_BIN"
+  for box in "${WORKSPACES[@]}"; do check_one_deep "$box" || failed=1; done
+  (( failed == 0 )) || fatal "deep checks failed"
+  ok "all live VM, Docker, SSH, internet, and published-port checks passed"
+}
+
+managed_backup_paths() {
+  cat <<'PATHS'
+.microsandbox
+.config/msw
+.local/bin/msw
+.local/bin/msw-ssh-proxy
+.local/libexec/msw-git-askpass
+.local/share/msw
+.ssh/msw_ed25519
+.ssh/msw_ed25519.pub
+.ssh/config.d/msw.conf
+PATHS
+}
+
+running_workspaces() {
+  local box
+  for box in "${WORKSPACES[@]}"; do
+    if sandbox_exists "$box" && "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+      printf '%s\n' "$box"
+    fi
+  done
+}
+
+cmd_backup() {
+  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info temp running_file box rel
+  require_command_path gtar "$GTAR_BIN"
+  require_command_path zstd "$ZSTD_BIN"
+  require_command_path shasum "$SHASUM_BIN"
+
+  mkdir -p "$destination"
+  destination="$(cd "$destination" && pwd -P)"
+  case "$destination/" in
+    "$HOME/.microsandbox/"*|"$HOME/.config/msw/"*|"$HOME/.local/share/msw/"*)
+      fatal "backup destination may not be inside managed state"
+      ;;
+  esac
+
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  archive="$destination/microsandbox-all-$stamp.tar.zst"
+  partial="$archive.partial"
+  checksum="$archive.sha256"
+  info="$archive.info.txt"
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/msw-backup.XXXXXX")"
+  running_file="$temp/running"
+  running_workspaces >"$running_file"
+
+  (
+    cleanup_backup() {
+      local rc=$? running_box
+      rm -f "$partial"
+      if (( rc != 0 )); then rm -f "$archive" "$checksum" "$info"; fi
+      while IFS= read -r running_box; do
+        [[ -n "$running_box" ]] || continue
+        if ! "$MSB_BIN" ping -q "$running_box" >/dev/null 2>&1; then
+          start_sandbox "$running_box" >/dev/null 2>&1 || warn "could not restart $running_box after backup"
+        fi
+      done <"$running_file"
+      rm -rf "$temp"
+      return "$rc"
+    }
+    trap cleanup_backup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+
+    note "Flushing and stopping managed workspaces"
+    while IFS= read -r box; do
+      [[ -n "$box" ]] || continue
+      guest_exec "$box" sync >/dev/null
+      "$MSB_BIN" stop -q -t 120 "$box"
+    done <"$running_file"
+    sync
+
+    local -a paths=()
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      if [[ -e "$HOME/$rel" || -L "$HOME/$rel" ]]; then paths+=("$rel"); fi
+    done < <(managed_backup_paths)
+    (( ${#paths[@]} > 0 )) || fatal "nothing to back up"
+
+    {
+      printf 'MSW version: %s\n' "$MSW_VERSION"
+      printf 'Created UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'MicroSandbox: '
+      "$MSB_BIN" --version 2>/dev/null || true
+      printf 'Running before backup:\n'
+      sed 's/^/  /' "$running_file"
+      printf '\nKeychain tokens are intentionally not included.\n'
+    } >"$info"
+
+    note "Creating sparse compressed archive"
+    "$GTAR_BIN" --sparse --xattrs --acls -C "$HOME" -cf - "${paths[@]}" |
+      "$ZSTD_BIN" -T0 -8 -q -o "$partial"
+    [[ -s "$partial" ]] || fatal "backup archive is empty"
+    mv "$partial" "$archive"
+    (cd "$destination" && "$SHASUM_BIN" -a 256 "$(basename "$archive")" >"$(basename "$checksum")")
+  )
+
+  ok "backup complete"
+  printf '%s\n' "$archive"
+  printf '%s\n' "$checksum"
+  printf '%s\n' "$info"
+}
+
+validate_backup_member() {
+  local member="$1"
+  [[ -n "$member" ]] || return 1
+  case "$member" in
+    /*|../*|*/../*|*/..|./*|*/./*|*/.|*//* ) return 1 ;;
+  esac
+  case "$member" in
+    .microsandbox|.microsandbox/*|.config/msw|.config/msw/*|.local/bin/msw|.local/bin/msw-ssh-proxy|.local/libexec/msw-git-askpass|.local/share/msw|.local/share/msw/*|.ssh/msw_ed25519|.ssh/msw_ed25519.pub|.ssh/config.d/msw.conf)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_backup_listing() {
+  local listing="$1" member required count=0 duplicate=""
+  while IFS= read -r member; do
+    validate_backup_member "$member" || fatal "unsafe or unexpected archive member: $member"
+    count=$((count + 1))
+    (( count <= 2000000 )) || fatal "backup contains too many archive members"
+  done <"$listing"
+
+  duplicate="$(LC_ALL=C sort "$listing" | uniq -d | head -n 1)"
+  [[ -z "$duplicate" ]] || fatal "backup contains a duplicate archive member: $duplicate"
+
+  for required in \
+    .microsandbox \
+    .config/msw \
+    .local/bin/msw \
+    .local/bin/msw-ssh-proxy \
+    .local/libexec/msw-git-askpass \
+    .local/share/msw \
+    .ssh/msw_ed25519 \
+    .ssh/msw_ed25519.pub \
+    .ssh/config.d/msw.conf
+  do
+    grep -Fqx -- "$required" "$listing" || grep -Fqx -- "$required/" "$listing" || \
+      fatal "backup is incomplete; missing $required"
+  done
+}
+
+validate_staged_backup() {
+  local stage="$1" link target
+  if find "$stage" \( -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+    fatal "backup contains a device, FIFO, or socket"
+  fi
+  # Absolute symlinks in managed state are unnecessary for this setup and can
+  # unexpectedly escape the restored tree when followed later.
+  while IFS= read -r -d '' link; do
+    target="$(readlink "$link")"
+    [[ "$target" != /* ]] || fatal "backup contains an absolute symlink: ${link#$stage/}"
+  done < <(find "$stage" -type l -print0)
+}
+
+restore_state_health() {
+  "$MSB_BIN" snapshot reindex >/dev/null
+  "$MSB_BIN" doctor >/dev/null
+  snapshot_exists "$MSW_BASE_SNAPSHOT" || return 1
+  local box
+  for box in "${WORKSPACES[@]}"; do
+    sandbox_exists "$box" || return 1
+    volume_exists "$(workspace_volume "$box" workspace)" || return 1
+    volume_exists "$(workspace_volume "$box" runtime)" || return 1
+  done
+}
+
+cmd_restore() {
+  local archive="${1:-}" assume_yes=0 arg checksum stage rollback listing
+  [[ -n "$archive" ]] || fatal "usage: msw restore ARCHIVE [--yes]"
+  shift || true
+  for arg in "$@"; do
+    case "$arg" in --yes|-y) assume_yes=1 ;; *) fatal "unknown restore option: $arg" ;; esac
+  done
+  [[ -f "$archive" ]] || fatal "backup archive not found: $archive"
+  archive="$(cd "$(dirname "$archive")" && pwd -P)/$(basename "$archive")"
+  require_command_path gtar "$GTAR_BIN"
+  require_command_path zstd "$ZSTD_BIN"
+  require_command_path shasum "$SHASUM_BIN"
+
+  checksum="$archive.sha256"
+  if [[ -f "$checksum" ]]; then
+    note "Verifying SHA-256 checksum"
+    (cd "$(dirname "$archive")" && "$SHASUM_BIN" -a 256 -c "$(basename "$checksum")") || fatal "backup checksum failed"
+  else
+    warn "checksum sidecar is missing; archive integrity cannot be authenticated"
+  fi
+
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/msw-restore-stage.XXXXXX")"
+  rollback="$HOME/.msw-restore-rollback-$(date +%Y%m%d-%H%M%S)"
+  listing="$stage.members"
+
+  (
+    local transaction_active=0 rel source target item rc
+    local -a installed=() saved=()
+
+    rollback_restore() {
+      warn "restore failed; rolling back the previous managed state"
+      for item in "${installed[@]}"; do rm -rf "$HOME/$item"; done
+      for item in "${saved[@]}"; do
+        mkdir -p "$(dirname "$HOME/$item")"
+        mv "$rollback/$item" "$HOME/$item"
+      done
+      "$MSB_BIN" snapshot reindex >/dev/null 2>&1 || true
+    }
+
+    cleanup_restore() {
+      rc=$?
+      trap - EXIT INT TERM HUP
+      if (( transaction_active == 1 )); then rollback_restore; fi
+      rm -rf "$stage"
+      rm -f "$listing"
+      exit "$rc"
+    }
+    trap cleanup_restore EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+
+    note "Validating archive paths"
+    "$ZSTD_BIN" -dc -q "$archive" | "$GTAR_BIN" -tf - >"$listing"
+    validate_backup_listing "$listing"
+
+    "$ZSTD_BIN" -dc -q "$archive" |
+      "$GTAR_BIN" --extract --no-same-owner --no-same-permissions --delay-directory-restore -C "$stage" -f -
+    validate_staged_backup "$stage"
+
+    if [[ "$assume_yes" != 1 && "${MSW_ASSUME_YES:-0}" != 1 ]]; then
+      cat <<CONFIRM
+This replaces the managed MicroSandbox state and MSW configuration in your home directory.
+Current managed files will be retained at:
+  $rollback
+
+Keychain tokens are not changed.
+Type RESTORE to continue:
+CONFIRM
+      local answer; IFS= read -r answer
+      [[ "$answer" == RESTORE ]] || fatal "restore cancelled"
+    fi
+
+    note "Stopping current managed workspaces"
+    cmd_stop all >/dev/null 2>&1 || true
+    mkdir -p "$rollback"
+    transaction_active=1
+
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      source="$stage/$rel"; target="$HOME/$rel"
+      [[ -e "$source" || -L "$source" ]] || continue
+      if [[ -e "$target" || -L "$target" ]]; then
+        mkdir -p "$(dirname "$rollback/$rel")"
+        mv "$target" "$rollback/$rel"
+        saved+=("$rel")
+      fi
+      mkdir -p "$(dirname "$target")"
+      mv "$source" "$target"
+      installed+=("$rel")
+    done < <(managed_backup_paths)
+
+    restore_state_health || fatal "restored state did not pass health checks"
+    transaction_active=0
+  )
+
+  ok "restore complete; workspaces remain stopped"
+  printf 'Previous managed files: %s\n' "$rollback"
+  printf 'Run: msw host repair\n'
+  printf 'Then: msw check --deep\n'
+}
+
+cmd_docs() {
+  local topic="${1:-cheatsheet}" file pager
+  case "$topic" in
+    cheatsheet|commands) file="$MSW_DOCS_DIR/MSW-CHEATSHEET.md" ;;
+    setup) file="$MSW_DOCS_DIR/SETUP-GUIDE.md" ;;
+    github) file="$MSW_DOCS_DIR/GITHUB-SETUP.md" ;;
+    tests|test-report) file="$MSW_DOCS_DIR/TEST-REPORT.md" ;;
+    *) fatal "docs topic must be cheatsheet, setup, github, or tests" ;;
+  esac
+  [[ -f "$file" ]] || fatal "documentation missing; rerun setup.sh"
+  pager="${PAGER:-less}"
+  if [[ -t 1 && "$pager" != cat ]]; then "$pager" "$file"; else cat "$file"; fi
+}
+
+show_help() {
+  cat <<'HELP'
+MSW — grouped MicroSandbox development workspaces
+
+Enter / edit
+  msw dev [PATH]                       Ghostty/SSH shell in dev
+  msw playgrounds [PATH]               Shell in playgrounds
+  msw personal [PATH]                  Shell in personal
+  msw zed WORKSPACE [PATH]             Open workspace/repository in Zed
+  msw exec WORKSPACE COMMAND...         Run a command in /workspace
+
+Repositories
+  msw clone WORKSPACE OWNER/REPO [PATH] Clone, including into nested folders
+  msw repos WORKSPACE                   List repositories
+  msw pull WORKSPACE [PATH|all]         Fast-forward-only pull
+  msw push WORKSPACE PATH [--yes]       Explicit host-only push
+  msw push ... --force-with-lease       Exact lease-protected force push
+  msw identity "NAME" EMAIL [TARGET]    Set commit identity
+
+GitHub permissions
+  msw github setup WORKSPACE OWNER/REPO Store tokens and run the full permission test
+  msw github verify WORKSPACE [REPO]    Rerun the permission test
+  msw github status [WORKSPACE|all]     Show credential presence
+  msw github remove WORKSPACE           Remove that workspace's tokens
+
+Websites
+  msw open WORKSPACE [PORT] [SCHEME]    Start VM and open published URL
+  msw url WORKSPACE [PORT] [SCHEME]     Print URL
+  msw ports [WORKSPACE|all]             List pre-published ports
+  msw tunnel WORKSPACE REMOTE [LOCAL]   Temporary tunnel for an unlisted port
+
+Lifecycle / maintenance
+  msw start|stop|restart [TARGET]        TARGET is a workspace or all
+  msw status                            VM status and URLs
+  msw metrics [TARGET]                  Live metrics
+  msw logs WORKSPACE [MSB OPTIONS]      Sandbox logs
+  msw disk [TARGET]                     Filesystem and Docker usage
+  msw resize WORKSPACE MEMORY [CPUS]    Resize within configured limits
+  msw clean [TARGET] [--volumes]        Prune Docker; volumes require explicit opt-in
+  msw upgrade [TARGET]                  Upgrade guest Ubuntu packages
+  msw update                            Update MicroSandbox
+  msw check [--deep]                    Configuration or full end-to-end check
+  msw host repair                       Recreate local names, loopbacks, and SSH setup
+
+Backup / reference
+  msw backup [DIRECTORY]                Cold sparse zstd backup; restarts prior VMs
+  msw restore ARCHIVE                   Transactional restore; leaves VMs stopped
+  msw docs [cheatsheet|setup|github|tests]
+  msw version
+  msw help
+HELP
+}
+
+main() {
+  local command="${1:-help}"
+  shift || true
+  case "$command" in
+    version|--version|-V) printf 'msw %s\n' "$MSW_VERSION"; return ;;
+    help|--help|-h) show_help; return ;;
+    docs) (( $# <= 1 )) || fatal "usage: msw docs [TOPIC]"; cmd_docs "${1:-cheatsheet}"; return ;;
+  esac
+  require_command_path msb "$MSB_BIN"
+  case "$command" in
+    dev|playgrounds|personal)
+      (( $# <= 1 )) || fatal "usage: msw $command [PATH]"
+      cmd_shell "$command" "${1:-}"
+      ;;
+    shell)
+      (( $# >= 1 && $# <= 2 )) || fatal "usage: msw shell WORKSPACE [PATH]"
+      cmd_shell "$1" "${2:-}"
+      ;;
+    zed)
+      (( $# >= 1 && $# <= 2 )) || fatal "usage: msw zed WORKSPACE [PATH]"
+      cmd_zed "$1" "${2:-}"
+      ;;
+    open)
+      (( $# >= 1 && $# <= 3 )) || fatal "usage: msw open WORKSPACE [PORT] [http|https]"
+      cmd_open "$1" "${2:-3000}" "${3:-http}"
+      ;;
+    url)
+      (( $# >= 1 && $# <= 3 )) || fatal "usage: msw url WORKSPACE [PORT] [http|https]"
+      cmd_url "$1" "${2:-3000}" "${3:-http}"
+      ;;
+    ports) cmd_ports "${1:-all}" ;;
+    tunnel)
+      (( $# >= 2 && $# <= 3 )) || fatal "usage: msw tunnel WORKSPACE REMOTE_PORT [LOCAL_PORT]"
+      cmd_tunnel "$1" "$2" "${3:-$2}"
+      ;;
+    clone)
+      (( $# >= 2 && $# <= 3 )) || fatal "usage: msw clone WORKSPACE OWNER/REPO [PATH]"
+      cmd_clone "$1" "$2" "${3:-}"
+      ;;
+    repos) (( $# == 1 )) || fatal "usage: msw repos WORKSPACE"; cmd_repos "$1" ;;
+    pull)
+      (( $# >= 1 && $# <= 2 )) || fatal "usage: msw pull WORKSPACE [PATH|all]"
+      cmd_pull "$1" "${2:-all}"
+      ;;
+    push)
+      (( $# >= 2 )) || fatal "usage: msw push WORKSPACE PATH [--yes] [--force-with-lease]"
+      local push_box="$1" push_path="$2"; shift 2
+      cmd_push "$push_box" "$push_path" "$@"
+      ;;
+    identity)
+      (( $# >= 2 && $# <= 3 )) || fatal 'usage: msw identity "NAME" EMAIL [WORKSPACE|all]'
+      cmd_identity "$1" "$2" "${3:-all}"
+      ;;
+    github) cmd_github "$@" ;;
+    start) cmd_start "${1:-all}" ;;
+    stop) cmd_stop "${1:-all}" ;;
+    restart) cmd_restart "${1:-all}" ;;
+    status|ps) cmd_status ;;
+    metrics) cmd_metrics "${1:-all}" ;;
+    logs) (( $# >= 1 )) || fatal "usage: msw logs WORKSPACE [OPTIONS]"; local logs_box="$1"; shift; cmd_logs "$logs_box" "$@" ;;
+    exec) (( $# >= 2 )) || fatal "usage: msw exec WORKSPACE COMMAND..."; local exec_box="$1"; shift; cmd_exec "$exec_box" "$@" ;;
+    disk) cmd_disk "${1:-all}" ;;
+    resize) (( $# >= 2 && $# <= 3 )) || fatal "usage: msw resize WORKSPACE MEMORY [CPUS]"; cmd_resize "$1" "$2" "${3:-}" ;;
+    clean) cmd_clean "$@" ;;
+    upgrade) cmd_upgrade "${1:-all}" ;;
+    update) cmd_update ;;
+    check) cmd_check "$@" ;;
+    host)
+      [[ "${1:-}" == repair && $# == 1 ]] || fatal "usage: msw host repair"
+      cmd_host_repair
+      ;;
+    __github-verify-transaction)
+      (( $# == 2 )) || fatal "internal GitHub verification arguments missing"
+      bind_github_read_token "$1"
+      cmd_github_verify "$1" "$2"
+      ;;
+    backup) (( $# <= 1 )) || fatal "usage: msw backup [DIRECTORY]"; cmd_backup "${1:-$MSW_BACKUP_DIR}" ;;
+    restore) cmd_restore "$@" ;;
+    *) fatal "unknown command '$command'; run: msw help" ;;
+  esac
+}
+
+if [[ "${MSW_SOURCE_ONLY:-0}" != 1 ]]; then
+  main "$@"
+fi

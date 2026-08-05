@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+service="${MSW_KEYCHAIN_SERVICE:-msw.github.write}"
+account="${MSW_KEYCHAIN_ACCOUNT:?MSW_KEYCHAIN_ACCOUNT is required}"
+prompt="${1:-}"
+
+case "$prompt" in
+  *sername*|*Username*)
+    printf '%s\n' 'x-access-token'
+    ;;
+  *assword*|*Password*)
+    if [ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]; then
+      safe_service=$(printf '%s' "$service" | tr -c 'A-Za-z0-9_.-' '_')
+      safe_account=$(printf '%s' "$account" | tr -c 'A-Za-z0-9_.-' '_')
+      file="$MSW_TEST_KEYCHAIN_DIR/${safe_service}__${safe_account}"
+      [ -f "$file" ] || exit 1
+      cat "$file"
+    else
+      exec /usr/bin/security find-generic-password -w -s "$service" -a "$account"
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac
