@@ -16,8 +16,6 @@ readonly GITHUB_META_DIR="$HOME/.config/msw/github"
 SETUP_TRANSACTION_ACTIVE=0
 SETUP_TRANSACTION_BOX=""
 GITHUB_LOCK_HELD=0
-GITHUB_LOCK_BOX=""
-GITHUB_LOCK_DIR=""
 
 MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 SSH_BIN="${MSW_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
@@ -30,6 +28,7 @@ ASKPASS_BIN="${MSW_ASKPASS_BIN:-$HOME/.local/libexec/msw-git-askpass}"
 GTAR_BIN="${MSW_GTAR_BIN:-$(command -v gtar 2>/dev/null || command -v tar 2>/dev/null || true)}"
 ZSTD_BIN="${MSW_ZSTD_BIN:-$(command -v zstd 2>/dev/null || true)}"
 SHASUM_BIN="${MSW_SHASUM_BIN:-$(command -v shasum 2>/dev/null || true)}"
+LOCKF_BIN="${MSW_LOCKF_BIN:-$(command -v lockf 2>/dev/null || true)}"
 
 fatal() { printf 'msw: %s\n' "$*" >&2; exit 1; }
 note() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -187,14 +186,26 @@ snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_file() { printf '%s/%s.lock\n' "$GITHUB_META_DIR" "$1"; }
+github_lock_reclaim_legacy() {
+  local lock="$1" owner="" moved_owner="" stale="${lock}.legacy.$$.$RANDOM"
+  if [[ -f "$lock/pid" ]]; then
+    owner="$(cat "$lock/pid" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then return 1; fi
+  fi
+  [[ ! -e "$stale" ]] || return 1
+  if ! mv "$lock" "$stale" 2>/dev/null; then return 1; fi
+  moved_owner="$(cat "$stale/pid" 2>/dev/null || true)"
+  if [[ "$moved_owner" =~ ^[0-9]+$ ]] && kill -0 "$moved_owner" 2>/dev/null; then
+    if [[ ! -e "$lock" ]]; then mv "$stale" "$lock" 2>/dev/null || true; fi
+    return 1
+  fi
+  # The rename owns this directory; remove its stale pid before removing it.
+  if ! rm -f "$stale/pid" 2>/dev/null || ! rmdir "$stale" 2>/dev/null; then return 1; fi
+}
 github_lock_release() {
-  local lock="$GITHUB_LOCK_DIR"
   if (( GITHUB_LOCK_HELD )); then
-    rm -f "$lock/pid" 2>/dev/null || true
-    rmdir "$lock" 2>/dev/null || true
+    exec 9>&-
     GITHUB_LOCK_HELD=0
-    GITHUB_LOCK_BOX=""
-    GITHUB_LOCK_DIR=""
   fi
   trap - EXIT
 }
@@ -207,26 +218,24 @@ github_lock_exit() {
 }
 
 github_lock_acquire() {
-  local box="$1" lock owner="" acquired=0
+  local box="$1" lock
+  require_command_path lockf "$LOCKF_BIN"
   mkdir -p "$GITHUB_META_DIR" || return 1
   chmod 700 "$GITHUB_META_DIR" || return 1
   lock="$(github_lock_file "$box")"
-  if mkdir "$lock" 2>/dev/null; then
-    acquired=1
-  elif [[ -f "$lock/pid" ]]; then
-    owner="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
-      if rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null; then acquired=1; fi
-    fi
+  if [[ -d "$lock" ]]; then
+    github_lock_reclaim_legacy "$lock" || fatal "GitHub operation already in progress for workspace '$box'"
   fi
-  (( acquired )) || fatal "GitHub operation already in progress for workspace '$box'"
-  if ! printf '%s\n' "$$" >"$lock/pid"; then
-    rmdir "$lock" 2>/dev/null || true
+  if ! exec 9>>"$lock"; then return 1; fi
+  if ! "$LOCKF_BIN" -s -t 0 9; then
+    exec 9>&-
+    fatal "GitHub operation already in progress for workspace '$box'"
+  fi
+  if ! printf '%s\n' "$$" >"$lock"; then
+    exec 9>&-
     return 1
   fi
   GITHUB_LOCK_HELD=1
-  GITHUB_LOCK_BOX="$box"
-  GITHUB_LOCK_DIR="$lock"
   trap 'github_lock_exit $?' EXIT
 }
 
@@ -1225,7 +1234,7 @@ INFO
   # Run verification in a fresh process. Bash disables errexit inside functions
   # used directly as an `if` condition; a child process keeps every internal
   # failure fatal while still allowing this parent to roll credentials back.
-  if ! MSW_ALLOW_QUARANTINED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode"; then
+  if ! ( exec 9>&-; MSW_ALLOW_QUARANTINED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" ); then
     if (( preexisting_quarantine )); then
       warn "verification failed; revoking untrusted repair credentials and keeping the workspace quarantined"
     else

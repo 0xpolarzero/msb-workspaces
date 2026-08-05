@@ -2,7 +2,7 @@
 
 ## Result
 
-**43 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
+**44 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
 
 The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, interruption-safe setup transactions, and fail-closed workspace quarantine. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
 
@@ -36,7 +36,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub and host-only push — 23 scenarios
+### GitHub and host-only push — 24 scenarios
 
 - Complete GitHub setup transaction: read token binding, guest push rejection, host push success, temporary-branch cleanup, token secrecy, status, and removal.
 - Identical read/write token rejection.
@@ -61,6 +61,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Failed guest-secret removal stops and quarantines the workspace so normal starts, restarts, pushes, and guest commands cannot rebind or use the secret.
 - Proven-stop quarantine handling is fail-closed when ping or inspect is unavailable, or stop fails.
 - Per-workspace GitHub setup/remove locks serialize credential, metadata, and quarantine mutations.
+- Dead-owner recovery migrates legacy lock directories and uses kernel-held `lockf` ownership, so stale or empty lock files do not wedge future operations.
 - An interrupted verification followed by a failed repair never restores tainted credentials or metadata and leaves the quarantine marker in place.
 
 ### Backup and restore — 6 scenarios

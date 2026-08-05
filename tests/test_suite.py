@@ -328,6 +328,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", msw)
         self.assertIn("--force-with-lease=$ref:$remote_sha", msw)
         self.assertIn("failed SHA-256 verification", msw)
+        self.assertIn('"$LOCKF_BIN" -s -t 0 9', msw)
         self.assertNotIn("tar -x", msw[msw.index("copy_lfs_objects"):msw.index("cmd_github_setup")])
         self.assertNotIn("ForwardAgent", setup + proxy)
         self.assertNotIn("/var/run/docker.sock", setup)
@@ -530,6 +531,24 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
         self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
         self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
+
+    def test_stale_github_lock_is_reclaimed(self) -> None:
+        self.env.init_remote()
+        stale_lock = self.env.home / ".config/msw/github/dev.lock"
+        stale_lock.mkdir(parents=True)
+        (stale_lock / "pid").write_text("99999999\n")
+
+        configured = self.env.configure_tokens("dev", "acme/demo")
+        self.assertIn("GitHub configured for dev", configured.stdout)
+        self.assertTrue(stale_lock.is_file())
+
+        self.env.msw("github", "remove", "dev")
+        stale_lock.unlink()
+        stale_lock.mkdir()
+        configured = self.env.configure_tokens("dev", "acme/demo")
+        self.assertIn("GitHub configured for dev", configured.stdout)
+        self.assertTrue(stale_lock.is_file())
+
     def test_read_only_setup_keeps_guest_access_without_host_token(self) -> None:
         self.env.init_remote()
         proc = self.env.configure_read_only("playgrounds", "acme/demo")
