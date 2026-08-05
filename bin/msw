@@ -1143,7 +1143,7 @@ cmd_github_verify() {
     cleanup_verify() {
       local event="${1:-EXIT}" status="${2:-0}"
       if [[ "$event" != EXIT ]]; then
-        trap - EXIT INT TERM HUP
+        trap - INT TERM HUP
         exit "$status"
       fi
       guest_exec "$box" rm -rf "/workspace/$temp_rel" >/dev/null 2>&1 || true

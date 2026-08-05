@@ -321,11 +321,16 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
         mapped[2] = script
 
     pause_file = os.environ.get("MSW_FAKE_VERIFY_PAUSE_FILE", "")
+    pause_once = os.environ.get("MSW_FAKE_VERIFY_PAUSE_ONCE", "") == "1"
     if pause_file:
         pause_path = Path(pause_file)
-        pause_path.write_text("ready")
-        while pause_path.exists():
-            time.sleep(0.05)
+        pause_once_marker = Path(f"{pause_file}.once")
+        if not pause_once or not pause_once_marker.exists():
+            if pause_once:
+                pause_once_marker.write_text("paused")
+            pause_path.write_text("ready")
+            while pause_path.exists():
+                time.sleep(0.05)
 
     try:
         proc = subprocess.run(mapped, cwd=mapped_workdir, env=env, input=stdin_data if stdin_data else None)

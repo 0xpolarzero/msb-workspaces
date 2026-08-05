@@ -795,6 +795,7 @@ class GitHubAndPushTests(MSWTestCase):
                 "MSW_FAKE_SECURITY_STATE": str(state_path),
                 "MSW_FAKE_SECURITY_MODE": "normal",
                 "MSW_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
+                "MSW_FAKE_VERIFY_PAUSE_ONCE": "1",
             }
         )
         proc = subprocess.Popen(
@@ -823,6 +824,9 @@ class GitHubAndPushTests(MSWTestCase):
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
         self.assertNotEqual(proc.returncode, 0)
+        verification_root = self.env.workspace("dev") / ".msw-verification"
+        verification_entries = list(verification_root.iterdir()) if verification_root.exists() else []
+        self.assertEqual(verification_entries, [])
         quarantine = self.env.home / ".config/msw/github/dev.quarantine"
         self.assertTrue(quarantine.exists())
         metadata = self.env.home / ".config/msw/github/dev.conf"
