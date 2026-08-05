@@ -253,7 +253,7 @@ create_workspace() {
     check_port_conflicts "$bind_ip" "$box"
     expand_ports_into_args "$bind_ip"
     log "Creating workspace: $box"
-    "$MSB_BIN" create \
+    "$MSB_BIN" run --detach \
       --name "$box" --from-snapshot "$MSW_BASE_SNAPSHOT" \
       --cpus "$effective_cpus" --max-cpus "$effective_max" \
       --memory "$memory" --max-memory "$max_memory" \

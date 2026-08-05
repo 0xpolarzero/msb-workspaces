@@ -406,7 +406,7 @@ def main() -> int:
         log_event(state, "self-update")
         save(state)
         return 0
-    if cmd == "create": return parse_create(rest, state)
+    if cmd in {"create", "run"}: return parse_create(rest, state)
     if cmd == "inspect":
         box = rest[0] if rest else ""
         return 0 if box in state["sandboxes"] else 1
