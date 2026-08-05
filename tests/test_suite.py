@@ -656,10 +656,11 @@ class GitHubAndPushTests(MSWTestCase):
         command = 'source "$1"; quarantine_workspace "dev" "test quarantine"'
         quarantine = self.env.home / ".config/msw/github/dev.quarantine"
         cases = (
-            ({"MSW_FAKE_PING_FAIL": "1"}, False, False),
-            ({"MSW_FAKE_STOP_FAIL": "1"}, True, True),
+            ({"MSW_FAKE_PING_FAIL": "1"}, False, False, ""),
+            ({"MSW_FAKE_STOP_FAIL": "1"}, True, True, "could not stop"),
+            ({"MSW_FAKE_INSPECT_FAIL": "1"}, True, True, "could not inspect"),
         )
-        for overrides, should_fail, should_still_run in cases:
+        for overrides, should_fail, should_still_run, expected in cases:
             with self.subTest(overrides=overrides):
                 if quarantine.exists():
                     quarantine.unlink()
@@ -674,7 +675,7 @@ class GitHubAndPushTests(MSWTestCase):
                     extra_env={"MSW_SOURCE_ONLY": "1", **overrides},
                 )
                 if should_fail:
-                    self.assertFailed(proc, "could not")
+                    self.assertFailed(proc, expected)
                 else:
                     self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertEqual(self.env.state()["sandboxes"]["dev"]["running"], should_still_run)

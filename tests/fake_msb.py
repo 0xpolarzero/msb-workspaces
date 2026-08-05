@@ -419,7 +419,11 @@ def main() -> int:
     if cmd in {"create", "run"}: return parse_create(rest, state)
     if cmd == "inspect":
         box = rest[0] if rest else ""
-        return 0 if box in state["sandboxes"] else 1
+        if os.environ.get("MSW_FAKE_INSPECT_FAIL") == "1":
+            return fail("fake inspect failure", 2)
+        if box in state["sandboxes"]:
+            return 0
+        return fail(f"error: sandbox not found: {box}")
     if cmd == "ping":
         box = parse_named_arg(rest) or ""
         if os.environ.get("MSW_FAKE_PING_FAIL") == "1":
