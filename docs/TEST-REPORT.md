@@ -64,6 +64,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Dead-owner recovery migrates legacy lock directories and uses kernel-held `lockf` ownership, so stale or empty lock files do not wedge future operations.
 - Standalone verification blocks removal through `SIGKILL`, and an orphaned setup verifier retains the lock after its parent dies.
 - An interrupted verification followed by a failed repair never restores tainted credentials or metadata and leaves the quarantine marker in place.
+- Interruption coverage pauses after a completed verification clone and confirms signal cleanup removes its checkout.
 
 ### Backup and restore — 6 scenarios
 

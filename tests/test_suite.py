@@ -782,6 +782,7 @@ class GitHubAndPushTests(MSWTestCase):
                 self.assertTrue(quarantine.exists())
 
     def test_interrupted_verification_failed_repair_keeps_quarantine(self) -> None:
+        self.env.init_remote()
         state_path = self.env.root / "fake-security-interrupt-state.json"
         pause_file = self.env.root / "fake-verification-interrupt.ready"
         state_path.write_text("{}")
@@ -813,6 +814,9 @@ class GitHubAndPushTests(MSWTestCase):
                 time.sleep(0.05)
             else:
                 self.fail("verification did not reach the injected pause")
+            verification_root = self.env.workspace("dev") / ".msw-verification"
+            verification_entries = list(verification_root.iterdir())
+            self.assertEqual(len(verification_entries), 1, f"{verification_root}: {verification_entries}")
             overlap = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
             self.assertFailed(overlap, "already in progress")
             os.killpg(proc.pid, signal.SIGTERM)
@@ -824,7 +828,6 @@ class GitHubAndPushTests(MSWTestCase):
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
         self.assertNotEqual(proc.returncode, 0)
-        verification_root = self.env.workspace("dev") / ".msw-verification"
         verification_entries = list(verification_root.iterdir()) if verification_root.exists() else []
         self.assertEqual(verification_entries, [])
         quarantine = self.env.home / ".config/msw/github/dev.quarantine"

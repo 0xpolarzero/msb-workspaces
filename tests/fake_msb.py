@@ -322,18 +322,24 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
 
     pause_file = os.environ.get("MSW_FAKE_VERIFY_PAUSE_FILE", "")
     pause_once = os.environ.get("MSW_FAKE_VERIFY_PAUSE_ONCE", "") == "1"
-    if pause_file:
-        pause_path = Path(pause_file)
-        pause_once_marker = Path(f"{pause_file}.once")
-        if not pause_once or not pause_once_marker.exists():
-            if pause_once:
-                pause_once_marker.write_text("paused")
-            pause_path.write_text("ready")
-            while pause_path.exists():
-                time.sleep(0.05)
+    pause_after_clone = bool(
+        pause_file
+        and command[:2] == ["bash", "-s"]
+        and b"git -C" in stdin_data
+        and b"clone" in stdin_data
+    )
 
     try:
         proc = subprocess.run(mapped, cwd=mapped_workdir, env=env, input=stdin_data if stdin_data else None)
+        if pause_after_clone:
+            pause_path = Path(pause_file)
+            pause_once_marker = Path(f"{pause_file}.once")
+            if not pause_once or not pause_once_marker.exists():
+                if pause_once:
+                    pause_once_marker.write_text("paused")
+                pause_path.write_text("ready")
+                while pause_path.exists():
+                    time.sleep(0.05)
         return proc.returncode
     except FileNotFoundError:
         return fail(f"fake guest command not found: {mapped[0]}", 127)
