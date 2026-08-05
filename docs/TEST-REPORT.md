@@ -60,7 +60,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Failed setup rollback revokes active metadata before credential cleanup; deletion failures leave subsequent pushes blocked.
 - Failed guest-secret removal stops and quarantines the workspace so normal starts, restarts, pushes, and guest commands cannot rebind or use the secret.
 - Proven-stop quarantine handling is fail-closed when ping is unavailable or stop fails.
-- An interrupted verification leaves the pending quarantine marker and blocks normal start, restart, exec, and push paths until the workspace is repaired.
+- An interrupted verification followed by a failed repair never restores tainted credentials or metadata and leaves the quarantine marker in place.
 
 ### Backup and restore — 6 scenarios
 

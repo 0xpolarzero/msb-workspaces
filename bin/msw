@@ -182,7 +182,7 @@ assert_not_quarantined() {
   local box="$1" file
   [[ "${MSW_ALLOW_QUARANTINED:-0}" == 1 ]] && return 0
   file="$(quarantine_file "$box")"
-  [[ ! -e "$file" ]] || fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
+  [[ ! -e "$file" && ! -L "$file" ]] || fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
 }
 
 sandbox_running() {
@@ -1131,11 +1131,17 @@ INFO
     [[ "$read_token" != "$write_token" ]] || fatal "use two different tokens"
   fi
 
-  local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta="" rollback_failed=0
+  local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta="" rollback_failed=0 preexisting_quarantine=0 quarantine_path
   meta_file="$(metadata_file "$box")"
-  if old_read="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_read=1; fi
-  if old_write="$(keychain_get "$WRITE_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_write=1; fi
-  if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
+  quarantine_path="$(quarantine_file "$box")"
+  if [[ -e "$quarantine_path" || -L "$quarantine_path" ]]; then preexisting_quarantine=1; fi
+  if (( preexisting_quarantine )); then
+    warn "workspace '$box' is already quarantined; existing GitHub credentials will not be used as rollback state"
+  else
+    if old_read="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_read=1; fi
+    if old_write="$(keychain_get "$WRITE_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_write=1; fi
+    if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
+  fi
   setup_transaction_arm "$box"
   if ! quarantine_workspace "$box" "GitHub setup pending verification"; then
     fatal "could not quarantine workspace before changing GitHub credentials"
@@ -1151,7 +1157,11 @@ INFO
   # used directly as an `if` condition; a child process keeps every internal
   # failure fatal while still allowing this parent to roll credentials back.
   if ! MSW_ALLOW_QUARANTINED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode"; then
-    warn "verification failed; restoring the previous GitHub configuration"
+    if (( preexisting_quarantine )); then
+      warn "verification failed; revoking untrusted repair credentials and keeping the workspace quarantined"
+    else
+      warn "verification failed; restoring the previous GitHub configuration"
+    fi
     if ! rm -f "$meta_file"; then rollback_failed=1; fi
     if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
     if (( had_read )); then
@@ -1177,7 +1187,18 @@ INFO
       if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
       quarantine_workspace "$box" "GitHub setup rollback failed" >/dev/null 2>&1 || true
       setup_transaction_disarm
-      warn "previous GitHub configuration could not be fully restored"
+      if (( preexisting_quarantine )); then
+        warn "untrusted repair credentials could not be fully revoked; workspace remains quarantined"
+      else
+        warn "previous GitHub configuration could not be fully restored"
+      fi
+      unset old_read old_write
+      return 1
+    fi
+    if (( preexisting_quarantine )); then
+      quarantine_workspace "$box" "GitHub repair verification failed" >/dev/null 2>&1 || true
+      setup_transaction_disarm
+      warn "GitHub repair verification failed; workspace remains quarantined"
       unset old_read old_write
       return 1
     fi

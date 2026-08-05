@@ -680,7 +680,7 @@ class GitHubAndPushTests(MSWTestCase):
                 self.assertEqual(self.env.state()["sandboxes"]["dev"]["running"], should_still_run)
                 self.assertTrue(quarantine.exists())
 
-    def test_interrupted_github_verification_leaves_quarantine_and_blocks_commands(self) -> None:
+    def test_interrupted_verification_failed_repair_keeps_quarantine(self) -> None:
         state_path = self.env.root / "fake-security-interrupt-state.json"
         pause_file = self.env.root / "fake-verification-interrupt.ready"
         state_path.write_text("{}")
@@ -736,6 +736,27 @@ class GitHubAndPushTests(MSWTestCase):
             with self.subTest(command=command):
                 blocked = self.env.msw(*command, check=False, extra_env=env)
                 self.assertFailed(blocked, "quarantined")
+
+        repair_env = env.copy()
+        repair_env.pop("MSW_GITHUB_READ_TOKEN_INPUT", None)
+        repair_env.pop("MSW_GITHUB_WRITE_TOKEN_INPUT", None)
+        repair_env.pop("MSW_FAKE_VERIFY_PAUSE_FILE", None)
+        failed_repair = self.env.configure_tokens(
+            "dev",
+            "acme/missing",
+            read="github_pat_READ_repair_abcdefghijklmnopqrstuvwxyz0123456789",
+            write="github_pat_WRITE_repair_abcdefghijklmnopqrstuvwxyz0123456789",
+            extra_env=repair_env,
+            check=False,
+        )
+        self.assertFailed(failed_repair, "workspace remains quarantined")
+        self.assertTrue(quarantine.exists())
+        self.assertFalse(metadata.exists())
+        security_state = json.loads(state_path.read_text())
+        self.assertNotIn("msw.github.read/dev", security_state)
+        self.assertNotIn("msw.github.write/dev", security_state)
+        self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_read_only_conversion_failure_revokes_metadata_first(self) -> None:
         self.env.init_remote()
