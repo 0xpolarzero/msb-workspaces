@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -319,6 +320,13 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
         script = script.replace("/workspace/", str(guest_workspace(state, box)) + "/")
         mapped[2] = script
 
+    pause_file = os.environ.get("MSW_FAKE_VERIFY_PAUSE_FILE", "")
+    if pause_file:
+        pause_path = Path(pause_file)
+        pause_path.write_text("ready")
+        while pause_path.exists():
+            time.sleep(0.05)
+
     try:
         proc = subprocess.run(mapped, cwd=mapped_workdir, env=env, input=stdin_data if stdin_data else None)
         return proc.returncode
@@ -414,6 +422,8 @@ def main() -> int:
         return 0 if box in state["sandboxes"] else 1
     if cmd == "ping":
         box = parse_named_arg(rest) or ""
+        if os.environ.get("MSW_FAKE_PING_FAIL") == "1":
+            return 1
         return 0 if box in state["sandboxes"] and state["sandboxes"][box].get("running") else 1
     if cmd in {"start", "restart"}:
         box = parse_named_arg(rest) or ""
@@ -427,6 +437,8 @@ def main() -> int:
     if cmd == "stop":
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
+        if os.environ.get("MSW_FAKE_STOP_FAIL") == "1":
+            return fail("fake stop failure")
         state["sandboxes"][box]["running"] = False
         log_event(state, "stop", box=box)
         save(state)
@@ -496,8 +508,17 @@ def main() -> int:
             return 0
         if rest and rest[0] == "serve": return 0
     if cmd in {"ps", "ls", "status"}:
-        for name, sb in sorted(state["sandboxes"].items()):
-            print(f"{name}\t{'running' if sb.get('running') else 'stopped'}")
+        if cmd == "status" and "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
+            names = [name for name in sorted(state["sandboxes"]) if name in rest]
+            if not names:
+                names = sorted(state["sandboxes"])
+            print(json.dumps([
+                {"name": name, "status": "Running" if state["sandboxes"][name].get("running") else "Stopped"}
+                for name in names
+            ]))
+        else:
+            for name, sb in sorted(state["sandboxes"].items()):
+                print(f"{name}\t{'running' if sb.get('running') else 'stopped'}")
         return 0
     if cmd in {"metrics", "logs"}: return 0
     return fail(f"fake msb: unsupported command: {cmd} {' '.join(rest)}")

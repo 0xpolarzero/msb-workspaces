@@ -13,6 +13,8 @@ readonly WORKSPACES=(dev playgrounds personal)
 readonly READ_KEYCHAIN_SERVICE="msw.github.read"
 readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/msw/github"
+SETUP_TRANSACTION_ACTIVE=0
+SETUP_TRANSACTION_BOX=""
 
 MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 SSH_BIN="${MSW_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
@@ -183,19 +185,42 @@ assert_not_quarantined() {
   [[ ! -e "$file" ]] || fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
 }
 
+sandbox_running() {
+  local box="$1" status
+  status="$("$MSB_BIN" status "$box" --format json 2>/dev/null)" || return 2
+  status="$(printf '%s' "$status" | tr -d '[:space:]')"
+  case "$status" in
+    *'"status":"Running"'*) return 0 ;;
+    *'"status":"Stopped"'*) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 quarantine_workspace() {
-  local box="$1" reason="${2:-GitHub credential cleanup failed}" file
+  local box="$1" reason="${2:-GitHub credential cleanup failed}" file attempt=0 stop_failed=0 running_rc
   file="$(quarantine_file "$box")"
-  mkdir -p "$GITHUB_META_DIR"
-  chmod 700 "$GITHUB_META_DIR"
-  umask 077
+  mkdir -p "$GITHUB_META_DIR" || return 1
+  chmod 700 "$GITHUB_META_DIR" || return 1
+  umask 077 || return 1
   printf '%s\n' "$reason" >"$file" || return 1
-  if sandbox_exists "$box" && "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
-    if ! "$MSB_BIN" stop -q -t 60 "$box" >/dev/null 2>&1; then
-      warn "could not stop quarantined workspace '$box'"
+  sandbox_exists "$box" || return 0
+  if ! "$MSB_BIN" stop -q -t 60 "$box" >/dev/null 2>&1; then stop_failed=1; fi
+  while (( attempt < 5 )); do
+    if sandbox_running "$box"; then
+      :
+    else
+      running_rc=$?
+      if (( running_rc == 1 )); then return 0; fi
     fi
+    attempt=$((attempt + 1))
+    if (( attempt < 5 )); then sleep 1; fi
+  done
+  if (( stop_failed )); then
+    printf 'msw: could not stop quarantined workspace %s\n' "$box" >&2
+  else
+    printf 'msw: could not prove quarantined workspace %s is stopped\n' "$box" >&2
   fi
-  return 0
+  return 1
 }
 
 clear_quarantine() {
@@ -204,6 +229,33 @@ clear_quarantine() {
   rm -f "$file"
   [[ ! -e "$file" ]]
 }
+setup_transaction_arm() {
+  SETUP_TRANSACTION_BOX="$1"
+  SETUP_TRANSACTION_ACTIVE=1
+  trap 'setup_transaction_trap EXIT $?' EXIT
+  trap 'setup_transaction_trap INT 130' INT
+  trap 'setup_transaction_trap TERM 143' TERM
+  trap 'setup_transaction_trap HUP 129' HUP
+}
+
+setup_transaction_disarm() {
+  SETUP_TRANSACTION_ACTIVE=0
+  SETUP_TRANSACTION_BOX=""
+  trap - EXIT INT TERM HUP
+}
+
+setup_transaction_trap() {
+  local signal="$1" status="${2:-1}"
+  trap - EXIT
+  trap '' INT TERM HUP
+  if (( SETUP_TRANSACTION_ACTIVE )); then
+    SETUP_TRANSACTION_ACTIVE=0
+    quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
+  fi
+  trap - INT TERM HUP
+  exit "$status"
+}
+
 
 
 read_token_for_workspace() { keychain_get "$READ_KEYCHAIN_SERVICE" "$1"; }
@@ -856,6 +908,7 @@ push_impl() {
   local box="$1" relative="$2" force_mode="$3" assume_yes="$4" quiet_mode="${5:-0}"
   validate_workspace "$box"
   validate_relative_path "$relative"
+  assert_not_quarantined "$box"
   local access
   access="$(metadata_access "$box" 2>/dev/null || true)"
   [[ "$access" == host-write ]] || fatal "host write access is not enabled (host write token missing or workspace is read-only); run: msw github setup $box OWNER/REPO"
@@ -1083,8 +1136,11 @@ INFO
   if old_read="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_read=1; fi
   if old_write="$(keychain_get "$WRITE_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_write=1; fi
   if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
+  setup_transaction_arm "$box"
+  if ! quarantine_workspace "$box" "GitHub setup pending verification"; then
+    fatal "could not quarantine workspace before changing GitHub credentials"
+  fi
   if ! rm -f "$meta_file"; then fatal "could not revoke existing GitHub metadata for $box"; fi
-  if [[ -e "$meta_file" ]]; then fatal "could not revoke existing GitHub metadata for $box"; fi
 
   keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$read_token"
   if (( host_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$write_token"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
@@ -1119,13 +1175,19 @@ INFO
     if (( rollback_failed )); then
       if ! rm -f "$meta_file"; then rollback_failed=1; fi
       if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
-      if ! quarantine_workspace "$box" "GitHub setup rollback failed"; then rollback_failed=1; fi
+      quarantine_workspace "$box" "GitHub setup rollback failed" >/dev/null 2>&1 || true
+      setup_transaction_disarm
       warn "previous GitHub configuration could not be fully restored"
+      unset old_read old_write
+      return 1
     fi
+    if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
+    setup_transaction_disarm
     unset old_read old_write
     return 1
   fi
   if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
+  setup_transaction_disarm
   unset old_read old_write
   ok "GitHub configured for $box ($mode)"
 }

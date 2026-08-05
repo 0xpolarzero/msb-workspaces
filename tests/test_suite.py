@@ -12,8 +12,10 @@ import io
 import json
 import os
 import re
+import signal
 import shutil
 import stat
+import time
 import subprocess
 import tarfile
 import tempfile
@@ -617,7 +619,7 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
 
         push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
-        self.assertFailed(push, "host write access is not enabled")
+        self.assertFailed(push, "quarantined")
 
     def test_setup_rollback_failure_revokes_metadata_first(self) -> None:
         self.env.init_remote()
@@ -645,6 +647,95 @@ class GitHubAndPushTests(MSWTestCase):
 
         guest_push = self.env.msw("exec", "dev", "git", "push", "origin", "main", check=False, extra_env=fake_env)
         self.assertFailed(guest_push, "quarantined")
+        metadata.write_text("verification_repo=acme/demo\naccess=host-write\n")
+        host_push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=fake_env)
+        self.assertFailed(host_push, "quarantined")
+        metadata.unlink()
+
+    def test_quarantine_requires_proven_stop(self) -> None:
+        command = 'source "$1"; quarantine_workspace "dev" "test quarantine"'
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        cases = (
+            ({"MSW_FAKE_PING_FAIL": "1"}, False, False),
+            ({"MSW_FAKE_STOP_FAIL": "1"}, True, True),
+        )
+        for overrides, should_fail, should_still_run in cases:
+            with self.subTest(overrides=overrides):
+                if quarantine.exists():
+                    quarantine.unlink()
+                self.env.msw("start", "dev")
+                proc = self.env.run(
+                    "bash",
+                    "-c",
+                    command,
+                    "msw-quarantine-test",
+                    str(PACKAGE / "bin/msw"),
+                    check=False,
+                    extra_env={"MSW_SOURCE_ONLY": "1", **overrides},
+                )
+                if should_fail:
+                    self.assertFailed(proc, "could not")
+                else:
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(self.env.state()["sandboxes"]["dev"]["running"], should_still_run)
+                self.assertTrue(quarantine.exists())
+
+    def test_interrupted_github_verification_leaves_quarantine_and_blocks_commands(self) -> None:
+        state_path = self.env.root / "fake-security-interrupt-state.json"
+        pause_file = self.env.root / "fake-verification-interrupt.ready"
+        state_path.write_text("{}")
+        env = self.env.env.copy()
+        env.update(
+            {
+                "MSW_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
+                "MSW_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
+                "MSW_TEST_KEYCHAIN_DIR": "",
+                "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+                "MSW_FAKE_SECURITY_STATE": str(state_path),
+                "MSW_FAKE_SECURITY_MODE": "normal",
+                "MSW_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
+            }
+        )
+        proc = subprocess.Popen(
+            [str(self.env.msw_bin), "github", "setup", "dev", "acme/demo"],
+            env=env,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            for _ in range(100):
+                if pause_file.exists():
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("verification did not reach the injected pause")
+            os.killpg(proc.pid, signal.SIGTERM)
+            pause_file.unlink(missing_ok=True)
+            proc.wait(timeout=15)
+        finally:
+            pause_file.unlink(missing_ok=True)
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
+        self.assertNotEqual(proc.returncode, 0)
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        self.assertTrue(quarantine.exists())
+        metadata = self.env.home / ".config/msw/github/dev.conf"
+        self.assertTrue(metadata.exists())
+        self.assertIn("access=host-write", metadata.read_text())
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+        self.assertIn("msw.github.read/dev", json.loads(state_path.read_text()))
+        for command in (
+            ("start", "dev"),
+            ("restart", "dev"),
+            ("exec", "dev", "true"),
+            ("push", "dev", "repo", "--yes"),
+        ):
+            with self.subTest(command=command):
+                blocked = self.env.msw(*command, check=False, extra_env=env)
+                self.assertFailed(blocked, "quarantined")
 
     def test_read_only_conversion_failure_revokes_metadata_first(self) -> None:
         self.env.init_remote()
@@ -666,7 +757,7 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
 
         push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
-        self.assertFailed(push, "host write access is not enabled")
+        self.assertFailed(push, "quarantined")
 
     def test_same_token_is_rejected_without_mutation(self) -> None:
         self.env.init_remote()

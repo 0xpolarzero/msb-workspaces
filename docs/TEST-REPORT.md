@@ -2,9 +2,9 @@
 
 ## Result
 
-**41 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
+**43 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
 
-The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, and quarantine when guest-secret removal fails. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
+The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, interruption-safe setup transactions, and fail-closed workspace quarantine. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
 
 ## Automated coverage
 
@@ -36,7 +36,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub and host-only push — 21 scenarios
+### GitHub and host-only push — 23 scenarios
 
 - Complete GitHub setup transaction: read token binding, guest push rejection, host push success, temporary-branch cleanup, token secrecy, status, and removal.
 - Identical read/write token rejection.
@@ -58,7 +58,9 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Keychain deletion rejects delete failures, post-delete lookup failures, and still-present items while accepting explicit missing-item results.
 - Remove revokes host-write metadata before credential cleanup; a failed Keychain delete leaves subsequent pushes blocked.
 - Failed setup rollback revokes active metadata before credential cleanup; deletion failures leave subsequent pushes blocked.
-- Failed guest-secret removal stops and quarantines the workspace so normal starts and guest commands cannot rebind or use the secret.
+- Failed guest-secret removal stops and quarantines the workspace so normal starts, restarts, pushes, and guest commands cannot rebind or use the secret.
+- Proven-stop quarantine handling is fail-closed when ping is unavailable or stop fails.
+- An interrupted verification leaves the pending quarantine marker and blocks normal start, restart, exec, and push paths until the workspace is repaired.
 
 ### Backup and restore — 6 scenarios
 
@@ -84,6 +86,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Remove revokes host-write metadata before secret and Keychain cleanup, so cleanup failures cannot leave pushes authorized.
 - Failed setup rollback restores old metadata only after all credential operations succeed; any rollback failure leaves the metadata gate absent.
 - Failed rollback secret cleanup stops and quarantines the workspace; normal start, restart, and exec paths refuse the quarantined workspace.
+- Setup writes and retains a quarantine marker before credential mutation, and clears it only after verification or a fully successful rollback.
 - Git bundles are verified and checked against the exact guest commit before push.
 - Git LFS object IDs, file types, and SHA-256 contents are verified on the host.
 - GitHub setup and restore are transactional and roll back on failure.
