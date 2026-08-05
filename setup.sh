@@ -266,7 +266,8 @@ create_workspace() {
       --env SHELL=/usr/bin/zsh --env LANG=en_US.UTF-8 \
       --env HOST=0.0.0.0 --env BIND_ADDRESS=0.0.0.0 \
       --env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${browser_host}" \
-      "${PORT_ARGS[@]}"
+      "${PORT_ARGS[@]}" \
+      -- sleep infinity
     configure_workspace_guest "$box" "$browser_host"
     if token="$(keychain_read_token "$box" 2>/dev/null)"; then
       GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" >/dev/null

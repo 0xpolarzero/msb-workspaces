@@ -314,6 +314,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         msw = (PACKAGE / "bin/msw").read_text()
         setup = (PACKAGE / "setup.sh").read_text()
         self.assertIn('"$MSB_BIN" run --detach', setup)
+        self.assertIn("-- sleep infinity", setup)
         proxy = (PACKAGE / "bin/msw-ssh-proxy").read_text()
         self.assertIn("env -i", msw)
         self.assertIn("GIT_CONFIG_NOSYSTEM=1", msw)

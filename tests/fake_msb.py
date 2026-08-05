@@ -146,6 +146,8 @@ def parse_named_arg(args: list[str]) -> str | None:
 
 
 def parse_create(args: list[str], state: dict[str, Any]) -> int:
+    if "--" in args:
+        args = args[:args.index("--")]
     name: str | None = None
     image: str | None = None
     snapshot: str | None = None
