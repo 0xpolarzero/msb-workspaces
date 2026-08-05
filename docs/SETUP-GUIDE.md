@@ -6,7 +6,7 @@ This guide installs three persistent MicroSandbox development workspaces on an A
 - `playgrounds`
 - `personal`
 
-The packaged defaults are tuned for a 64 GB Mac. All commands below run in Ghostty unless stated otherwise.
+The packaged defaults allow up to 80 GB of live VM memory across the three workspaces, with resize ceilings up to 128 GB. Ensure the Mac has sufficient RAM. All commands below run in Ghostty unless stated otherwise.
 
 ## 1. Install
 

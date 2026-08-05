@@ -19,20 +19,20 @@ MSW_PLAYGROUNDS_HOST="playgrounds.msw.test"
 MSW_PERSONAL_IP="127.0.0.12"
 MSW_PERSONAL_HOST="personal.msw.test"
 
-# Initial and maximum resources for a 64 GB Mac.
+# Workspace CPU defaults plus each workspace's live memory limit and resize ceiling.
 MSW_DEV_CPUS="8"
 MSW_DEV_MAX_CPUS="12"
-MSW_DEV_MEMORY="20G"
-MSW_DEV_MAX_MEMORY="40G"
+MSW_DEV_MEMORY="32G"
+MSW_DEV_MAX_MEMORY="48G"
 
 MSW_PLAYGROUNDS_CPUS="4"
 MSW_PLAYGROUNDS_MAX_CPUS="12"
-MSW_PLAYGROUNDS_MEMORY="8G"
-MSW_PLAYGROUNDS_MAX_MEMORY="24G"
+MSW_PLAYGROUNDS_MEMORY="32G"
+MSW_PLAYGROUNDS_MAX_MEMORY="48G"
 
 MSW_PERSONAL_CPUS="6"
 MSW_PERSONAL_MAX_CPUS="12"
-MSW_PERSONAL_MEMORY="12G"
+MSW_PERSONAL_MEMORY="16G"
 MSW_PERSONAL_MAX_MEMORY="32G"
 
 # Independent persistent ext4 volumes. Adjust before first installation if needed.

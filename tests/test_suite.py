@@ -333,6 +333,11 @@ class InstallerAndDailyTests(MSWTestCase):
         })
         self.assertEqual(set(state["snapshots"]), {"msw-base-v1"})
         self.assertTrue(state["snapshots"]["msw-base-v1"]["integrity"])
+        expected_memory = {
+            "dev": ("32G", "48G"),
+            "playgrounds": ("32G", "48G"),
+            "personal": ("16G", "32G"),
+        }
         for box, ip in (("dev", "127.0.0.10"), ("playgrounds", "127.0.0.11"), ("personal", "127.0.0.12")):
             sb = state["sandboxes"][box]
             self.assertFalse(sb["running"])
@@ -342,6 +347,9 @@ class InstallerAndDailyTests(MSWTestCase):
             self.assertIn(f"{ip}:24678:24678", sb["ports"])
             self.assertIn(f"{ip}:24679:24679", sb["ports"])
             self.assertEqual(sb["labels"]["msw.managed"], "true")
+            args = sb["args"]
+            self.assertEqual(args[args.index("--memory") + 1], expected_memory[box][0])
+            self.assertEqual(args[args.index("--max-memory") + 1], expected_memory[box][1])
 
     def test_setup_is_idempotent(self) -> None:
         before = self.env.state()

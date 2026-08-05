@@ -2,11 +2,11 @@
 
 A ready-to-run development setup for an Apple Silicon Mac with three isolated, persistent Linux microVM workspaces:
 
-| Workspace | Purpose | Initial resources | Browser name |
-|---|---|---:|---|
-| `dev` | Main/work development | 8 CPU, 20 GB RAM | `dev.msw.test` |
-| `playgrounds` | Experiments | 4 CPU, 8 GB RAM | `playgrounds.msw.test` |
-| `personal` | Personal projects | 6 CPU, 12 GB RAM | `personal.msw.test` |
+| Workspace | Purpose | Normal live limit | Resize ceiling | Browser name |
+|---|---|---:|---:|---|
+| `dev` | Main/work development | 8 CPU, 32 GB RAM | 48 GB RAM | `dev.msw.test` |
+| `playgrounds` | Experiments | 4 CPU, 32 GB RAM | 48 GB RAM | `playgrounds.msw.test` |
+| `personal` | Personal projects | 6 CPU, 16 GB RAM | 32 GB RAM | `personal.msw.test` |
 
 Each workspace has its own Ubuntu system, repositories, Docker daemon, images, volumes, credentials, processes, and public-internet connection. Code and Docker data live on independent persistent ext4 volumes. Zed and Ghostty remain native macOS applications and connect over SSH.
 
