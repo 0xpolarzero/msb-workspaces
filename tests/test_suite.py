@@ -330,6 +330,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         self.assertIn("--force-with-lease=$ref:$remote_sha", msw)
         self.assertIn("failed SHA-256 verification", msw)
         self.assertIn('"$LOCKF_BIN" -s -t 0 9', msw)
+        self.assertIn('"$MSB_BIN" "$@" 9>&-', msw)
         self.assertIn("MSW_GITHUB_VERIFY_INHERITED=1", msw)
         self.assertNotIn("tar -x", msw[msw.index("copy_lfs_objects"):msw.index("cmd_github_setup")])
         self.assertNotIn("ForwardAgent", setup + proxy)
@@ -545,14 +546,19 @@ class GitHubAndPushTests(MSWTestCase):
 
     def test_github_setup_preserves_secret_source_for_verifier_cli(self) -> None:
         self.env.init_remote()
+        marker = self.env.root / "lock-fd.marker"
         proc = self.env.configure_tokens(
             "dev",
             "acme/demo",
-            extra_env={"MSW_FAKE_REQUIRE_SECRET_SOURCE": "1"},
+            extra_env={
+                "MSW_FAKE_REQUIRE_SECRET_SOURCE": "1",
+                "MSW_FAKE_LOCK_FD_MARKER": str(marker),
+            },
         )
         self.assertIn("GitHub configured for dev", proc.stdout)
         self.assertIn("guest push rejected", proc.stdout)
         self.assertIn("host push and cleanup succeeded", proc.stdout)
+        self.assertEqual(marker.read_text().strip(), "closed")
 
     def test_github_secret_source_survives_fresh_clone_exec_and_remove(self) -> None:
         self.env.init_remote()

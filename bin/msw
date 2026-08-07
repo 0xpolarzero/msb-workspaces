@@ -333,7 +333,7 @@ workspace_msb() {
   local box="$1" token="" status
   shift
   if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
-    if GH_TOKEN="$token" "$MSB_BIN" "$@"; then
+    if GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
       status=0
     else
       status=$?
@@ -341,7 +341,7 @@ workspace_msb() {
     unset token
     return "$status"
   fi
-  "$MSB_BIN" "$@"
+  "$MSB_BIN" "$@" 9>&-
 }
 
 start_sandbox() {

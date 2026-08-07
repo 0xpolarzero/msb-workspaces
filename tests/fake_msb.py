@@ -48,6 +48,18 @@ def require_secret_source(sb: dict[str, Any]) -> bool:
         fail("host source GH_TOKEN missing")
         return False
     return True
+def record_lock_fd() -> None:
+    marker = os.environ.get("MSW_FAKE_LOCK_FD_MARKER", "")
+    if not marker:
+        return
+    try:
+        os.fstat(9)
+    except OSError:
+        value = "closed"
+    else:
+        value = "open"
+    Path(marker).write_text(value + "\n")
+
 
 
 def log_event(state: dict[str, Any], event: str, **data: Any) -> None:
@@ -463,6 +475,7 @@ def main() -> int:
     if cmd in {"start", "restart"}:
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
+        record_lock_fd()
         if state["sandboxes"][box].get("secrets", {}).get("GH_TOKEN") and not os.environ.get("GH_TOKEN"):
             return fail("host source GH_TOKEN missing")
         state["sandboxes"][box]["running"] = True
