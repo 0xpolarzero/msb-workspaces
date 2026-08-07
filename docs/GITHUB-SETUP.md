@@ -89,7 +89,7 @@ Run:
 msw github setup dev OWNER/msw-verification
 ```
 
-Paste the guest read token, then the host write token. Input is hidden. The standard workspace setup enables TLS interception; do not bind GitHub secrets to a workspace created outside that setup unless its network configuration also enables TLS interception.
+Paste the guest read token, then the host write token. Input is hidden. The standard workspace setup enables TLS interception; if setup reports that interception is disabled, run `./setup.sh --recreate-workspaces` from the package directory before entering any tokens.
 
 For a read-only workspace, add `--read-only`:
 

@@ -2,13 +2,13 @@
 
 ## Result
 
-**50 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
+**52 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
 
 The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, interruption-safe setup transactions, and fail-closed workspace quarantine. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
 
 ## Automated coverage
 
-### Syntax and release invariants — 2 scenarios
+### Syntax and release invariants — 3 scenarios
 
 - Bash syntax for installer, CLI, bootstrap, SSH proxy, and askpass helper.
 - Python compilation for simulators.
@@ -36,8 +36,9 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub and host-only push — 30 scenarios
+### GitHub and host-only push — 31 scenarios
 
+- TLS-interception preflight rejects incompatible workspaces before token prompts or Keychain mutation and gives the recreation command.
 - Complete GitHub setup transaction: read token binding, guest push rejection, host push success, temporary-branch cleanup, token secrecy, status, and removal.
 - Verifier subprocesses retain the host-side read-token source required for MicroSandbox secret substitution during guest exec, clone, and cleanup commands.
 - Fresh `msw clone`, `msw exec`, SSH proxy, and `msw github remove` invocations source the read token from Keychain independently of the setup process lifetime.
@@ -88,7 +89,7 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 ## Security properties exercised
 
 - The real guest read token is absent from simulated VM state; only the MicroSandbox placeholder is visible in the guest.
-- The write token is retrieved only by the host askpass helper from macOS Keychain.
+- The write token is retrieved only by the host askpass helper from macOS Keychain, including when host Git runs with an isolated temporary `HOME`.
 - The privileged push process uses an empty environment, temporary home, no system/global Git config, no custom hooks, no SSH agent, and no ambient GitHub token.
 - Push authorization requires both host-write workspace metadata and the host write credential.
 - Remove revokes host-write metadata before secret and Keychain cleanup, so cleanup failures cannot leave pushes authorized.

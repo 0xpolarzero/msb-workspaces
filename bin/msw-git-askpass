@@ -3,6 +3,8 @@ set -eu
 
 service="${MSW_KEYCHAIN_SERVICE:-msw.github.write}"
 account="${MSW_KEYCHAIN_ACCOUNT:?MSW_KEYCHAIN_ACCOUNT is required}"
+security_bin="${MSW_SECURITY_BIN:-/usr/bin/security}"
+keychain_home="${MSW_KEYCHAIN_HOME:-$HOME}"
 prompt="${1:-}"
 
 case "$prompt" in
@@ -17,7 +19,7 @@ case "$prompt" in
       [ -f "$file" ] || exit 1
       cat "$file"
     else
-      exec /usr/bin/security find-generic-password -w -s "$service" -a "$account"
+      HOME="$keychain_home" exec "$security_bin" find-generic-password -w -s "$service" -a "$account"
     fi
     ;;
   *)

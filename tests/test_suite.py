@@ -342,6 +342,36 @@ class SyntaxAndStaticTests(MSWTestCase):
         self.assertIn("url.https://github.com/.insteadOf", bootstrap)
         self.assertIn("gh config set git_protocol https", bootstrap)
         self.assertIn('"$MSB_BIN" self update', msw)
+    def test_askpass_uses_login_keychain_with_isolated_git_home(self) -> None:
+        state_path = self.env.root / "askpass-security.json"
+        service = "msw.github.write"
+        account = "dev"
+        value = "diagnostic-write-token"
+        security_env = self.env.env.copy()
+        security_env.update({
+            "MSW_FAKE_SECURITY_STATE": str(state_path),
+            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+        })
+        run_cmd(
+            [FAKE_SECURITY, "add-generic-password", "-s", service, "-a", account, "-w", value],
+            env=security_env,
+        )
+        isolated_home = self.env.root / "isolated-home"
+        isolated_home.mkdir()
+        askpass_env = security_env.copy()
+        askpass_env.update({
+            "HOME": str(isolated_home),
+            "MSW_TEST_KEYCHAIN_DIR": "",
+            "MSW_KEYCHAIN_SERVICE": service,
+            "MSW_KEYCHAIN_ACCOUNT": account,
+            "MSW_KEYCHAIN_HOME": str(self.env.home),
+            "MSW_FAKE_SECURITY_HOME": str(self.env.home),
+        })
+        proc = run_cmd(
+            [PACKAGE / "bin/msw-git-askpass", "Password for https://github.com:"],
+            env=askpass_env,
+        )
+        self.assertEqual(proc.stdout, value + "\n")
 
 
 class InstallerAndDailyTests(MSWTestCase):
@@ -496,6 +526,7 @@ class InstallerAndDailyTests(MSWTestCase):
         run_cmd([SYSTEM_GIT, "-C", updater, "add", "remote.txt"], env=self.env.env)
         run_cmd([SYSTEM_GIT, "-C", updater, "commit", "-m", "Remote update"], env=self.env.env)
         run_cmd([SYSTEM_GIT, "-C", updater, "push", "origin", "main"], env=self.env.env)
+
         self.env.msw("pull", "dev", "clients/acme/backend")
         self.assertEqual((repo / "remote.txt").read_text(), "remote\n")
 
@@ -526,6 +557,20 @@ class GitHubAndPushTests(MSWTestCase):
         self.env.git(repo, "config", "user.email", "agent@example.invalid")
         return bare, repo
 
+    def test_github_setup_rejects_disabled_tls_before_token_prompt(self) -> None:
+        state = self.env.state()
+        state["sandboxes"]["dev"]["args"] = [
+            arg for arg in state["sandboxes"]["dev"]["args"] if arg != "--tls-intercept"
+        ]
+        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+        proc = self.env.configure_tokens("dev", "acme/demo", check=False)
+        output = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("TLS interception disabled", output)
+        self.assertIn("./setup.sh --recreate-workspaces", output)
+        self.assertNotIn("Paste the READ-ONLY token:", output)
+        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
     def test_github_setup_end_to_end_secret_hidden_and_remove(self) -> None:
         bare = self.env.init_remote()
         proc = self.env.configure_tokens("dev", "acme/demo")

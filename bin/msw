@@ -182,6 +182,26 @@ sandbox_inspect_state() {
   [[ "$output" == *"sandbox not found"* ]] && return 1
   return 2
 }
+github_tls_interception_enabled() {
+  local box="$1" output enabled
+  require_command_path jq "$JQ_BIN"
+  output="$("$MSB_BIN" inspect "$box" --format json 2>/dev/null)" || return 2
+  enabled="$(printf '%s\n' "$output" | "$JQ_BIN" -r '(.active_config // .config).network.tls.enabled // false' 2>/dev/null)" || return 2
+  [[ "$enabled" == true ]]
+}
+
+require_github_tls_interception() {
+  local box="$1" status
+  if github_tls_interception_enabled "$box"; then
+    return 0
+  else
+    status=$?
+  fi
+  if (( status == 1 )); then
+    fatal "workspace '$box' has TLS interception disabled; recreate it with: ./setup.sh --recreate-workspaces"
+  fi
+  fatal "could not inspect TLS interception for workspace '$box'; recreate it with: ./setup.sh --recreate-workspaces"
+}
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
@@ -899,7 +919,7 @@ host_safe_path() {
 }
 
 host_git_run() {
-  local temp_home="$1" box="$2"; shift 2
+  local temp_home="$1" box="$2" keychain_home="$HOME"; shift 2
   mkdir -p "$temp_home"
   env -i \
     HOME="$temp_home" \
@@ -914,6 +934,8 @@ host_git_run() {
     SSH_ASKPASS="$ASKPASS_BIN" \
     MSW_KEYCHAIN_SERVICE="$WRITE_KEYCHAIN_SERVICE" \
     MSW_KEYCHAIN_ACCOUNT="$box" \
+    MSW_KEYCHAIN_HOME="$keychain_home" \
+    MSW_SECURITY_BIN="$SECURITY_BIN" \
     MSW_TEST_KEYCHAIN_DIR="${MSW_TEST_KEYCHAIN_DIR:-}" \
     GIT_LFS_SKIP_SMUDGE=1 \
     "$@"
@@ -1210,6 +1232,7 @@ cmd_github_setup() {
   validate_workspace "$box"
   validate_github_repo "$repo"
   sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+  require_github_tls_interception "$box"
   if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
   if [[ "$mode" == "--read-only" ]]; then mode="read-only"; host_write=0; fi
   [[ "$mode" == host-write || "$mode" == read-only ]] || fatal "usage: msw github setup WORKSPACE OWNER/REPO [--read-only]"

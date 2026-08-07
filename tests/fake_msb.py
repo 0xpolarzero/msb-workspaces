@@ -463,6 +463,12 @@ def main() -> int:
         if box in state["sandboxes"]:
             if not require_secret_source(state["sandboxes"][box]):
                 return 1
+            if "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
+                tls_enabled = "--tls-intercept" in state["sandboxes"][box].get("args", [])
+                print(json.dumps({
+                    "active_config": {"network": {"tls": {"enabled": tls_enabled}}},
+                    "config": {"network": {"tls": {"enabled": tls_enabled}}},
+                }))
             return 0
         return fail(f"error: sandbox not found: {box}")
     if cmd == "ping":

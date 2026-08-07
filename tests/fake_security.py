@@ -43,6 +43,10 @@ def main() -> int:
         return 0
 
     if command == "find-generic-password":
+        expected_home = os.environ.get("MSW_FAKE_SECURITY_HOME")
+        if expected_home and os.environ.get("HOME") != expected_home:
+            print(ITEM_NOT_FOUND_MESSAGE, file=sys.stderr)
+            return ITEM_NOT_FOUND
         if mode == "post-delete-lookup-failure":
             print("security: The keychain is locked.", file=sys.stderr)
             return 1
