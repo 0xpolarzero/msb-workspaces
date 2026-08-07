@@ -163,8 +163,9 @@ class TestEnv:
         return self.run(self.msw_bin, *args, check=check, input_text=input_text,
                         extra_env=extra_env, timeout=timeout)
 
-    def setup(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return self.run(PACKAGE / "setup.sh", *args, check=check, timeout=90)
+    def setup(self, *args: str, check: bool = True,
+              extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return self.run(PACKAGE / "setup.sh", *args, check=check, extra_env=extra_env, timeout=90)
 
     @property
     def state_file(self) -> Path:
@@ -381,6 +382,15 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertEqual(before_create, after_create)
         self.assertEqual(set(before["volumes"]), set(after["volumes"]))
 
+    def test_recreate_github_workspace_rebinds_secret_from_keychain(self) -> None:
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        proc = self.env.setup("--recreate-workspaces", extra_env={"MSW_FAKE_REQUIRE_SECRET_SOURCE": "1"})
+        self.assertNotIn("host source GH_TOKEN missing", proc.stdout + proc.stderr)
+        state = self.env.state()
+        self.assertIn("GH_TOKEN", state["sandboxes"]["dev"]["secrets"])
+        self.assertFalse(state["sandboxes"]["dev"]["running"])
+
     def _seed_volume_sentinels(self) -> None:
         (self.env.workspace("dev") / "repo-sentinel").write_text("workspace")
         (self.env.runtime("dev") / "docker-sentinel").write_text("runtime")
@@ -543,6 +553,21 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertIn("GitHub configured for dev", proc.stdout)
         self.assertIn("guest push rejected", proc.stdout)
         self.assertIn("host push and cleanup succeeded", proc.stdout)
+
+    def test_github_secret_source_survives_fresh_clone_exec_and_remove(self) -> None:
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        guard = {"MSW_FAKE_REQUIRE_SECRET_SOURCE": "1"}
+
+        self.env.msw("clone", "dev", "acme/demo", "fresh/repo", extra_env=guard)
+        self.assertTrue(self.env.guest_repo("dev", "fresh/repo").joinpath(".git").is_dir())
+        self.env.msw("exec", "dev", "true", extra_env=guard)
+        self.env.run(self.env.home / ".local/bin/msw-ssh-proxy", "dev.msb", extra_env=guard)
+        self.env.msw("github", "remove", "dev", extra_env=guard)
+
+        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+        self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
 
     def test_stale_github_lock_is_reclaimed(self) -> None:
         self.env.init_remote()
@@ -839,7 +864,11 @@ class GitHubAndPushTests(MSWTestCase):
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
         self.assertNotEqual(proc.returncode, 0)
-        verification_entries = list(verification_root.iterdir()) if verification_root.exists() else []
+        for _ in range(100):
+            verification_entries = list(verification_root.iterdir()) if verification_root.exists() else []
+            if not verification_entries:
+                break
+            time.sleep(0.05)
         self.assertEqual(verification_entries, [])
         quarantine = self.env.home / ".config/msw/github/dev.quarantine"
         self.assertTrue(quarantine.exists())

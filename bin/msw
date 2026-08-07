@@ -175,10 +175,10 @@ write_metadata() {
   printf 'verification_repo=%s\naccess=%s\nconfigured_at=%s\n' "$repo" "$access" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(metadata_file "$box")"
 }
 
-sandbox_exists() { "$MSB_BIN" inspect "$1" >/dev/null 2>&1; }
+sandbox_exists() { workspace_msb "$1" inspect "$1" >/dev/null 2>&1; }
 sandbox_inspect_state() {
   local box="$1" output
-  if output="$("$MSB_BIN" inspect "$box" 2>&1)"; then return 0; fi
+  if output="$(workspace_msb "$box" inspect "$box" 2>&1)"; then return 0; fi
   [[ "$output" == *"sandbox not found"* ]] && return 1
   return 2
 }
@@ -248,7 +248,7 @@ assert_not_quarantined() {
 
 sandbox_running() {
   local box="$1" status
-  status="$("$MSB_BIN" status "$box" --format json 2>/dev/null)" || return 2
+  status="$(workspace_msb "$box" status "$box" --format json 2>/dev/null)" || return 2
   status="$(printf '%s' "$status" | tr -d '[:space:]')"
   case "$status" in
     *'"status":"Running"'*) return 0 ;;
@@ -272,7 +272,7 @@ quarantine_workspace() {
     printf 'msw: could not inspect quarantined workspace %s; stop not confirmed\n' "$box" >&2
     return 1
   fi
-  if ! "$MSB_BIN" stop -q -t 60 "$box" >/dev/null 2>&1; then stop_failed=1; fi
+  if ! workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1; then stop_failed=1; fi
   while (( attempt < 5 )); do
     if sandbox_running "$box"; then
       :
@@ -329,24 +329,34 @@ setup_transaction_trap() {
 
 
 read_token_for_workspace() { keychain_get "$READ_KEYCHAIN_SERVICE" "$1"; }
+workspace_msb() {
+  local box="$1" token="" status
+  shift
+  if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
+    if GH_TOKEN="$token" "$MSB_BIN" "$@"; then
+      status=0
+    else
+      status=$?
+    fi
+    unset token
+    return "$status"
+  fi
+  "$MSB_BIN" "$@"
+}
 
 start_sandbox() {
-  local box="$1" token=""
+  local box="$1"
   assert_not_quarantined "$box"
-  if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
-    GH_TOKEN="$token" "$MSB_BIN" start -q "$box"
-    unset token
-  else
-    if [[ -f "$(metadata_file "$box")" ]]; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
-    fi
-    "$MSB_BIN" start -q "$box"
+  if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" && [[ -f "$(metadata_file "$box")" ]]; then
+    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
   fi
+  workspace_msb "$box" start -q "$box"
 }
+
 
 wait_for_guest_systemd() {
   local box="$1" attempt=0
-  until "$MSB_BIN" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
+  until workspace_msb "$box" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
     attempt=$((attempt + 1))
     (( attempt < 120 )) || fatal "$box systemd bus did not become ready"
     sleep 1
@@ -358,19 +368,19 @@ ensure_running() {
   validate_workspace "$box"
   assert_not_quarantined "$box"
   sandbox_exists "$box" || fatal "workspace '$box' does not exist; rerun setup.sh"
-  if "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+  if workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
     wait_for_guest_systemd "$box"
     return 0
   fi
   note "Starting $box"
   if ! output="$(start_sandbox "$box" 2>&1)"; then
     sleep 1
-    if ! "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+    if ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
       [[ -n "$output" ]] && printf '%s\n' "$output" >&2
       fatal "workspace '$box' could not start; run 'msw logs $box'"
     fi
   fi
-  until "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; do
+  until workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; do
     attempt=$((attempt + 1))
     (( attempt < 120 )) || fatal "workspace '$box' did not become ready"
     sleep 1
@@ -381,19 +391,19 @@ ensure_running() {
 guest_exec() {
   local box="$1"; shift
   ensure_running "$box"
-  "$MSB_BIN" exec --no-tty "$box" -- "$@"
+  workspace_msb "$box" exec --no-tty "$box" -- "$@"
 }
 
 guest_exec_w() {
   local box="$1" workdir="$2"; shift 2
   ensure_running "$box"
-  "$MSB_BIN" exec --no-tty -w "$workdir" "$box" -- "$@"
+  workspace_msb "$box" exec --no-tty -w "$workdir" "$box" -- "$@"
 }
 
 guest_script() {
   local box="$1" script="$2"; shift 2
   ensure_running "$box"
-  printf '%s\n' "$script" | "$MSB_BIN" exec --no-tty "$box" -- bash -s -- "$@"
+  printf '%s\n' "$script" | workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$@"
 }
 
 validate_relative_path() {
@@ -533,9 +543,9 @@ cmd_start() {
 cmd_stop() {
   local target="${1:-all}" box
   while IFS= read -r box; do
-    if sandbox_exists "$box" && "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+    if sandbox_exists "$box" && workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
       note "Stopping $box"
-      "$MSB_BIN" stop -q -t 60 "$box"
+      workspace_msb "$box" stop -q -t 60 "$box"
     else
       echo "$box: already stopped"
     fi
@@ -543,20 +553,15 @@ cmd_stop() {
 }
 
 cmd_restart() {
-  local target="${1:-all}" box token=""
+  local target="${1:-all}" box
   while IFS= read -r box; do
     sandbox_exists "$box" || fatal "workspace '$box' does not exist"
     assert_not_quarantined "$box"
     note "Restarting $box"
-    if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
-      GH_TOKEN="$token" "$MSB_BIN" restart -q -t 60 "$box"
-      unset token
-    else
-      if [[ -f "$(metadata_file "$box")" ]]; then
-        fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
-      fi
-      "$MSB_BIN" restart -q -t 60 "$box"
+    if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" && [[ -f "$(metadata_file "$box")" ]]; then
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
     fi
+    workspace_msb "$box" restart -q -t 60 "$box"
   done < <(for_targets "$target")
 }
 
@@ -570,13 +575,13 @@ cmd_metrics() {
   local target="${1:-all}"
   if [[ "$target" == all ]]; then exec "$MSB_BIN" metrics --watch; fi
   validate_workspace "$target"
-  exec "$MSB_BIN" metrics --watch "$target"
+  workspace_msb "$target" metrics --watch "$target"
 }
 
 cmd_logs() {
   local box="$1"; shift
   validate_workspace "$box"
-  "$MSB_BIN" logs "$box" "$@"
+  workspace_msb "$box" logs "$box" "$@"
 }
 
 cmd_exec() {
@@ -599,7 +604,7 @@ cmd_resize() {
   local box="$1" memory="${2:-}" cpus="${3:-}"
   validate_workspace "$box"
   [[ -n "$memory" ]] || fatal "usage: msw resize WORKSPACE MEMORY [CPUS]"
-  if [[ -n "$cpus" ]]; then "$MSB_BIN" modify "$box" --memory "$memory" --cpus "$cpus"; else "$MSB_BIN" modify "$box" --memory "$memory"; fi
+  if [[ -n "$cpus" ]]; then workspace_msb "$box" modify "$box" --memory "$memory" --cpus "$cpus"; else workspace_msb "$box" modify "$box" --memory "$memory"; fi
 }
 
 cmd_upgrade() {
@@ -865,10 +870,9 @@ cmd_clean() {
 }
 
 bind_github_read_token() {
-  local box="$1" token
-  token="$(read_token_for_workspace "$box")" || fatal "read token missing for $box"
-  GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart >/dev/null
-  unset token
+  local box="$1"
+  keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
+  workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart >/dev/null
 }
 
 remove_github_secret() {
@@ -881,7 +885,7 @@ remove_github_secret() {
     printf 'msw: could not inspect workspace %s before removing its GitHub secret\n' "$box" >&2
     return 1
   fi
-  "$MSB_BIN" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
+  workspace_msb "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
 }
 
 host_safe_path() {
@@ -972,7 +976,7 @@ copy_lfs_objects() {
     guest_path="$(guest_exec_w "$box" "$repo_root" git rev-parse --path-format=absolute --git-path "lfs/objects/${oid:0:2}/${oid:2:2}/$oid")"
     dest="$host_repo/.git/lfs/objects/${oid:0:2}/${oid:2:2}/$oid"
     mkdir -p "$(dirname "$dest")"
-    "$MSB_BIN" copy -q "$box:$guest_path" "$dest.partial"
+    workspace_msb "$box" copy -q "$box:$guest_path" "$dest.partial"
     [[ -f "$dest.partial" && ! -L "$dest.partial" ]] || fatal "Git LFS object $oid was not a regular file"
     require_command_path shasum "$SHASUM_BIN"
     actual="$("$SHASUM_BIN" -a 256 "$dest.partial" | awk '{print $1}')"
@@ -1054,7 +1058,7 @@ SUMMARY
     trap cleanup_push EXIT INT TERM HUP
 
     guest_exec_w "$box" "$repo_root" git bundle create "$guest_bundle" "$ref"
-    "$MSB_BIN" copy -q "$box:$guest_bundle" "$host_bundle"
+    workspace_msb "$box" copy -q "$box:$guest_bundle" "$host_bundle"
     [[ -f "$host_bundle" && ! -L "$host_bundle" ]] || fatal "invalid Git bundle transfer"
 
     "$GIT_BIN" init -q "$host_repo"
@@ -1409,7 +1413,7 @@ cmd_check_quick() {
 
 check_one_deep() {
   local box="$1" was_running=0 failed=0 host direct_url docker_url direct_unit docker_name
-  "$MSB_BIN" ping -q "$box" >/dev/null 2>&1 && was_running=1
+  workspace_msb "$box" ping -q "$box" >/dev/null 2>&1 && was_running=1
   ensure_running "$box"
   host="$(workspace_host "$box")"
   direct_unit="msw-health-direct-${box}"
@@ -1460,7 +1464,7 @@ SCRIPT
     }
   fi
 
-  if (( was_running == 0 )); then "$MSB_BIN" stop -q -t 60 "$box" >/dev/null 2>&1 || failed=1; fi
+  if (( was_running == 0 )); then workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1 || failed=1; fi
   (( failed == 0 )) || return 1
   ok "$box passed"
 }
@@ -1494,7 +1498,7 @@ PATHS
 running_workspaces() {
   local box
   for box in "${WORKSPACES[@]}"; do
-    if sandbox_exists "$box" && "$MSB_BIN" ping -q "$box" >/dev/null 2>&1; then
+    if sandbox_exists "$box" && workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
       printf '%s\n' "$box"
     fi
   done
@@ -1531,7 +1535,7 @@ cmd_backup() {
       if (( rc != 0 )); then rm -f "$archive" "$checksum" "$info"; fi
       while IFS= read -r running_box; do
         [[ -n "$running_box" ]] || continue
-        if ! "$MSB_BIN" ping -q "$running_box" >/dev/null 2>&1; then
+        if ! workspace_msb "$running_box" ping -q "$running_box" >/dev/null 2>&1; then
           start_sandbox "$running_box" >/dev/null 2>&1 || warn "could not restart $running_box after backup"
         fi
       done <"$running_file"
@@ -1546,7 +1550,7 @@ cmd_backup() {
     while IFS= read -r box; do
       [[ -n "$box" ]] || continue
       guest_exec "$box" sync >/dev/null
-      "$MSB_BIN" stop -q -t 120 "$box"
+      workspace_msb "$box" stop -q -t 120 "$box"
     done <"$running_file"
     sync
 

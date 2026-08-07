@@ -39,6 +39,16 @@ def fail(msg: str, code: int = 1) -> int:
     print(msg, file=sys.stderr)
     return code
 
+def require_secret_source(sb: dict[str, Any]) -> bool:
+    if (
+        os.environ.get("MSW_FAKE_REQUIRE_SECRET_SOURCE") == "1"
+        and sb.get("secrets", {}).get("GH_TOKEN")
+        and not os.environ.get("GH_TOKEN")
+    ):
+        fail("host source GH_TOKEN missing")
+        return False
+    return True
+
 
 def log_event(state: dict[str, Any], event: str, **data: Any) -> None:
     state.setdefault("events", []).append({"event": event, **data})
@@ -246,12 +256,8 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     if not command:
         return fail("missing exec command")
     sb = ensure_sandbox_dirs(state, box)
-    if (
-        os.environ.get("MSW_FAKE_REQUIRE_SECRET_SOURCE") == "1"
-        and sb.get("secrets", {}).get("GH_TOKEN")
-        and not os.environ.get("GH_TOKEN")
-    ):
-        return fail("host source GH_TOKEN missing")
+    if not require_secret_source(sb):
+        return 1
     sb["running"] = True
     mapped_workdir = Path(map_guest_path(state, box, workdir))
     mapped_workdir.mkdir(parents=True, exist_ok=True)
@@ -387,6 +393,8 @@ def do_copy(args: list[str], state: dict[str, Any]) -> int:
     src_raw, dst_raw = args
     if ":" in src_raw and src_raw.split(":", 1)[0] in state["sandboxes"]:
         box, raw = src_raw.split(":", 1)
+        if not require_secret_source(state["sandboxes"][box]):
+            return 1
         src = Path(map_guest_path(state, box, raw))
         dst = Path(dst_raw)
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -405,6 +413,8 @@ def do_copy(args: list[str], state: dict[str, Any]) -> int:
         return 0
     if ":" in dst_raw and dst_raw.split(":", 1)[0] in state["sandboxes"]:
         box, raw = dst_raw.split(":", 1)
+        if not require_secret_source(state["sandboxes"][box]):
+            return 1
         dst = Path(map_guest_path(state, box, raw))
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_raw, dst)
@@ -439,13 +449,17 @@ def main() -> int:
         if os.environ.get("MSW_FAKE_INSPECT_FAIL") == "1":
             return fail("fake inspect failure", 2)
         if box in state["sandboxes"]:
+            if not require_secret_source(state["sandboxes"][box]):
+                return 1
             return 0
         return fail(f"error: sandbox not found: {box}")
     if cmd == "ping":
         box = parse_named_arg(rest) or ""
         if os.environ.get("MSW_FAKE_PING_FAIL") == "1":
             return 1
-        return 0 if box in state["sandboxes"] and state["sandboxes"][box].get("running") else 1
+        if box not in state["sandboxes"] or not require_secret_source(state["sandboxes"][box]):
+            return 1
+        return 0 if state["sandboxes"][box].get("running") else 1
     if cmd in {"start", "restart"}:
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
@@ -458,6 +472,8 @@ def main() -> int:
     if cmd == "stop":
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
+        if not require_secret_source(state["sandboxes"][box]):
+            return 1
         if os.environ.get("MSW_FAKE_STOP_FAIL") == "1":
             return fail("fake stop failure")
         state["sandboxes"][box]["running"] = False
@@ -466,6 +482,9 @@ def main() -> int:
         return 0
     if cmd == "rm":
         box = parse_named_arg(rest) or ""
+        if box not in state["sandboxes"]: return 1
+        if not require_secret_source(state["sandboxes"][box]):
+            return 1
         state["sandboxes"].pop(box, None)
         shutil.rmtree(STATE_ROOT / "guests" / box, ignore_errors=True)
         save(state)
@@ -507,6 +526,9 @@ def main() -> int:
     if cmd == "modify":
         box = rest[0] if rest else ""
         if box not in state["sandboxes"]: return 1
+        sb = ensure_sandbox_dirs(state, box)
+        if not require_secret_source(sb):
+            return 1
         if "--secret" in rest:
             spec = rest[rest.index("--secret") + 1]
             name = spec.split("@", 1)[0]
@@ -527,7 +549,11 @@ def main() -> int:
     if cmd == "ssh":
         if rest and rest[0] == "authorize":
             return 0
-        if rest and rest[0] == "serve": return 0
+        if rest and rest[0] == "serve":
+            box = rest[1] if len(rest) > 1 else ""
+            if box in state["sandboxes"] and not require_secret_source(state["sandboxes"][box]):
+                return 1
+            return 0
     if cmd in {"ps", "ls", "status"}:
         if cmd == "status" and "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
             names = [name for name in sorted(state["sandboxes"]) if name in rest]

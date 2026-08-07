@@ -24,24 +24,20 @@ keychain_read() {
   fi
 }
 
+token=""
+if token="$(keychain_read 2>/dev/null)"; then
+  export GH_TOKEN="$token"
+  unset token
+elif [ -f "$HOME/.config/msw/github/$box.conf" ]; then
+  echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
+  echo "run: msw github setup $box OWNER/REPO" >&2
+  exit 1
+fi
+
 if ! "$MSB" ping -q "$box" >/dev/null 2>&1; then
-  token=""
-  if token="$(keychain_read 2>/dev/null)"; then
-    if ! output="$(GH_TOKEN="$token" "$MSB" start -q "$box" 2>&1)"; then
-      sleep 1
-      "$MSB" ping -q "$box" >/dev/null 2>&1 || { [ -n "$output" ] && echo "$output" >&2; exit 1; }
-    fi
-    unset token
-  else
-    if [ -f "$HOME/.config/msw/github/$box.conf" ]; then
-      echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
-      echo "run: msw github setup $box OWNER/REPO" >&2
-      exit 1
-    fi
-    if ! output="$("$MSB" start -q "$box" 2>&1)"; then
-      sleep 1
-      "$MSB" ping -q "$box" >/dev/null 2>&1 || { [ -n "$output" ] && echo "$output" >&2; exit 1; }
-    fi
+  if ! output="$("$MSB" start -q "$box" 2>&1)"; then
+    sleep 1
+    "$MSB" ping -q "$box" >/dev/null 2>&1 || { [ -n "$output" ] && echo "$output" >&2; exit 1; }
   fi
 
   attempt=0

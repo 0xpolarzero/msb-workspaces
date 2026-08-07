@@ -101,7 +101,24 @@ HOST_CPUS="${MSW_TEST_HOST_CPUS:-}"
 if [[ -z "$HOST_CPUS" ]]; then HOST_CPUS="$(sysctl -n hw.logicalcpu)"; fi
 cap_cpu() { local requested="$1"; (( requested > HOST_CPUS )) && printf '%s\n' "$HOST_CPUS" || printf '%s\n' "$requested"; }
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$MSW_BASE_SNAPSHOT" >/dev/null 2>&1; }
-sandbox_exists() { "$MSB_BIN" inspect "$1" >/dev/null 2>&1; }
+sandbox_exists() { workspace_msb "$1" inspect "$1" >/dev/null 2>&1; }
+workspace_msb() {
+  local box="$1" token="" status
+  shift
+  if token="$(keychain_read_token "$box" 2>/dev/null)"; then
+    if GH_TOKEN="$token" "$MSB_BIN" "$@"; then
+      status=0
+    else
+      status=$?
+    fi
+    unset token
+    return "$status"
+  fi
+  if [[ -f "$HOME/.config/msw/github/${box}.conf" || -f "$HOME/.config/msw/github/${box}.quarantine" ]]; then
+    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
+  fi
+  "$MSB_BIN" "$@"
+}
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 
 BASE_STAMP="$HOME/.config/msw/base-version"
@@ -190,7 +207,7 @@ check_port_conflicts() {
 
 wait_for_guest_systemd() {
   local box="$1" attempt=0
-  until "$MSB_BIN" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
+  until workspace_msb "$box" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
     attempt=$((attempt + 1))
     (( attempt < 120 )) || fatal "$box systemd bus did not become ready"
     sleep 1
@@ -200,7 +217,7 @@ wait_for_guest_systemd() {
 configure_workspace_guest() {
   local box="$1" browser_host="$2"
   wait_for_guest_systemd "$box"
-  "$MSB_BIN" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" <<'GUEST'
+  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" <<'GUEST'
 set -Eeuo pipefail
 workspace="$1"; browser_host="$2"
 mkdir -p /workspace /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
@@ -256,7 +273,7 @@ create_workspace() {
 
   if sandbox_exists "$box" && [[ "$RECREATE_WORKSPACES" == 1 ]]; then
     warn "recreating $box root; its repository and Docker volumes are preserved"
-    "$MSB_BIN" rm -f "$box"
+    workspace_msb "$box" rm -f "$box"
   fi
 
   if ! sandbox_exists "$box"; then
@@ -280,10 +297,10 @@ create_workspace() {
       -- sleep infinity
     configure_workspace_guest "$box" "$browser_host"
     if token="$(keychain_read_token "$box" 2>/dev/null)"; then
-      GH_TOKEN="$token" "$MSB_BIN" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
+      workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
       unset token
     fi
-    "$MSB_BIN" stop -t 90 "$box"
+    workspace_msb "$box" stop -t 90 "$box"
   else
     echo "Workspace already exists: $box"
   fi
