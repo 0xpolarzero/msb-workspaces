@@ -246,6 +246,12 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     if not command:
         return fail("missing exec command")
     sb = ensure_sandbox_dirs(state, box)
+    if (
+        os.environ.get("MSW_FAKE_REQUIRE_SECRET_SOURCE") == "1"
+        and sb.get("secrets", {}).get("GH_TOKEN")
+        and not os.environ.get("GH_TOKEN")
+    ):
+        return fail("host source GH_TOKEN missing")
     sb["running"] = True
     mapped_workdir = Path(map_guest_path(state, box, workdir))
     mapped_workdir.mkdir(parents=True, exist_ok=True)

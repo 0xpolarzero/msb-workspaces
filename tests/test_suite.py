@@ -533,6 +533,17 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
         self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
 
+    def test_github_setup_preserves_secret_source_for_verifier_cli(self) -> None:
+        self.env.init_remote()
+        proc = self.env.configure_tokens(
+            "dev",
+            "acme/demo",
+            extra_env={"MSW_FAKE_REQUIRE_SECRET_SOURCE": "1"},
+        )
+        self.assertIn("GitHub configured for dev", proc.stdout)
+        self.assertIn("guest push rejected", proc.stdout)
+        self.assertIn("host push and cleanup succeeded", proc.stdout)
+
     def test_stale_github_lock_is_reclaimed(self) -> None:
         self.env.init_remote()
         stale_lock = self.env.home / ".config/msw/github/dev.lock"

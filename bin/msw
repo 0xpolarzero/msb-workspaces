@@ -1112,7 +1112,7 @@ read_hidden_token() {
 }
 
 cmd_github_verify() {
-  local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_sha="" host_write=1
+  local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_sha="" host_write=1 read_token="" verify_status=0
   validate_workspace "$box"
   if (( inherited_lock == 0 )); then
     if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
@@ -1127,11 +1127,16 @@ cmd_github_verify() {
   esac
   if [[ -z "$repo" ]]; then repo="$(metadata_repo "$box")" || fatal "no verification repository recorded for $box"; fi
   validate_github_repo "$repo"
-  keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
+  read_token="$(read_token_for_workspace "$box")" || fatal "read token missing for $box"
   if (( host_write )); then
     keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "write token missing for $box"
   fi
 
+  # MicroSandbox secret references require the source environment variable for
+  # every CLI operation that reads the sandbox config, not only for modify/start.
+  # Keep the host-held token in this verifier process so guest exec, clone, and
+  # cleanup commands all resolve the source reference without exposing it to the VM.
+  export GH_TOKEN="$read_token"
   bind_github_read_token "$box"
   ensure_running "$box"
   id="$(date +%Y%m%d%H%M%S)-$RANDOM"
@@ -1183,7 +1188,12 @@ cmd_github_verify() {
       ok "host push and cleanup succeeded"
     fi
   )
-  if (( lock_acquired )); then github_lock_release; fi
+  verify_status=$?
+  unset GH_TOKEN read_token
+  if (( verify_status != 0 )); then
+    if (( lock_acquired )); then github_lock_release; fi
+    return "$verify_status"
+  fi
   if (( host_write )); then
     ok "GitHub permissions verified for $box using $repo"
   else
