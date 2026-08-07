@@ -7,6 +7,11 @@ case "$box" in dev|playgrounds|personal) ;; *) echo "msw: unknown workspace '$bo
 
 config="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
 [ -f "$config" ] || { echo "msw: configuration missing; rerun setup.sh" >&2; exit 1; }
+quarantine="$HOME/.config/msw/github/$box.quarantine"
+if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+  echo "msw: workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO" >&2
+  exit 1
+fi
 
 MSB="${MSW_MSB_BIN:-$HOME/.local/bin/msb}"
 if [ ! -x "$MSB" ]; then MSB="$(command -v msb 2>/dev/null || true)"; fi

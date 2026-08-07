@@ -788,6 +788,19 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertFailed(host_push, "quarantined")
         metadata.unlink()
 
+    def test_ssh_proxy_blocks_quarantined_workspace_without_starting(self) -> None:
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        self.env.msw("stop", "dev")
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine.write_text("credential cleanup failed\n")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
+        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        proc = self.env.run(proxy, "dev.msb", check=False)
+        self.assertFailed(proc, "quarantined")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
     def test_quarantine_requires_proven_stop(self) -> None:
         command = 'source "$1"; quarantine_workspace "dev" "test quarantine"'
         quarantine = self.env.home / ".config/msw/github/dev.quarantine"
