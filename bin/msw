@@ -1138,7 +1138,7 @@ read_hidden_token() {
 }
 
 cmd_github_verify() {
-  local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_sha="" host_write=1 read_token="" verify_status=0
+  local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_heads="" remote_sha="" host_write=1 read_token="" verify_status=0
   validate_workspace "$box"
   if (( inherited_lock == 0 )); then
     if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
@@ -1187,6 +1187,8 @@ cmd_github_verify() {
     note "Verifying read-only guest access in $box"
     cmd_clone "$box" "$repo" "$temp_rel" >/dev/null
     repo_root="$(resolve_guest_repo "$box" "$temp_rel")"
+    remote_heads="$(guest_exec_w "$box" "$repo_root" git ls-remote --heads origin)" || fatal "could not inspect verification repository branches"
+    [[ -n "$remote_heads" ]] || fatal "verification repository '$repo' has no branches; initialize main (for example, add a README.md and push main) before retrying"
     guest_exec_w "$box" "$repo_root" git config user.name "MSW Permission Test"
     guest_exec_w "$box" "$repo_root" git config user.email "msw-permission-test@localhost"
     guest_exec_w "$box" "$repo_root" git switch -c "$branch" >/dev/null

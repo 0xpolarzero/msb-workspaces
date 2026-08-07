@@ -21,6 +21,7 @@ Choose one repository that will be used to verify permissions. It must:
 
 - Belong to the same resource owner as the other selected repositories.
 - Be selected in both tokens.
+- Already contain at least one branch, normally `main`; initialize it before setup if the repository is empty.
 - Permit the host token to create and delete a temporary branch.
 - Be safe for a temporary empty verification commit and branch; the branch is deleted automatically.
 
@@ -80,6 +81,20 @@ Workflows:  Read and write
 No administration, secrets, webhooks, organization, or other write permissions are required by MSW.
 
 The host token's selected repository list is the definitive set of repositories `msw push` can modify.
+
+The verification repository must already contain at least one branch before setup. Initialize `main` first; do not let the temporary MSW verification branch become the repository's first/default branch, because GitHub refuses to delete a default branch.
+
+For an empty repository:
+
+```bash
+git clone https://github.com/OWNER/msw-verification.git
+cd msw-verification
+git switch -c main
+printf '# Verification repository\n' > README.md
+git add README.md
+git commit -m "Initialize repository"
+git push -u origin main
+```
 
 ## Configure a workspace
 

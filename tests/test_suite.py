@@ -571,6 +571,25 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertNotIn("Paste the READ-ONLY token:", output)
         self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
         self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+    def test_github_setup_rejects_empty_verification_repository(self) -> None:
+        bare = self.env.root / "remotes" / "acme" / "empty.git"
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        run_cmd([SYSTEM_GIT, "init", "--bare", str(bare)], env=self.env.env)
+
+        proc = self.env.configure_tokens("dev", "acme/empty", check=False)
+        output = proc.stdout + proc.stderr
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("has no branches", output)
+        self.assertIn("initialize main", output)
+        self.assertNotIn("Verifying the host-only push path", output)
+        refs = run_cmd(
+            [SYSTEM_GIT, "--git-dir", str(bare), "for-each-ref", "--format=%(refname)", "refs/heads"],
+            env=self.env.env,
+        ).stdout
+        self.assertEqual(refs.strip(), "")
+        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+
     def test_github_setup_end_to_end_secret_hidden_and_remove(self) -> None:
         bare = self.env.init_remote()
         proc = self.env.configure_tokens("dev", "acme/demo")

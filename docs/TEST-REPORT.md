@@ -2,7 +2,7 @@
 
 ## Result
 
-**52 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
+**53 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
 
 The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, interruption-safe setup transactions, and fail-closed workspace quarantine. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
 
@@ -36,9 +36,10 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub and host-only push — 31 scenarios
+### GitHub and host-only push — 32 scenarios
 
 - TLS-interception preflight rejects incompatible workspaces before token prompts or Keychain mutation and gives the recreation command.
+- Empty verification repositories are rejected before the host-only push so the temporary branch cannot become an undeletable default branch.
 - Complete GitHub setup transaction: read token binding, guest push rejection, host push success, temporary-branch cleanup, token secrecy, status, and removal.
 - Verifier subprocesses retain the host-side read-token source required for MicroSandbox secret substitution during guest exec, clone, and cleanup commands.
 - Fresh `msw clone`, `msw exec`, SSH proxy, and `msw github remove` invocations source the read token from Keychain independently of the setup process lifetime.
