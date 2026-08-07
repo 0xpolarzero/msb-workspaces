@@ -1,0 +1,167 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+
+		A00000000000000000000001 /* MSWMonitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = MSWMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000002 /* MSWMonitorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MSWMonitorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A00000000000000000000003 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		A00000000000000000000004 /* MonitorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonitorView.swift; sourceTree = "<group>"; };
+		A00000000000000000000005 /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
+		A00000000000000000000007 /* MSWMonitorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWMonitorApp.swift; sourceTree = "<group>"; };
+		A00000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000009 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
+		A0000000000000000000000A /* MSWMonitorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWMonitorUITests.swift; sourceTree = "<group>"; };
+		A0000000000000000000000B /* MSWMonitorUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MSWMonitorUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+
+		A10000000000000000000003 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000003 /* AppModel.swift */; };
+		A10000000000000000000004 /* MonitorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000004 /* MonitorView.swift */; };
+		A10000000000000000000005 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000005 /* StatusBarController.swift */; };
+		A10000000000000000000007 /* MSWMonitorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000007 /* MSWMonitorApp.swift */; };
+		A10000000000000000000009 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000009 /* AppModelTests.swift */; };
+		A1000000000000000000000A /* MSWMonitorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000A /* MSWMonitorUITests.swift */; };
+
+		A20000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000002 /* Sources */,
+				A20000000000000000000003 /* Resources */,
+				A20000000000000000000004 /* Tests */,
+				A20000000000000000000006 /* UITests */,
+				A20000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A20000000000000000000002 /* Sources */ = {
+			isa = PBXGroup;
+			children = (A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000007);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000003 /* Resources */ = {
+			isa = PBXGroup;
+			children = (A00000000000000000000008);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000004 /* Tests */ = {
+			isa = PBXGroup;
+			children = (A00000000000000000000009);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (A00000000000000000000001, A00000000000000000000002, A0000000000000000000000B);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000006 /* UITests */ = {
+			isa = PBXGroup;
+			children = (A0000000000000000000000A);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+
+		A30000000000000000000001 /* App Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000002 /* App Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000003 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000004 /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000005 /* Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000006 /* Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000007 /* UI Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000A); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000008 /* UI Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000009 /* UI Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+
+		A40000000000000000000001 /* App Target */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A60000000000000000000002;
+			buildPhases = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003);
+			buildRules = ();
+			dependencies = ();
+			name = MSWMonitor;
+			productName = MSWMonitor;
+			productReference = A00000000000000000000001;
+			productType = "com.apple.product-type.application";
+		};
+		A40000000000000000000002 /* Test Target */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A60000000000000000000003;
+			buildPhases = (A30000000000000000000004, A30000000000000000000005, A30000000000000000000006);
+			buildRules = ();
+			dependencies = (A50000000000000000000001);
+			name = MSWMonitorTests;
+			productName = MSWMonitorTests;
+			productReference = A00000000000000000000002;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A40000000000000000000003 /* UI Test Target */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A60000000000000000000004;
+			buildPhases = (A30000000000000000000007, A30000000000000000000008, A30000000000000000000009);
+			buildRules = ();
+			dependencies = (A50000000000000000000003);
+			name = MSWMonitorUITests;
+			productName = MSWMonitorUITests;
+			productReference = A0000000000000000000000B;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+
+		A50000000000000000000001 = {isa = PBXTargetDependency; target = A40000000000000000000001; targetProxy = A50000000000000000000002; };
+		A50000000000000000000002 = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001; proxyType = 1; remoteGlobalIDString = A40000000000000000000001; remoteInfo = MSWMonitor; };
+		A50000000000000000000003 = {isa = PBXTargetDependency; target = A40000000000000000000001; targetProxy = A50000000000000000000004; };
+		A50000000000000000000004 = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001; proxyType = 1; remoteGlobalIDString = A40000000000000000000001; remoteInfo = MSWMonitor; };
+
+		A60000000000000000000001 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A61000000000000000000001, A61000000000000000000002);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A60000000000000000000002 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A62000000000000000000001, A62000000000000000000002);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A60000000000000000000003 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A63000000000000000000001, A63000000000000000000002);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A60000000000000000000004 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A64000000000000000000001, A64000000000000000000002);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+
+		A61000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Debug;};
+		A61000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Release;};
+		A62000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = NO; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; name = Debug;};
+		A62000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_COMPILATION_MODE = wholemodule;}; name = Release;};
+		A63000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MSWMonitor.app/Contents/MacOS/MSWMonitor";}; name = Debug;};
+		A63000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MSWMonitor.app/Contents/MacOS/MSWMonitor";}; name = Release;};
+		A64000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_TARGET_NAME = MSWMonitor;}; name = Debug;};
+		A64000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_TARGET_NAME = MSWMonitor;}; name = Release;};
+
+		A70000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {BuildIndependentTargetsInParallel = YES; LastSwiftUpdateCheck = 2650; LastUpgradeCheck = 2650; TargetAttributes = {A40000000000000000000001 = {CreatedOnToolsVersion = 26.5;}; A40000000000000000000002 = {CreatedOnToolsVersion = 26.5; TestTargetID = A40000000000000000000001;}; A40000000000000000000003 = {CreatedOnToolsVersion = 26.5; TestTargetID = A40000000000000000000001;};};};
+			buildConfigurationList = A60000000000000000000001;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = A20000000000000000000001;
+			productRefGroup = A20000000000000000000005;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A40000000000000000000001, A40000000000000000000002, A40000000000000000000003);
+		};
+	};
+	rootObject = A70000000000000000000001;
+}
