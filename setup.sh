@@ -286,7 +286,7 @@ create_workspace() {
       --memory "$memory" --max-memory "$max_memory" \
       --mount-named "msw-${box}-workspace:/workspace:kind=disk,size=${workspace_size}" \
       --mount-named "msw-${box}-runtime:/var/lib/msw-runtime:kind=disk,size=${runtime_size}" \
-      --workdir /workspace --init auto --security default --net public \
+      --workdir /workspace --init auto --security default --net public --tls-intercept \
       --label msw.managed=true --label "msw.workspace=${box}" \
       --env "MSW_WORKSPACE=${box}" --env "MSW_BROWSER_HOST=${browser_host}" \
       --env 'PATH=/root/.local/bin:/root/.local/share/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \

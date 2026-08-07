@@ -321,7 +321,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         self.assertIn('"$MSB_BIN" run --detach', setup)
         self.assertIn("-- sleep infinity", setup)
         self.assertIn("wait_for_guest_systemd", setup)
-        self.assertIn('--secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start', setup)
+        self.assertIn("--tls-intercept", setup)
         self.assertIn('--secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart', msw)
         self.assertIn("--secret-rm GH_TOKEN --restart", msw)
         self.assertIn("env -i", msw)

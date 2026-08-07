@@ -28,8 +28,9 @@ The installer may request your macOS administrator password to add three private
 5. Creates `dev`, `playgrounds`, and `personal` from that snapshot.
 6. Attaches a separate persistent ext4 workspace volume and Docker-runtime volume to each VM.
 7. Configures Docker Engine, Compose, Buildx, Git, GitHub CLI, mise, Node LTS, pnpm, uv, Python, zsh, and common development tools.
-8. Configures fixed local browser names and SSH aliases.
-9. Runs `msw check --deep` against all three VMs.
+8. Enables local TLS interception so MicroSandbox can substitute host-held secrets only at their allow-listed HTTPS endpoints.
+9. Configures fixed local browser names and SSH aliases.
+10. Runs `msw check --deep` against all three VMs.
 
 When it finishes:
 
