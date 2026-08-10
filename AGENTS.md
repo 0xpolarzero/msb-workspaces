@@ -295,6 +295,22 @@ Every investigation report should state:
    returned no remaining instance.
 6. Which behavior is real implementation versus the current static scaffold.
 
+For the current static fixture, the report must explicitly say that workspace
+states and the observation counter are deterministic scaffold values, not live
+sandbox telemetry. It must enumerate observed semantic identifiers and values,
+not only say that the UI was verified:
+
+- `statusItem.button`: `MSW Monitor`; application menu: `MSW Monitor`.
+- Application menu items: `About MSW Monitor`, `Settings…`, `Hide MSW Monitor`,
+  and `Quit MSW Monitor`.
+- `monitor.title`: `MSW Monitor`.
+- `workspace.dev.name/state`: `dev` / `Stopped`;
+  `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`;
+  `workspace.personal.name/state`: `personal` / `Stopped`.
+- `observation.value`: `Not yet refreshed`, then `Observation #1` after
+  clicking `refresh.button` (`Refresh`).
+- `quit.button`: `Quit`; clicking it must reach app state `notRunning`.
+
 Keep generated logs and result bundles under `app/MSWMonitor/build/`. Do not
 publish credentials, raw private paths, user data, security details, or
 unredacted system logs.
