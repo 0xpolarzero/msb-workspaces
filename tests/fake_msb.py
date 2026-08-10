@@ -39,8 +39,10 @@ def fail(msg: str, code: int = 1) -> int:
     print(msg, file=sys.stderr)
     return code
 
-def require_secret_source(sb: dict[str, Any]) -> bool:
+def require_secret_source(sb: dict[str, Any], *, binding_operation: bool = False) -> bool:
     if (
+        binding_operation
+        and
         os.environ.get("MSW_FAKE_REQUIRE_SECRET_SOURCE") == "1"
         and sb.get("secrets", {}).get("GH_TOKEN")
         and not os.environ.get("GH_TOKEN")
@@ -443,6 +445,14 @@ def main() -> int:
         print("microsandbox 0.6.9-fake")
         return 0
     cmd, rest = args[0], args[1:]
+    if os.environ.get("MSW_FAKE_RECORD_CREDENTIAL_ENV") == "1":
+        log_event(
+            state,
+            "credential-env",
+            command=cmd,
+            gh_token_present=bool(os.environ.get("GH_TOKEN")),
+        )
+        save(state)
     if cmd == "doctor":
         if os.environ.get("MSW_FAKE_DOCTOR_FAIL") == "1" and "--fix" not in rest:
             return fail("fake doctor failure")
@@ -575,6 +585,11 @@ def main() -> int:
             return 0
     if cmd in {"ps", "ls", "status"}:
         if cmd == "status" and "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
+            if os.environ.get("MSW_FAKE_STATUS_FAIL") == "1":
+                return fail("fake status failure", 69)
+            if "MSW_FAKE_STATUS_JSON" in os.environ:
+                print(os.environ["MSW_FAKE_STATUS_JSON"])
+                return 0
             names = [name for name in sorted(state["sandboxes"]) if name in rest]
             if not names:
                 names = sorted(state["sandboxes"])
@@ -586,7 +601,16 @@ def main() -> int:
             for name, sb in sorted(state["sandboxes"].items()):
                 print(f"{name}\t{'running' if sb.get('running') else 'stopped'}")
         return 0
-    if cmd in {"metrics", "logs"}: return 0
+    if cmd == "metrics":
+        payload = os.environ.get("MSW_FAKE_METRICS", "")
+        if payload:
+            print(payload)
+        return 0
+    if cmd == "logs":
+        payload = os.environ.get("MSW_FAKE_LOGS", "")
+        if payload:
+            print(payload)
+        return 0
     return fail(f"fake msb: unsupported command: {cmd} {' '.join(rest)}")
 
 

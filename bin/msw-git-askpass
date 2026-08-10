@@ -11,15 +11,39 @@ case "$prompt" in
   *sername*|*Username*)
     printf '%s\n' 'x-access-token'
     ;;
-  *assword*|*Password*)
-    if [ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]; then
+  *assword*)
+    if [ -n "${MSW_GITHUB_WRITE_TOKEN:-}" ]; then
+      printf '%s\n' "$MSW_GITHUB_WRITE_TOKEN"
+    elif [ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]; then
       safe_service=$(printf '%s' "$service" | tr -c 'A-Za-z0-9_.-' '_')
       safe_account=$(printf '%s' "$account" | tr -c 'A-Za-z0-9_.-' '_')
       file="$MSW_TEST_KEYCHAIN_DIR/${safe_service}__${safe_account}"
       [ -f "$file" ] || exit 1
       cat "$file"
+    elif [ -n "${MSW_APP_KEYCHAIN_SERVICE:-}" ]; then
+      raw=$(HOME="$keychain_home" "$security_bin" find-generic-password \
+        -w -s "$MSW_APP_KEYCHAIN_SERVICE" \
+        -a "${MSW_APP_KEYCHAIN_ACCOUNT:-profile}") || exit 1
+      jq_bin="${MSW_JQ_BIN:-}"
+      if [ -n "$jq_bin" ] && [ -x "$jq_bin" ] &&
+        access=$(printf '%s\n' "$raw" | "$jq_bin" -er '
+          select(type == "object" and .schemaVersion == 2) |
+          select(.refreshToken | type == "string" and length > 0) |
+          select(.accessExpiresAt | type == "string" and length > 0) |
+          select(.refreshExpiresAt | type == "string" and length > 0) |
+          select(.generation | type == "number" and . > 0) |
+          .accessToken | select(type == "string" and length > 0)
+        '); then
+        printf '%s\n' "$access"
+      else
+        exit 1
+      fi
+    elif [ -n "${MSW_KEYCHAIN_SERVICE:-}" ]; then
+      raw=$(HOME="$keychain_home" "$security_bin" find-generic-password \
+        -w -s "$MSW_KEYCHAIN_SERVICE" -a "$account") || exit 1
+      printf '%s\n' "$raw"
     else
-      HOME="$keychain_home" exec "$security_bin" find-generic-password -w -s "$service" -a "$account"
+      exit 1
     fi
     ;;
   *)

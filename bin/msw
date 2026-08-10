@@ -2,17 +2,37 @@
 set -Eeuo pipefail
 
 CONFIG_FILE="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
+MSW_APP_MODE=0
+[[ "${1:-}" == app ]] && MSW_APP_MODE=1
+MSW_APP_ROOT_SUBSHELL="${BASH_SUBSHELL:-0}"
+MSW_APP_RESPONSE_EMITTED=0
+MSW_APP_COMMAND="app"
 if [[ ! -f "$CONFIG_FILE" ]]; then
-  printf 'msw: missing %s\nRun the MicroSandbox Workspaces setup installer.\n' "$CONFIG_FILE" >&2
-  exit 1
+  if (( MSW_APP_MODE == 0 )); then
+    printf 'msw: missing %s\nRun the MicroSandbox Workspaces setup installer.\n' "$CONFIG_FILE" >&2
+    exit 1
+  fi
+  MSW_CONFIG_AVAILABLE=0
+else
+  # shellcheck source=/dev/null
+  source "$CONFIG_FILE"
+  MSW_CONFIG_AVAILABLE=1
 fi
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
+# App protocol commands must be able to report a typed configuration error
+# without requiring a shell profile or a live MicroSandbox installation.
+: "${MSW_PUBLISHED_PORTS:=3000,5173,8080}"
+: "${MSW_DEV_IP:=127.0.0.10}"
+: "${MSW_PLAYGROUNDS_IP:=127.0.0.11}"
+: "${MSW_PERSONAL_IP:=127.0.0.12}"
+: "${MSW_DEV_HOST:=dev.msw.test}"
+: "${MSW_PLAYGROUNDS_HOST:=playgrounds.msw.test}"
+: "${MSW_PERSONAL_HOST:=personal.msw.test}"
 
 readonly WORKSPACES=(dev playgrounds personal)
 readonly READ_KEYCHAIN_SERVICE="msw.github.read"
 readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/msw/github"
+readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/MSW Monitor/credentials.json"
 SETUP_TRANSACTION_ACTIVE=0
 SETUP_TRANSACTION_BOX=""
 GITHUB_LOCK_HELD=0
@@ -98,7 +118,19 @@ keychain_get() {
   fi
 }
 
-keychain_has() { keychain_get "$1" "$2" >/dev/null 2>&1; }
+keychain_has() {
+  local service="$1" account="$2"
+  case "$service" in
+    "$READ_KEYCHAIN_SERVICE")
+      app_credential_available "$account" guest && return 0
+      ;;
+    "$WRITE_KEYCHAIN_SERVICE")
+      app_credential_available "$account" host && return 0
+      ;;
+  esac
+  keychain_get "$service" "$account" >/dev/null 2>&1
+}
+
 
 keychain_set() {
   local service="$1" account="$2" value="$3"
@@ -154,17 +186,122 @@ keychain_delete() {
 metadata_file() { printf '%s/%s.conf\n' "$GITHUB_META_DIR" "$1"; }
 
 metadata_access() {
-  local file
-  file="$(metadata_file "$1")"
-  [[ -f "$file" ]] || return 1
-  sed -n 's/^access=//p' "$file" | head -n 1
+  local box="$1" file
+  file="$(metadata_file "$box")"
+  if app_metadata_profile_present "$box" guest; then
+    # Native OAuth credentials are independent guest and host profiles. The
+    # guest profile remains read-only after host authorization, so aggregate
+    # write capability must be derived from the host profile as well.
+    if app_metadata_profile_present "$box" host &&
+      [[ "$(app_metadata_value "$box" host accessMode 2>/dev/null || true)" == host-write ]]; then
+      printf 'host-write\n'
+    else
+      app_metadata_value "$box" guest accessMode
+    fi
+  elif [[ -f "$file" && ! -L "$file" ]]; then
+    sed -n 's/^access=//p' "$file" | head -n 1
+  else
+    return 1
+  fi
 }
 
 metadata_repo() {
-  local file
-  file="$(metadata_file "$1")"
-  [[ -f "$file" ]] || return 1
-  sed -n 's/^verification_repo=//p' "$file" | head -n 1
+  local box="$1" file
+  file="$(metadata_file "$box")"
+  if app_metadata_profile_present "$box" guest; then
+    app_metadata_value "$box" guest verificationRepository
+  elif [[ -f "$file" && ! -L "$file" ]]; then
+    sed -n 's/^verification_repo=//p' "$file" | head -n 1
+  else
+    return 1
+  fi
+}
+
+
+app_credential_environment_token() {
+  local box="$1" role="$2" suffix variable value=""
+  suffix="$(printf '%s' "$box" | tr '[:lower:]' '[:upper:]')"
+  case "$role" in
+    guest) variable="MSW_GITHUB_READ_TOKEN_${suffix}" ;;
+    host) variable="MSW_GITHUB_WRITE_TOKEN_${suffix}" ;;
+    *) return 1 ;;
+  esac
+  value="${!variable:-}"
+  if [[ -z "$value" ]]; then
+    case "$role" in
+      guest) value="${MSW_GITHUB_READ_TOKEN:-}" ;;
+      host) value="${MSW_GITHUB_WRITE_TOKEN:-}" ;;
+    esac
+  fi
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
+app_keychain_service() {
+  local box="$1" role="$2"
+  case "$role" in
+    guest) printf 'msw.github.app.%s.guest.tokens' "$box" ;;
+    host) printf 'msw.github.app.%s.host.tokens' "$box" ;;
+    *) return 1 ;;
+  esac
+}
+
+app_keychain_get() {
+  local box="$1" role="$2" service raw
+  [[ -z "${MSW_TEST_KEYCHAIN_DIR:-}" ]] || return 1
+  app_metadata_profile_present "$box" "$role" || return 1
+  service="$(app_keychain_service "$box" "$role")"
+  raw="$("$SECURITY_BIN" find-generic-password -w -s "$service" -a profile 2>/dev/null)" || return 1
+  # Native MSW Monitor keeps the access/refresh pair as one atomic Keychain
+  # record. This broker emits only the access token to callers such as Git.
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  "$JQ_BIN" -e '
+    type == "object" and
+    .schemaVersion == 2 and
+    (.accessToken | type == "string" and length > 0) and
+    (.refreshToken | type == "string" and length > 0) and
+    (.accessExpiresAt | type == "string" and length > 0) and
+    (.refreshExpiresAt | type == "string" and length > 0) and
+    (.generation | type == "number" and . > 0)
+  ' <<<"$raw" >/dev/null 2>&1 || return 1
+  "$JQ_BIN" -r '.accessToken' <<<"$raw"
+}
+
+app_keychain_has() {
+  local box="$1" role="$2"
+  [[ -z "${MSW_TEST_KEYCHAIN_DIR:-}" ]] || return 1
+  app_metadata_profile_present "$box" "$role" || return 1
+  app_keychain_get "$box" "$role" >/dev/null 2>&1
+}
+
+app_credential_available() {
+  local box="$1" role="$2"
+  app_credential_environment_token "$box" "$role" >/dev/null 2>&1 ||
+    app_keychain_has "$box" "$role"
+}
+
+app_credential_value() {
+  local box="$1" role="$2" value
+  if value="$(app_credential_environment_token "$box" "$role" 2>/dev/null)"; then
+    printf '%s' "$value"
+  else
+    app_keychain_get "$box" "$role"
+  fi
+}
+
+app_metadata_value() {
+  local box="$1" role="$2" field="$3" key
+  [[ -f "$APP_CREDENTIALS_FILE" && ! -L "$APP_CREDENTIALS_FILE" ]] || return 1
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  key="$box.$role"
+  "$JQ_BIN" -r --arg key "$key" --arg field "$field" \
+    '.entries[$key][$field] // empty' "$APP_CREDENTIALS_FILE" 2>/dev/null
+}
+
+app_metadata_profile_present() {
+  local box="$1" role="$2" value
+  value="$(app_metadata_value "$box" "$role" workspace 2>/dev/null || true)"
+  [[ "$value" == "$box" ]]
 }
 
 write_metadata() {
@@ -244,11 +381,15 @@ github_lock_acquire() {
   chmod 700 "$GITHUB_META_DIR" || return 1
   lock="$(github_lock_file "$box")"
   if [[ -d "$lock" ]]; then
-    github_lock_reclaim_legacy "$lock" || fatal "GitHub operation already in progress for workspace '$box'"
+    if ! github_lock_reclaim_legacy "$lock"; then
+      (( MSW_APP_MODE == 1 )) && return 1
+      fatal "GitHub operation already in progress for workspace '$box'"
+    fi
   fi
   if ! exec 9>>"$lock"; then return 1; fi
   if ! "$LOCKF_BIN" -s -t 0 9; then
     exec 9>&-
+    (( MSW_APP_MODE == 1 )) && return 1
     fatal "GitHub operation already in progress for workspace '$box'"
   fi
   if ! printf '%s\n' "$$" >"$lock"; then
@@ -260,10 +401,20 @@ github_lock_acquire() {
 }
 
 assert_not_quarantined() {
-  local box="$1" file
+  local box="$1" file role app_quarantined=0
   [[ "${MSW_ALLOW_QUARANTINED:-0}" == 1 ]] && return 0
   file="$(quarantine_file "$box")"
-  [[ ! -e "$file" && ! -L "$file" ]] || fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
+  if [[ -e "$file" || -L "$file" ]]; then
+    fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
+  fi
+  for role in guest host; do
+    if app_metadata_profile_present "$box" "$role" &&
+      [[ "$(app_metadata_value "$box" "$role" quarantined 2>/dev/null || true)" == true ]]; then
+      app_quarantined=1
+    fi
+  done
+  (( app_quarantined == 0 )) ||
+    fatal "workspace '$box' is quarantined; repair it from MSW Monitor setup"
 }
 
 sandbox_running() {
@@ -346,10 +497,21 @@ setup_transaction_trap() {
   exit "$status"
 }
 
+read_token_for_workspace() {
+  local box="$1"
+  app_credential_value "$box" guest 2>/dev/null ||
+    keychain_get "$READ_KEYCHAIN_SERVICE" "$box"
+}
 
 
-read_token_for_workspace() { keychain_get "$READ_KEYCHAIN_SERVICE" "$1"; }
+
 workspace_msb() {
+  local box="$1"
+  shift
+  "$MSB_BIN" "$@" 9>&-
+}
+
+workspace_msb_with_read_token() {
   local box="$1" token="" status
   shift
   if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
@@ -367,10 +529,11 @@ workspace_msb() {
 start_sandbox() {
   local box="$1"
   assert_not_quarantined "$box"
-  if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" && [[ -f "$(metadata_file "$box")" ]]; then
+  if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
+    { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
     fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
   fi
-  workspace_msb "$box" start -q "$box"
+  workspace_msb_with_read_token "$box" start -q "$box"
 }
 
 
@@ -578,10 +741,11 @@ cmd_restart() {
     sandbox_exists "$box" || fatal "workspace '$box' does not exist"
     assert_not_quarantined "$box"
     note "Restarting $box"
-    if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" && [[ -f "$(metadata_file "$box")" ]]; then
+    if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
+      { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
       fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
     fi
-    workspace_msb "$box" restart -q -t 60 "$box"
+    workspace_msb_with_read_token "$box" restart -q -t 60 "$box"
   done < <(for_targets "$target")
 }
 
@@ -682,6 +846,7 @@ cmd_host_repair() {
   [[ "$(uname -s)" == Darwin ]] || fatal "host repair is only supported on macOS"
   require_command_path msb "$MSB_BIN"
   note "Configuring local browser addresses"
+  if [[ "${MSW_SKIP_HOST_REPAIR:-0}" != 1 ]]; then
   sudo -v
   local loop_script loop_plist hosts_tmp
   loop_script="$(mktemp "${TMPDIR:-/tmp}/msw-loopback.XXXXXX")"
@@ -727,6 +892,9 @@ HOSTS
   rm -f "$hosts_tmp"
   sudo /usr/bin/dscacheutil -flushcache
   sudo /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
+  else
+    note "Deferring privileged host repair to MSW Monitor"
+  fi
 
   note "Configuring SSH for Ghostty and Zed"
   mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
@@ -892,7 +1060,7 @@ cmd_clean() {
 bind_github_read_token() {
   local box="$1"
   keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
-  workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart >/dev/null
+  workspace_msb_with_read_token "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart >/dev/null
 }
 
 remove_github_secret() {
@@ -919,7 +1087,10 @@ host_safe_path() {
 }
 
 host_git_run() {
-  local temp_home="$1" box="$2" keychain_home="$HOME"; shift 2
+  local temp_home="$1" box="$2" keychain_home="$HOME" app_service=""; shift 2
+  if app_metadata_profile_present "$box" host; then
+    app_service="$(app_keychain_service "$box" host)"
+  fi
   mkdir -p "$temp_home"
   env -i \
     HOME="$temp_home" \
@@ -936,6 +1107,10 @@ host_git_run() {
     MSW_KEYCHAIN_ACCOUNT="$box" \
     MSW_KEYCHAIN_HOME="$keychain_home" \
     MSW_SECURITY_BIN="$SECURITY_BIN" \
+    MSW_JQ_BIN="$JQ_BIN" \
+    MSW_APP_KEYCHAIN_SERVICE="$app_service" \
+    MSW_APP_KEYCHAIN_ACCOUNT=profile \
+    MSW_GITHUB_WRITE_TOKEN="${MSW_GITHUB_WRITE_TOKEN:-}" \
     MSW_TEST_KEYCHAIN_DIR="${MSW_TEST_KEYCHAIN_DIR:-}" \
     GIT_LFS_SKIP_SMUDGE=1 \
     "$@"
@@ -1842,7 +2017,1583 @@ Backup / reference
   msw docs [cheatsheet|setup|github|tests]
   msw version
   msw help
+Machine-readable app integration
+  msw app handshake|state|metrics|logs|repositories|ports|github-state
+  msw app url|clone|pull|identity|disk|resize|clean|upgrade|update
+  msw app check|backup|restore|push-plan|plan|apply|bootstrap|help
 HELP
+}
+
+# Machine-readable integration boundary for MSW Monitor. Observation commands
+# never call ensure_running; only explicit, confirmed mutation commands may start.
+app_json_escape() {
+  local value="${1-}" escaped="" char code index
+  LC_ALL=C
+  for ((index = 0; index < ${#value}; index++)); do
+    char="${value:index:1}"
+    case "$char" in
+      '"') escaped="${escaped}\\\"" ;;
+      "\\") escaped="${escaped}\\\\\\" ;;
+      $'\n') escaped="${escaped}\\n" ;;
+      $'\r') escaped="${escaped}\\r" ;;
+      $'\t') escaped="${escaped}\\t" ;;
+      *)
+        printf -v code '%d' "'$char"
+        if (( code < 32 )); then
+          printf -v char '\\u%04x' "$code"
+        fi
+        escaped="${escaped}${char}"
+        ;;
+    esac
+  done
+  printf '%s' "$escaped"
+}
+
+app_json_string() {
+  printf '"'
+  app_json_escape "${1-}"
+  printf '"'
+}
+
+app_json_optional() {
+  if [[ -n "${1-}" ]]; then
+    app_json_string "$1"
+  else
+    printf 'null'
+  fi
+}
+
+app_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+app_request_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr -d '\n'
+  else
+    printf '%s-%s-%s' "$(date +%s)" "$$" "$RANDOM"
+  fi
+}
+
+app_emit_success() {
+  local command="$1" result warnings observed_at
+  result="${2-}"
+  [[ -n "$result" ]] || result='{}'
+  warnings="${3-}"
+  [[ -n "$warnings" ]] || warnings='[]'
+  observed_at="${4-}"
+  [[ -n "$observed_at" ]] || observed_at="$(app_now)"
+  MSW_APP_RESPONSE_EMITTED=1
+  printf '{"schemaVersion":1,"requestId":%s,"ok":true,"command":%s,"observedAt":%s,"result":%s,"warnings":%s}\n' \
+    "$(app_json_string "${MSW_APP_REQUEST_ID:-$(app_request_id)}")" \
+    "$(app_json_string "$command")" \
+    "$(app_json_string "$observed_at")" \
+    "$result" "$warnings"
+}
+
+app_emit_error() {
+  local command="$1" code="$2" message="$3" recovery="$4" workspace="${5:-}" retryable="${6:-false}" exit_code="${7:-1}"
+  MSW_APP_RESPONSE_EMITTED=1
+  printf '{"schemaVersion":1,"requestId":%s,"ok":false,"command":%s,"error":{"code":%s,"message":%s,"recovery":%s,"workspace":%s,"retryable":%s}}\n' \
+    "$(app_json_string "${MSW_APP_REQUEST_ID:-$(app_request_id)}")" \
+    "$(app_json_string "$command")" \
+    "$(app_json_string "$code")" \
+    "$(app_json_string "$message")" \
+    "$(app_json_string "$recovery")" \
+    "$(app_json_optional "$workspace")" \
+    "$retryable"
+  return "$exit_code"
+}
+
+app_unexpected_error() {
+  local status="$?"
+  if [[ "${BASH_SUBSHELL:-0}" != "$MSW_APP_ROOT_SUBSHELL" ]]; then
+    return "$status"
+  fi
+  trap - ERR
+  if [[ "$MSW_APP_RESPONSE_EMITTED" != 1 ]]; then
+    app_emit_error "$MSW_APP_COMMAND" "MSW_INTERNAL_ERROR" \
+      "MSW could not complete the machine-readable operation." \
+      "Retry after checking the MSW configuration and runtime diagnostics." "" true 1 || true
+  fi
+  exit "$status"
+}
+
+app_usage_error() {
+  local command="$1"
+  app_emit_error "$command" "MSW_INVALID_REQUEST" \
+    "The requested MSW Monitor command has invalid arguments." \
+    "See 'msw app help' for the typed command contract." "" false 64
+}
+
+app_require_config() {
+  local command="$1"
+  (( MSW_CONFIG_AVAILABLE == 1 )) || app_emit_error "$command" "MSW_CONFIG_MISSING" \
+    "MSW configuration is not installed." "Run Setup in MSW Monitor." "" false 78
+}
+
+app_require_runtime() {
+  local command="$1"
+  [[ -n "${MSB_BIN:-}" && -x "${MSB_BIN:-}" ]] || app_emit_error "$command" "MSW_RUNTIME_UNAVAILABLE" \
+    "The MicroSandbox runtime is unavailable." "Repair the MSW toolchain in MSW Monitor." "" true 69
+}
+
+app_workspace_purpose() {
+  case "$1" in
+    dev) printf 'Primary software development workspace' ;;
+    playgrounds) printf 'Experiments and disposable prototypes' ;;
+    personal) printf 'Personal projects and services' ;;
+  esac
+}
+
+app_workspace_resource() {
+  local box="$1" field="$2" upper var value
+  upper="$(printf '%s' "$box" | tr '[:lower:]' '[:upper:]')"
+  var="MSW_${upper}_${field}"
+  value="${!var-}"
+  printf '%s' "$value"
+}
+
+app_status_for_workspace() {
+  local box="$1" raw status
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 69
+  if ! raw="$(workspace_msb "$box" status "$box" --format json 2>/dev/null)"; then
+    return 69
+  fi
+  status="$("$JQ_BIN" -r --arg workspace "$box" '
+    if type == "array" then
+      ([.[] | select((.name // .id // "") == $workspace) | (.status // .lifecycle // empty)] | first) // empty
+    elif type == "object" then
+      if ((.name // .id // $workspace) == $workspace) then
+        (.status // .lifecycle // empty)
+      else empty end
+    else empty
+    end
+  ' <<<"$raw" 2>/dev/null)" || return 78
+  [[ -n "$status" && "$status" != null ]] || return 78
+  case "$status" in
+    Running|running) printf 'Running' ;;
+    Starting|starting) printf 'Starting' ;;
+    Stopping|stopping) printf 'Stopping' ;;
+    Restarting|restarting) printf 'Restarting' ;;
+    Stopped|stopped) printf 'Stopped' ;;
+    Exited|exited) printf 'Exited' ;;
+    *) printf 'Unknown' ;;
+  esac
+}
+
+app_workspace_quarantined() {
+  local box="$1" file role
+  file="$(quarantine_file "$box")"
+  [[ -e "$file" || -L "$file" ]] && return 0
+  for role in guest host; do
+    if app_metadata_profile_present "$box" "$role" &&
+      [[ "$(app_metadata_value "$box" "$role" quarantined 2>/dev/null || true)" == true ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+app_timestamp_epoch() {
+  local value="${1-}"
+  [[ -n "$value" ]] || return 1
+  date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null ||
+    date -u -d "$value" +%s 2>/dev/null
+}
+
+app_profile_expiry_state() {
+  local box="$1" role="$2" access refresh now soon access_epoch refresh_epoch
+  access="$(app_metadata_value "$box" "$role" accessExpiresAt 2>/dev/null || true)"
+  refresh="$(app_metadata_value "$box" "$role" refreshExpiresAt 2>/dev/null || true)"
+  [[ -n "$access" && -n "$refresh" ]] || return 1
+  access_epoch="$(app_timestamp_epoch "$access")" || return 1
+  refresh_epoch="$(app_timestamp_epoch "$refresh")" || return 1
+  now="$(date +%s)"
+  soon=$((now + 3600))
+  if (( refresh_epoch <= now )); then
+    printf 'authorization-required'
+  elif (( access_epoch <= soon )); then
+    printf 'expiring'
+  else
+    printf 'valid'
+  fi
+}
+
+app_workspace_credential_state() {
+  local box="$1" access needs_restart host_needs_restart guest_expiry host_expiry
+  if app_workspace_quarantined "$box"; then
+    printf 'Quarantined'
+  elif app_metadata_profile_present "$box" guest; then
+    access="$(metadata_access "$box" 2>/dev/null || true)"
+    needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
+    guest_expiry="$(app_profile_expiry_state "$box" guest 2>/dev/null || true)"
+    if ! app_credential_available "$box" guest || [[ -z "$guest_expiry" ]]; then
+      printf 'Needs authorization'
+      return
+    fi
+    if [[ "$access" == host-write ]]; then
+      host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
+      host_expiry="$(app_profile_expiry_state "$box" host 2>/dev/null || true)"
+      if ! app_metadata_profile_present "$box" host ||
+        ! app_credential_available "$box" host || [[ -z "$host_expiry" ]]; then
+        printf 'Needs authorization'
+        return
+      fi
+      if [[ "$guest_expiry" == authorization-required || "$host_expiry" == authorization-required ]]; then
+        printf 'Needs authorization'
+      elif [[ "$guest_expiry" == expiring || "$host_expiry" == expiring ]]; then
+        printf 'Expiring'
+      elif [[ "$needs_restart" == true || "$host_needs_restart" == true ]]; then
+        printf 'Needs restart'
+      else
+        printf 'Ready'
+      fi
+    elif [[ "$access" == read-only ]]; then
+      if [[ "$guest_expiry" == authorization-required ]]; then
+        printf 'Needs authorization'
+      elif [[ "$guest_expiry" == expiring ]]; then
+        printf 'Expiring'
+      elif [[ "$needs_restart" == true ]]; then
+        printf 'Needs restart'
+      else
+        printf 'Read-only'
+      fi
+    else
+      printf 'Needs authorization'
+    fi
+  elif [[ ! -f "$(metadata_file "$box")" ]]; then
+    printf 'Unconfigured'
+  else
+    access="$(metadata_access "$box" 2>/dev/null || true)"
+    if [[ "$access" == host-write ]]; then
+      if keychain_has "$READ_KEYCHAIN_SERVICE" "$box" && keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then
+        printf 'Ready'
+      else
+        printf 'Needs authorization'
+      fi
+    elif [[ "$access" == read-only ]]; then
+      if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
+        printf 'Read-only'
+      else
+        printf 'Needs authorization'
+      fi
+    else
+      printf 'Needs authorization'
+    fi
+  fi
+}
+
+app_workspace_json() {
+  local box="$1" lifecycle="${2:-Unknown}" freshness="${3:-unavailable}" status_observed_at="${4:-}" quarantine="clear"
+  local metrics_observed_at="" github_observed_at="" activity_observed_at=""
+  local credential purpose host ip cpus max_cpus memory max_memory root_disk verification_repo access
+  local account_login installation_id access_expires refresh_expires needs_restart host_needs_restart quarantine_reason role
+  if app_workspace_quarantined "$box"; then
+    quarantine="quarantined"
+    if [[ -f "$(quarantine_file "$box")" && ! -L "$(quarantine_file "$box")" ]]; then
+      quarantine_reason="$(sed -n '1p' "$(quarantine_file "$box")" 2>/dev/null || true)"
+      quarantine_reason="$(app_redact "$quarantine_reason")"
+    fi
+    if [[ -z "$quarantine_reason" ]]; then
+      for role in guest host; do
+        if app_metadata_profile_present "$box" "$role" &&
+          [[ "$(app_metadata_value "$box" "$role" quarantined 2>/dev/null || true)" == true ]]; then
+          quarantine_reason="Credential repair is required for the $role authorization."
+          break
+        fi
+      done
+    fi
+  fi
+  purpose="$(app_workspace_purpose "$box")"
+  host="$(workspace_host "$box")"
+  ip="$(workspace_ip "$box")"
+  cpus="$(app_workspace_resource "$box" CPUS)"
+  max_cpus="$(app_workspace_resource "$box" MAX_CPUS)"
+  memory="$(app_workspace_resource "$box" MEMORY)"
+  max_memory="$(app_workspace_resource "$box" MAX_MEMORY)"
+  root_disk="${MSW_ROOT_DISK:-}"
+  credential="$(app_workspace_credential_state "$box")"
+  if app_metadata_profile_present "$box" guest; then
+    github_observed_at="$(app_metadata_value "$box" guest updatedAt 2>/dev/null || true)"
+    verification_repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
+    access="$(metadata_access "$box" 2>/dev/null || true)"
+    account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
+    installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
+    access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
+    refresh_expires="$(app_metadata_value "$box" guest refreshExpiresAt 2>/dev/null || true)"
+    needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
+    if app_metadata_profile_present "$box" host; then
+      local host_access_expires host_refresh_expires
+      host_access_expires="$(app_metadata_value "$box" host accessExpiresAt 2>/dev/null || true)"
+      host_refresh_expires="$(app_metadata_value "$box" host refreshExpiresAt 2>/dev/null || true)"
+      [[ -n "$host_access_expires" && ( -z "$access_expires" || "$host_access_expires" < "$access_expires" ) ]] && access_expires="$host_access_expires"
+      [[ -n "$host_refresh_expires" && ( -z "$refresh_expires" || "$host_refresh_expires" < "$refresh_expires" ) ]] && refresh_expires="$host_refresh_expires"
+    fi
+    host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
+    [[ "$host_needs_restart" == true ]] && needs_restart=true
+  else
+    verification_repo="$(metadata_repo "$box" 2>/dev/null || true)"
+    access="$(metadata_access "$box" 2>/dev/null || true)"
+    account_login=""
+    installation_id=""
+    access_expires=""
+    refresh_expires=""
+    needs_restart=false
+  fi
+  [[ -n "$needs_restart" ]] || needs_restart=false
+  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s}}' \
+    "$(app_json_string "$box")" \
+    "$(app_json_string "$purpose")" \
+    "$(app_json_string "$lifecycle")" \
+    "$(app_json_string "$freshness")" \
+    "$(app_json_optional "$status_observed_at")" \
+    "$(app_json_optional "$metrics_observed_at")" \
+    "$(app_json_optional "$github_observed_at")" \
+    "$(app_json_optional "$activity_observed_at")" \
+    "$(app_json_string "$quarantine")" \
+    "$(app_json_optional "$quarantine_reason")" \
+    "$(app_json_string "$credential")" \
+    "$(app_json_string "${access:-unconfigured}")" \
+    "$(app_json_optional "$verification_repo")" \
+    "$(app_json_optional "$account_login")" \
+    "$(app_json_optional "$installation_id")" \
+    "$(app_json_optional "$access_expires")" \
+    "$(app_json_optional "$refresh_expires")" \
+    "$needs_restart" \
+    "$(app_json_string "$cpus")" \
+    "$(app_json_string "$max_cpus")" \
+    "$(app_json_string "$memory")" \
+    "$(app_json_string "$max_memory")" \
+    "$(app_json_string "$root_disk")" \
+    "$(app_json_string "$host")" \
+    "$(app_json_string "$ip")" \
+    "$([[ "$quarantine" == clear && ( "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] && printf true || printf false)" \
+    "$([[ "$lifecycle" == Running ]] && printf true || printf false)" \
+    "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
+    "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
+    "$([[ "$quarantine" == clear && "$credential" == Ready && "$lifecycle" == Running ]] && printf true || printf false)"
+}
+app_valid_control_free() {
+  local value="${1-}"
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]]
+}
+
+app_valid_relative_path() {
+  local path="${1-}" component
+  [[ -n "$path" && "$path" != /* ]] || return 1
+  app_valid_control_free "$path" || return 1
+  [[ "$path" == "." ]] && return 0
+  IFS='/' read -r -a _app_parts <<<"$path"
+  for component in "${_app_parts[@]}"; do
+    [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || return 1
+  done
+}
+
+app_valid_repository() {
+  local repository="${1-}"
+  [[ "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+}
+
+app_read_confirmation() {
+  local fd="${1-}" expected="${2-}" supplied=""
+  [[ "$fd" =~ ^[0-9]+$ ]] || return 1
+  IFS= read -r supplied <&"$fd" || return 1
+  [[ "$supplied" == "$expected" ]]
+}
+
+app_target_json() {
+  local target="${1:-all}" box items=""
+  while IFS= read -r box; do
+    [[ -n "$items" ]] && items+=","
+    items+="$(app_json_string "$box")"
+  done < <(for_targets "$target")
+  printf '[%s]' "$items"
+}
+
+app_cmd_url() {
+  local box="" port="3000" scheme="http" url
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error url "missing value for --workspace"; box="$2"; shift 2 ;;
+      --port) [[ $# -ge 2 ]] || app_usage_error url "missing value for --port"; port="$2"; shift 2 ;;
+      --scheme) [[ $# -ge 2 ]] || app_usage_error url "missing value for --scheme"; scheme="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error url "url requires --format json"; shift 2 ;;
+      *) app_usage_error url "unknown url option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error url "workspace must be dev, playgrounds, or personal"
+  app_require_config url
+  [[ "$port" =~ ^[0-9]+$ ]] || app_usage_error url "port must be an integer from 1 to 65535"
+  (( 10#$port >= 1 && 10#$port <= 65535 )) || app_usage_error url "port must be an integer from 1 to 65535"
+  [[ "$scheme" == http || "$scheme" == https ]] || app_usage_error url "scheme must be http or https"
+  port_is_published "$port" || app_emit_error url "MSW_PORT_NOT_PUBLISHED" "The requested port is not published for this installation." "Use a configured port or create an explicit tunnel." "$box" false 64
+  url="$(printf '%s://%s:%s' "$scheme" "$(workspace_host "$box")" "$port")"
+  app_emit_success url "{\"workspace\":$(app_json_string "$box"),\"url\":$(app_json_string "$url"),\"started\":false}"
+}
+
+app_cmd_clone() {
+  local box="" repository="" destination="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error clone "missing value for --workspace"; box="$2"; shift 2 ;;
+      --repository) [[ $# -ge 2 ]] || app_usage_error clone "missing value for --repository"; repository="$2"; shift 2 ;;
+      --destination) [[ $# -ge 2 ]] || app_usage_error clone "missing value for --destination"; destination="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error clone "clone requires --format json"; shift 2 ;;
+      *) app_usage_error clone "unknown clone option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error clone "workspace must be dev, playgrounds, or personal"
+  app_valid_repository "$repository" || app_usage_error clone "repository must be OWNER/REPOSITORY"
+  if [[ -n "$destination" ]]; then
+    app_valid_relative_path "$destination" || app_usage_error clone "destination must be relative to /workspace"
+  else
+    destination="${repository#*/}"
+  fi
+  app_valid_relative_path "$destination" || app_usage_error clone "destination must be relative to /workspace"
+  app_require_config clone
+  app_require_runtime clone
+  if ! output="$(cmd_clone "$box" "$repository" "$destination" 2>/dev/null)"; then
+    app_emit_error clone "MSW_CLONE_FAILED" "The repository could not be cloned into the workspace." "Check repository authorization and choose a new destination." "$box" true 1
+  fi
+  app_emit_success clone "{\"workspace\":$(app_json_string "$box"),\"operation\":\"clone\",\"target\":$(app_json_string "$destination"),\"changed\":true,\"outcome\":\"repository cloned\"}"
+}
+
+app_cmd_pull() {
+  local box="" path="all" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error pull "missing value for --workspace"; box="$2"; shift 2 ;;
+      --path) [[ $# -ge 2 ]] || app_usage_error pull "missing value for --path"; path="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error pull "pull requires --format json"; shift 2 ;;
+      *) app_usage_error pull "unknown pull option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error pull "workspace must be dev, playgrounds, or personal"
+  [[ "$path" == all ]] || app_valid_relative_path "$path" || app_usage_error pull "path must be relative to /workspace"
+  app_require_config pull
+  app_require_runtime pull
+  if ! output="$(cmd_pull "$box" "$path" 2>/dev/null)"; then
+    app_emit_error pull "MSW_PULL_FAILED" "The repository could not be fast-forwarded." "Review repository state and retry the individual path." "$box" true 1
+  fi
+  app_emit_success pull "{\"workspace\":$(app_json_string "$box"),\"operation\":\"pull\",\"target\":$(app_json_string "$path"),\"changed\":true,\"outcome\":\"fast-forward pull completed\"}"
+}
+
+app_cmd_identity() {
+  local name="" email="" target="all" output box
+  while (( $# > 0 )); do
+    case "$1" in
+      --name) [[ $# -ge 2 ]] || app_usage_error identity "missing value for --name"; name="$2"; shift 2 ;;
+      --email) [[ $# -ge 2 ]] || app_usage_error identity "missing value for --email"; email="$2"; shift 2 ;;
+      --workspace) [[ $# -ge 2 ]] || app_usage_error identity "missing value for --workspace"; target="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error identity "identity requires --format json"; shift 2 ;;
+      *) app_usage_error identity "unknown identity option '$1'" ;;
+    esac
+  done
+  [[ -n "$name" && -n "$email" && ${#name} -le 256 && ${#email} -le 320 ]] || app_usage_error identity "name and email are required"
+  app_valid_control_free "$name" && app_valid_control_free "$email" || app_usage_error identity "identity fields contain a control character"
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error identity "workspace must be dev, playgrounds, or personal"
+  app_require_config identity
+  app_require_runtime identity
+  if ! output="$(cmd_identity "$name" "$email" "$target" 2>/dev/null)"; then
+    app_emit_error identity "MSW_IDENTITY_FAILED" "Git identity could not be applied." "Review the workspace runtime and retry." "" true 1
+  fi
+  app_emit_success identity "{\"target\":$(app_json_string "$target"),\"name\":$(app_json_string "$name"),\"email\":$(app_json_string "$email"),\"workspaces\":$(app_target_json "$target")}"
+}
+
+app_cmd_disk() {
+  local target="all" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error disk "missing value for --workspace"; target="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error disk "disk requires --format json"; shift 2 ;;
+      *) app_usage_error disk "unknown disk option '$1'" ;;
+    esac
+  done
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error disk "workspace must be dev, playgrounds, or personal"
+  app_require_config disk
+  app_require_runtime disk
+  if ! output="$(cmd_disk "$target" 2>/dev/null)"; then
+    app_emit_error disk "MSW_DISK_UNAVAILABLE" "Disk usage could not be collected." "Retry after repairing the workspace runtime." "" true 69
+  fi
+  app_emit_success disk "{\"workspace\":$(app_json_string "$target"),\"operation\":\"disk\",\"target\":null,\"changed\":false,\"outcome\":\"disk usage collected; stopped workspaces may have been started for this read\"}"
+}
+
+app_cmd_resize() {
+  local box="" memory="" cpus="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error resize "missing value for --workspace"; box="$2"; shift 2 ;;
+      --memory) [[ $# -ge 2 ]] || app_usage_error resize "missing value for --memory"; memory="$2"; shift 2 ;;
+      --cpus) [[ $# -ge 2 ]] || app_usage_error resize "missing value for --cpus"; cpus="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error resize "resize requires --format json"; shift 2 ;;
+      *) app_usage_error resize "unknown resize option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error resize "workspace must be dev, playgrounds, or personal"
+  [[ "$memory" =~ ^[0-9]+([KMGTP]i?B?)$ ]] || app_usage_error resize "memory must use an explicit size such as 8GiB"
+  [[ -z "$cpus" || "$cpus" =~ ^[0-9]+([.][0-9]+)?$ ]] || app_usage_error resize "cpus must be numeric"
+  app_require_config resize
+  app_require_runtime resize
+  if ! output="$(cmd_resize "$box" "$memory" "$cpus" 2>/dev/null)"; then
+    app_emit_error resize "MSW_RESIZE_FAILED" "Workspace resources could not be changed." "Review configured ceilings and retry." "$box" true 1
+  fi
+  app_emit_success resize "{\"workspace\":$(app_json_string "$box"),\"memory\":$(app_json_string "$memory"),\"cpus\":$(app_json_optional "$cpus"),\"effective\":true,\"outcome\":\"resource change applied\"}"
+}
+
+app_cmd_clean() {
+  local target="all" volumes=0 fd="" expected="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error clean "missing value for --workspace"; target="$2"; shift 2 ;;
+      --volumes) volumes=1; shift ;;
+      --confirmation-fd) [[ $# -ge 2 ]] || app_usage_error clean "missing value for --confirmation-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error clean "clean requires --format json"; shift 2 ;;
+      *) app_usage_error clean "unknown clean option '$1'" ;;
+    esac
+  done
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error clean "workspace must be dev, playgrounds, or personal"
+  expected="$([[ "$volumes" == 1 ]] && printf 'DELETE VOLUMES %s' "$target" || printf 'CLEAN %s' "$target")"
+  app_read_confirmation "$fd" "$expected" || app_emit_error clean "MSW_CONFIRMATION_MISMATCH" "The cleanup confirmation did not match the reviewed action." "Review the cleanup effect and confirm the exact phrase." "$target" false 77
+  app_require_config clean
+  app_require_runtime clean
+  if (( volumes == 1 )); then
+    if ! output="$(cmd_clean "$target" --volumes 2>/dev/null)"; then
+      app_emit_error clean "MSW_CLEAN_FAILED" "Workspace cleanup failed." "Retry after checking the workspace runtime." "$target" true 1
+    fi
+  elif ! output="$(cmd_clean "$target" 2>/dev/null)"; then
+    app_emit_error clean "MSW_CLEAN_FAILED" "Workspace cleanup failed." "Retry after checking the workspace runtime." "$target" true 1
+  fi
+  app_emit_success clean "{\"target\":$(app_json_string "$target"),\"operation\":\"clean\",\"volumesRemoved\":$([[ "$volumes" == 1 ]] && printf true || printf false),\"outcome\":\"cleanup completed\"}"
+}
+
+app_cmd_upgrade() {
+  local target="all" fd="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error upgrade "missing value for --workspace"; target="$2"; shift 2 ;;
+      --confirmation-fd) [[ $# -ge 2 ]] || app_usage_error upgrade "missing value for --confirmation-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error upgrade "upgrade requires --format json"; shift 2 ;;
+      *) app_usage_error upgrade "unknown upgrade option '$1'" ;;
+    esac
+  done
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error upgrade "workspace must be dev, playgrounds, or personal"
+  app_read_confirmation "$fd" "UPGRADE $target" || app_emit_error upgrade "MSW_CONFIRMATION_MISMATCH" "The upgrade confirmation did not match the reviewed action." "Review the upgrade effect and confirm the exact phrase." "$target" false 77
+  app_require_config upgrade
+  app_require_runtime upgrade
+  if ! output="$(cmd_upgrade "$target" 2>/dev/null)"; then
+    app_emit_error upgrade "MSW_UPGRADE_FAILED" "Guest package upgrade failed." "Retry after checking the workspace runtime." "$target" true 1
+  fi
+  app_emit_success upgrade "{\"target\":$(app_json_string "$target"),\"operation\":\"upgrade\",\"volumesRemoved\":false,\"outcome\":\"guest package upgrade completed\"}"
+}
+
+app_cmd_update() {
+  local fd="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --confirmation-fd) [[ $# -ge 2 ]] || app_usage_error update "missing value for --confirmation-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error update "update requires --format json"; shift 2 ;;
+      *) app_usage_error update "unknown update option '$1'" ;;
+    esac
+  done
+  app_read_confirmation "$fd" "UPDATE" || app_emit_error update "MSW_CONFIRMATION_MISMATCH" "The runtime update confirmation did not match." "Review the update effect and confirm UPDATE." "" false 77
+  app_require_runtime update
+  if ! output="$(cmd_update 2>/dev/null)"; then
+    app_emit_error update "MSW_UPDATE_FAILED" "The MicroSandbox runtime update failed." "Retry from Settings after checking the toolchain." "" true 1
+  fi
+  app_emit_success update "{\"target\":\"host\",\"operation\":\"update\",\"volumesRemoved\":false,\"outcome\":\"host runtime update and doctor completed\"}"
+}
+
+app_cmd_check() {
+  local deep=0 fd="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --deep) deep=1; shift ;;
+      --confirmation-fd) [[ $# -ge 2 ]] || app_usage_error check "missing value for --confirmation-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error check "check requires --format json"; shift 2 ;;
+      *) app_usage_error check "unknown check option '$1'" ;;
+    esac
+  done
+  if (( deep == 1 )); then
+    app_read_confirmation "$fd" "DEEP CHECK" || app_emit_error check "MSW_CONFIRMATION_MISMATCH" "The deep-check confirmation did not match." "Review that deep verification starts workspaces and test containers, then confirm DEEP CHECK." "" false 77
+  elif [[ -n "$fd" ]]; then
+    app_usage_error check "--confirmation-fd is valid only with --deep"
+  fi
+  app_require_config check
+  app_require_runtime check
+  if ! output="$(cmd_check $([[ "$deep" == 1 ]] && printf '%s' --deep) 2>/dev/null)"; then
+    app_emit_error check "MSW_CHECK_FAILED" "One or more MSW checks failed." "Open diagnostics for subsystem recovery details." "" true 1
+  fi
+  app_emit_success check "{\"deep\":$([[ "$deep" == 1 ]] && printf true || printf false),\"passed\":true,\"checks\":[{\"id\":\"msw-check\",\"title\":\"MSW check\",\"status\":\"pass\",\"detail\":\"MSW check completed successfully.\",\"recovery\":null}],\"outcome\":\"all requested checks passed\"}"
+}
+
+app_cmd_backup() {
+  local directory="" output archive checksum box running_json="" restarted_json="" warnings="[]" warning=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --directory) [[ $# -ge 2 ]] || app_usage_error backup "missing value for --directory"; directory="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error backup "backup requires --format json"; shift 2 ;;
+      *) app_usage_error backup "unknown backup option '$1'" ;;
+    esac
+  done
+  [[ -n "$directory" && "$directory" != -* ]] || app_usage_error backup "backup directory is required"
+  app_valid_control_free "$directory" || app_usage_error backup "backup directory contains a control character"
+  app_require_config backup
+  app_require_runtime backup
+  for box in "${WORKSPACES[@]}"; do
+    if [[ "$(app_status_for_workspace "$box" 2>/dev/null || true)" == Running ]]; then
+      [[ -n "$running_json" ]] && running_json+=","
+      running_json+="$(app_json_string "$box")"
+    fi
+  done
+  if ! output="$(cmd_backup "$directory" 2>/dev/null)"; then
+    app_emit_error backup "MSW_BACKUP_FAILED" "The backup could not be created." "Review the destination and workspace health, then retry." "" true 1
+  fi
+  directory="$(cd "$directory" && pwd -P)"
+  archive="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst$/p' | tail -n 1)"
+  checksum="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst\.sha256$/p' | tail -n 1)"
+  [[ -n "$archive" && "$archive" == "$directory"/* && "$archive" == *.tar.zst && -f "$archive" && ! -L "$archive" ]] ||
+    app_emit_error backup "MSW_BACKUP_FAILED" "MSW returned an invalid backup archive path." "Retry the backup after checking diagnostics." "" false 78
+  [[ -n "$checksum" && "$checksum" == "$archive.sha256" && -f "$checksum" && ! -L "$checksum" ]] || checksum=""
+  for box in "${WORKSPACES[@]}"; do
+    [[ ",$running_json," == *",\"$box\","* ]] || continue
+    if [[ "$(app_status_for_workspace "$box" 2>/dev/null || true)" == Running ]]; then
+      [[ -n "$restarted_json" ]] && restarted_json+=","
+      restarted_json+="$(app_json_string "$box")"
+    else
+      warning="MSW could not confirm that $box returned to its pre-backup running state"
+      if [[ "$warnings" == "[]" ]]; then warnings="[$(app_json_string "$warning")]"; else warnings="${warnings%]},$(app_json_string "$warning")]"; fi
+    fi
+  done
+  app_emit_success backup "{\"archive\":$(app_json_string "$archive"),\"checksum\":$(app_json_optional "$checksum"),\"stoppedWorkspaces\":[$running_json],\"restartedWorkspaces\":[$restarted_json]}" "$warnings"
+}
+
+app_cmd_restore() {
+  local archive="" fd="" output
+  while (( $# > 0 )); do
+    case "$1" in
+      --archive) [[ $# -ge 2 ]] || app_usage_error restore "missing value for --archive"; archive="$2"; shift 2 ;;
+      --confirmation-fd) [[ $# -ge 2 ]] || app_usage_error restore "missing value for --confirmation-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error restore "restore requires --format json"; shift 2 ;;
+      *) app_usage_error restore "unknown restore option '$1'" ;;
+    esac
+  done
+  [[ -f "$archive" && ! -L "$archive" && "$archive" == *.zst ]] || app_usage_error restore "restore requires an existing regular .zst archive"
+  app_read_confirmation "$fd" RESTORE || app_emit_error restore "MSW_CONFIRMATION_MISMATCH" "The restore confirmation did not match." "Review the archive and confirm RESTORE." "" false 77
+  app_require_config restore
+  app_require_runtime restore
+  if ! output="$(printf 'RESTORE\n' | cmd_restore "$archive" 2>/dev/null)"; then
+    app_emit_error restore "MSW_RESTORE_FAILED" "The workspace restore failed and MSW attempted its rollback." "Run diagnostics and inspect the retained rollback state." "" true 1
+  fi
+  app_emit_success restore "{\"workspace\":\"all\",\"operation\":\"restore\",\"target\":$(app_json_string "$archive"),\"changed\":true,\"outcome\":\"restore completed; workspaces remain stopped\"}"
+}
+
+
+app_cmd_handshake() {
+  local config_available=false runtime_available=false jq_available=false
+  (( MSW_CONFIG_AVAILABLE == 1 )) && config_available=true
+  [[ -n "${MSB_BIN:-}" && -x "${MSB_BIN:-}" ]] && runtime_available=true
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] && jq_available=true
+  app_emit_success handshake "{\"protocolVersion\":1,\"mswVersion\":$(app_json_string "${MSW_VERSION:-unknown}"),\"platform\":{\"os\":$(app_json_string "$(uname -s)"),\"architecture\":$(app_json_string "$(uname -m)")},\"configurationAvailable\":$config_available,\"runtimeAvailable\":$runtime_available,\"capabilities\":{\"jsonState\":true,\"jsonMetrics\":true,\"jsonLogs\":true,\"plans\":true,\"bootstrapEvents\":true,\"jq\":$jq_available,\"workspaceCount\":3},\"exitCodes\":{\"success\":0,\"operationFailed\":1,\"usage\":64,\"dependencyUnavailable\":69,\"lockConflict\":73,\"authorizationDenied\":77,\"configurationRequired\":78,\"cancelled\":130}}"
+}
+
+app_cmd_state() {
+  local target="all" box state_json="" warnings="[]" warning lifecycle observed_at
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error state "missing value for --workspace"; target="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error state "state requires --format json"; shift 2 ;;
+      *) app_usage_error state "unknown state option '$1'" ;;
+    esac
+  done
+  app_require_config state
+  app_require_runtime state
+  if [[ "$target" == all ]]; then
+    for box in "${WORKSPACES[@]}"; do
+      [[ -n "$state_json" ]] && state_json+=","
+      if lifecycle="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+        observed_at="$(app_now)"
+        state_json+="$(app_workspace_json "$box" "$lifecycle" fresh "$observed_at")"
+      else
+        state_json+="$(app_workspace_json "$box" Unknown unavailable "")"
+        warning="state observation for $box is unavailable; the previous lifecycle must remain stale"
+        if [[ "$warnings" == "[]" ]]; then warnings="[$(app_json_string "$warning")]"; else warnings="${warnings%]},$(app_json_string "$warning")]"; fi
+      fi
+    done
+  else
+    is_workspace "$target" || app_usage_error state "workspace must be dev, playgrounds, or personal"
+    if lifecycle="$(app_status_for_workspace "$target" 2>/dev/null)"; then
+      observed_at="$(app_now)"
+      state_json="$(app_workspace_json "$target" "$lifecycle" fresh "$observed_at")"
+    else
+      state_json="$(app_workspace_json "$target" Unknown unavailable "")"
+      warning="state observation for $target is unavailable; the previous lifecycle must remain stale"
+      warnings="[$(app_json_string "$warning")]"
+    fi
+  fi
+  app_emit_success state "{\"schemaVersion\":1,\"mswVersion\":$(app_json_string "${MSW_VERSION:-unknown}"),\"workspaces\":[$state_json]}" "$warnings"
+}
+
+app_cmd_metrics() {
+  local box="" once=0 follow=0 raw status line
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error metrics "missing value for --workspace"; box="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error metrics "metrics requires --format json"; shift 2 ;;
+      --once) once=1; shift ;;
+      --follow) follow=1; shift ;;
+      *) app_usage_error metrics "unknown metrics option '$1'" ;;
+    esac
+  done
+  [[ -n "$box" ]] || app_usage_error metrics "--workspace is required"
+  is_workspace "$box" || app_usage_error metrics "workspace must be dev, playgrounds, or personal"
+  (( once + follow == 1 )) || app_usage_error metrics "metrics requires exactly one of --once or --follow"
+  app_require_config metrics
+  app_require_runtime metrics
+  if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error metrics "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
+  fi
+  if [[ "$status" != Running ]]; then
+    app_emit_success metrics "{\"workspace\":$(app_json_string "$box"),\"available\":false,\"lifecycle\":$(app_json_string "$status"),\"freshness\":\"fresh\",\"reason\":\"workspace is not running\"}"
+    return
+  fi
+  if (( follow == 1 )); then
+    MSW_APP_RESPONSE_EMITTED=1
+    printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"metrics","requestId":%s,"workspace":%s,"observedAt":%s,"safeForDisplay":true}\n' \
+      "$(app_json_string "$MSW_APP_REQUEST_ID")" \
+      "$(app_json_string "$box")" \
+      "$(app_json_string "$(app_now)")"
+    if ! workspace_msb "$box" metrics "$box" --format json --follow 2>/dev/null | while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      if (( ${#line} > 262144 )); then line="${line:0:262144}"; fi
+      if [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] && "$JQ_BIN" -e 'type == "object" or type == "array"' <<<"$line" >/dev/null 2>&1; then
+        MSW_APP_RESPONSE_EMITTED=1
+        printf '{"schemaVersion":1,"type":"metrics","requestId":%s,"workspace":%s,"observedAt":%s,"available":true,"snapshot":%s,"safeForDisplay":true}\n' \
+          "$(app_json_string "$MSW_APP_REQUEST_ID")" \
+          "$(app_json_string "$box")" \
+          "$(app_json_string "$(app_now)")" \
+          "$line"
+      else
+        MSW_APP_RESPONSE_EMITTED=1
+        printf '{"schemaVersion":1,"type":"metrics","requestId":%s,"workspace":%s,"observedAt":%s,"available":false,"reason":"The runtime returned a malformed metrics snapshot.","safeForDisplay":true}\n' \
+          "$(app_json_string "$MSW_APP_REQUEST_ID")" \
+          "$(app_json_string "$box")" \
+          "$(app_json_string "$(app_now)")"
+      fi
+    done; then
+      printf '{"schemaVersion":1,"type":"failed","requestId":%s,"workspace":%s,"observedAt":%s,"code":"MSW_METRICS_UNAVAILABLE","message":"The runtime metrics stream ended with an error.","safeForDisplay":true}\n' \
+        "$(app_json_string "$MSW_APP_REQUEST_ID")" \
+        "$(app_json_string "$box")" \
+        "$(app_json_string "$(app_now)")"
+      return 69
+    fi
+    printf '{"schemaVersion":1,"type":"stream-end","requestId":%s,"workspace":%s,"observedAt":%s,"safeForDisplay":true}\n' \
+      "$(app_json_string "$MSW_APP_REQUEST_ID")" \
+      "$(app_json_string "$box")" \
+      "$(app_json_string "$(app_now)")"
+    return
+  fi
+  if ! raw="$(workspace_msb "$box" metrics "$box" --format json --once 2>/dev/null)"; then
+    app_emit_error metrics "MSW_METRICS_UNAVAILABLE" "The runtime did not provide a one-shot JSON metrics snapshot." "Keep Metrics visible after the runtime is updated." "$box" true 69
+  fi
+  [[ -n "${JQ_BIN:-}" ]] && "$JQ_BIN" -e 'type == "object" or type == "array"' <<<"$raw" >/dev/null 2>&1 || \
+    app_emit_error metrics "MSW_SCHEMA_MISMATCH" "The runtime returned an unsupported metrics schema." "Update the MSW toolchain and retry." "$box" false 78
+  app_emit_success metrics "{\"workspace\":$(app_json_string "$box"),\"available\":true,\"lifecycle\":\"Running\",\"freshness\":\"fresh\",\"snapshot\":$raw}"
+}
+
+app_cmd_ports() {
+  local target="all" box ports_json="" port
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error ports "missing value for --workspace"; target="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error ports "ports requires --format json"; shift 2 ;;
+      *) app_usage_error ports "unknown ports option '$1'" ;;
+    esac
+  done
+  if [[ "$target" != all ]]; then
+    is_workspace "$target" || app_usage_error ports "workspace must be dev, playgrounds, or personal"
+  fi
+  app_require_config ports
+  while IFS= read -r port; do
+    [[ -n "$ports_json" ]] && ports_json+=","
+    ports_json+="{\"port\":$(app_json_string "$port"),\"configured\":true}"
+  done < <(expand_ports)
+  app_emit_success ports "{\"workspace\":$(app_json_string "$target"),\"published\":[$ports_json],\"activeListening\":\"unknown\",\"freshness\":\"fresh\"}"
+}
+
+app_cmd_github_state() {
+  local target="all" box items="" repo access provider configured quarantine account_login installation_id access_expires refresh_expires needs_restart
+  local host_access_expires host_refresh_expires host_needs_restart
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error github-state "missing value for --workspace"; target="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-state "github-state requires --format json"; shift 2 ;;
+      *) app_usage_error github-state "unknown github-state option '$1'" ;;
+    esac
+  done
+  if [[ "$target" != all ]]; then
+    is_workspace "$target" || app_usage_error github-state "workspace must be dev, playgrounds, or personal"
+  fi
+  for box in "${WORKSPACES[@]}"; do
+    [[ "$target" == all || "$target" == "$box" ]] || continue
+    configured=false
+    repo=""
+    access=""
+    provider="none"
+    account_login=""
+    installation_id=""
+    access_expires=""
+    refresh_expires=""
+    needs_restart=false
+    if app_metadata_profile_present "$box" guest; then
+      configured=true
+      provider="$(app_metadata_value "$box" guest provider 2>/dev/null || true)"
+      [[ -n "$provider" ]] || provider="github-app-user"
+      repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
+      access="$(metadata_access "$box" 2>/dev/null || true)"
+      account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
+      installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
+      access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
+      refresh_expires="$(app_metadata_value "$box" guest refreshExpiresAt 2>/dev/null || true)"
+      needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
+      if app_metadata_profile_present "$box" host; then
+        host_access_expires="$(app_metadata_value "$box" host accessExpiresAt 2>/dev/null || true)"
+        host_refresh_expires="$(app_metadata_value "$box" host refreshExpiresAt 2>/dev/null || true)"
+        host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
+        [[ -n "$host_access_expires" && ( -z "$access_expires" || "$host_access_expires" < "$access_expires" ) ]] && access_expires="$host_access_expires"
+        [[ -n "$host_refresh_expires" && ( -z "$refresh_expires" || "$host_refresh_expires" < "$refresh_expires" ) ]] && refresh_expires="$host_refresh_expires"
+        [[ "$host_needs_restart" == true ]] && needs_restart=true
+      fi
+    elif [[ -f "$(metadata_file "$box")" ]]; then
+      configured=true
+      provider="legacy-pat"
+      repo="$(metadata_repo "$box" 2>/dev/null || true)"
+      access="$(metadata_access "$box" 2>/dev/null || true)"
+    fi
+    [[ "$needs_restart" == true ]] || needs_restart=false
+    quarantine=false
+    app_workspace_quarantined "$box" && quarantine=true
+    [[ -n "$items" ]] && items+=","
+    items+="{\"workspace\":$(app_json_string "$box"),\"provider\":$(app_json_string "$provider"),\"configured\":$configured,\"accessMode\":$(app_json_string "${access:-unconfigured}"),\"verificationRepository\":$(app_json_optional "$repo"),\"accountLogin\":$(app_json_optional "$account_login"),\"installationId\":$(app_json_optional "$installation_id"),\"accessExpiresAt\":$(app_json_optional "$access_expires"),\"refreshExpiresAt\":$(app_json_optional "$refresh_expires"),\"needsRestart\":$needs_restart,\"quarantined\":$quarantine}"
+  done
+  app_emit_success github-state "{\"workspaces\":[$items]}"
+}
+
+app_cmd_github_bind() {
+  local box="" repo="" mode="read-only" before="Unknown" after="Unknown" verify_output="" legacy_file=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --workspace"; box="$2"; shift 2 ;;
+      --repository) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --repository"; repo="$2"; shift 2 ;;
+      --mode) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --mode"; mode="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-bind "github-bind requires --format json"; shift 2 ;;
+      *) app_usage_error github-bind "unknown github-bind option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error github-bind "workspace must be dev, playgrounds, or personal"
+  app_valid_repository "$repo" || app_usage_error github-bind "repository must be OWNER/REPOSITORY"
+  [[ "$mode" == host-write || "$mode" == read-only ]] ||
+    app_usage_error github-bind "mode must be host-write or read-only"
+  app_require_config github-bind
+  app_require_runtime github-bind
+  app_metadata_profile_present "$box" guest ||
+    app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Guest GitHub authorization is not committed." "Authorize guest access in MSW Monitor first." "$box" false 77
+  app_credential_available "$box" guest ||
+    app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "The guest GitHub credential is unavailable." "Authorize guest access again in MSW Monitor." "$box" false 77
+  if [[ "$mode" == host-write ]]; then
+    app_metadata_profile_present "$box" host ||
+      app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Host GitHub authorization is not committed." "Authorize host write access in MSW Monitor first." "$box" false 77
+    app_credential_available "$box" host ||
+      app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "The host GitHub credential is unavailable." "Authorize host write access again in MSW Monitor." "$box" false 77
+  fi
+  before="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
+  [[ "$before" != Unknown ]] || app_emit_error github-bind "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed before credential binding." "Repair state observation and authorize again." "$box" true 69
+  if ! github_lock_acquire "$box"; then
+    app_emit_error github-bind "MSW_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then authorize again." "$box" true 73
+  fi
+  if ! quarantine_workspace "$box" "GitHub App credential binding pending verification" >/dev/null 2>&1; then
+    app_emit_error github-bind "MSW_GITHUB_QUARANTINE_FAILED" "MSW could not prove the workspace safe before binding credentials." "Repair the quarantined workspace before authorizing again." "$box" false 77
+  fi
+  if ! verify_output="$(MSW_ALLOW_QUARANTINED=1 MSW_GITHUB_VERIFY_INHERITED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" 2>&1)"; then
+    quarantine_workspace "$box" "GitHub App credential verification failed" >/dev/null 2>&1 || true
+    app_emit_error github-bind "MSW_GITHUB_BIND_FAILED" "GitHub permissions could not be verified and the workspace remains quarantined." "Review the repository and GitHub App permissions, then authorize again." "$box" true 77
+  fi
+  after="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
+  if [[ "$before" == Stopped || "$before" == Exited ]] && [[ "$after" == Running ]]; then
+    if ! workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1; then
+      quarantine_workspace "$box" "GitHub verification lifecycle restoration failed" >/dev/null 2>&1 || true
+      app_emit_error github-bind "MSW_GITHUB_BIND_RECONCILE_FAILED" "GitHub verification completed but the workspace could not be returned to its prior stopped state." "Repair the quarantined workspace before continuing." "$box" true 69
+    fi
+    after="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
+  fi
+  if [[ "$before" == Running && "$after" != Running ]] ||
+    { [[ "$before" == Stopped || "$before" == Exited ]] && [[ "$after" != Stopped ]]; }; then
+    quarantine_workspace "$box" "GitHub verification outcome could not be reconciled" >/dev/null 2>&1 || true
+    app_emit_error github-bind "MSW_GITHUB_BIND_RECONCILE_FAILED" "GitHub verification exited without restoring the previously observed lifecycle." "Repair the quarantined workspace before continuing." "$box" true 69
+  fi
+  legacy_file="$(metadata_file "$box")"
+  if [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
+    if [[ -L "$legacy_file" ]] || ! rm -f "$legacy_file" || [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
+      quarantine_workspace "$box" "Legacy GitHub metadata cleanup failed" >/dev/null 2>&1 || true
+      app_emit_error github-bind "MSW_GITHUB_LEGACY_CLEANUP_FAILED" "GitHub verification succeeded but legacy capability metadata could not be removed." "Repair the quarantined credential configuration before continuing." "$box" false 77
+    fi
+  fi
+  if ! clear_quarantine "$box"; then
+    quarantine_workspace "$box" "GitHub verification quarantine cleanup failed" >/dev/null 2>&1 || true
+    app_emit_error github-bind "MSW_GITHUB_QUARANTINE_FAILED" "GitHub verification succeeded but quarantine cleanup could not be proven." "Repair the quarantined workspace before continuing." "$box" false 77
+  fi
+  github_lock_release
+  app_emit_success github-bind "{\"workspace\":$(app_json_string "$box"),\"accessMode\":$(app_json_string "$mode"),\"verificationRepository\":$(app_json_string "$repo"),\"verified\":true,\"lifecycleRestored\":true}"
+}
+
+app_cmd_github_quarantine() {
+  local box=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error github-quarantine "missing value for --workspace"; box="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-quarantine "github-quarantine requires --format json"; shift 2 ;;
+      *) app_usage_error github-quarantine "unknown github-quarantine option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error github-quarantine "workspace must be dev, playgrounds, or personal"
+  app_require_config github-quarantine
+  app_require_runtime github-quarantine
+  if ! github_lock_acquire "$box"; then
+    app_emit_error github-quarantine "MSW_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then retry fail-closed quarantine." "$box" true 73
+  fi
+  quarantine_workspace "$box" "Native credential transaction requires repair" >/dev/null 2>&1 ||
+    app_emit_error github-quarantine "MSW_GITHUB_QUARANTINE_FAILED" "The workspace was marked quarantined, but a stopped lifecycle could not be proven." "Inspect the workspace runtime before any further credential operation." "$box" false 77
+  github_lock_release
+  app_emit_success github-quarantine "{\"workspace\":$(app_json_string "$box"),\"quarantined\":true,\"lifecycle\":\"Stopped\"}"
+}
+app_guest_repository_scan() {
+
+  local box="$1" include_status="$2" credential_state="$3" quarantine_state="$4" requested_path="${5-}" script
+  read -r -d '' script <<'SCRIPT' || true
+set -Eeuo pipefail
+include_status="$1"
+credential_state="$2"
+quarantine_state="$3"
+requested_path="${4-}"
+root="${MSW_GUEST_WORKSPACE_ROOT:-/workspace}"
+
+json_escape() {
+  local value="${1-}" escaped="" char code index
+  LC_ALL=C
+  for ((index = 0; index < ${#value}; index++)); do
+    char="${value:index:1}"
+    case "$char" in
+      '"') escaped="${escaped}\\\"" ;;
+      "\\") escaped="${escaped}\\\\\\" ;;
+      $'\n') escaped="${escaped}\\n" ;;
+      $'\r') escaped="${escaped}\\r" ;;
+      $'\t') escaped="${escaped}\\t" ;;
+      *)
+        printf -v code '%d' "'$char"
+        if (( code < 32 )); then
+          printf -v char '\\u%04x' "$code"
+        fi
+        escaped="${escaped}${char}"
+        ;;
+    esac
+  done
+  printf '"%s"' "$escaped"
+}
+
+json_or_null() {
+  if [[ -n "${1-}" ]]; then json_escape "$1"; else printf 'null'; fi
+}
+
+canonical_remote() {
+  local remote="${1-}" raw owner repo
+  case "$remote" in
+    https://github.com/*) raw="${remote#https://github.com/}" ;;
+    git@github.com:*) raw="${remote#git@github.com:}" ;;
+    ssh://git@github.com/*) raw="${remote#ssh://git@github.com/}" ;;
+    *) return 0 ;;
+  esac
+  raw="${raw%.git}"
+  [[ "$raw" != */*/* && "$raw" != *[\?\#]* ]] || return 0
+  owner="${raw%%/*}"
+  repo="${raw#*/}"
+  [[ -n "$owner" && -n "$repo" ]] || return 0
+  [[ "$owner" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 0
+  printf 'https://github.com/%s/%s.git' "$owner" "$repo"
+}
+
+printf '['
+first=1
+while IFS= read -r -d '' marker; do
+  if [[ "$marker" == */.git ]]; then
+    candidate="${marker%/.git}"
+  else
+    candidate="${marker%/*}"
+  fi
+  repo="$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$repo" ]] || continue
+  repo="$(realpath -- "$repo" 2>/dev/null || true)"
+  [[ -n "$repo" ]] || continue
+  case "$repo" in "$root"|"$root"/*) ;; *) continue ;; esac
+  relative="${repo#"$root"/}"
+  [[ "$relative" != "$repo" ]] || relative="."
+  [[ -n "$relative" ]] || relative="."
+  if [[ -n "$requested_path" && "$relative" != "$requested_path" ]]; then continue; fi
+
+  remote_raw="$(git -C "$repo" config --get remote.origin.url 2>/dev/null || true)"
+  remote="$(canonical_remote "$remote_raw" || true)"
+  has_origin=false
+  # Never send guest credentials to an origin that failed strict GitHub
+  # HTTPS/SSH normalization (notably plaintext HTTP or credentialed URLs).
+  [[ -n "$remote" ]] && has_origin=true
+  branch="$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  local_commit="$(git -C "$repo" rev-parse --verify HEAD 2>/dev/null || true)"
+  remote_commit=""
+  destination_observed=false
+  if [[ "$has_origin" == true && -n "$branch" ]]; then
+    if ls_remote_output="$(git -C "$repo" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null)"; then
+      destination_observed=true
+      remote_commit="$(awk 'NR == 1 { print $1 }' <<<"$ls_remote_output")"
+      [[ -z "$remote_commit" || "$remote_commit" =~ ^[0-9a-fA-F]{40,64}$ ]] || destination_observed=false
+      [[ "$destination_observed" == true ]] || remote_commit=""
+    fi
+  fi
+
+  worktree_state=unavailable
+  destination_state=unavailable
+  pushability=unavailable
+  staged=0
+  modified=0
+  deleted=0
+  untracked=0
+  ahead=0
+  behind=0
+  if [[ "$include_status" == 1 ]]; then
+    worktree_state=clean
+    status_file="$(mktemp)"
+    if git -C "$repo" status --porcelain=v1 -z >"$status_file" 2>/dev/null; then
+      while IFS= read -r -d '' entry; do
+        code="${entry:0:2}"
+        if [[ "$code" == "??" ]]; then
+          untracked=$((untracked + 1))
+        else
+          [[ "${code:0:1}" != " " ]] && staged=$((staged + 1))
+          if [[ "$code" == *D* ]]; then
+            deleted=$((deleted + 1))
+          elif [[ "${code:1:1}" != " " ]]; then
+            modified=$((modified + 1))
+          fi
+          if [[ "${code:0:1}" == R || "${code:0:1}" == C ]]; then
+            IFS= read -r -d '' ignored_rename_path || true
+          fi
+        fi
+      done <"$status_file"
+      if (( staged + modified + deleted + untracked > 0 )); then worktree_state=localChanges; fi
+      [[ -n "$branch" ]] || worktree_state=detached
+    else
+      worktree_state=unavailable
+    fi
+    rm -f "$status_file"
+
+    remote_ref=""
+    # Compare with the SHA currently advertised by the destination instead of
+    # a potentially stale local remote-tracking ref. This fetch updates only
+    # FETCH_HEAD/object storage and never touches worktree content.
+    if [[ -n "$remote_commit" ]] &&
+      git -C "$repo" fetch --quiet --no-tags origin "refs/heads/$branch" >/dev/null 2>&1 &&
+      git -C "$repo" cat-file -e "$remote_commit^{commit}" >/dev/null 2>&1; then
+      remote_ref="$remote_commit"
+    fi
+    if [[ "$has_origin" != true || "$destination_observed" != true ]]; then
+      destination_state=unavailable
+    elif [[ -z "$remote_commit" ]]; then
+      destination_state=absent
+    elif [[ -z "$local_commit" || -z "$remote_ref" ]]; then
+      destination_state=unavailable
+    elif [[ "$local_commit" == "$remote_commit" ]]; then
+      destination_state=upToDate
+    elif git -C "$repo" merge-base --is-ancestor "$remote_ref" "$local_commit" >/dev/null 2>&1; then
+      destination_state=ahead
+    elif git -C "$repo" merge-base --is-ancestor "$local_commit" "$remote_ref" >/dev/null 2>&1; then
+      destination_state=behind
+    else
+      destination_state=diverged
+    fi
+    if [[ -n "$local_commit" && -n "$remote_ref" ]]; then
+      counts="$(git -C "$repo" rev-list --left-right --count "$remote_ref...$local_commit" 2>/dev/null || true)"
+      if [[ "$counts" =~ ^[0-9]+[[:space:]][0-9]+$ ]]; then
+        read -r behind ahead <<<"$counts"
+      fi
+    fi
+    if [[ "$quarantine_state" == clear && "$credential_state" == Ready && "$worktree_state" != detached && "$worktree_state" != unavailable && "$destination_state" != unavailable && "$destination_state" != behind && "$destination_state" != diverged ]]; then
+      if [[ "$destination_state" == absent ]]; then pushability=publish; else pushability=pushable; fi
+    else
+      pushability=blocked
+    fi
+  fi
+
+  if (( first == 0 )); then printf ','; fi
+  first=0
+  printf '{"path":%s,"canonicalRemote":%s,"branch":%s,"upstreamRef":%s,"worktreeState":%s,"destinationState":%s,"stagedCount":%s,"modifiedCount":%s,"deletedCount":%s,"untrackedCount":%s,"aheadCount":%s,"behindCount":%s,"localCommit":%s,"remoteCommit":%s,"pushability":%s,"needsStart":false,"freshness":"fresh","checkedAt":%s}' \
+    "$(json_escape "$relative")" \
+    "$(json_or_null "$remote")" \
+    "$(json_or_null "$branch")" \
+    "$(json_or_null "$upstream")" \
+    "$(json_escape "$worktree_state")" \
+    "$(json_escape "$destination_state")" \
+    "$staged" "$modified" "$deleted" "$untracked" "$ahead" "$behind" \
+    "$(json_or_null "$local_commit")" \
+    "$(json_or_null "$remote_commit")" \
+    "$(json_escape "$pushability")" \
+    "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+done < <(find "$root" -mindepth 1 \( -type d -o -type f \) -name .git -prune -print0 2>/dev/null)
+printf ']\n'
+SCRIPT
+  printf '%s\n' "$script" | workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$include_status" "$credential_state" "$quarantine_state" "${requested_path-}"
+}
+
+app_cmd_repositories() {
+  local box="" if_running=0 include_status=0 status repositories_json credential_state quarantine_state
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error repositories "missing value for --workspace"; box="$2"; shift 2 ;;
+      --if-running) if_running=1; shift ;;
+      --include-worktree-status) include_status=1; shift ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error repositories "repositories requires --format json"; shift 2 ;;
+      *) app_usage_error repositories "unknown repositories option '$1'" ;;
+    esac
+  done
+  [[ -n "$box" ]] || app_usage_error repositories "--workspace is required"
+  is_workspace "$box" || app_usage_error repositories "workspace must be dev, playgrounds, or personal"
+  app_require_config repositories
+  app_require_runtime repositories
+  if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error repositories "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
+  fi
+  if [[ "$status" != Running ]]; then
+    app_emit_success repositories "{\"workspace\":$(app_json_string "$box"),\"repositories\":[],\"needsStart\":true,\"freshness\":\"fresh\",\"worktreeStatusIncluded\":false,\"notice\":\"Repository scanning is unavailable while this workspace is stopped.\"}"
+    return
+  fi
+  credential_state="$(app_workspace_credential_state "$box")"
+  quarantine_state="$(app_workspace_quarantined "$box" && printf quarantined || printf clear)"
+  if ! repositories_json="$(app_guest_repository_scan "$box" "$include_status" "$credential_state" "$quarantine_state" 2>/dev/null)"; then
+    app_emit_error repositories "MSW_REPOSITORIES_UNAVAILABLE" "The running workspace did not provide a repository snapshot." "Retry after repairing the workspace runtime." "$box" true 69
+  fi
+  [[ "$repositories_json" == \[*\] ]] || app_emit_error repositories "MSW_SCHEMA_MISMATCH" "The runtime returned an invalid repository snapshot." "Update or repair the MSW repository adapter." "$box" false 78
+  app_emit_success repositories "{\"workspace\":$(app_json_string "$box"),\"repositories\":$repositories_json,\"needsStart\":false,\"freshness\":\"fresh\",\"worktreeStatusIncluded\":$([[ "$include_status" == 1 ]] && printf true || printf false),\"notice\":null}"
+}
+
+
+app_redact() {
+  local value="${1-}"
+  printf '%s\n' "$value" | /usr/bin/sed -E \
+    -e 's#([Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+)[A-Za-z0-9._~+/-]+=*#\1[REDACTED]#g' \
+    -e 's#([Bb][Aa][Ss][Ii][Cc][[:space:]]+)[A-Za-z0-9+/=]+#\1[REDACTED]#g' \
+    -e 's#(gh[osuphr]_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
+    -e 's#(github_pat_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
+    -e 's#((MSW_GITHUB_READ_TOKEN(_[A-Za-z0-9_]+)?|MSW_GITHUB_WRITE_TOKEN(_[A-Za-z0-9_]+)?|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN)=)[^[:space:]]+#\1[REDACTED]#g' \
+    -e 's#(https?://)[^[:space:]@/:]+:[^[:space:]@]+@#\1[REDACTED]@#g'
+}
+
+app_cmd_logs() {
+  local box="" status raw line safe
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error logs "missing value for --workspace"; box="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == jsonl ]] || app_usage_error logs "logs requires --format jsonl"; shift 2 ;;
+      *) app_usage_error logs "unknown logs option '$1'" ;;
+    esac
+  done
+  [[ -n "$box" ]] || app_usage_error logs "--workspace is required"
+  is_workspace "$box" || app_usage_error logs "workspace must be dev, playgrounds, or personal"
+  app_require_config logs
+  app_require_runtime logs
+  if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error logs "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
+  fi
+  if [[ "$status" != Running ]]; then
+    MSW_APP_RESPONSE_EMITTED=1
+    printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":%s,"workspace":%s,"observedAt":%s,"available":false,"lifecycle":%s,"freshness":"fresh","reason":"workspace is not running","safeForDisplay":true}\n' \
+      "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" \
+      "$(app_json_string "$(app_now)")" "$(app_json_string "$status")"
+    printf '{"schemaVersion":1,"type":"stream-end","requestId":%s,"workspace":%s,"observedAt":%s,"safeForDisplay":true}\n' \
+      "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" "$(app_json_string "$(app_now)")"
+    return
+  fi
+  if ! raw="$(workspace_msb "$box" logs "$box" --format jsonl --tail 200 2>/dev/null)"; then
+    app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide bounded JSONL logs." "Retry with Logs visible after repairing the runtime." "$box" true 69
+  fi
+  MSW_APP_RESPONSE_EMITTED=1
+  printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":%s,"workspace":%s,"observedAt":%s,"available":true,"lifecycle":"Running","freshness":"fresh","reason":null,"safeForDisplay":true}\n' \
+    "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" "$(app_json_string "$(app_now)")"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if (( ${#line} > 262144 )); then line="${line:0:262144}"; fi
+    safe="$(app_redact "$line")"
+    MSW_APP_RESPONSE_EMITTED=1
+    printf '{"schemaVersion":1,"type":"log","requestId":%s,"workspace":%s,"observedAt":%s,"message":%s,"safeForDisplay":true}\n' \
+      "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" \
+      "$(app_json_string "$(app_now)")" "$(app_json_string "$safe")"
+  done <<<"$raw"
+  printf '{"schemaVersion":1,"type":"stream-end","requestId":%s,"workspace":%s,"observedAt":%s,"safeForDisplay":true}\n' \
+    "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" "$(app_json_string "$(app_now)")"
+}
+app_plan_file() { printf '%s/app-plans/%s.plan\n' "$GITHUB_META_DIR" "$1"; }
+
+app_cmd_plan() {
+  local action="${1:-}" box="" plan_id now plan_path plan_dir action_upper expected
+  shift || true
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error plan "missing value for --workspace"; box="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error plan "plan requires --format json"; shift 2 ;;
+      *) app_usage_error plan "unknown plan option '$1'" ;;
+    esac
+  done
+  [[ "$action" == start || "$action" == stop || "$action" == restart ]] || app_usage_error plan "only start, stop, and restart plans are available"
+  [[ -n "$box" ]] || app_usage_error plan "--workspace is required"
+  is_workspace "$box" || app_usage_error plan "workspace must be dev, playgrounds, or personal"
+  app_require_config plan
+  app_require_runtime plan
+  if ! expected="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error plan "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
+  fi
+  if app_workspace_quarantined "$box"; then
+    app_emit_error plan "MSW_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace before planning a lifecycle change." "$box" false 77
+  fi
+  case "$action:$expected" in
+    start:Stopped|start:Exited|stop:Running|restart:Running) ;;
+    *) app_emit_error plan "MSW_PLAN_STATE_CHANGED" "The workspace is not in a state that permits this lifecycle action." "Refresh the workspace and review the action again." "$box" true 73 ;;
+  esac
+  plan_id="$(app_request_id)"
+  now="$(date +%s)"
+  plan_path="$(app_plan_file "$plan_id")"
+  plan_dir="$(dirname "$plan_path")"
+  mkdir -p "$plan_dir"
+  chmod 700 "$plan_dir"
+  umask 077
+  printf 'action=%s\nworkspace=%s\nexpected=%s\ncreated=%s\nexpires=%s\n' "$action" "$box" "$expected" "$now" "$((now + 300))" >"$plan_path"
+  action_upper="$(printf '%s' "$action" | tr '[:lower:]' '[:upper:]')"
+  app_emit_success plan "{\"planId\":$(app_json_string "$plan_id"),\"action\":$(app_json_string "$action"),\"workspace\":$(app_json_string "$box"),\"expiresAt\":$(app_json_string "$(date -u -r "$((now + 300))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$((now + 300))" +%Y-%m-%dT%H:%M:%SZ)"),\"confirmationPhrase\":$(app_json_string "$action_upper $box"),\"effects\":\"The workspace lifecycle will change and must be reconciled with a fresh state observation.\"}"
+}
+app_cmd_push_plan() {
+  local box="" path="" status="" snapshot_json="" repo_json="" credential_state="" quarantine_state=""
+  local branch="" local_sha="" remote_sha="" canonical="" pushability="" worktree_state="" destination_state=""
+  local ahead=0 behind=0 plan_id="" now="" plan_path="" phrase="" effects=""
+  local -a repositories=()
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error push-plan "missing value for --workspace"; box="$2"; shift 2 ;;
+      --repositories)
+        shift
+        while (( $# > 0 )) && [[ "$1" != --format ]]; do
+          repositories+=("$1")
+          shift
+        done
+        ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error push-plan "push-plan requires --format json"; shift 2 ;;
+      *) app_usage_error push-plan "unknown push-plan option '$1'" ;;
+    esac
+  done
+  [[ -n "$box" ]] || app_usage_error push-plan "--workspace is required"
+  is_workspace "$box" || app_usage_error push-plan "workspace must be dev, playgrounds, or personal"
+  ((${#repositories[@]} == 1)) || app_usage_error push-plan "exactly one repository path is required per push plan"
+  path="${repositories[0]}"
+  app_valid_relative_path "$path" || app_usage_error push-plan "repository path must be relative to /workspace"
+  app_require_config push-plan
+  app_require_runtime push-plan
+  if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error push-plan "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the workspace runtime." "$box" true 69
+  fi
+  [[ "$status" == Running ]] || app_emit_error push-plan "MSW_WORKSPACE_NOT_RUNNING" "The workspace is not running." "Start the workspace, refresh state, and review the repository again." "$box" true 69
+  credential_state="$(app_workspace_credential_state "$box")"
+  quarantine_state="$(app_workspace_quarantined "$box" && printf quarantined || printf clear)"
+  [[ "$quarantine_state" == clear ]] || app_emit_error push-plan "MSW_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace credentials before reviewing a push." "$box" false 77
+  [[ "$credential_state" == Ready ]] || app_emit_error push-plan "MSW_PUSH_NOT_AUTHORIZED" "Host write authorization is not ready for this workspace." "Authorize host write access before reviewing a push." "$box" false 77
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error push-plan "MSW_JSON_TOOL_UNAVAILABLE" "The repository adapter requires jq to validate its snapshot." "Repair the MSW toolchain and retry the repository review." "$box" true 69
+  if ! snapshot_json="$(app_guest_repository_scan "$box" 1 "$credential_state" "$quarantine_state" "$path" 2>/dev/null)"; then
+    app_emit_error push-plan "MSW_REPOSITORIES_UNAVAILABLE" "The running workspace did not provide a repository snapshot." "Retry after repairing the workspace runtime." "$box" true 69
+  fi
+  repo_json="$("$JQ_BIN" -c --arg path "$path" 'map(select(.path == $path)) | if length == 1 then .[0] else empty end' <<<"$snapshot_json" 2>/dev/null || true)"
+  [[ -n "$repo_json" ]] || app_emit_error push-plan "MSW_REPOSITORY_NOT_FOUND" "The requested repository was not found under /workspace." "Refresh repositories and choose a listed workspace-relative path." "$box" false 78
+  branch="$("$JQ_BIN" -r '.branch // empty' <<<"$repo_json")"
+  local_sha="$("$JQ_BIN" -r '.localCommit // empty' <<<"$repo_json")"
+  remote_sha="$("$JQ_BIN" -r '.remoteCommit // empty' <<<"$repo_json")"
+  canonical="$("$JQ_BIN" -r '.canonicalRemote // empty' <<<"$repo_json")"
+  pushability="$("$JQ_BIN" -r '.pushability // empty' <<<"$repo_json")"
+  worktree_state="$("$JQ_BIN" -r '.worktreeState // empty' <<<"$repo_json")"
+  destination_state="$("$JQ_BIN" -r '.destinationState // empty' <<<"$repo_json")"
+  ahead="$("$JQ_BIN" -r '.aheadCount // 0' <<<"$repo_json")"
+  behind="$("$JQ_BIN" -r '.behindCount // 0' <<<"$repo_json")"
+  [[ "$pushability" == pushable || "$pushability" == publish ]] || app_emit_error push-plan "MSW_PUSH_BLOCKED" "MSW policy does not allow pushing this repository state." "Resolve detached, diverged, unavailable, or unauthorized state before reviewing a push." "$box" false 77
+  [[ "$pushability" == publish || "$ahead" =~ ^[1-9][0-9]*$ ]] || app_emit_error push-plan "MSW_NOTHING_TO_PUSH" "The reviewed repository has no committed changes to transfer." "Refresh the repository after committing the branch you want to push." "$box" false 77
+  plan_id="$(app_request_id)"
+  now="$(date +%s)"
+  plan_path="$(app_plan_file "$plan_id")"
+  mkdir -p "$(dirname "$plan_path")"
+  chmod 700 "$(dirname "$plan_path")"
+  umask 077
+  {
+    printf 'action=push\n'
+    printf 'workspace=%s\n' "$box"
+    printf 'path=%s\n' "$path"
+    printf 'branch=%s\n' "$branch"
+    printf 'local=%s\n' "$local_sha"
+    printf 'remote=%s\n' "$remote_sha"
+    printf 'canonical=%s\n' "$canonical"
+    printf 'destination=%s\n' "$destination_state"
+    printf 'worktree=%s\n' "$worktree_state"
+    printf 'ahead=%s\n' "$ahead"
+    printf 'behind=%s\n' "$behind"
+    printf 'created=%s\n' "$now"
+    printf 'expires=%s\n' "$((now + 300))"
+  } >"$plan_path"
+  chmod 600 "$plan_path"
+  phrase="PUSH"
+  effects="Only committed HEAD for $path will be transferred through the host; uncommitted changes remain in the workspace."
+  app_emit_success push-plan "{\"planId\":$(app_json_string "$plan_id"),\"workspace\":$(app_json_string "$box"),\"repositoryPath\":$(app_json_string "$path"),\"branch\":$(app_json_string "$branch"),\"localCommit\":$(app_json_string "$local_sha"),\"remoteCommit\":$(app_json_string "$remote_sha"),\"aheadCount\":$ahead,\"behindCount\":$behind,\"forceWithLease\":false,\"expiresAt\":$(app_json_string "$(date -u -r "$((now + 300))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$((now + 300))" +%Y-%m-%dT%H:%M:%SZ)"),\"confirmationPhrase\":$(app_json_string "$phrase"),\"effects\":$(app_json_string "$effects")}"
+}
+
+app_cmd_apply() {
+  local plan_id="${1:-}" fd="" plan_path="" claimed_path="" action="" box="" path="" created=0 expires=0 now="" supplied="" phrase=""
+  local expected="" planned="" current_state="" observed="" current_json="" current_local="" current_remote="" current_branch="" current_canonical="" current_pushability="" current_ahead=0
+  local reconciled_json="" reconciled_remote="" reconciled_destination=""
+  local expected_local="" expected_remote="" expected_branch="" expected_destination="" expected_worktree="" expected_canonical=""
+  local credential_state="" quarantine_state="" push_error="" action_upper=""
+  shift || true
+  while (( $# > 0 )); do
+    case "$1" in
+      --confirmation-fd) [[ $# -ge 2 ]] || app_usage_error apply "missing value for --confirmation-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error apply "apply requires --format json"; shift 2 ;;
+      *) app_usage_error apply "unknown apply option '$1'" ;;
+    esac
+  done
+  [[ "$plan_id" =~ ^[A-Za-z0-9-]{1,128}$ ]] || app_usage_error apply "plan identifier is required"
+  [[ "$fd" =~ ^[0-9]+$ ]] || app_usage_error apply "a confirmation file descriptor is required"
+  plan_path="$(app_plan_file "$plan_id")"
+  [[ -f "$plan_path" && ! -L "$plan_path" ]] || app_emit_error apply "MSW_PLAN_NOT_FOUND" "The confirmation plan is missing or expired." "Create a fresh plan." "" true 78
+  while IFS='=' read -r key value; do
+    case "$key" in
+      action) action="$value" ;;
+      workspace) box="$value" ;;
+      expected) planned="$value" ;;
+      path) path="$value" ;;
+      created) created="$value" ;;
+      expires) expires="$value" ;;
+      local) expected_local="$value" ;;
+      remote) expected_remote="$value" ;;
+      branch) expected_branch="$value" ;;
+      destination) expected_destination="$value" ;;
+      worktree) expected_worktree="$value" ;;
+      canonical) expected_canonical="$value" ;;
+    esac
+  done <"$plan_path"
+  now="$(date +%s)"
+  [[ "$expires" =~ ^[0-9]+$ && "$expires" -gt "$now" ]] || {
+    rm -f "$plan_path"
+    app_emit_error apply "MSW_PLAN_EXPIRED" "The confirmation plan expired." "Create a fresh plan." "$box" true 78
+  }
+  is_workspace "$box" || app_emit_error apply "MSW_PLAN_INVALID" "The plan contains an invalid workspace." "Create a fresh plan." "$box" false 78
+  case "$action" in
+    start|stop|restart) phrase="$(printf '%s' "$action" | tr '[:lower:]' '[:upper:]') $box" ;;
+    push) phrase="PUSH" ;;
+    *) app_emit_error apply "MSW_PLAN_INVALID" "The plan contains an unsupported action." "Create a fresh plan." "$box" false 78 ;;
+  esac
+  if ! IFS= read -r supplied <&"$fd"; then
+    app_emit_error apply "MSW_CONFIRMATION_REQUIRED" "The action confirmation was not supplied." "Confirm the exact phrase shown by MSW Monitor." "$box" false 77
+  fi
+  [[ "$supplied" == "$phrase" ]] || app_emit_error apply "MSW_CONFIRMATION_MISMATCH" "The confirmation did not match the reviewed action." "Review the plan and confirm again." "$box" false 77
+
+  app_require_config apply
+  app_require_runtime apply
+  # Consume a reviewed plan exactly once before mutation. Atomic rename makes
+  # concurrent app/CLI apply attempts deterministic and prevents replay.
+  claimed_path="${plan_path}.applying.$$"
+  if ! mv "$plan_path" "$claimed_path" 2>/dev/null; then
+    app_emit_error apply "MSW_PLAN_CONFLICT" "The reviewed plan is already being applied or was consumed." "Refresh state and create a new plan." "$box" true 73
+  fi
+  plan_path="$claimed_path"
+  rm -f "$plan_path"
+  if [[ "$action" == start || "$action" == stop || "$action" == restart ]]; then
+    [[ -n "$planned" ]] || app_emit_error apply "MSW_PLAN_INVALID" "The lifecycle plan has no observed precondition." "Create a fresh plan." "$box" false 78
+    if ! current_state="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+      app_emit_error apply "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed before the operation." "Refresh after repairing the MSW runtime." "$box" true 69
+    fi
+    [[ "$current_state" == "$planned" ]] || app_emit_error apply "MSW_PLAN_STATE_CHANGED" "The workspace changed after the action was reviewed." "Refresh the workspace and create a new plan." "$box" true 73
+    if app_workspace_quarantined "$box"; then
+      app_emit_error apply "MSW_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace before retrying this action." "$box" false 77
+    fi
+  fi
+  case "$action" in
+    start|stop|restart)
+      case "$action" in
+        start) expected="Running" ;;
+        stop) expected="Stopped" ;;
+        restart) expected="Running" ;;
+      esac
+      if ! case "$action" in
+        start) cmd_start "$box" >/dev/null 2>&1 ;;
+        stop) cmd_stop "$box" >/dev/null 2>&1 ;;
+        restart) cmd_restart "$box" >/dev/null 2>&1 ;;
+      esac; then
+        app_emit_error apply "MSW_OPERATION_FAILED" "The workspace operation failed before reconciliation." "Refresh the workspace state and retry if it is safe." "$box" true 1
+      fi
+      if ! observed="$(app_status_for_workspace "$box" 2>/dev/null)" || [[ "$observed" != "$expected" ]]; then
+        app_emit_error apply "MSW_RECONCILE_PENDING" "The lifecycle operation completed without a matching fresh state observation." "Refresh after checking the workspace runtime; MSW did not claim final state." "$box" true 69
+      fi
+      app_emit_success apply \
+        "{\"workspace\":$(app_json_string "$box"),\"action\":$(app_json_string "$action"),\"reconciled\":true,\"outcome\":$(app_json_string "operation completed and the observed lifecycle is $observed")}" || return
+      ;;
+    push)
+      app_valid_relative_path "$path" || app_emit_error apply "MSW_PLAN_INVALID" "The plan contains an invalid repository path." "Create a fresh plan." "$box" false 78
+      [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error apply "MSW_JSON_TOOL_UNAVAILABLE" "The repository adapter requires jq to validate its snapshot." "Repair the MSW toolchain and retry the repository review." "$box" true 69
+      credential_state="$(app_workspace_credential_state "$box")"
+      quarantine_state="$(app_workspace_quarantined "$box" && printf quarantined || printf clear)"
+      [[ "$quarantine_state" == clear && "$credential_state" == Ready ]] || app_emit_error apply "MSW_PUSH_NOT_AUTHORIZED" "Host write authorization is no longer ready for this workspace." "Reauthorize host write access and create a fresh push plan." "$box" false 77
+      if ! current_json="$(app_guest_repository_scan "$box" 1 "$credential_state" "$quarantine_state" "$path" 2>/dev/null)"; then
+        app_emit_error apply "MSW_REPOSITORIES_UNAVAILABLE" "The running workspace did not provide a repository snapshot." "Refresh repositories and create a fresh push plan." "$box" true 69
+      fi
+      current_json="$("$JQ_BIN" -c --arg path "$path" 'map(select(.path == $path)) | if length == 1 then .[0] else empty end' <<<"$current_json" 2>/dev/null || true)"
+      [[ -n "$current_json" ]] || app_emit_error apply "MSW_REPOSITORY_NOT_FOUND" "The reviewed repository is no longer available." "Refresh repositories and create a fresh push plan." "$box" false 78
+      current_local="$("$JQ_BIN" -r '.localCommit // empty' <<<"$current_json")"
+      current_remote="$("$JQ_BIN" -r '.remoteCommit // empty' <<<"$current_json")"
+      current_branch="$("$JQ_BIN" -r '.branch // empty' <<<"$current_json")"
+      current_canonical="$("$JQ_BIN" -r '.canonicalRemote // empty' <<<"$current_json")"
+      current_pushability="$("$JQ_BIN" -r '.pushability // empty' <<<"$current_json")"
+      current_ahead="$("$JQ_BIN" -r '.aheadCount // 0' <<<"$current_json")"
+      [[ "$current_local" == "$expected_local" && "$current_remote" == "$expected_remote" && "$current_branch" == "$expected_branch" && "$current_canonical" == "$expected_canonical" ]] || \
+        app_emit_error apply "MSW_PLAN_STATE_CHANGED" "The repository changed after the push was reviewed." "Refresh the repository and create a new push plan." "$box" true 73
+      [[ "$current_pushability" == pushable || "$current_pushability" == publish ]] || \
+        app_emit_error apply "MSW_PUSH_BLOCKED" "MSW policy no longer allows pushing this repository state." "Review the updated repository and create a new push plan." "$box" false 77
+      [[ "$current_pushability" == publish || "$current_ahead" =~ ^[1-9][0-9]*$ ]] || \
+        app_emit_error apply "MSW_NOTHING_TO_PUSH" "The reviewed repository has no committed changes to transfer." "Refresh the repository after committing the branch you want to push." "$box" false 77
+      push_error="$(mktemp "${TMPDIR:-/tmp}/msw-app-push.XXXXXX")"
+      if ! printf 'PUSH\n' | push_impl "$box" "$path" 0 0 1 >/dev/null 2>"$push_error"; then
+        rm -f "$push_error"
+        app_emit_error apply "MSW_PUSH_FAILED" "The host-only push failed." "Review the repository state and create a new plan; no uncommitted files were transferred." "$box" true 1
+      fi
+      rm -f "$push_error"
+      if ! reconciled_json="$(app_guest_repository_scan "$box" 1 "$credential_state" "$quarantine_state" "$path" 2>/dev/null)"; then
+        app_emit_error apply "MSW_RECONCILE_PENDING" "The host-only push exited without a fresh destination observation." "Refresh the repository before deciding whether another push is safe." "$box" true 69
+      fi
+      reconciled_json="$("$JQ_BIN" -c --arg path "$path" 'map(select(.path == $path)) | if length == 1 then .[0] else empty end' <<<"$reconciled_json" 2>/dev/null || true)"
+      [[ -n "$reconciled_json" ]] || app_emit_error apply "MSW_RECONCILE_PENDING" "The pushed repository could not be re-observed." "Refresh the repository before deciding whether another push is safe." "$box" true 69
+      reconciled_remote="$("$JQ_BIN" -r '.remoteCommit // empty' <<<"$reconciled_json")"
+      reconciled_destination="$("$JQ_BIN" -r '.destinationState // empty' <<<"$reconciled_json")"
+      [[ "$reconciled_remote" == "$expected_local" && "$reconciled_destination" == upToDate ]] ||
+        app_emit_error apply "MSW_RECONCILE_PENDING" "The host-only push did not converge to the reviewed destination state." "Refresh the repository before deciding whether another push is safe." "$box" true 69
+      app_emit_success apply "{\"workspace\":$(app_json_string "$box"),\"repositoryPath\":$(app_json_string "$path"),\"branch\":$(app_json_string "$expected_branch"),\"pushed\":true,\"reconciled\":true,\"outcome\":\"host-only push completed and the destination was freshly re-observed\"}"
+      ;;
+  esac
+}
+
+app_cmd_bootstrap() {
+  local resume=0 events_fd="" format="" phase request_id output
+  while (( $# > 0 )); do
+    case "$1" in
+      --resume) resume=1; shift ;;
+      --events-fd) [[ $# -ge 2 ]] || app_usage_error bootstrap "missing value for --events-fd"; events_fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error bootstrap "bootstrap requires --format json"; format="$2"; shift 2 ;;
+      *) app_usage_error bootstrap "unknown bootstrap option '$1'" ;;
+    esac
+  done
+  [[ "$resume" == 1 ]] || app_usage_error bootstrap "bootstrap requires --resume"
+  [[ -z "$events_fd" || "$events_fd" =~ ^[0-9]+$ ]] || app_usage_error bootstrap "events fd must be numeric"
+  request_id="${MSW_APP_REQUEST_ID:-$(app_request_id)}"
+  app_require_config bootstrap
+  app_require_runtime bootstrap
+
+  for phase in preflight toolchain host-integration workspaces; do
+    if [[ -n "$events_fd" ]]; then
+      printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":%s,"fraction":1,"message":%s,"safeForDisplay":true}\n' \
+        "$(app_json_string "$request_id")" \
+        "$(app_json_string "$phase")" \
+        "$(app_json_string "The native setup coordinator completed this phase.")" >&"$events_fd"
+    fi
+  done
+
+  if [[ -n "$events_fd" ]]; then
+    printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":0,"message":"Starting the complete deep verification. Workspaces may start temporarily and the previous running set will be restored.","safeForDisplay":true}\n' \
+      "$(app_json_string "$request_id")" >&"$events_fd"
+  fi
+  if ! output="$(cmd_check --deep 2>&1)"; then
+    app_emit_error bootstrap "MSW_BOOTSTRAP_VERIFICATION_FAILED" "Workspace bootstrap verification failed." "Repair the reported MSW configuration or runtime issue, then resume Setup." "" true 69
+  fi
+  if [[ -n "$events_fd" ]]; then
+    printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":1,"message":"Deep verification passed and the previous running set was restored.","safeForDisplay":true}\n' \
+      "$(app_json_string "$request_id")" >&"$events_fd"
+  fi
+  app_emit_success bootstrap '{"resumed":true,"phase":"complete","requiresApproval":false,"vmsStarted":true,"message":"Workspace bootstrap and deep verification completed; the previous running set was restored."}'
+}
+
+app_cmd_help() {
+  cat <<'APPHELP'
+Machine-readable MSW Monitor commands:
+  msw app handshake --format json
+  msw app state [--workspace WORKSPACE] --format json
+  msw app metrics --workspace WORKSPACE --format json --once
+  msw app logs --workspace WORKSPACE --format jsonl
+  msw app repositories --workspace WORKSPACE [--if-running] --format json
+  msw app push-plan --workspace WORKSPACE --repositories PATH... --format json
+  msw app ports [--workspace WORKSPACE] --format json
+  msw app github-state [--workspace WORKSPACE] --format json
+  msw app github-bind --workspace WORKSPACE --repository OWNER/REPO --mode read-only|host-write --format json
+  msw app github-quarantine --workspace WORKSPACE --format json
+  msw app url --workspace WORKSPACE [--port PORT] [--scheme http|https] --format json
+  msw app clone --workspace WORKSPACE --repository OWNER/REPO [--destination PATH] --format json
+  msw app pull --workspace WORKSPACE [--path PATH|all] --format json
+  msw app identity --name NAME --email EMAIL [--workspace WORKSPACE] --format json
+  msw app disk [--workspace WORKSPACE] --format json
+  msw app resize --workspace WORKSPACE --memory SIZE [--cpus COUNT] --format json
+  msw app clean [--workspace WORKSPACE] [--volumes] --confirmation-fd FD --format json
+  msw app upgrade [--workspace WORKSPACE] --confirmation-fd FD --format json
+  msw app update --confirmation-fd FD --format json
+  msw app check [--deep --confirmation-fd FD] --format json
+  msw app backup --directory DIRECTORY --format json
+  msw app restore --archive ARCHIVE --confirmation-fd FD --format json
+  msw app plan ACTION --workspace WORKSPACE --format json
+  msw app apply PLAN_ID --confirmation-fd FD --format json
+  msw app bootstrap --resume --events-fd FD --format json
+
+Every finite command returns one schemaVersion=1 JSON envelope. Lifecycle
+observations never start a VM; unknown or unavailable observations are not
+reported as Stopped.
+APPHELP
+}
+
+cmd_app() {
+  local sub="${1:-handshake}"
+  shift || true
+  MSW_APP_COMMAND="$sub"
+  MSW_APP_REQUEST_ID="$(app_request_id)"
+  trap app_unexpected_error ERR
+  case "$sub" in
+    handshake) app_cmd_handshake "$@" ;;
+    state) app_cmd_state "$@" ;;
+    url) app_cmd_url "$@" ;;
+    clone) app_cmd_clone "$@" ;;
+    pull) app_cmd_pull "$@" ;;
+    identity) app_cmd_identity "$@" ;;
+    disk) app_cmd_disk "$@" ;;
+    resize) app_cmd_resize "$@" ;;
+    clean) app_cmd_clean "$@" ;;
+    upgrade) app_cmd_upgrade "$@" ;;
+    update) app_cmd_update "$@" ;;
+    check) app_cmd_check "$@" ;;
+    backup) app_cmd_backup "$@" ;;
+    restore) app_cmd_restore "$@" ;;
+    push-plan) app_cmd_push_plan "$@" ;;
+    metrics) app_cmd_metrics "$@" ;;
+    logs) app_cmd_logs "$@" ;;
+    repositories) app_cmd_repositories "$@" ;;
+    ports) app_cmd_ports "$@" ;;
+    github-state) app_cmd_github_state "$@" ;;
+    github-bind) app_cmd_github_bind "$@" ;;
+    github-quarantine) app_cmd_github_quarantine "$@" ;;
+    plan) app_cmd_plan "$@" ;;
+    apply) app_cmd_apply "$@" ;;
+    bootstrap) app_cmd_bootstrap "$@" ;;
+    help|--help|-h) app_cmd_help ;;
+    *) app_emit_error app "MSW_UNKNOWN_COMMAND" "Unknown app command." "Run 'msw app help'." "" false 64 ;;
+  esac
 }
 
 main() {
@@ -1851,7 +3602,8 @@ main() {
   case "$command" in
     version|--version|-V) printf 'msw %s\n' "$MSW_VERSION"; return ;;
     help|--help|-h) show_help; return ;;
-    docs) (( $# <= 1 )) || fatal "usage: msw docs [TOPIC]"; cmd_docs "${1:-cheatsheet}"; return ;;
+    docs) (( $# <= 1 )) || fatal "usage: msw docs [cheatsheet|setup|github|tests]"; cmd_docs "${1:-cheatsheet}"; return ;;
+    app) cmd_app "$@"; return ;;
   esac
   require_command_path msb "$MSB_BIN"
   case "$command" in

@@ -490,6 +490,24 @@ class InstallerAndDailyTests(MSWTestCase):
         events = self.env.state().get("events", [])[before:]
         self.assertTrue(any(event.get("event") == "self-update" for event in events), events)
 
+    def test_app_bootstrap_runs_deep_verification_and_restores_running_set(self) -> None:
+        self.env.msw("start", "dev")
+        before = {
+            box: self.env.state()["sandboxes"][box]["running"]
+            for box in ("dev", "playgrounds", "personal")
+        }
+        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", timeout=90)
+        envelope = json.loads(proc.stdout)
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["result"]["phase"], "complete")
+        self.assertFalse(envelope["result"]["requiresApproval"])
+        self.assertTrue(envelope["result"]["vmsStarted"])
+        after = {
+            box: self.env.state()["sandboxes"][box]["running"]
+            for box in ("dev", "playgrounds", "personal")
+        }
+        self.assertEqual(after, before)
+
     def test_lifecycle_resize_restart_token_guard_and_proxy(self) -> None:
         self.env.msw("start", "dev")
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
@@ -857,6 +875,30 @@ class GitHubAndPushTests(MSWTestCase):
         host_push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=fake_env)
         self.assertFailed(host_push, "quarantined")
         metadata.unlink()
+
+
+    def test_stop_remains_available_for_quarantined_running_workspace(self) -> None:
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        self.env.msw("start", "dev")
+
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine.write_text("credential cleanup failed\n")
+
+        document = json.loads(self.env.msw(
+            "app", "state", "--workspace", "dev", "--format", "json"
+        ).stdout)
+        workspace = document["result"]["workspaces"][0]
+        self.assertEqual(workspace["lifecycle"], "Running")
+        self.assertEqual(workspace["quarantine"]["state"], "quarantined")
+        self.assertTrue(workspace["actionCapabilities"]["canStop"])
+        self.assertFalse(workspace["actionCapabilities"]["canStart"])
+        self.assertFalse(workspace["actionCapabilities"]["canRestart"])
+        self.assertFalse(workspace["actionCapabilities"]["canOpenTerminal"])
+        self.assertFalse(workspace["actionCapabilities"]["canPush"])
+
+        self.env.msw("stop", "dev")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_ssh_proxy_blocks_quarantined_workspace_without_starting(self) -> None:
         self.env.init_remote()
@@ -1384,6 +1426,319 @@ class PackagedBehaviorTests(MSWTestCase):
         state = self.env.state()
         self.assertNotIn("24678", state["sandboxes"]["dev"].get("port_content", {}))
         self.assertNotIn("24679", state["sandboxes"]["dev"].get("port_content", {}))
+
+    def test_app_github_state_emits_guest_metadata_as_valid_json(self) -> None:
+        credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text(json.dumps({
+            "schemaVersion": 2,
+            "entries": {
+                "dev.guest": {
+                    "workspace": "dev",
+                    "schemaVersion": 2,
+                    "role": "guest",
+                    "provider": "github-app-user",
+                    "appClientID": "guest-public",
+                    "accountLogin": "alice",
+                    "owner": "acme",
+                    "repositoryIDs": [12, 34],
+                    "accessMode": "read-only",
+                    "verificationRepository": "acme/demo",
+                    "installationID": 123,
+                    "accessExpiresAt": "2026-08-08T08:00:00Z",
+                    "refreshExpiresAt": "2027-02-08T08:00:00Z",
+                    "needsRestart": False,
+                    "generation": 1,
+                    "quarantined": False,
+                    "updatedAt": "2026-08-08T00:00:00Z",
+                }
+            },
+        }))
+
+        document = json.loads(self.env.msw("app", "github-state", "--format", "json").stdout)
+        self.assertTrue(document["ok"])
+        workspaces = {item["workspace"]: item for item in document["result"]["workspaces"]}
+        self.assertEqual(workspaces["dev"]["provider"], "github-app-user")
+        self.assertEqual(workspaces["dev"]["accessMode"], "read-only")
+        self.assertEqual(workspaces["dev"]["verificationRepository"], "acme/demo")
+        self.assertEqual(workspaces["dev"]["accountLogin"], "alice")
+        self.assertEqual(workspaces["dev"]["installationId"], "123")
+        self.assertFalse(workspaces["dev"]["needsRestart"])
+        self.assertFalse(workspaces["dev"]["quarantined"])
+
+    def test_app_polling_contract_never_starts_or_forwards_guest_credentials(self) -> None:
+        before = len(self.env.state().get("events", []))
+        probe_env = {
+            "MSW_GITHUB_READ_TOKEN_DEV": "ghu_probe_fixture",
+            "MSW_FAKE_RECORD_CREDENTIAL_ENV": "1",
+        }
+        commands = [
+            ("state", "--workspace", "dev", "--format", "json"),
+            ("metrics", "--workspace", "dev", "--format", "json", "--once"),
+            ("logs", "--workspace", "dev", "--format", "jsonl"),
+            ("repositories", "--workspace", "dev", "--if-running", "--format", "json"),
+            ("ports", "--workspace", "dev", "--format", "json"),
+        ]
+        for command in commands:
+            with self.subTest(command=command[0]):
+                self.env.msw("app", *command, extra_env=probe_env)
+
+        events = self.env.state().get("events", [])[before:]
+        self.assertFalse(any(event.get("event") == "start" for event in events), events)
+        credential_events = [event for event in events if event.get("event") == "credential-env"]
+        self.assertTrue(credential_events, events)
+        self.assertTrue(all(not event["gh_token_present"] for event in credential_events), credential_events)
+        self.assertTrue(all(not sandbox["running"] for sandbox in self.env.state()["sandboxes"].values()))
+
+    def test_app_state_preserves_unknown_for_malformed_or_unrecognized_runtime_state(self) -> None:
+        malformed = json.loads(self.env.msw(
+            "app", "state", "--workspace", "dev", "--format", "json",
+            extra_env={"MSW_FAKE_STATUS_JSON": "not-json"},
+        ).stdout)
+        workspace = malformed["result"]["workspaces"][0]
+        self.assertEqual(workspace["lifecycle"], "Unknown")
+        self.assertEqual(workspace["freshness"], "unavailable")
+        self.assertIsNone(workspace["statusObservedAt"])
+        self.assertFalse(workspace["actionCapabilities"]["canStart"])
+        self.assertTrue(malformed["warnings"])
+
+        unrecognized = json.loads(self.env.msw(
+            "app", "state", "--workspace", "dev", "--format", "json",
+            extra_env={"MSW_FAKE_STATUS_JSON": json.dumps({"name": "dev", "status": "Paused"})},
+        ).stdout)["result"]["workspaces"][0]
+        self.assertEqual(unrecognized["lifecycle"], "Unknown")
+        self.assertEqual(unrecognized["freshness"], "fresh")
+        self.assertNotEqual(unrecognized["lifecycle"], "Stopped")
+
+    def test_app_backup_returns_archive_and_reconciled_running_set(self) -> None:
+        self.env.msw("start", "dev")
+        destination = self.env.root / "app-backups"
+
+        document = json.loads(self.env.msw(
+            "app", "backup", "--directory", str(destination), "--format", "json",
+            timeout=90,
+        ).stdout)
+
+        result = document["result"]
+        self.assertTrue(result["archive"].endswith(".tar.zst"), result)
+        self.assertTrue(Path(result["archive"]).is_file())
+        self.assertEqual(result["checksum"], result["archive"] + ".sha256")
+        self.assertEqual(result["stoppedWorkspaces"], ["dev"])
+        self.assertEqual(result["restartedWorkspaces"], ["dev"])
+        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+
+    def test_app_oauth_host_profile_enables_aggregate_host_write_capability(self) -> None:
+        credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        common = {
+            "workspace": "dev",
+            "schemaVersion": 2,
+            "provider": "github-app-user",
+            "accountLogin": "alice",
+            "owner": "acme",
+            "repositoryIDs": [12],
+            "verificationRepository": "acme/demo",
+            "installationID": 123,
+            "accessExpiresAt": "2099-08-08T08:00:00Z",
+            "refreshExpiresAt": "2099-12-08T08:00:00Z",
+            "needsRestart": False,
+            "generation": 1,
+            "quarantined": False,
+            "updatedAt": "2026-08-08T00:00:00Z",
+        }
+        credentials.write_text(json.dumps({
+            "schemaVersion": 2,
+            "entries": {
+                "dev.guest": common | {
+                    "role": "guest", "appClientID": "guest-public", "accessMode": "read-only",
+                },
+                "dev.host": common | {
+                    "role": "host", "appClientID": "host-public", "accessMode": "host-write",
+                },
+            },
+        }))
+        token_env = {
+            "MSW_GITHUB_READ_TOKEN_DEV": "ghu_read_fixture",
+            "MSW_GITHUB_WRITE_TOKEN_DEV": "ghu_write_fixture",
+        }
+
+        github = json.loads(self.env.msw(
+            "app", "github-state", "--workspace", "dev", "--format", "json",
+            extra_env=token_env,
+        ).stdout)
+        self.assertEqual(github["result"]["workspaces"][0]["accessMode"], "host-write")
+
+        state = json.loads(self.env.msw(
+            "app", "state", "--workspace", "dev", "--format", "json",
+            extra_env=token_env,
+        ).stdout)["result"]["workspaces"][0]
+        self.assertEqual(state["credential"]["state"], "Ready")
+        self.assertEqual(state["credential"]["accessMode"], "host-write")
+    def test_app_logs_normalizes_and_redacts_jsonl(self) -> None:
+        self.env.msw("start", "dev")
+        payload = json.dumps({
+            "message": "Authorization: Bearer ghp_secret",
+            "detail": "runtime",
+            "secret": "MSW_GITHUB_READ_TOKEN_DEV=opaque_secret",
+        })
+        document = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS": payload},
+        )
+        lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
+        self.assertEqual([line["type"] for line in lines], ["stream-start", "log", "stream-end"])
+        self.assertEqual(lines[0]["stream"], "logs")
+        self.assertEqual(lines[0]["protocolVersion"], 1)
+        self.assertEqual({line["requestId"] for line in lines}, {lines[0]["requestId"]})
+        self.assertTrue(all(line["workspace"] == "dev" for line in lines))
+        self.assertTrue(all(line["safeForDisplay"] for line in lines))
+        self.assertTrue(all("observedAt" in line for line in lines))
+        self.assertIn("[REDACTED]", lines[1]["message"])
+        self.assertNotIn("ghp_secret", lines[1]["message"])
+        self.assertNotIn("opaque_secret", lines[1]["message"])
+
+
+    def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
+        plan_document = json.loads(self.env.msw(
+            "app", "plan", "start", "--workspace", "dev", "--format", "json"
+        ).stdout)
+        plan = plan_document["result"]
+        self.assertEqual(plan["confirmationPhrase"], "START dev")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
+        rejected = self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text="START playgrounds\n", check=False,
+        )
+        self.assertFailed(rejected, "MSW_CONFIRMATION_MISMATCH")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
+        applied = json.loads(self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text="START dev\n",
+        ).stdout)
+        self.assertTrue(applied["result"]["reconciled"])
+        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+
+        replayed = self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text="START dev\n", check=False,
+        )
+        self.assertEqual(replayed.returncode, 78)
+        self.assertFailed(replayed, "MSW_PLAN_NOT_FOUND")
+
+    def test_app_push_apply_reconciles_the_reviewed_commit(self) -> None:
+        bare = self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        self.env.msw("clone", "dev", "acme/demo", "repo")
+        repo = self.env.guest_repo("dev", "repo")
+        self.env.git(repo, "config", "user.name", "App Contract")
+        self.env.git(repo, "config", "user.email", "app-contract@example.invalid")
+        (repo / "reviewed.txt").write_text("reviewed commit\n")
+        self.env.git(repo, "add", "reviewed.txt")
+        self.env.git(repo, "commit", "-m", "Reviewed app push")
+        reviewed_commit = self.env.git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        plan = json.loads(self.env.msw(
+            "app", "push-plan", "--workspace", "dev", "--repositories", "repo",
+            "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(plan["localCommit"], reviewed_commit)
+        self.assertEqual(plan["confirmationPhrase"], "PUSH")
+
+        applied = json.loads(self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text="PUSH\n",
+        ).stdout)["result"]
+        self.assertTrue(applied["pushed"])
+        self.assertTrue(applied["reconciled"])
+        remote_commit = run_cmd(
+            [SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"],
+            env=self.env.env,
+        ).stdout.strip()
+        self.assertEqual(remote_commit, reviewed_commit)
+
+    def test_app_command_inventory_is_dispatched_and_guarded(self) -> None:
+        help_text = self.env.msw("app", "help").stdout
+        for command in (
+            "url", "clone", "pull", "identity", "disk", "resize", "clean",
+            "upgrade", "update", "check", "backup", "restore", "push-plan",
+        ):
+            self.assertIn(f"msw app {command}", help_text)
+
+        url = json.loads(self.env.msw(
+            "app", "url", "--workspace", "dev", "--port", "3000",
+            "--scheme", "https", "--format", "json",
+        ).stdout)
+        self.assertEqual(url["command"], "url")
+        self.assertEqual(url["result"]["url"], "https://dev.msw.test:3000")
+        self.assertFalse(url["result"]["started"])
+
+        invalid_destination = self.env.msw(
+            "app", "clone", "--workspace", "dev", "--repository", "acme/demo",
+            "--destination", "../escape", "--format", "json", check=False,
+        )
+        self.assertEqual(invalid_destination.returncode, 64)
+        self.assertFailed(invalid_destination, "MSW_INVALID_REQUEST")
+
+        update_without_confirmation = self.env.msw(
+            "app", "update", "--format", "json", check=False,
+        )
+        self.assertEqual(update_without_confirmation.returncode, 77)
+        self.assertFailed(update_without_confirmation, "MSW_CONFIRMATION_MISMATCH")
+
+        deep_without_confirmation = self.env.msw(
+            "app", "check", "--deep", "--format", "json", check=False,
+        )
+        self.assertEqual(deep_without_confirmation.returncode, 77)
+        self.assertFailed(deep_without_confirmation, "MSW_CONFIRMATION_MISMATCH")
+
+        invalid_repository = self.env.msw(
+            "app", "github-bind", "--workspace", "dev", "--repository", "../escape",
+            "--mode", "read-only", "--format", "json", check=False,
+        )
+        self.assertEqual(invalid_repository.returncode, 64)
+        self.assertFailed(invalid_repository, "MSW_INVALID_REQUEST")
+
+        invalid_push_path = self.env.msw(
+            "app", "push-plan", "--workspace", "dev", "--repositories", "../escape",
+            "--format", "json", check=False,
+        )
+        self.assertEqual(invalid_push_path.returncode, 64)
+        self.assertFailed(invalid_push_path, "MSW_INVALID_REQUEST")
+
+    def test_app_repository_scan_never_treats_remote_failure_as_absent(self) -> None:
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")
+        self.env.msw("clone", "dev", "acme/demo", "repo")
+        repo = self.env.guest_repo("dev", "repo")
+        self.env.git(repo, "remote", "set-url", "origin", "https://github.com/acme/missing.git")
+
+        result = json.loads(self.env.msw(
+            "app", "repositories", "--workspace", "dev", "--if-running",
+            "--include-worktree-status", "--format", "json",
+        ).stdout)["result"]
+        snapshot = next(item for item in result["repositories"] if item["path"] == "repo")
+        self.assertEqual(snapshot["destinationState"], "unavailable")
+        self.assertEqual(snapshot["pushability"], "blocked")
+
+    def test_app_follow_metrics_normalizes_jsonl_events(self) -> None:
+        self.env.msw("start", "dev")
+        process = self.env.msw(
+            "app", "metrics", "--workspace", "dev", "--format", "json", "--follow",
+            extra_env={"MSW_FAKE_METRICS": '{"cpu":12.5}'},
+        )
+        events = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+        self.assertEqual([event["type"] for event in events], ["stream-start", "metrics", "stream-end"])
+        event = events[1]
+        self.assertEqual(event["schemaVersion"], 1)
+        self.assertEqual(event["type"], "metrics")
+        self.assertEqual(event["workspace"], "dev")
+        self.assertEqual(event["snapshot"]["cpu"], 12.5)
+        self.assertTrue(event["safeForDisplay"])
+        self.assertEqual(events[0]["stream"], "metrics")
+        self.assertEqual(events[0]["protocolVersion"], 1)
+        self.assertEqual({item["requestId"] for item in events}, {events[0]["requestId"]})
 
 
 if __name__ == "__main__":

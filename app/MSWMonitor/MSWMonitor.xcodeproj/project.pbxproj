@@ -12,37 +12,96 @@
 		A00000000000000000000005 /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
 		A00000000000000000000007 /* MSWMonitorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWMonitorApp.swift; sourceTree = "<group>"; };
 		A00000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A00000000000000000000024 /* config.sh */ = {isa = PBXFileReference; lastKnownFileType = text; path = ../../../config.sh; sourceTree = "<group>"; };
 		A00000000000000000000009 /* AppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelTests.swift; sourceTree = "<group>"; };
 		A0000000000000000000000A /* MSWMonitorUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWMonitorUITests.swift; sourceTree = "<group>"; };
 		A0000000000000000000000B /* MSWMonitorUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MSWMonitorUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-
+		A0000000000000000000000C /* MSWModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWModels.swift; sourceTree = "<group>"; };
+		A0000000000000000000000D /* MSWJSONProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWJSONProtocol.swift; sourceTree = "<group>"; };
+		A0000000000000000000000E /* MSWCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWCommandRunner.swift; sourceTree = "<group>"; };
+		A0000000000000000000000F /* MSWClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWClient.swift; sourceTree = "<group>"; };
+		A00000000000000000000010 /* MSWOperationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWOperationCoordinator.swift; sourceTree = "<group>"; };
+		A00000000000000000000011 /* GitHubDeviceFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubDeviceFlow.swift; sourceTree = "<group>"; };
+		A00000000000000000000012 /* GitHubAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAPIClient.swift; sourceTree = "<group>"; };
+		A00000000000000000000013 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		A00000000000000000000014 /* CredentialBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialBroker.swift; sourceTree = "<group>"; };
+		A00000000000000000000015 /* TokenRefreshCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenRefreshCoordinator.swift; sourceTree = "<group>"; };
+		A00000000000000000000016 /* BootstrapCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BootstrapCoordinator.swift; sourceTree = "<group>"; };
+		A00000000000000000000017 /* ToolchainInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolchainInstaller.swift; sourceTree = "<group>"; };
+		A00000000000000000000018 /* HostAgentClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAgentClient.swift; sourceTree = "<group>"; };
+		A00000000000000000000019 /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
+		A0000000000000000000001A /* SetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupView.swift; sourceTree = "<group>"; };
+		A0000000000000000000001B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A0000000000000000000001C /* MSWOperationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWOperationService.swift; sourceTree = "<group>"; };
+		A0000000000000000000001E /* MSWHostAgent */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; path = MSWHostAgent; sourceTree = BUILT_PRODUCTS_DIR; };
+		A0000000000000000000001F /* HostAgentMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAgentMain.swift; sourceTree = "<group>"; };
+		A00000000000000000000020 /* org.microsandbox.MSWMonitor.host-agent.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = org.microsandbox.MSWMonitor.host-agent.plist; sourceTree = "<group>"; };
+		A0000000000000000000001D /* GitHubAuthorizationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAuthorizationCoordinator.swift; sourceTree = "<group>"; };
+		A00000000000000000000027 /* MSWSourceSetupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWSourceSetupService.swift; sourceTree = "<group>"; };
+		A00000000000000000000028 /* MSWHostRepairVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWHostRepairVerifier.swift; sourceTree = "<group>"; };
+		A0000000000000000000002A /* MSWHostRepairAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWHostRepairAuthorization.swift; sourceTree = "<group>"; };
+A00000000000000000000022 /* WorkspaceNetworkConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceNetworkConfiguration.swift; sourceTree = "<group>"; };
+		A1000000000000000000001C /* MSWOperationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001C /* MSWOperationService.swift */; };
+		A10000000000000000000019 /* DetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000019 /* DetailView.swift */; };
+		A1000000000000000000001A /* SetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001A /* SetupView.swift */; };
+		A1000000000000000000001B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001B /* SettingsView.swift */; };
 		A10000000000000000000003 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000003 /* AppModel.swift */; };
 		A10000000000000000000004 /* MonitorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000004 /* MonitorView.swift */; };
 		A10000000000000000000005 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000005 /* StatusBarController.swift */; };
 		A10000000000000000000007 /* MSWMonitorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000007 /* MSWMonitorApp.swift */; };
+		A1000000000000000000000C /* MSWModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000C /* MSWModels.swift */; };
+		A1000000000000000000000D /* MSWJSONProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000D /* MSWJSONProtocol.swift */; };
+		A1000000000000000000000E /* MSWCommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000E /* MSWCommandRunner.swift */; };
+		A1000000000000000000000F /* MSWClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000F /* MSWClient.swift */; };
+		A10000000000000000000010 /* MSWOperationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000010 /* MSWOperationCoordinator.swift */; };
+		A10000000000000000000011 /* GitHubDeviceFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000011 /* GitHubDeviceFlow.swift */; };
+		A10000000000000000000012 /* GitHubAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000012 /* GitHubAPIClient.swift */; };
+		A10000000000000000000013 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000013 /* KeychainStore.swift */; };
+		A10000000000000000000014 /* CredentialBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000014 /* CredentialBroker.swift */; };
+		A10000000000000000000015 /* TokenRefreshCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000015 /* TokenRefreshCoordinator.swift */; };
+		A10000000000000000000016 /* BootstrapCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000016 /* BootstrapCoordinator.swift */; };
+		A10000000000000000000017 /* ToolchainInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000017 /* ToolchainInstaller.swift */; };
+		A1000000000000000000001E /* HostAgentMain.swift in MSWHostAgent */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001F /* HostAgentMain.swift */; };
+		A10000000000000000000020 /* org.microsandbox.MSWMonitor.host-agent.plist in Launch Daemons */ = {isa = PBXBuildFile; fileRef = A00000000000000000000020 /* org.microsandbox.MSWMonitor.host-agent.plist */; };
+		A10000000000000000000021 /* MSWHostAgent in Embed Host Agent */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001E /* MSWHostAgent */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		A10000000000000000000018 /* HostAgentClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000018 /* HostAgentClient.swift */; };
+		A1000000000000000000001D /* GitHubAuthorizationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000001D /* GitHubAuthorizationCoordinator.swift */; };
 		A10000000000000000000009 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000009 /* AppModelTests.swift */; };
 		A1000000000000000000000A /* MSWMonitorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000A /* MSWMonitorUITests.swift */; };
+	A10000000000000000000024 /* config.sh in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000024 /* config.sh */; };
+	A10000000000000000000023 /* WorkspaceNetworkConfiguration.swift in MSWHostAgent */ = {isa = PBXBuildFile; fileRef = A00000000000000000000022 /* WorkspaceNetworkConfiguration.swift */; };
+		A10000000000000000000027 /* MSWSourceSetupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000027 /* MSWSourceSetupService.swift */; };
+		A10000000000000000000028 /* MSWHostRepairVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000028 /* MSWHostRepairVerifier.swift */; };
+		A1000000000000000000002A /* MSWHostRepairAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000002A /* MSWHostRepairAuthorization.swift */; };
+		A10000000000000000000029 /* WorkspaceNetworkConfiguration.swift in App Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000022 /* WorkspaceNetworkConfiguration.swift */; };
 
-		A20000000000000000000001 = {
+		A20000000000000000000001 /* Main group */ = {
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000002 /* Sources */,
 				A20000000000000000000003 /* Resources */,
 				A20000000000000000000004 /* Tests */,
 				A20000000000000000000006 /* UITests */,
+				A20000000000000000000007 /* HostAgent */,
 				A20000000000000000000005 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
+		A20000000000000000000007 /* HostAgent */ = {
+			isa = PBXGroup;
+			children = (A0000000000000000000001F, A00000000000000000000020, A00000000000000000000022);
+			path = HostAgent;
+			sourceTree = "<group>";
+		};
 		A20000000000000000000002 /* Sources */ = {
 			isa = PBXGroup;
-			children = (A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000007);
+			children = (A00000000000000000000003, A00000000000000000000004, A00000000000000000000005, A00000000000000000000007, A0000000000000000000000C, A0000000000000000000000D, A0000000000000000000000E, A0000000000000000000000F, A00000000000000000000010, A00000000000000000000011, A00000000000000000000012, A00000000000000000000013, A00000000000000000000014, A00000000000000000000015, A00000000000000000000016, A00000000000000000000017, A00000000000000000000018, A00000000000000000000019, A0000000000000000000001A, A0000000000000000000001B, A0000000000000000000001C, A0000000000000000000001D, A00000000000000000000027, A00000000000000000000028, A0000000000000000000002A);
 			path = Sources;
 			sourceTree = "<group>";
 		};
 		A20000000000000000000003 /* Resources */ = {
 			isa = PBXGroup;
-			children = (A00000000000000000000008);
+			children = (A00000000000000000000008, A00000000000000000000024);
 			path = Resources;
 			sourceTree = "<group>";
 		};
@@ -54,7 +113,7 @@
 		};
 		A20000000000000000000005 /* Products */ = {
 			isa = PBXGroup;
-			children = (A00000000000000000000001, A00000000000000000000002, A0000000000000000000000B);
+			children = (A00000000000000000000001, A00000000000000000000002, A0000000000000000000000B, A0000000000000000000001E);
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -65,22 +124,25 @@
 			sourceTree = "<group>";
 		};
 
-		A30000000000000000000001 /* App Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000007); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000001 /* App Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000007, A1000000000000000000000C, A1000000000000000000000D, A1000000000000000000000E, A1000000000000000000000F, A10000000000000000000010, A10000000000000000000011, A10000000000000000000012, A10000000000000000000013, A10000000000000000000014, A10000000000000000000015, A10000000000000000000016, A10000000000000000000017, A10000000000000000000018, A10000000000000000000019, A1000000000000000000001A, A1000000000000000000001B, A1000000000000000000001C, A1000000000000000000001D, A10000000000000000000027, A10000000000000000000028, A10000000000000000000029, A1000000000000000000002A); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000002 /* App Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		A30000000000000000000003 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000003 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000024); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000004 /* Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000005 /* Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000006 /* Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000007 /* UI Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000A); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000008 /* UI Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000009 /* UI Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A3000000000000000000000A /* Host Agent Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000001E, A10000000000000000000023); runOnlyForDeploymentPostprocessing = 0; };
+		A3000000000000000000000B /* Embed Host Agent */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 7; files = (A10000000000000000000021); name = "Embed Host Agent"; runOnlyForDeploymentPostprocessing = 0; };
+		A3000000000000000000000C /* Launch Daemons */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = "Contents/Library/LaunchDaemons"; dstSubfolderSpec = 1; files = (A10000000000000000000020); name = "Launch Daemons"; runOnlyForDeploymentPostprocessing = 0; };
 
 		A40000000000000000000001 /* App Target */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A60000000000000000000002;
-			buildPhases = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003);
+			buildPhases = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A3000000000000000000000B, A3000000000000000000000C);
 			buildRules = ();
-			dependencies = ();
+			dependencies = (A50000000000000000000006);
 			name = MSWMonitor;
 			productName = MSWMonitor;
 			productReference = A00000000000000000000001;
@@ -108,11 +170,24 @@
 			productReference = A0000000000000000000000B;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A40000000000000000000004 /* Host Agent Target */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A60000000000000000000005;
+			buildPhases = (A3000000000000000000000A);
+			buildRules = ();
+			dependencies = ();
+			name = MSWHostAgent;
+			productName = MSWHostAgent;
+			productReference = A0000000000000000000001E;
+			productType = "com.apple.product-type.tool";
+		};
 
 		A50000000000000000000001 = {isa = PBXTargetDependency; target = A40000000000000000000001; targetProxy = A50000000000000000000002; };
 		A50000000000000000000002 = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001; proxyType = 1; remoteGlobalIDString = A40000000000000000000001; remoteInfo = MSWMonitor; };
 		A50000000000000000000003 = {isa = PBXTargetDependency; target = A40000000000000000000001; targetProxy = A50000000000000000000004; };
 		A50000000000000000000004 = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001; proxyType = 1; remoteGlobalIDString = A40000000000000000000001; remoteInfo = MSWMonitor; };
+		A50000000000000000000006 = {isa = PBXTargetDependency; target = A40000000000000000000004; targetProxy = A50000000000000000000007; };
+		A50000000000000000000007 = {isa = PBXContainerItemProxy; containerPortal = A70000000000000000000001; proxyType = 1; remoteGlobalIDString = A40000000000000000000004; remoteInfo = MSWHostAgent; };
 
 		A60000000000000000000001 = {
 			isa = XCConfigurationList;
@@ -138,19 +213,27 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		A60000000000000000000005 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A65000000000000000000001, A65000000000000000000002);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 
-		A61000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Debug;};
-		A61000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Release;};
-		A62000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = NO; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; name = Debug;};
-		A62000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_COMPILATION_MODE = wholemodule;}; name = Release;};
+		A61000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; ENABLE_HARDENED_RUNTIME = YES; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Debug;};
+		A61000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; ARCHS = arm64; ENABLE_HARDENED_RUNTIME = YES; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0;}; name = Release;};
+		A65000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = YES; MACOSX_DEPLOYMENT_TARGET = 26.0; PRODUCT_NAME = MSWHostAgent; SDKROOT = macosx; SKIP_INSTALL = YES; SWIFT_VERSION = 6.0;}; name = Debug;};
+		A65000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {ARCHS = arm64; CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = YES; MACOSX_DEPLOYMENT_TARGET = 26.0; PRODUCT_NAME = MSWHostAgent; SDKROOT = macosx; SKIP_INSTALL = YES; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 6.0;}; name = Release;};
+		A62000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = YES; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MSW_TOOLCHAIN_MANIFEST_PUBLIC_KEY = ""; MSW_TOOLCHAIN_MANIFEST_URL = ""; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; name = Debug;};
+		A62000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Resources/Info.plist; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; MSW_TOOLCHAIN_MANIFEST_PUBLIC_KEY = ""; MSW_TOOLCHAIN_MANIFEST_URL = ""; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitor; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_COMPILATION_MODE = wholemodule;}; name = Release;};
 		A63000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MSWMonitor.app/Contents/MacOS/MSWMonitor";}; name = Debug;};
 		A63000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorTests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MSWMonitor.app/Contents/MacOS/MSWMonitor";}; name = Release;};
-		A64000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_TARGET_NAME = MSWMonitor;}; name = Debug;};
-		A64000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_TARGET_NAME = MSWMonitor;}; name = Release;};
+		A64000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_TARGET_NAME = MSWMonitor;}; name = Debug;};
+		A64000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; ENABLE_HARDENED_RUNTIME = NO; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = org.microsandbox.MSWMonitorUITests; PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_EMIT_LOC_STRINGS = NO; TEST_TARGET_NAME = MSWMonitor;}; name = Release;};
 
 		A70000000000000000000001 /* Project object */ = {
 			isa = PBXProject;
-			attributes = {BuildIndependentTargetsInParallel = YES; LastSwiftUpdateCheck = 2650; LastUpgradeCheck = 2650; TargetAttributes = {A40000000000000000000001 = {CreatedOnToolsVersion = 26.5;}; A40000000000000000000002 = {CreatedOnToolsVersion = 26.5; TestTargetID = A40000000000000000000001;}; A40000000000000000000003 = {CreatedOnToolsVersion = 26.5; TestTargetID = A40000000000000000000001;};};};
+			attributes = {BuildIndependentTargetsInParallel = YES; LastSwiftUpdateCheck = 2650; LastUpgradeCheck = 2650; TargetAttributes = {A40000000000000000000001 = {CreatedOnToolsVersion = 26.5;}; A40000000000000000000002 = {CreatedOnToolsVersion = 26.5; TestTargetID = A40000000000000000000001;}; A40000000000000000000003 = {CreatedOnToolsVersion = 26.5; TestTargetID = A40000000000000000000001;}; A40000000000000000000004 = {CreatedOnToolsVersion = 26.5;};};};
 			buildConfigurationList = A60000000000000000000001;
 			compatibilityVersion = "Xcode 16.0";
 			developmentRegion = en;
@@ -160,7 +243,7 @@
 			productRefGroup = A20000000000000000000005;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (A40000000000000000000001, A40000000000000000000002, A40000000000000000000003);
+			targets = (A40000000000000000000001, A40000000000000000000002, A40000000000000000000003, A40000000000000000000004);
 		};
 	};
 	rootObject = A70000000000000000000001;

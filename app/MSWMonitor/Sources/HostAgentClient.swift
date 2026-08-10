@@ -1,0 +1,185 @@
+import Foundation
+
+struct MSWHostRecordSnapshot: Codable, Sendable, Equatable {
+    let fixedAliases: [String]
+    let hostsBlockInstalled: Bool
+    let launchDaemonRegistered: Bool
+}
+
+enum MSWHostAgentError: Error, LocalizedError, Sendable, Equatable {
+    case unavailable
+    case timeout
+    case authorizationDenied
+    case invalidInput
+    case rejected(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: return "The privileged MSW host helper is unavailable."
+        case .timeout: return "The privileged MSW host helper did not respond within 10 seconds."
+        case .authorizationDenied: return "Administrator approval for the MSW host helper was denied."
+        case .invalidInput: return "The host integration request was invalid."
+        case .rejected(let message): return message
+        }
+    }
+}
+
+@objc protocol MSWHostAgentProtocol {
+    func inspect(_ reply: @escaping (Data?, String?) -> Void)
+    func ensureFixedLoopbackAliases(_ reply: @escaping (Data?, String?) -> Void)
+    func installFixedHostRecords(_ reply: @escaping (Data?, String?) -> Void)
+    func uninstall(reply: @escaping (Data?, String?) -> Void)
+}
+
+private final class MSWHostAgentCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<MSWHostRecordSnapshot, Error>?
+    private var timeoutTask: Task<Void, Never>?
+    private var timeoutHandler: (() -> Void)?
+
+    init(_ continuation: CheckedContinuation<MSWHostRecordSnapshot, Error>) {
+        self.continuation = continuation
+    }
+
+    func setTimeoutHandler(_ handler: @escaping () -> Void) {
+        lock.lock()
+        guard continuation != nil else {
+            lock.unlock()
+            return
+        }
+        timeoutHandler = handler
+        lock.unlock()
+    }
+
+    func setTimeoutTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        if continuation == nil {
+            lock.unlock()
+            task.cancel()
+        } else {
+            timeoutTask = task
+            lock.unlock()
+        }
+    }
+
+    func finish(
+        _ result: Result<MSWHostRecordSnapshot, Error>,
+        retiresConnection: Bool = false
+    ) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        let timeoutTask = self.timeoutTask
+        self.timeoutTask = nil
+        let timeoutHandler = retiresConnection ? self.timeoutHandler : nil
+        self.timeoutHandler = nil
+        lock.unlock()
+        timeoutTask?.cancel()
+        timeoutHandler?()
+        continuation?.resume(with: result)
+    }
+}
+
+actor HostAgentClient {
+    private let machServiceName: String
+    private var connection: NSXPCConnection?
+    private var connectionGeneration: String?
+
+    init(machServiceName: String = "org.microsandbox.MSWMonitor.host-agent") {
+        self.machServiceName = machServiceName
+    }
+
+    func inspect() async throws -> MSWHostRecordSnapshot {
+        try await call { proxy, reply in proxy.inspect(reply) }
+    }
+
+    func ensureFixedLoopbackAliases() async throws -> MSWHostRecordSnapshot {
+        try await call { proxy, reply in proxy.ensureFixedLoopbackAliases(reply) }
+    }
+
+    func installFixedHostRecords() async throws -> MSWHostRecordSnapshot {
+        try await call { proxy, reply in proxy.installFixedHostRecords(reply) }
+    }
+
+    func uninstall() async throws -> MSWHostRecordSnapshot {
+        try await call { proxy, reply in proxy.uninstall(reply: reply) }
+    }
+
+    private func call(
+        _ invoke: @escaping (MSWHostAgentProtocol, @escaping (Data?, String?) -> Void) -> Void
+    ) async throws -> MSWHostRecordSnapshot {
+        try await withCheckedThrowingContinuation { continuation in
+            let completion = MSWHostAgentCompletion(continuation)
+            do {
+                let (proxy, generation) = try remoteProxy { _ in
+                    completion.finish(.failure(MSWHostAgentError.unavailable))
+                }
+                completion.setTimeoutHandler { [weak self] in
+                    Task { await self?.connectionTimedOut(generation: generation) }
+                }
+                let timeoutTask = Task {
+                    do {
+                        try await Task.sleep(for: .seconds(10))
+                        completion.finish(
+                            .failure(MSWHostAgentError.timeout),
+                            retiresConnection: true
+                        )
+                    } catch {
+                        // The request completed before the timeout.
+                    }
+                }
+                completion.setTimeoutTask(timeoutTask)
+                invoke(proxy) { data, errorMessage in
+                    if let errorMessage {
+                        completion.finish(.failure(MSWHostAgentError.rejected(errorMessage)))
+                    } else if let data,
+                              let snapshot = try? JSONDecoder().decode(MSWHostRecordSnapshot.self, from: data) {
+                        completion.finish(.success(snapshot))
+                    } else {
+                        completion.finish(.failure(MSWHostAgentError.unavailable))
+                    }
+                }
+            } catch {
+                completion.finish(.failure(error))
+            }
+        }
+    }
+
+    private func remoteProxy(
+        errorHandler: @escaping (Error) -> Void
+    ) throws -> (proxy: MSWHostAgentProtocol, generation: String) {
+        if connection == nil {
+            let value = NSXPCConnection(machServiceName: machServiceName, options: .privileged)
+            let generation = UUID().uuidString
+            value.remoteObjectInterface = NSXPCInterface(with: MSWHostAgentProtocol.self)
+            value.invalidationHandler = { [weak self] in
+                Task { await self?.connectionInvalidated(generation: generation) }
+            }
+            value.interruptionHandler = { [weak self] in
+                Task { await self?.connectionInvalidated(generation: generation) }
+            }
+            value.resume()
+            connection = value
+            connectionGeneration = generation
+        }
+        guard let connection,
+              let generation = connectionGeneration,
+              let proxy = connection.remoteObjectProxyWithErrorHandler(errorHandler) as? MSWHostAgentProtocol else {
+            throw MSWHostAgentError.unavailable
+        }
+        return (proxy, generation)
+    }
+
+    private func connectionInvalidated(generation: String) {
+        guard connectionGeneration == generation else { return }
+        connection = nil
+        connectionGeneration = nil
+    }
+
+    private func connectionTimedOut(generation: String) {
+        guard connectionGeneration == generation else { return }
+        connection?.invalidate()
+        connection = nil
+        connectionGeneration = nil
+    }
+}

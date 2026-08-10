@@ -12,6 +12,26 @@ if [[ -d "$BUILD_DIR/MSWMonitor.app" ]]; then
   /bin/rm -rf -- "$BUILD_DIR/MSWMonitor.app"
 fi
 
+# Local verification stays unsigned by default. A release-capable build can opt
+# into an installed Apple team signing identity without changing the script.
+typeset -a signingSettings
+# An explicit CODE_SIGNING_ALLOWED value always wins.
+typeset signingAllowed="${CODE_SIGNING_ALLOWED:-}"
+if [[ -z "$signingAllowed" ]]; then
+  if [[ -n "${CODE_SIGN_IDENTITY:-}" || -n "${DEVELOPMENT_TEAM:-}" ]]; then
+    signingAllowed=YES
+  else
+    signingAllowed=NO
+  fi
+fi
+signingSettings=("CODE_SIGNING_ALLOWED=$signingAllowed")
+if [[ -n "${CODE_SIGN_IDENTITY:-}" ]]; then
+  signingSettings+=("CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY}")
+fi
+if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
+  signingSettings+=("DEVELOPMENT_TEAM=${DEVELOPMENT_TEAM}")
+fi
+
 xcodebuild \
   -project "$APP_DIR/MSWMonitor.xcodeproj" \
   -scheme MSWMonitor \
@@ -21,7 +41,7 @@ xcodebuild \
   ARCHS=arm64 \
   ONLY_ACTIVE_ARCH=YES \
   CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
-  CODE_SIGNING_ALLOWED=NO \
+  "${signingSettings[@]}" \
   build 2>&1 | tee "$LOG_DIR/build.log"
 
 test -x "$BUILD_DIR/MSWMonitor.app/Contents/MacOS/MSWMonitor"
