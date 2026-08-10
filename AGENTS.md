@@ -17,9 +17,9 @@ Run commands from the repository root unless a command says otherwise.
 ### Scope and current implementation
 
 - The local app bundle is `app/MSWMonitor/build/MSWMonitor.app`.
-- The app is an `LSUIElement` background app. It intentionally has no normal
-  application window or Dock presence; its primary UI is the `MSW` status item
-  and its transient popover.
+- The app is a regular macOS application with a normal `MSW Monitor` application
+  menu and Dock/Cmd-Tab presence. Its primary monitor UI remains the `MSW` status
+  item and transient popover; setup, detail, and settings windows may also open.
 - The source of truth is `app/MSWMonitor/Sources/`, especially
   `MSWMonitorApp.swift`, `StatusBarController.swift`, `MonitorView.swift`, and
   `AppModel.swift`.
@@ -112,10 +112,11 @@ open app/MSWMonitor/build/MSWMonitor.app
 pgrep -x MSWMonitor
 ```
 
-Normal production launch creates the status item but does not automatically open
-the popover. Click the `MSW` item in the menu bar to open it. Do not use the
-absence of `app.windows` as a launch-failure signal; this is a background-only
-status app.
+Normal production launch creates the application menu and status item but does not
+automatically open the monitor popover after setup. On first launch it may open
+the setup window. Otherwise click the `MSW` item in the menu bar to open the
+monitor. Do not use the absence of a monitor popover or `app.windows` as a
+launch-failure signal; the monitor remains primarily a status-item/popover app.
 
 For deterministic automation and debugging, launch the test mode:
 
@@ -268,7 +269,7 @@ Check the symptom against the narrowest evidence source:
 | --- | --- |
 | Build fails | `build.log`; rerun `build.sh` and inspect the first compiler/linker error |
 | Smoke says the app bundle is missing | Run `build.sh`; `smoke-test.sh` requires `build/MSWMonitor.app` |
-| `statusItem.button` is missing | Confirm the bundle path, `pgrep`, `LSUIElement`, and launch logs; remember there is no normal window |
+| `statusItem.button` is missing | Confirm the bundle path, `pgrep`, `LSUIElement=false`, the application menu, and launch logs; the status item may exist without the monitor popover being open |
 | `monitor.title` or rows are missing | Confirm `--ui-test-open-popover`, rebuild the bundle, then inspect the smoke log and result activities |
 | Content disappears after clicking Refresh | Check for transient-popover dismissal and unrelated desktop-window interruption messages; test mode must use `.applicationDefined` |
 | Refresh does not become `Observation #1` | Confirm `refresh.button` was found/clicked and inspect the accessibility activity tree; the current model only increments an integer |

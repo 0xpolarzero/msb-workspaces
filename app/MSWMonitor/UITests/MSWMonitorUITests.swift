@@ -21,6 +21,15 @@ final class MSWMonitorUITests: XCTestCase {
         let statusItem = app.statusItems["statusItem.button"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 3))
         XCTAssertEqual(statusItem.label, "MSW Monitor")
+        let applicationMenu = app.menuBars.menuBarItems["MSW Monitor"]
+        XCTAssertTrue(applicationMenu.waitForExistence(timeout: 3))
+        applicationMenu.click()
+        XCTAssertTrue(app.menuItems["About MSW Monitor"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.menuItems["Settings…"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.menuItems["Hide MSW Monitor"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.menuItems["Quit MSW Monitor"].waitForExistence(timeout: 2))
+        app.typeKey(.escape, modifierFlags: [])
+
 
         assertText("MSW Monitor", identifier: "monitor.title", in: app)
         assertText("dev", identifier: "workspace.dev.name", in: app)

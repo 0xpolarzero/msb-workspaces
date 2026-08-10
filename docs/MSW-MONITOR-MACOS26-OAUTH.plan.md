@@ -574,7 +574,7 @@ Use `NSStatusItem` + transient `NSPopover` with SwiftUI hosted by `NSHostingCont
 
 `MenuBarExtra` with `.window` is a valid macOS 26 option and can remain a prototype/reference implementation, but the explicit AppKit shell is safer for this product because it provides direct control over status-item lifetime, popover anchoring, closing, focus restoration, long-operation error presentation, and keyboard behavior. The app remains SwiftUI-first; AppKit is only the lifecycle/hosting boundary.
 
-Use an `LSUIElement` agent application so the app lives in the menu bar and does not add a normal Dock icon. A detail or setup window may still activate normally when opened.
+Use a regular macOS application (`LSUIElement=false`) so macOS presents a standard `MSW Monitor` application menu and Dock/Cmd-Tab identity while the monitor remains available from the status item. The status item and transient popover are still the primary steady-state monitor surface; detail, setup, and settings windows may activate normally when opened.
 
 ### 8.3 State and process layers
 
