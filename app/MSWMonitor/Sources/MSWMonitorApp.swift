@@ -17,16 +17,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
     private let runner: MSWCommandRunner
     private let credentialBroker: CredentialBroker?
+    private let connect: MSWConnectClient
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: MSWClient
     override init() {
-        let broker = try? CredentialBroker()
-        let refresher = broker.map { TokenRefreshCoordinator(broker: $0) }
+        let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let connectBaseURL = configuredBaseURL.flatMap(URL.init(string:)) ?? MSWConnectConfiguration().baseURL
+        let configuredClientID = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectClientID") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let connectClientID = configuredClientID.flatMap { $0.isEmpty ? nil : $0 } ?? MSWConnectConfiguration().clientID
+        let configuredAttestation = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectScopeAttestationPublicKey") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let scopeAttestationKey = configuredAttestation.flatMap { value in
+            value.isEmpty ? nil : Data(base64Encoded: value)
+        }
+        let connectConfiguration = MSWConnectConfiguration(
+            baseURL: connectBaseURL,
+            clientID: connectClientID,
+            scopeAttestationPublicKey: scopeAttestationKey,
+            requiresScopeAttestation: !(configuredAttestation?.isEmpty ?? true)
+        )
+        let connect = MSWConnectClient(configuration: connectConfiguration)
         let runner = MSWCommandRunner()
+        let broker = try? CredentialBroker()
+        let refresher = broker.map {
+            TokenRefreshCoordinator(broker: $0, connect: connect)
+        }
         self.runner = runner
-        credentialBroker = broker
-        tokenRefreshCoordinator = refresher
-        client = MSWClient(runner: runner, credentialBroker: broker, tokenRefreshCoordinator: refresher)
+        self.credentialBroker = broker
+        self.connect = connect
+        self.tokenRefreshCoordinator = refresher
+        self.client = MSWClient(
+            runner: runner,
+            credentialBroker: broker,
+            tokenRefreshCoordinator: refresher
+        )
         super.init()
     }
 
@@ -55,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hostService: MSWHostServiceController()
         )
         let authorization = credentialBroker.map {
-            GitHubAuthorizationCoordinator(broker: $0, mswClient: client)
+            GitHubAuthorizationCoordinator(broker: $0, connect: connect, mswClient: client)
         }
         let controller = StatusBarController(
             model: model,
@@ -78,5 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 controller.showSetupForFirstLaunch()
             }
         }
+    }
+    @objc func openGitHubSetup() {
+        statusBarController?.showSetupForGitHubAuthorization()
     }
 }

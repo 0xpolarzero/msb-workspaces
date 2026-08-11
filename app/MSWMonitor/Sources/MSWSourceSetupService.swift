@@ -1,6 +1,12 @@
 import Foundation
 
-struct MSWSourceSetupService: Sendable {
+protocol MSWSourceSetupControlling: Sendable {
+    var isAvailable: Bool { get }
+    func configureUserIntegrationIfAvailable() async throws
+    func installRuntime() async throws
+}
+
+struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
     enum Failure: Error, LocalizedError, Sendable, Equatable {
         case unavailable
         case failed(String)

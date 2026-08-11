@@ -84,3 +84,11 @@ final class KeychainStore: @unchecked Sendable {
         return query
     }
 }
+protocol CredentialKeychainStoring: Sendable {
+    func save(_ item: KeychainItem) throws
+    func load(service: String, account: String) throws -> Data
+    func delete(service: String, account: String) throws
+}
+
+extension KeychainStore: CredentialKeychainStoring {}
+extension KeychainStore: MSWConnectKeychainStoring {}

@@ -1,6 +1,10 @@
 import Foundation
 
-struct MSWHostRepairAuthorization: Sendable {
+protocol MSWHostRepairAuthorizing: Sendable {
+    func repair() async throws
+}
+
+struct MSWHostRepairAuthorization: MSWHostRepairAuthorizing, Sendable {
     enum Failure: Error, LocalizedError, Sendable, Equatable {
         case unavailable
         case cancelled

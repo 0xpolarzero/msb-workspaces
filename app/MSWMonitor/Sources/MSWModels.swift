@@ -207,10 +207,11 @@ struct MSWCredentialSnapshot: Codable, Sendable {
     enum State: String, Codable, Sendable {
         case unconfigured = "Unconfigured"
         case legacy = "Legacy"
+        case needsAuthorization = "Needs authorization"
+        case serviceUnavailable = "Service unavailable"
         case ready = "Ready"
         case expiring = "Expiring"
         case needsRestart = "Needs restart"
-        case needsAuthorization = "Needs authorization"
         case readOnly = "Read-only"
         case removalPending = "Removal pending"
         case quarantined = "Quarantined"
@@ -341,6 +342,11 @@ struct MSWGitHubBindResult: Codable, Sendable {
     let verified: Bool
     let lifecycleRestored: Bool
 }
+struct MSWGitHubUnbindResult: Codable, Sendable {
+    let workspace: String
+    let unbound: Bool
+}
+
 
 struct MSWGitHubWorkspaceState: Codable, Identifiable, Sendable {
     let workspace: String

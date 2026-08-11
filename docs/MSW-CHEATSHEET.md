@@ -42,20 +42,26 @@ msw identity "Ada Lovelace" ada@example.com
 
 ## GitHub permissions
 
+Connect GitHub in **MSW Monitor** → **Settings** → **GitHub**. Select the owner and repositories for each workspace, review the guest-read/host-write grants, then apply.
+
+The legacy CLI token prompt was removed:
+
+```text
+msw github setup …       reports the MSW Monitor migration path
+```
+
+The retained commands inspect or verify scoped Connect grants:
+
 ```bash
-msw github setup WORKSPACE OWNER/VERIFICATION-REPO
 msw github verify WORKSPACE [OWNER/REPO]
 msw github status [WORKSPACE|all]
 msw github remove WORKSPACE
 ```
 
-Set up every group:
-
-```bash
-msw github setup dev OWNER/msw-verification
-msw github setup playgrounds OWNER/msw-verification
-msw github setup personal OWNER/msw-verification
-```
+`msw github remove` refuses current Connect grants because revocation must be
+performed by MSW Monitor. Use the app's workspace removal or account
+disconnect action so the service grant and local credential state are updated
+together.
 
 ## Push from the Mac
 

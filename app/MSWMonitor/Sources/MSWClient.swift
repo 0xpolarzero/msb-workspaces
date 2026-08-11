@@ -245,6 +245,22 @@ actor MSWClient {
             timeout: .seconds(300)
         )
     }
+    func unbindGitHubCredentials(workspace: String) async throws -> MSWEnvelope<MSWGitHubUnbindResult> {
+        guard WorkspaceID.isValid(workspace) else {
+            throw MSWClientError.invalidArguments
+        }
+        return try await execute(
+            arguments: [
+                "app", "github-unbind",
+                "--workspace", workspace,
+                "--format", "json"
+            ],
+            as: MSWGitHubUnbindResult.self,
+            command: "github-unbind",
+            timeout: .seconds(300)
+        )
+    }
+
  
     func preparePushPlan(workspace: String, repositories: [String]) async throws -> MSWEnvelope<MSWPushPlan> {
         guard WorkspaceID.isValid(workspace), repositories.count == 1,
@@ -571,14 +587,31 @@ actor MSWClient {
         let bundle: CredentialBundle
         do {
             bundle = try await credentialBroker.load(workspace: workspace, role: role)
-        } catch CredentialBrokerError.missingCredential {
+        } catch CredentialBrokerError.missingCredential,
+                CredentialBrokerError.legacyCredentialRequiresAuthorization {
             return nil
+        } catch CredentialBrokerError.grantUnavailable {
+            var canRetry = false
+            do {
+                if let entry = try await credentialBroker.metadata(for: workspace, role: role) {
+                    canRetry = entry.recoveryState == .serviceUnavailable && !entry.quarantined
+                }
+            } catch {
+                canRetry = false
+            }
+            if canRetry, let tokenRefreshCoordinator {
+                let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
+                return refreshed.accessToken
+            }
+            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reauthorization.")
+        } catch CredentialBrokerError.quarantineRequired {
+            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reauthorization.")
         }
-        if !bundle.tokens.isAccessExpired {
-            return bundle.tokens.accessToken
+        if !bundle.credential.isAccessExpired {
+            return bundle.credential.accessToken
         }
         guard let tokenRefreshCoordinator else {
-            throw MSWClientError.unavailable("The GitHub access token has expired; authorize the workspace again.")
+            throw MSWClientError.unavailable("The GitHub installation grant has expired; authorize the workspace again.")
         }
         let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
         return refreshed.accessToken

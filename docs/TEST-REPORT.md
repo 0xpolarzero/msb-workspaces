@@ -1,10 +1,43 @@
-# MSW 3.1.0 test report
+# MSW 3.1.0 verification report
 
-## Result
+Verification is split between the native MSW Monitor app and the portable `msw` release suite. The Connect authorization contract is exercised by the app's Swift unit tests; the portable suite covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
 
-**53 automated release scenarios passed.** The suite drives the actual packaged `setup.sh` and installed `msw` CLI against a stateful MicroSandbox simulator, while using real local Git repositories and bare remotes for clone, fetch, pull, bundle, push, force-with-lease, and Git LFS behavior.
+The token-prompt GitHub setup scenarios described in older release reports are historical. The legacy `msw github setup` surface is removed and must not be treated as a supported setup or rotation path.
 
-The release suite covers strict 1–65535 tunnel-port validation, GitHub least-privilege boundaries, transactional Keychain cleanup, host-write metadata authorization, stale-token rejection in read-only workspaces, fail-closed `security(1)` deletion handling, metadata revocation before fallible credential cleanup, rollback safety when credential deletion fails, interruption-safe setup transactions, and fail-closed workspace quarantine. The exact packaged archive is also extracted into a clean directory and subjected to syntax, documentation, installation, GitHub-boundary, and deep-check smoke tests before release.
+Run the app checks after source changes:
+
+```bash
+app/MSWMonitor/Scripts/build.sh
+app/MSWMonitor/Scripts/test.sh
+app/MSWMonitor/Scripts/smoke-test.sh
+```
+
+The smoke flow proves the app bundle and status-item/popover UI. The app's workspace state and observation counter remain deterministic fixture values; they are not live sandbox telemetry.
+
+## Native macOS app evidence
+
+- Bundle exercised: `app/MSWMonitor/build/MSWMonitor.app`.
+- UI smoke mode: `--ui-test-open-popover`; production mode remains `.transient`.
+- UI result bundle: `app/MSWMonitor/build/DerivedData/Smoke/Logs/Test/Test-MSWMonitor-2026.08.11_02-55-53-+0200.xcresult`.
+- Complete UI output: `app/MSWMonitor/build/logs/smoke-ui.log`.
+- Result: `MSWMonitorUITests/testStatusItemPopoverRefreshAndQuit()` passed with zero failures.
+- Observed semantic values:
+  - `statusItem.button`: accessibility label `MSW Monitor`.
+  - Application menu title: `MSW Monitor`.
+  - Application menu items: `About MSW Monitor`, `Settings…`, `Hide MSW Monitor`, and `Quit MSW Monitor`.
+  - `monitor.title`: `MSW Monitor`.
+  - `workspace.dev.name/state`: `dev` / `Stopped`.
+  - `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`.
+  - `workspace.personal.name/state`: `personal` / `Stopped`.
+  - `observation.value`: `Not yet refreshed`, then `Observation #1` after `refresh.button` (`Refresh`).
+  - `quit.button`: `Quit`; the app reached `notRunning`.
+- Cleanup: the app was quit through the UI, and the subsequent `pgrep -x MSWMonitor` check returned no remaining instance.
+- Unified-log queries actually run after the smoke test used `log show --last 3m --style compact --info --debug` (a three-minute window):
+  - `process == "MSWMonitor"`
+  - `process == "MSWMonitor" AND (messageType == error OR messageType == fault)`
+  No narrower wall-clock interval was recorded. These logs are framework diagnostics; the app has no intentional application-level logger.
+
+The native app values above are deterministic fixture values from the current scaffold, not live sandbox telemetry. The smoke test does not prove VM health, `msw` integration, lifecycle actions, telemetry, signing, notarization, or release readiness.
 
 ## Automated coverage
 
@@ -36,41 +69,19 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub and host-only push — 32 scenarios
+### GitHub authorization and host-only push
 
-- TLS-interception preflight rejects incompatible workspaces before token prompts or Keychain mutation and gives the recreation command.
-- Empty verification repositories are rejected before the host-only push so the temporary branch cannot become an undeletable default branch.
-- Complete GitHub setup transaction: read token binding, guest push rejection, host push success, temporary-branch cleanup, token secrecy, status, and removal.
-- Verifier subprocesses retain the host-side read-token source required for MicroSandbox secret substitution during guest exec, clone, and cleanup commands.
-- Fresh `msw clone`, `msw exec`, SSH proxy, and `msw github remove` invocations source the read token from Keychain independently of the setup process lifetime.
-- Installer reruns and recreates GitHub-bound workspaces with secret-aware inspect, exec, remove, modify, and stop calls.
-- Quarantined workspace SSH proxy access is rejected before token use or VM startup.
-- Identical read/write token rejection.
-- Failed verification restoring the previous working tokens and metadata.
-- Detection and rollback when the guest token has write permission.
-- New-branch push transferring only the current committed branch—not dirty files, tags, or other branches.
-- Repeated fast-forward pushes and guest remote-tracking refresh.
-- Non-fast-forward rejection followed by exact lease-protected force push.
-- Concurrent remote update causing force-with-lease rejection.
-- Detached HEAD, non-GitHub origin, missing host token, and user-cancel failure paths.
-- Isolation from hostile host global Git configuration and hooks.
-- Valid Git LFS object transfer and host-only upload.
-- Invalid LFS pointer rejection.
-- Missing LFS object rejection.
-- Corrupted LFS transfer rejection by SHA-256.
-- Symlink/nonregular LFS object rejection.
-- Read-only setup retains guest read access without a host token and blocks stale write-token pushes using workspace metadata.
-- Read-only conversion revokes existing host-write metadata before downgrade cleanup; failure leaves subsequent pushes blocked.
-- Keychain deletion rejects delete failures, post-delete lookup failures, and still-present items while accepting explicit missing-item results.
-- Remove revokes host-write metadata before credential cleanup; a failed Keychain delete leaves subsequent pushes blocked.
-- Failed setup rollback revokes active metadata before credential cleanup; deletion failures leave subsequent pushes blocked.
-- Failed guest-secret removal stops and quarantines the workspace so normal starts, restarts, pushes, and guest commands cannot rebind or use the secret.
-- Proven-stop quarantine handling is fail-closed when ping or inspect is unavailable, or stop fails.
-- Per-workspace GitHub setup/remove locks serialize credential, metadata, and quarantine mutations.
-- Dead-owner recovery migrates legacy lock directories and uses kernel-held `lockf` ownership, so stale or empty lock files do not wedge future operations.
-- Standalone verification blocks removal through `SIGKILL`, and an orphaned setup verifier retains the lock after its parent dies.
-- An interrupted verification followed by a failed repair never restores tainted credentials or metadata and leaves the quarantine marker in place.
-- Interruption coverage pauses after a completed verification clone and confirms signal cleanup removes its checkout.
+- Connect authorization validates the callback state, session expiry, service issuer, client identity, redirect URI, and callback payload before accepting a grant.
+- Account, installation owner, repository IDs/names, role, expiry, and scope digest are verified before a workspace assignment is committed.
+- Guest-read and host-write capabilities remain distinct; a grant for one workspace cannot be reused for another workspace or repository set.
+- Assignment writes are transactional: a failed service commit, credential write, or scope validation leaves the previous usable state intact or marks the workspace for explicit recovery.
+- Reauthorization and expiry use explicit `Needs authorization`, `Needs restart`, `Revoked`, and `Quarantined` recovery states; the app never silently restarts a running VM.
+- Disconnect/revocation removes the VM-held secret before revoking the service grant and local metadata; if cleanup or revocation is uncertain, the workspace remains quarantined.
+- The legacy CLI token prompt reports the MSW Monitor migration path and never reads, stores, or forwards a pasted token.
+- Guest secret substitution remains limited to `github.com` and `api.github.com`; the guest sees only the MicroSandbox placeholder.
+- Host-only push still transfers only the current committed branch, enforces fast-forward or exact lease-protected force updates, and isolates host Git configuration.
+- Git LFS object IDs, file types, and SHA-256 contents are verified on the host.
+- Quarantined workspace access fails closed until the recovery state is resolved.
 
 ### Backup and restore — 6 scenarios
 
@@ -89,17 +100,14 @@ The release suite covers strict 1–65535 tunnel-port validation, GitHub least-p
 
 ## Security properties exercised
 
-- The real guest read token is absent from simulated VM state; only the MicroSandbox placeholder is visible in the guest.
-- The write token is retrieved only by the host askpass helper from macOS Keychain, including when host Git runs with an isolated temporary `HOME`.
+- The guest receives only the selected read capability; the actual service-issued credential is absent from simulated VM state and the MicroSandbox placeholder is all the guest can inspect.
+- The host-write credential is retrieved only by the host push path from macOS Keychain, including when host Git runs with an isolated temporary `HOME`.
 - The privileged push process uses an empty environment, temporary home, no system/global Git config, no custom hooks, no SSH agent, and no ambient GitHub token.
-- Push authorization requires both host-write workspace metadata and the host write credential.
-- Remove revokes host-write metadata before secret and Keychain cleanup, so cleanup failures cannot leave pushes authorized.
-- Failed setup rollback restores old metadata only after all credential operations succeed; any rollback failure leaves the metadata gate absent.
-- Failed rollback secret cleanup stops and quarantines the workspace; normal start, restart, and exec paths refuse the quarantined workspace.
-- Setup writes and retains a quarantine marker before credential mutation, and clears it only after verification or a fully successful rollback.
+- Assignment and push authorization require the workspace, role, owner, installation, repository set, expiry, and scope metadata to match.
+- Disconnect/revocation fails closed before any uncertain cleanup can leave a usable workspace authorization.
+- Failed grant commit or cleanup leaves explicit recovery state; it never silently restores an unvalidated credential.
 - Git bundles are verified and checked against the exact guest commit before push.
 - Git LFS object IDs, file types, and SHA-256 contents are verified on the host.
-- GitHub setup and restore are transactional and roll back on failure.
 - Keychain deletion accepts only an explicit missing-item result or confirmed removal; other failures abort the transaction.
 - Normal Docker cleanup never deletes volumes unless explicitly requested.
 - Backups exclude macOS Keychain tokens and remove partial output on failure.
@@ -128,17 +136,13 @@ The installer ends by running `msw check --deep`. Continue only when it reports:
 all live VM, Docker, SSH, internet, and published-port checks passed
 ```
 
-### 2. Configure each GitHub trust domain
+### 2. Connect each GitHub trust domain
 
-```bash
-msw github setup dev OWNER/VERIFICATION-REPO
-msw github setup playgrounds OWNER/VERIFICATION-REPO
-msw github setup personal OWNER/VERIFICATION-REPO
-```
+Open **MSW Monitor** → **Settings** → **GitHub** → **Connect GitHub**. Complete authorization, select the owner and repositories, review the scoped guest-read/host-write grants, and apply them for each workspace that needs GitHub.
 
-Each command automatically proves against GitHub that the VM can read, the VM cannot push, the Mac-only path can push, and its temporary branch can be deleted.
+Do not run `msw github setup`; the former token prompt is removed and the CLI reports the MSW Monitor migration path instead.
 
-That is the complete user-side verification set.
+The user-side verification set is the installer deep check plus the app build, Swift tests, and UI smoke test. The Connect flow must leave each assignment in an explicit `Ready`, `Needs authorization`, `Needs restart`, `Revoked`, or `Quarantined` state.
 
 ## Re-running the portable test suite
 

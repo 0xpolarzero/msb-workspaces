@@ -3,46 +3,168 @@ set -eu
 
 host="${1:?missing SSH host alias}"
 box="${host%.msb}"
-case "$box" in dev|playgrounds|personal) ;; *) echo "msw: unknown workspace '$box'" >&2; exit 64 ;; esac
+case "$box" in
+  dev|playgrounds|personal) ;;
+  *) echo "msw: unknown workspace '$box'" >&2; exit 64 ;;
+esac
 
 config="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
-[ -f "$config" ] || { echo "msw: configuration missing; rerun setup.sh" >&2; exit 1; }
-quarantine="$HOME/.config/msw/github/$box.quarantine"
-if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
-  echo "msw: workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO" >&2
+[ -f "$config" ] || {
+  echo "msw: msw configuration is missing; rerun setup.sh" >&2
   exit 1
+}
+
+app_credentials="${MSW_APP_CREDENTIALS_FILE:-$HOME/Library/Application Support/MSW Monitor/credentials.json}"
+security_bin="${MSW_SECURITY_BIN:-/usr/bin/security}"
+jq_bin="${MSW_JQ_BIN:-}"
+if [ -z "$jq_bin" ]; then
+  jq_bin="$(command -v jq 2>/dev/null || true)"
+fi
+
+safe_component() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+keychain_read() {
+  service="$1"
+  account="$2"
+  if [ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]; then
+    file="$MSW_TEST_KEYCHAIN_DIR/$(safe_component "$service")__$(safe_component "$account")"
+    [ -f "$file" ] || return 1
+    cat "$file"
+  else
+    "$security_bin" find-generic-password -w -s "$service" -a "$account" 2>/dev/null
+  fi
+}
+
+metadata_value() {
+  role="$1"
+  field="$2"
+  [ -f "$app_credentials" ] && [ ! -L "$app_credentials" ] || return 1
+  [ -n "$jq_bin" ] && [ -x "$jq_bin" ] || return 1
+  "$jq_bin" -r --arg key "$box.$role" --arg field "$field" \
+    '.entries[$key][$field] // empty' "$app_credentials" 2>/dev/null
+}
+
+app_profile_present() {
+  [ "$(metadata_value guest workspace 2>/dev/null || true)" = "$box" ]
+}
+
+timestamp_epoch() {
+  value="$1"
+  [ -n "$value" ] || return 1
+  date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null ||
+    date -u -d "$value" +%s 2>/dev/null
+}
+
+app_expiry_state() {
+  access="$(metadata_value guest accessExpiresAt 2>/dev/null || true)"
+  [ -n "$access" ] || return 1
+  access_epoch="$(timestamp_epoch "$access")" || return 1
+  now="$(date +%s)"
+  soon=$((now + 3600))
+  if [ "$access_epoch" -le "$now" ]; then
+    printf 'authorization-required'
+  elif [ "$access_epoch" -le "$soon" ]; then
+    printf 'expiring'
+  else
+    printf 'valid'
+  fi
+}
+
+app_token() {
+  provider="$(metadata_value guest provider 2>/dev/null || true)"
+  recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
+  expiry_state="$(app_expiry_state 2>/dev/null || true)"
+  [ "$provider" = "github-app-installation" ] || return 1
+  [ "$recovery_state" = "ready" ] || return 1
+  [ "$expiry_state" = valid ] || [ "$expiry_state" = expiring ] || return 1
+  [ -n "$jq_bin" ] && [ -x "$jq_bin" ] || return 1
+
+  raw="$(keychain_read "msw.github.app.$box.guest.tokens" profile)" || return 1
+  printf '%s\n' "$raw" | "$jq_bin" -e '
+    type == "object" and
+    .schemaVersion == 3 and
+    (.grantID | type == "string" and length > 0) and
+    (.accessToken |
+      type == "string" and
+      length > 0 and
+      length <= 4096 and
+      test("^ghs_[^[:space:][:cntrl:]]+$") and
+      (test("^(ghp_|gho_|ghu_|ghr_|github_pat_)"; "i") | not)
+    ) and
+    (.accessExpiresAt | type == "string" and length > 0) and
+    (.generation | type == "number" and . > 0) and
+    (.refreshToken // null) == null
+  ' >/dev/null 2>&1 || return 1
+  printf '%s\n' "$raw" | "$jq_bin" -r '.accessToken'
+}
+
+app_mode=0
+if [ -f "$app_credentials" ] && [ ! -L "$app_credentials" ]; then
+  app_mode=1
+fi
+
+token=""
+if [ "$app_mode" -eq 1 ]; then
+  if [ -z "$jq_bin" ] || [ ! -x "$jq_bin" ]; then
+    echo "msw: jq is required to read MSW Monitor's scoped GitHub grant" >&2
+    exit 1
+  fi
+  if app_profile_present; then
+    recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
+    quarantined="$(metadata_value guest quarantined 2>/dev/null || true)"
+    if [ "$quarantined" = true ] || [ "$recovery_state" = quarantined ]; then
+      echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+      exit 1
+    fi
+    if ! token="$(app_token 2>/dev/null)"; then
+      echo "msw: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in MSW Monitor" >&2
+      exit 1
+    fi
+    export GH_TOKEN="$token"
+    unset token
+  else
+    echo "msw: workspace '$box' has no scoped GitHub grant; connect GitHub in MSW Monitor" >&2
+    exit 1
+  fi
+else
+  quarantine="$HOME/.config/msw/github/$box.quarantine"
+  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+    exit 1
+  fi
+  if [ "${MSW_TEST_MODE:-0}" = 1 ]; then
+    if token="$(keychain_read "msw.github.read" "$box" 2>/dev/null)"; then
+      export GH_TOKEN="$token"
+      unset token
+    elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
+      [ -L "$HOME/.config/msw/github/$box.conf" ]; then
+      echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
+      echo "run: msw github setup $box OWNER/REPO" >&2
+      exit 1
+    fi
+  elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
+    [ -L "$HOME/.config/msw/github/$box.conf" ]; then
+    echo "msw: legacy GitHub token metadata for '$box' requires migration in MSW Monitor" >&2
+    exit 1
+  fi
 fi
 
 MSB="${MSW_MSB_BIN:-$HOME/.local/bin/msb}"
 if [ ! -x "$MSB" ]; then MSB="$(command -v msb 2>/dev/null || true)"; fi
-[ -n "$MSB" ] && [ -x "$MSB" ] || { echo "msw: msb was not found; rerun setup.sh" >&2; exit 127; }
-
-keychain_read() {
-  if [ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]; then
-    safe_service=$(printf '%s' msw.github.read | tr -c 'A-Za-z0-9_.-' '_')
-    safe_account=$(printf '%s' "$box" | tr -c 'A-Za-z0-9_.-' '_')
-    file="$MSW_TEST_KEYCHAIN_DIR/${safe_service}__${safe_account}"
-    [ -f "$file" ] || return 1
-    cat "$file"
-  else
-    /usr/bin/security find-generic-password -w -s msw.github.read -a "$box" 2>/dev/null
-  fi
+[ -n "$MSB" ] && [ -x "$MSB" ] || {
+  echo "msw: msb was not found; rerun setup.sh" >&2
+  exit 127
 }
-
-token=""
-if token="$(keychain_read 2>/dev/null)"; then
-  export GH_TOKEN="$token"
-  unset token
-elif [ -f "$HOME/.config/msw/github/$box.conf" ]; then
-  echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
-  echo "run: msw github setup $box OWNER/REPO" >&2
-  exit 1
-fi
 
 if ! "$MSB" ping -q "$box" >/dev/null 2>&1; then
   if ! output="$("$MSB" start -q "$box" 2>&1)"; then
     sleep 1
-    "$MSB" ping -q "$box" >/dev/null 2>&1 || { [ -n "$output" ] && echo "$output" >&2; exit 1; }
+    "$MSB" ping -q "$box" >/dev/null 2>&1 || {
+      [ -n "$output" ] && echo "$output" >&2
+      exit 1
+    }
   fi
 
   attempt=0

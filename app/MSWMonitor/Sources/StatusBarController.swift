@@ -85,11 +85,20 @@ final class StatusBarController {
         showSetup()
     }
 
+    func showSetupForGitHubAuthorization() {
+        showSetup()
+    }
+
     private func showSettings() {
         popover.performClose(nil)
         model.setPollingVisible(false)
         if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController()
+            settingsWindowController = SettingsWindowController(
+                authorizationCoordinator: authorizationCoordinator,
+                onConnect: { [weak self] in
+                    self?.showSetup()
+                }
+            )
         }
         settingsWindowController?.show()
     }
@@ -126,12 +135,17 @@ final class StatusBarController {
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
         let hasCritical = model.workspaces.contains {
-            $0.state == .quarantined || $0.credential == .quarantined
+            guard $0.state != .quarantined else { return true }
+            switch $0.credential {
+            case .legacy, .removalPending, .quarantined:
+                return true
+            default:
+                return false
+            }
         }
         let hasAttention = model.lastError != nil || model.workspaces.contains {
             $0.freshness == .stale || $0.freshness == .unavailable ||
-                $0.credential == .needsAuthorization || $0.credential == .expiring ||
-                $0.credential == .needsRestart || $0.credential == .legacy
+                $0.credential != .ready && $0.credential != .readOnly
         }
         let symbol: String
         if hasCritical {

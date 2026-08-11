@@ -230,9 +230,11 @@ private struct WorkspaceCard: View {
 
     private var credentialSymbol: String {
         switch workspace.credential {
-        case .ready, .readOnly: return "checkmark.shield"
-        case .needsAuthorization, .legacy, .removalPending, .quarantined: return "exclamationmark.shield"
-        default: return "shield"
+        case .ready, .readOnly:
+            return "checkmark.shield"
+        case .needsAuthorization, .legacy, .removalPending, .quarantined,
+             .serviceUnavailable, .unconfigured, .expiring, .needsRestart:
+            return "exclamationmark.shield"
         }
     }
 }

@@ -1,172 +1,74 @@
-# GitHub setup: read-only inside VMs, explicit pushes from the Mac
+# GitHub authorization: scoped Connect grants
 
-This setup uses two different fine-grained personal access tokens for each workspace:
+GitHub authorization is managed by **MSW Monitor** and the MSW Connect service. The legacy CLI flow that prompted for personal access tokens was removed. Do not paste a GitHub token into `msw` or into the app.
 
-1. A **guest read token**. It lets the VM clone, fetch, and pull selected private repositories. GitHub rejects pushes made with it.
-2. A **host write token**. It stays in macOS Keychain and is used only when you explicitly run `msw push` or the permission verifier.
+The result is still two separate capabilities for each workspace:
 
-Agents can create branches, edit, commit, merge, rebase, and inspect history locally without any write credential.
+1. A **guest-read grant**. It is limited to the selected GitHub owner and repositories and is usable only through the VM's read path. GitHub rejects guest-authenticated pushes.
+2. A **host-write grant**. It is limited to the reviewed repository set, remains host-held, and is used only by the explicit `msw push` path.
 
-For a workspace that only needs private read access, omit the host credential:
+The Connect service issues short-lived, workspace-scoped grant material. MSW Monitor stores grant metadata and the host-side credentials needed to deliver those capabilities; it never stores a broad user token as a substitute for a scoped grant. The app does not contain a GitHub App private key or client secret.
 
-```bash
-msw github setup playgrounds OWNER/msw-verification --read-only
-```
+## Before connecting
 
-The command stores only the guest read token and removes any host write token for that workspace.
+Choose the GitHub owner and repositories that each workspace may access. Keep workspace scopes separate when they represent different trust domains.
 
-## Before creating tokens
+For a workspace that needs a host-only push path, select:
 
-Choose one repository that will be used to verify permissions. It must:
+- The GitHub owner whose App installation provides the repositories.
+- Every repository the VM may clone, fetch, or pull.
+- Every repository the host may push, including the verification repository.
+- A non-empty verification repository with an existing branch, normally `main`, when the Connect service requests one.
 
-- Belong to the same resource owner as the other selected repositories.
-- Be selected in both tokens.
-- Already contain at least one branch, normally `main`; initialize it before setup if the repository is empty.
-- Permit the host token to create and delete a temporary branch.
-- Be safe for a temporary empty verification commit and branch; the branch is deleted automatically.
+The owner must have installed the MSW GitHub App. Organization policy, SAML enforcement, or an unapproved installation can prevent authorization; MSW Monitor reports the recovery action instead of accepting an incomplete grant.
 
-A small private repository such as `OWNER/msw-verification` is ideal.
+## Connect a workspace
 
-Fine-grained tokens are scoped to one resource owner. A workspace that needs private repositories from two different owners normally needs to be split by owner, or one set of repositories must use another authentication mechanism. Public repositories do not require the private read token.
+Open **MSW Monitor** and choose **Settings** → **GitHub** → **Connect GitHub**. The first-run setup window exposes the same action.
 
-## Token 1: guest read-only token
+The flow is:
 
-In GitHub, create a new **fine-grained personal access token** with:
+1. MSW Monitor starts a Connect authorization session with a fresh state value.
+2. The default browser opens the Connect authorization page. Complete GitHub authorization there.
+3. Return to MSW Monitor. The app verifies the callback/session, account, and service issuer.
+4. Select the installed GitHub owner.
+5. Select the repositories available from that installation and choose the verification repository when required.
+6. Review the guest-read and host-write scope for each workspace.
+7. Apply the assignment. The service validates the scope and returns a grant; the app commits the grant metadata and credential material transactionally.
+8. If the workspace is running, MSW Monitor reports whether a restart is required before the new guest capability is active. It never silently restarts a VM.
 
-```text
-Token name:          msw-dev-read       (or msw-personal-read, etc.)
-Expiration:          your preferred rotation period
-Resource owner:      the user or organization owning the repositories
-Repository access:  Only select repositories
-Selected repos:      every repository this VM may read, including verification repo
-```
+Repeat the flow for `dev`, `playgrounds`, and `personal` when their repository scopes differ. A workspace that does not use private GitHub repositories needs no grant.
 
-Repository permissions:
+The app shows an explicit state for each workspace:
 
-```text
-Contents:  Read-only
-Metadata:  Read-only (GitHub adds this automatically)
-```
+- **Ready** — the grant is present, scoped, and usable.
+- **Needs authorization** — Connect must be completed again.
+- **Needs restart** — the grant is valid but the running VM has not rebound it yet.
+- **Quarantined** — cleanup or verification was uncertain; stop the workspace and follow the recovery action shown by MSW Monitor.
 
-Leave every other permission at **No access** unless a tool genuinely needs read access. Optional examples are Issues: Read-only or Pull requests: Read-only. Do not grant any write permission.
+The app must not treat a successful browser callback as proof of repository access. It verifies the returned account, installation owner, repository IDs/names, role, expiry, and scope digest before committing the assignment.
 
-An organization may require an administrator to approve the token before private-repository access works.
+## Reauthorize, rotate, or disconnect
 
-## Token 2: host write token
+Use the **Reauthorize** action in MSW Monitor Settings to obtain a new service grant. Existing assignments remain unchanged until the replacement grant passes validation and the transaction commits.
 
-Create a second fine-grained token:
+Use **Disconnect** for one workspace when its GitHub access should be removed. MSW Monitor first removes the VM-held secret, then revokes the service grant and local metadata. If either cleanup step cannot be proven, the workspace remains quarantined instead of presenting a successful disconnect with an uncertain credential state.
 
-```text
-Token name:          msw-dev-host-write
-Expiration:          your preferred rotation period
-Resource owner:      same owner as the read token
-Repository access:  Only select repositories
-Selected repos:      only repositories you are willing to push from this workspace,
-                     including the verification repo
-```
-
-Repository permissions:
+The CLI commands are limited to inspecting and verifying the current scoped Connect grants:
 
 ```text
-Contents:   Read and write
-Metadata:   Read-only (automatic)
+msw github setup …       removed; use MSW Monitor → Settings → GitHub
+msw github status …      current scoped-grant status
+msw github verify …      current scoped-grant verification
+msw github remove …      refuses Connect grants; disconnect them in MSW Monitor
 ```
 
-Only when you need to push changes under `.github/workflows/`, also grant:
-
-```text
-Workflows:  Read and write
-```
-
-No administration, secrets, webhooks, organization, or other write permissions are required by MSW.
-
-The host token's selected repository list is the definitive set of repositories `msw push` can modify.
-
-The verification repository must already contain at least one branch before setup. Initialize `main` first; do not let the temporary MSW verification branch become the repository's first/default branch, because GitHub refuses to delete a default branch.
-
-For an empty repository:
-
-```bash
-git clone https://github.com/OWNER/msw-verification.git
-cd msw-verification
-git switch -c main
-printf '# Verification repository\n' > README.md
-git add README.md
-git commit -m "Initialize repository"
-git push -u origin main
-```
-
-## Configure a workspace
-
-Run:
-
-```bash
-msw github setup dev OWNER/msw-verification
-```
-
-Paste the guest read token, then the host write token. Input is hidden. The standard workspace setup enables TLS interception; if setup reports that interception is disabled, run `./setup.sh --recreate-workspaces` from the package directory before entering any tokens.
-
-For a read-only workspace, add `--read-only`:
-
-```bash
-msw github setup playgrounds OWNER/msw-verification --read-only
-```
-
-This prompts for only the guest token. `msw github verify playgrounds` reruns the read-only check.
-
-The command performs all of these checks automatically:
-
-1. Stores both tokens in macOS Keychain under separate services.
-2. Binds only the read token to the VM through MicroSandbox secret substitution.
-3. Clones the verification repository from inside the VM.
-4. Creates a temporary local branch and commit.
-5. Confirms that a direct guest push is rejected by GitHub.
-6. Transfers the committed branch through the host-only push path.
-7. Confirms the branch exists remotely.
-8. Deletes the temporary branch with the host-only credential.
-9. Confirms cleanup.
-
-If any step fails, the newly entered credentials are removed and the previously working credential pair is restored.
-
-Repeat for all groups:
-
-```bash
-msw github setup dev OWNER/msw-verification
-msw github setup playgrounds OWNER/msw-verification
-msw github setup personal OWNER/msw-verification
-```
-
-Using different selected-repository lists for each pair provides meaningful separation. You may use tokens from the same GitHub account.
-
-A workspace that does not use GitHub needs no `msw github setup` command.
-
-## Check or rotate credentials
-
-Show only credential presence and the recorded verification repository; tokens are never printed:
-
-```bash
-msw github status all
-```
-
-Rerun the permission test:
-
-```bash
-msw github verify dev
-```
-
-Rotate either token by running setup again:
-
-```bash
-msw github setup dev OWNER/msw-verification
-```
-
-Remove both credentials and the guest secret binding:
-
-```bash
-msw github remove dev
-```
-
-Setup, verification, and removal are serialized per workspace. Setup's verifier retains the inherited lock if its parent exits unexpectedly. The lock file may remain after a command, but its kernel-held `lockf` ownership is released automatically on exit or crash, so stale files do not block later operations.
+`msw github verify WORKSPACE [OWNER/REPO]` exercises the selected guest-read
+grant and, for a host-write assignment, the host-only push path. It does not
+accept a GitHub user token. `msw github status` reports whether the app-managed
+guest and host grant records are usable; it never prints credential material.
+`msw github remove` remains only for legacy local-token metadata and refuses to
+delete a current Connect grant without revoking it from the service.
 
 ## Clone and pull from the VM
 
@@ -184,7 +86,7 @@ git fetch --prune
 git pull --ff-only
 ```
 
-The guest sees a MicroSandbox placeholder, not the real token. The real read token remains host-held and is substituted only for requests to `github.com` and `api.github.com`.
+The guest sees a MicroSandbox placeholder, not the service-issued credential. The actual guest-read grant remains host-held and is substituted only for requests to `github.com` and `api.github.com`.
 
 ## Commit locally
 
@@ -202,7 +104,7 @@ A direct push from the VM is expected to fail:
 git push
 ```
 
-This is enforced by the token's server-side GitHub permissions, not merely by a local hook or Git setting.
+This is enforced by the guest grant's server-side GitHub permissions, not merely by a local hook or Git setting.
 
 ## Push from the Mac
 
@@ -246,7 +148,7 @@ The force operation is tied to the exact remote SHA observed immediately before 
 - Other local branches
 - Local tags
 - Your normal Mac Git configuration or hooks
-- The host write token in the VM
+- The host-write grant in the VM
 
 Git LFS objects referenced by the outgoing commits are copied one by one, checked as regular files, verified against their SHA-256 object IDs, and uploaded through the host-only credential path.
 
@@ -255,18 +157,20 @@ The privileged host Git process runs with an isolated temporary home and no syst
 ## Where credentials live
 
 ```text
-Guest read token:  macOS Keychain + MicroSandbox host-side secret binding
-Guest filesystem:  placeholder only
-Host write token:  macOS Keychain only
-Backups:           neither Keychain token is included
+Guest-read grant:   macOS Keychain + MicroSandbox host-side secret binding
+Guest filesystem:   placeholder only
+Host-write grant:   macOS Keychain only
+Grant metadata:     MSW Monitor application support state; no token values
+Backups:            no grant secret or Keychain credential is included
 ```
 
-Every agent in a VM can use that VM's read capability, but cannot retrieve the actual read token through the designed interface and has no host write token.
+Every agent in a VM can use that VM's selected read capability, but cannot retrieve the actual credential through the designed interface and has no host-write capability.
 
 ## Limits of this model
 
 - It prevents guest-authenticated pushes to repositories selected in GitHub.
-- It limits host pushes to repositories selected in the host write token.
+- It limits host pushes to the repositories selected in the service-issued host grant.
 - It does not stop an internet-enabled agent from uploading readable source files to an unrelated service.
 - It does not protect one repository from another process inside the same workspace.
 - GitHub repository rules or organization policies can still reject an otherwise authorized host push.
+

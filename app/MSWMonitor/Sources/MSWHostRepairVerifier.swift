@@ -1,6 +1,10 @@
 import Foundation
 
-struct MSWHostRepairVerifier: Sendable {
+protocol MSWHostRepairVerifying: Sendable {
+    func isReady() async -> Bool
+}
+
+struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
     private let runner: MSWCommandRunner
 
     init(runner: MSWCommandRunner = MSWCommandRunner()) {

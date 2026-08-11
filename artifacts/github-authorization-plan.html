@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MSW Monitor GitHub Authorization Plan</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18212b;
+      --muted: #5d6875;
+      --line: #dbe2e8;
+      --panel: #ffffff;
+      --wash: #f5f7f9;
+      --blue: #1769aa;
+      --blue-wash: #eaf4fc;
+      --orange: #9a5b00;
+      --orange-wash: #fff5e5;
+      --green: #16724b;
+      --green-wash: #eaf8f1;
+      --red: #a33a3a;
+      --red-wash: #fff0f0;
+      --shadow: 0 12px 30px rgba(23, 38, 54, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--wash);
+      color: var(--ink);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 48px 24px 72px; }
+    header { margin-bottom: 28px; }
+    .eyebrow { color: var(--blue); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 8px 0 10px; font-size: clamp(30px, 5vw, 48px); line-height: 1.05; letter-spacing: -.035em; }
+    h2 { margin: 0 0 14px; font-size: 23px; letter-spacing: -.02em; }
+    h3 { margin: 20px 0 8px; font-size: 17px; }
+    p { margin: 8px 0; }
+    .lede { max-width: 780px; color: var(--muted); font-size: 18px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; background: var(--panel); color: var(--muted); font-size: 12px; }
+    .pill strong { color: var(--ink); }
+    section { margin-top: 22px; padding: 24px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); }
+    .callout { border-left: 4px solid var(--orange); background: var(--orange-wash); padding: 14px 16px; border-radius: 10px; color: #4a3518; }
+    .callout strong { color: #6f4100; }
+    .success { border-left-color: var(--green); background: var(--green-wash); color: #173d2c; }
+    .danger { border-left-color: var(--red); background: var(--red-wash); color: #4c2222; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+    .card { border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: #fff; }
+    .card h3 { margin-top: 0; }
+    .card p, .card li { color: var(--muted); }
+    ul, ol { margin: 8px 0 0; padding-left: 22px; }
+    li + li { margin-top: 6px; }
+    .diagram { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; align-items: center; margin-top: 18px; }
+    .node { min-height: 92px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; border: 1px solid #bcd5e8; border-radius: 12px; padding: 10px; background: var(--blue-wash); color: #123e5d; font-weight: 650; }
+    .node small { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
+    .arrow { color: var(--blue); text-align: center; font-size: 24px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { padding: 11px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+    td code, li code, p code { border-radius: 4px; padding: 1px 4px; background: #eef1f4; color: #263542; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .checklist { list-style: none; padding-left: 0; }
+    .checklist li { position: relative; padding-left: 27px; color: var(--muted); }
+    .checklist li::before { content: "□"; position: absolute; left: 0; color: var(--blue); font-size: 19px; line-height: 1.2; }
+    .mono { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    footer { margin-top: 24px; color: var(--muted); font-size: 13px; }
+    a { color: var(--blue); }
+    @media (max-width: 760px) {
+      main { padding: 28px 14px 48px; }
+      section { padding: 18px; }
+      .diagram { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+      th, td { padding: 9px 6px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">MSW Monitor · Proposed architecture</div>
+      <h1>GitHub authorization that feels like Vercel</h1>
+      <p class="lede">Authenticate once in GitHub, return to MSW Monitor, choose which workspaces receive which repositories, and review the exact access before applying it.</p>
+      <div class="meta">
+        <span class="pill"><strong>Status</strong> Proposed</span>
+        <span class="pill"><strong>Current commit</strong> 58738d4</span>
+        <span class="pill"><strong>Scope</strong> OAuth UX + credential isolation</span>
+      </div>
+    </header>
+
+    <section class="callout">
+      <strong>Why this plan changes the current design.</strong>
+      The current app exposes six client-ID fields and separate guest/host Device Flow buttons. More importantly, <code>CredentialBroker</code> stores the full GitHub user token per workspace; <code>repositoryIDs</code> are metadata used for selection and verification, not token down-scoping. A single public client ID plus per-VM checkboxes would improve UX but would not create strong VM isolation.
+    </section>
+
+    <section>
+      <h2>Decision</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>One visible login</h3>
+          <p>Use a hosted MSW Connect OAuth broker so the desktop app can provide a real browser callback and a single GitHub authorization session. No GitHub client secret is shipped in the Mac bundle.</p>
+        </div>
+        <div class="card">
+          <h3>Per-workspace grants</h3>
+          <p>After authentication, the user assigns installations and repositories to <code>dev</code>, <code>playgrounds</code>, and <code>personal</code>. Each assignment gets its own grant and access mode.</p>
+        </div>
+        <div class="card">
+          <h3>Server-minted tokens</h3>
+          <p>The service keeps the GitHub App private key server-side and mints short-lived installation tokens restricted to the selected repository set. VMs never receive the full GitHub user token.</p>
+        </div>
+      </div>
+      <div class="callout success" style="margin-top: 16px;">
+        <strong>Fallback if a hosted service is rejected:</strong> retain distinct GitHub App identities for every isolation boundary and orchestrate the required prompts. Do not collapse to one client ID while treating repository metadata as enforcement.
+      </div>
+    </section>
+
+    <section>
+      <h2>Target user flow</h2>
+      <div class="diagram" aria-label="Authorization flow diagram">
+        <div class="node">Connect GitHub<small>one button in MSW</small></div>
+        <div class="arrow">→</div>
+        <div class="node">GitHub<small>sign in and authorize</small></div>
+        <div class="arrow">→</div>
+        <div class="node">MSW Connect<small>secure callback and discovery</small></div>
+      </div>
+      <div class="diagram" aria-label="Workspace assignment flow diagram" style="grid-template-columns: repeat(7, minmax(100px, 1fr));">
+        <div class="node">Account<small>Connected as @user</small></div>
+        <div class="arrow">→</div>
+        <div class="node">Installations<small>personal/org owners</small></div>
+        <div class="arrow">→</div>
+        <div class="node">Repositories<small>select allowed repos</small></div>
+        <div class="arrow">→</div>
+        <div class="node">VM access<small>review and apply</small></div>
+      </div>
+      <ol>
+        <li>Click <strong>Connect GitHub</strong>. MSW opens the hosted authorization page in the system browser or <code>ASWebAuthenticationSession</code>.</li>
+        <li>Authorize the MSW GitHub App once. The callback returns a one-time authorization result to the desktop app through a registered callback or loopback listener.</li>
+        <li>Show the signed-in account and available GitHub App installations. If the App is not installed for an owner, offer <strong>Install MSW App</strong> as the next step.</li>
+        <li>Present a workspace assignment view. Each workspace card has owner, repositories, and an explicit <strong>Read-only</strong> / <strong>Read + write</strong> choice. Read-only is the default.</li>
+        <li>Show a final review and apply all assignments together. The app reports exactly what each VM will receive and what remains unconfigured.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Security and data model</h2>
+      <table>
+        <thead><tr><th>Artifact</th><th>Owner</th><th>Lifetime</th><th>Rule</th></tr></thead>
+        <tbody>
+          <tr><td>OAuth authorization code / user token</td><td>MSW Connect service</td><td>Transient or encrypted service session</td><td>Never embedded in the app and never sent to a VM.</td></tr>
+          <tr><td>GitHub App private key</td><td>MSW Connect service</td><td>Rotatable server secret</td><td>Never present in the Mac bundle, logs, or local Keychain.</td></tr>
+          <tr><td>Workspace grant</td><td>MSW Monitor + service</td><td>Revocable; one per workspace/access boundary</td><td>Contains installation ID, owner, repository set, access mode, and grant identity; no full user token.</td></tr>
+          <tr><td>Installation access token</td><td>Target VM through the broker</td><td>Short-lived; renewed by service</td><td>Mint with the selected repository subset and required GitHub App permissions only.</td></tr>
+        </tbody>
+      </table>
+      <div class="callout danger" style="margin-top: 16px;">
+        <strong>Invariant:</strong> repository selection must be enforced at token issuance, not only stored in <code>repositoryIDs</code>. A VM receiving a broad user token defeats the assignment UI.
+      </div>
+      <h3>Access semantics</h3>
+      <ul>
+        <li>“Read-only” maps to the guest credential path.</li>
+        <li>“Read + write” maps to the host credential path and requires an explicit user choice.</li>
+        <li>Each workspace receives an independent grant and token renewal path, even when the user authorizes once.</li>
+        <li>Disconnecting a workspace revokes its grant and removes its local Keychain material; disconnecting the account revokes all associated workspace grants.</li>
+        <li>GitHub App revocation or installation removal invalidates affected grants and marks the workspace as needing authorization.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Implementation phases</h2>
+      <div class="grid">
+        <div class="card">
+          <h3>1 · Service contract</h3>
+          <ul>
+            <li>Define OAuth start, callback, session, installation discovery, repository discovery, grant creation, token renewal, and revocation endpoints.</li>
+            <li>Use state, PKCE, one-time callback codes, strict redirect allowlists, rate limits, and token redaction.</li>
+            <li>Use the GitHub App private key only on the service to mint installation tokens.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>2 · Desktop authorization client</h3>
+          <ul>
+            <li>Replace the visible Device Flow/client-ID plumbing with one production-configured Connect action.</li>
+            <li>Implement callback handoff, session cancellation, expiry, retry, and account display.</li>
+            <li>Keep Device Flow only as an explicit development fallback if the service is unavailable.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>3 · Workspace assignment UI</h3>
+          <ul>
+            <li>Replace guest/host buttons with workspace cards and a single assignment review.</li>
+            <li>Support owner, repository multi-select, access mode, verification repository, and per-workspace remove/re-authorize.</li>
+            <li>Remove the six client-ID fields from Settings; Settings should show connection state and access assignments only.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>4 · Credential migration</h3>
+          <ul>
+            <li>Advance the broker metadata schema from v2 to a grant-based schema.</li>
+            <li>Stop writing full GitHub user tokens into per-workspace records.</li>
+            <li>Replace local refresh-token handling with grant renewal and installation-token retrieval.</li>
+            <li>Require explicit reauthorization for existing broad-token records; do not silently claim they are repository-scoped.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>5 · MSW/VM delivery</h3>
+          <ul>
+            <li>Make <code>MSWClient</code> request credentials by workspace grant, not by arbitrary local token metadata.</li>
+            <li>Pass only the selected short-lived token to the target VM or use a brokered credential proxy.</li>
+            <li>Preserve host write approval and guest read-only sequencing.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>6 · Observability and rollout</h3>
+          <ul>
+            <li>Add revocation, expiration, and grant-audit events without recording tokens or repository secrets.</li>
+            <li>Ship the service behind a staging GitHub App first.</li>
+            <li>Roll out reauthorization with a clear migration screen and a safe rollback for unassigned workspaces.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Likely code touchpoints</h2>
+      <table>
+        <thead><tr><th>Area</th><th>Current role</th><th>Planned change</th></tr></thead>
+        <tbody>
+          <tr><td><code>SetupView.swift</code></td><td>Device Flow buttons, role-specific repository selection</td><td>Single Connect action, account/installations screen, workspace assignment and review.</td></tr>
+          <tr><td><code>SettingsView.swift</code></td><td>Six public client-ID fields</td><td>Remove developer configuration; show connection, assignments, revoke, and reauthorize controls.</td></tr>
+          <tr><td><code>GitHubDeviceFlow.swift</code></td><td>Local device-code OAuth</td><td>Move primary auth to broker callback; retain only development fallback if needed.</td></tr>
+          <tr><td><code>GitHubAuthorizationCoordinator.swift</code></td><td>Stores user token after discovery and commits per-role credentials</td><td>Consume broker sessions and commit grant metadata plus scoped token handles.</td></tr>
+          <tr><td><code>CredentialBroker.swift</code></td><td>Stores full token per workspace/role; repository IDs are metadata</td><td>Grant-based schema; enforce scoped-token invariant and migrate broad records safely.</td></tr>
+          <tr><td><code>TokenRefreshCoordinator.swift</code></td><td>Refreshes GitHub user tokens locally</td><td>Renews service grants or installation tokens without exposing the user token locally.</td></tr>
+          <tr><td><code>MSWClient.swift</code> and host agent</td><td>Binds credentials into workspace operations</td><td>Request and deliver only the target workspace's scoped credential.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Verification plan</h2>
+      <ul class="checklist">
+        <li>Mock OAuth callback rejects missing, mismatched, replayed, and expired state.</li>
+        <li>Mock GitHub discovery cannot assign an installation or repository outside the authenticated account.</li>
+        <li>Token issuance tests prove a requested repository subset is enforced by the issued installation token.</li>
+        <li>Credential broker tests prove no full user token is written to workspace metadata or passed to a VM.</li>
+        <li>Separate workspace grants cannot read or renew one another's credentials.</li>
+        <li>Read-only and read/write permissions are distinct, with write access opt-in.</li>
+        <li>Disconnect, GitHub revocation, installation removal, token expiry, and service outage produce recoverable UI states.</li>
+        <li>Setup UI tests cover Connect, callback success, installation selection, VM assignment, review, apply, reauthorize, and cancel.</li>
+        <li>Add a success-path <code>BootstrapCoordinator.run()</code> integration test with injected setup, authorization, verifier, and host-service fakes; also exercise Continue in a controlled first-run environment before declaring the end-to-end setup path complete.</li>
+        <li>Run the canonical build, unit tests, and UI smoke test; manually verify the browser handoff and the final assignment summary without real credentials in test artifacts.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Acceptance criteria</h2>
+      <ul>
+        <li>A new user sees one clear <strong>Connect GitHub</strong> action, not client-ID configuration.</li>
+        <li>One GitHub authorization can assign access to multiple MSW workspaces.</li>
+        <li>The user can see and review every owner, repository, workspace, and access mode before applying.</li>
+        <li>Repository checkboxes correspond to enforced server-side token scope, not metadata-only promises.</li>
+        <li>No GitHub client secret, private key, or broad user token ships to or is logged by the desktop app or VM.</li>
+        <li>Existing workspace credentials migrate explicitly and safely; broad existing tokens are never relabeled as scoped.</li>
+        <li>Users can revoke one workspace without disconnecting every workspace.</li>
+      </ul>
+    </section>
+
+    <footer>
+      Current code was committed as <code>58738d4</code>. Smithers runtime files and databases remain uncommitted because they are generated state. GitHub reference: <a href="https://docs.github.com/en/enterprise-cloud@latest/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app">Generating a user access token for a GitHub App</a>.
+    </footer>
+  </main>
+</body>
+</html>

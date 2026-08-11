@@ -257,21 +257,21 @@ actor BootstrapCoordinator {
     private let client: MSWClient
     private let runner: MSWCommandRunner
     private let stateStore: BootstrapStateStore
-    private let hostAgent: HostAgentClient
+    private let hostAgent: any MSWHostAgentControlling
     private let hostService: any MSWHostServiceControlling
-    private let sourceSetup: MSWSourceSetupService
-    private let hostRepairVerifier: MSWHostRepairVerifier
-    private let hostRepairAuthorization: MSWHostRepairAuthorization
+    private let sourceSetup: any MSWSourceSetupControlling
+    private let hostRepairVerifier: any MSWHostRepairVerifying
+    private let hostRepairAuthorization: any MSWHostRepairAuthorizing
     private var running = false
     init(
         client: MSWClient,
         runner: MSWCommandRunner,
         stateStore: BootstrapStateStore = BootstrapStateStore(),
-        hostAgent: HostAgentClient = HostAgentClient(),
+        hostAgent: any MSWHostAgentControlling = HostAgentClient(),
         hostService: any MSWHostServiceControlling,
-        sourceSetup: MSWSourceSetupService? = nil,
-        hostRepairVerifier: MSWHostRepairVerifier? = nil,
-        hostRepairAuthorization: MSWHostRepairAuthorization? = nil
+        sourceSetup: (any MSWSourceSetupControlling)? = nil,
+        hostRepairVerifier: (any MSWHostRepairVerifying)? = nil,
+        hostRepairAuthorization: (any MSWHostRepairAuthorizing)? = nil
     ) {
         self.client = client
         self.runner = runner

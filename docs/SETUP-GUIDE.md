@@ -58,17 +58,11 @@ Or configure one workspace only:
 msw identity "Your Full Name" work@example.com dev
 ```
 
-## 3. Configure GitHub
+## 3. Connect GitHub
 
-Follow [GITHUB-SETUP.md](GITHUB-SETUP.md). The final commands are:
+GitHub authorization is completed in **MSW Monitor**, not in the CLI. Open **Settings** → **GitHub** → **Connect GitHub** (the first-run setup window exposes the same action), complete the hosted authorization, select the GitHub owner and repositories, and review the guest-read/host-write assignments before applying them.
 
-```bash
-msw github setup dev OWNER/VERIFICATION-REPO
-msw github setup playgrounds OWNER/VERIFICATION-REPO
-msw github setup personal OWNER/VERIFICATION-REPO
-```
-
-You may use the same verification repository for several workspaces when both token pairs include it. Each command performs its own end-to-end permission check.
+The Connect service issues short-lived grants scoped to the selected owner, repositories, and workspace. Repeat the flow for `dev`, `playgrounds`, and `personal` when their repository scopes differ. The legacy `msw github setup` token prompt was removed; invoking it only reports the migration path.
 
 ## 4. Enter a workspace from Ghostty
 
@@ -348,5 +342,5 @@ Useful repair/rebuild modes:
 - Within one workspace, agents can access all repositories, processes, guest credentials, and Docker resources in that workspace.
 - No host directory, host Docker socket, or host SSH agent is shared by this setup.
 - The public network profile permits internet access but blocks direct host/private-network access.
-- A guest read token cannot push to GitHub, but unrestricted internet still permits source-code exfiltration to unrelated services.
+- A guest-read grant cannot push to GitHub, but unrestricted internet still permits source-code exfiltration to unrelated services.
 - Prefer ARM64 or multi-architecture container images for native M4 performance.

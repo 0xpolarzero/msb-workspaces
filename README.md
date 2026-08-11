@@ -27,15 +27,13 @@ Then set your commit identity:
 msw identity "Your Name" you@example.com
 ```
 
-Configure GitHub separately for each workspace:
+Connect GitHub from **MSW Monitor** rather than pasting tokens into the CLI:
 
-```bash
-msw github setup dev OWNER/VERIFICATION-REPO
-msw github setup playgrounds OWNER/VERIFICATION-REPO
-msw github setup personal OWNER/VERIFICATION-REPO
-```
+1. Open `MSW Monitor` → **Settings** → **GitHub**.
+2. Choose **Connect GitHub** and complete the hosted authorization flow.
+3. Select the GitHub owner and repositories for each workspace, then review the guest-read and host-write grants before applying them.
 
-Each command asks for two fine-grained GitHub tokens and verifies the complete permission boundary automatically: read/clone from the VM, rejected guest push, successful host-only push, and cleanup. See [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
+The Connect service issues short-lived, workspace-scoped grants. The app stores only grant metadata and the scoped installation credentials required by the host/VM boundary; the guest receives a read-only capability and `msw push` uses the separate host-write capability. The CLI's former `msw github setup` token prompt is removed. See [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
 
 ## Daily use
 
@@ -83,8 +81,6 @@ msw docs cheatsheet
 msw docs tests
 ```
 
-## Trust boundary
+Every process and agent inside one workspace can access everything in that workspace. The three workspaces are separate from one another and no Mac folder, Mac Docker socket, or Mac SSH agent is mounted into them. GitHub grants are owner/repository scoped: the guest capability is read-only and host-held, while the host-write capability remains in macOS Keychain and is used only by the explicit `msw push` path.
 
-Every process and agent inside one workspace can access everything in that workspace. The three workspaces are separate from one another and no Mac folder, Mac Docker socket, or Mac SSH agent is mounted into them. The guest GitHub credential is read-only and host-held; the write credential remains in macOS Keychain and is used only by the explicit `msw push` path.
-
-Full public internet access means an untrusted agent can still transmit files it can read to an unrelated internet service. This setup prevents direct access to your Mac and prevents GitHub pushes with the guest credential; it is not a data-loss-prevention system.
+Full public internet access means an untrusted agent can still transmit files it can read to an unrelated internet service. This setup prevents direct access to your Mac and prevents GitHub pushes with the guest capability; it is not a data-loss-prevention system.

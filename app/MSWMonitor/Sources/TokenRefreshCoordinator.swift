@@ -2,147 +2,142 @@ import Foundation
 
 enum TokenRefreshCoordinatorError: Error, LocalizedError, Sendable, Equatable {
     case inProgress
+    case missingGrant
+    case serviceUnavailable
+    case reauthorizationRequired
 
     var errorDescription: String? {
-        "A GitHub credential refresh is already in progress; try again shortly."
+        switch self {
+        case .inProgress:
+            return "A GitHub installation grant refresh is already in progress; try again shortly."
+        case .missingGrant:
+            return "The workspace has no renewable GitHub installation grant. Reauthorize it."
+        case .serviceUnavailable:
+            return "MSW Connect could not renew the workspace grant. Retry when the service is available; the previous grant remains blocked until it can be verified."
+        case .reauthorizationRequired:
+            return "The GitHub installation grant was revoked or expired. Reauthorize this workspace."
+        }
     }
 }
+
 actor TokenRefreshCoordinator {
-    private let clientID: String?
     private let broker: CredentialBroker
-    private let session: URLSession
-    private let refreshURL: URL
+    private let connect: MSWConnectClient
     private var refreshing: Set<String> = []
 
     init(
-        clientID: String? = nil,
         broker: CredentialBroker,
-        session: URLSession = .shared,
-        refreshURL: URL = URL(string: "https://github.com/login/oauth/access_token")!
+        connect: MSWConnectClient = MSWConnectClient()
     ) {
-        self.clientID = clientID
         self.broker = broker
-        self.session = session
-        self.refreshURL = refreshURL
+        self.connect = connect
     }
 
-    func refresh(workspace: String, role: CredentialRole = .guest) async throws -> GitHubTokenPair {
+    func refresh(workspace: String, role: CredentialRole = .guest) async throws -> ScopedInstallationCredential {
         let lockKey = "\(workspace).\(role.rawValue)"
         guard refreshing.insert(lockKey).inserted else {
             throw TokenRefreshCoordinatorError.inProgress
         }
         defer { refreshing.remove(lockKey) }
-        let bundle = try await broker.load(workspace: workspace, role: role)
-        guard !bundle.tokens.isRefreshExpired else {
-            try? await broker.quarantine(workspace: workspace, role: role)
-            throw GitHubDeviceFlowError.expiredToken
+
+        guard let metadata = try await broker.metadata(for: workspace, role: role),
+              let grantID = metadata.grantID,
+              metadata.provider == "github-app-installation",
+              metadata.recoveryState == .ready || metadata.recoveryState == .serviceUnavailable,
+              !metadata.quarantined else {
+            throw TokenRefreshCoordinatorError.missingGrant
         }
-        guard let resolvedClientID = clientID ?? bundle.metadata.appClientID,
-              !resolvedClientID.isEmpty else {
-            throw GitHubDeviceFlowError.clientIDMissing
-        }
-        var request = URLRequest(url: refreshURL)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = [
-            "client_id": resolvedClientID,
-            "grant_type": "refresh_token",
-            "refresh_token": bundle.tokens.refreshToken
-        ].map { key, value in
-            "\(key.formEncoded)=\(value.formEncoded)"
-        }.joined(separator: "&").data(using: .utf8)
-        let data: Data
-        let response: URLResponse
+
         do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            // Once the refresh request has left the process, a transport
-            // failure cannot prove whether GitHub accepted it and invalidated
-            // the previous one-time pair. Fail closed and require Device Flow.
-            try? await broker.quarantine(workspace: workspace, role: role)
-            throw GitHubDeviceFlowError.invalidResponse
-        }
-        guard let httpResponse = response as? HTTPURLResponse else {
-            try? await broker.quarantine(workspace: workspace, role: role)
-            throw GitHubDeviceFlowError.invalidResponse
-        }
-        guard httpResponse.statusCode == 200 else {
-            try? await broker.quarantine(workspace: workspace, role: role)
-            if httpResponse.statusCode == 400 || httpResponse.statusCode == 401 {
-                throw GitHubDeviceFlowError.expiredToken
+            guard let expectedAccountLogin = metadata.accountLogin,
+                  let expectedOwner = metadata.owner,
+                  let expectedInstallationID = metadata.installationID,
+                  let expectedVerificationRepository = metadata.verificationRepository else {
+                throw TokenRefreshCoordinatorError.reauthorizationRequired
             }
-            throw GitHubDeviceFlowError.httpStatus(httpResponse.statusCode)
-        }
-        let payload: RefreshResponse
-        do {
-            payload = try JSONDecoder().decode(RefreshResponse.self, from: data)
-        } catch {
-            try? await broker.quarantine(workspace: workspace, role: role)
-            throw GitHubDeviceFlowError.malformedTokenResponse
-        }
-        guard let accessToken = payload.accessToken,
-              !accessToken.isEmpty,
-              let refreshToken = payload.refreshToken,
-              !refreshToken.isEmpty,
-              let expiresIn = payload.expiresIn,
-              expiresIn > 0,
-              let refreshExpiresIn = payload.refreshTokenExpiresIn,
-              refreshExpiresIn > 0 else {
-            try? await broker.quarantine(workspace: workspace, role: role)
-            throw GitHubDeviceFlowError.malformedTokenResponse
-        }
-        let refreshed = GitHubTokenPair(
-            accessToken: accessToken,
-            refreshToken: refreshToken,
-            accessExpiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
-            refreshExpiresAt: Date().addingTimeInterval(TimeInterval(refreshExpiresIn)),
-            generation: bundle.tokens.generation + 1
-        )
-        do {
-            try await broker.store(
-                tokens: refreshed,
+            let expectedScope = MSWConnectGrantAssignment(
                 workspace: workspace,
-                accessMode: bundle.metadata.accessMode,
-                verificationRepository: bundle.metadata.verificationRepository,
-                installationID: bundle.metadata.installationID,
                 role: role,
-                appClientID: bundle.metadata.appClientID,
-                accountLogin: bundle.metadata.accountLogin,
-                owner: bundle.metadata.owner,
-                repositoryIDs: bundle.metadata.repositoryIDs
+                owner: expectedOwner,
+                installationID: expectedInstallationID,
+                repositoryIDs: metadata.repositoryIDs,
+                repositoryNames: metadata.repositoryNames,
+                accessMode: metadata.accessMode,
+                verificationRepository: expectedVerificationRepository
             )
-        } catch {
-            // GitHub may already have invalidated the old pair. Never claim a
-            // rollback; quarantine and require explicit Device Flow reauth.
-            try? await broker.quarantine(workspace: workspace, role: role)
+            let grant = try await connect.renewGrant(
+                grantID: grantID,
+                expectedScope: expectedScope
+            )
+            guard grant.workspace == workspace,
+                  grant.role == role,
+                  grant.id == grantID,
+                  grant.accountLogin.caseInsensitiveCompare(expectedAccountLogin) == .orderedSame,
+                  grant.owner.caseInsensitiveCompare(expectedOwner) == .orderedSame,
+                  grant.installationID == expectedInstallationID,
+                  grant.accessMode == metadata.accessMode,
+                  Self.normalizeRepositoryName(grant.verificationRepository) ==
+                    Self.normalizeRepositoryName(expectedVerificationRepository),
+                  grant.repositoryIDs.count == metadata.repositoryIDs.count,
+                  grant.repositoryIDs.count == Set(grant.repositoryIDs).count,
+                  Set(grant.repositoryIDs) == Set(metadata.repositoryIDs),
+                  grant.repositoryNames.count == metadata.repositoryNames.count,
+                  Set(grant.repositoryNames.map(Self.normalizeRepositoryName)) ==
+                    Set(metadata.repositoryNames.map(Self.normalizeRepositoryName)) else {
+                try? await broker.updateRecoveryState(
+                    workspace: workspace,
+                    role: role,
+                    state: .revoked,
+                    quarantined: true
+                )
+                throw TokenRefreshCoordinatorError.reauthorizationRequired
+            }
+            try await broker.updateScopedCredential(grant.credential, workspace: workspace, role: role)
+            return grant.credential
+        } catch let error as TokenRefreshCoordinatorError {
             throw error
+        } catch MSWConnectError.sessionExpired,
+                MSWConnectError.grantNotFound,
+                MSWConnectError.grantRevoked,
+                MSWConnectError.installationRemoved,
+                MSWConnectError.scopeMismatch,
+                MSWConnectError.scopeAttestationMissing,
+                MSWConnectError.scopeAttestationInvalid,
+                MSWConnectError.malformedResponse {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .revoked,
+                quarantined: true
+            )
+            throw TokenRefreshCoordinatorError.reauthorizationRequired
+        } catch MSWConnectError.transportUnavailable,
+                MSWConnectError.httpStatus,
+                MSWConnectError.rateLimited,
+                MSWConnectError.sessionCleanupFailed {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .serviceUnavailable,
+                quarantined: false
+            )
+            throw TokenRefreshCoordinatorError.serviceUnavailable
+        } catch {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .serviceUnavailable,
+                quarantined: false
+            )
+            throw TokenRefreshCoordinatorError.serviceUnavailable
         }
-        return refreshed
     }
 
     func isRefreshing(workspace: String, role: CredentialRole = .guest) -> Bool {
         refreshing.contains("\(workspace).\(role.rawValue)")
     }
 
-    private struct RefreshResponse: Decodable {
-        let accessToken: String?
-        let refreshToken: String?
-        let expiresIn: Int?
-        let refreshTokenExpiresIn: Int?
-
-        enum CodingKeys: String, CodingKey {
-            case accessToken = "access_token"
-            case refreshToken = "refresh_token"
-            case expiresIn = "expires_in"
-            case refreshTokenExpiresIn = "refresh_token_expires_in"
-        }
-    }
-}
-
-private extension String {
-    var formEncoded: String {
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "-._~")
-        return addingPercentEncoding(withAllowedCharacters: allowed) ?? self
+    private static func normalizeRepositoryName(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }

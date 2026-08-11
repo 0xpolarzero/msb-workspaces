@@ -27,6 +27,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         case expiring = "Expiring"
         case needsRestart = "Needs restart"
         case needsAuthorization = "Needs authorization"
+        case serviceUnavailable = "Service unavailable"
         case readOnly = "Read-only"
         case removalPending = "Removal pending"
         case quarantined = "Quarantined"
@@ -843,6 +844,7 @@ final class AppModel {
         case .expiring: return .expiring
         case .needsRestart: return .needsRestart
         case .needsAuthorization: return .needsAuthorization
+        case .serviceUnavailable: return .serviceUnavailable
         case .legacy: return .legacy
         case .removalPending: return .removalPending
         case .readOnly: return .readOnly

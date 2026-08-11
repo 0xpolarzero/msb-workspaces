@@ -30,6 +30,13 @@ enum MSWHostAgentError: Error, LocalizedError, Sendable, Equatable {
     func installFixedHostRecords(_ reply: @escaping (Data?, String?) -> Void)
     func uninstall(reply: @escaping (Data?, String?) -> Void)
 }
+protocol MSWHostAgentControlling: Sendable {
+    func inspect() async throws -> MSWHostRecordSnapshot
+    func ensureFixedLoopbackAliases() async throws -> MSWHostRecordSnapshot
+    func installFixedHostRecords() async throws -> MSWHostRecordSnapshot
+    func uninstall() async throws -> MSWHostRecordSnapshot
+}
+
 
 private final class MSWHostAgentCompletion: @unchecked Sendable {
     private let lock = NSLock()
@@ -80,7 +87,7 @@ private final class MSWHostAgentCompletion: @unchecked Sendable {
     }
 }
 
-actor HostAgentClient {
+actor HostAgentClient: MSWHostAgentControlling {
     private let machServiceName: String
     private var connection: NSXPCConnection?
     private var connectionGeneration: String?

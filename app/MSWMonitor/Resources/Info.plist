@@ -2,6 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>org.microsandbox.MSWMonitor.oauth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>msw</string>
+            </array>
+        </dict>
+    </array>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleExecutable</key>
@@ -24,10 +35,12 @@
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>LSUIElement</key>
     <false/>
-    <key>MSWToolchainManifestURL</key>
-    <string>$(MSW_TOOLCHAIN_MANIFEST_URL)</string>
-    <key>MSWToolchainManifestPublicKey</key>
-    <string>$(MSW_TOOLCHAIN_MANIFEST_PUBLIC_KEY)</string>
+    <key>MSWConnectBaseURL</key>
+    <string>$(MSW_CONNECT_BASE_URL)</string>
+    <key>MSWConnectClientID</key>
+    <string>$(MSW_CONNECT_CLIENT_ID)</string>
+    <key>MSWConnectScopeAttestationPublicKey</key>
+    <string>$(MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY)</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

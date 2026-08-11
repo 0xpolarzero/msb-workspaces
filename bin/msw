@@ -122,10 +122,20 @@ keychain_has() {
   local service="$1" account="$2"
   case "$service" in
     "$READ_KEYCHAIN_SERVICE")
-      app_credential_available "$account" guest && return 0
+      if app_metadata_profile_present "$account" guest; then
+        app_credential_available "$account" guest
+        return
+      fi
+      [[ "${MSW_TEST_MODE:-0}" == 1 ]] && keychain_get "$service" "$account" >/dev/null 2>&1
+      return
       ;;
     "$WRITE_KEYCHAIN_SERVICE")
-      app_credential_available "$account" host && return 0
+      if app_metadata_profile_present "$account" host; then
+        app_credential_available "$account" host
+        return
+      fi
+      [[ "${MSW_TEST_MODE:-0}" == 1 ]] && keychain_get "$service" "$account" >/dev/null 2>&1
+      return
       ;;
   esac
   keychain_get "$service" "$account" >/dev/null 2>&1
@@ -180,7 +190,6 @@ keychain_delete() {
       return 1
     fi
   fi
-  return 0
 }
 
 metadata_file() { printf '%s/%s.conf\n' "$GITHUB_META_DIR" "$1"; }
@@ -219,7 +228,12 @@ metadata_repo() {
 
 
 app_credential_environment_token() {
-  local box="$1" role="$2" suffix variable value=""
+  local box="$1" role="$2" suffix variable value="" expiry_state
+  app_metadata_profile_present "$box" "$role" || return 1
+  [[ "$(app_metadata_value "$box" "$role" provider 2>/dev/null || true)" == github-app-installation ]] || return 1
+  [[ "$(app_metadata_value "$box" "$role" recoveryState 2>/dev/null || true)" == ready ]] || return 1
+  expiry_state="$(app_profile_expiry_state "$box" "$role" 2>/dev/null || true)"
+  [[ "$expiry_state" == valid || "$expiry_state" == expiring ]] || return 1
   suffix="$(printf '%s' "$box" | tr '[:lower:]' '[:upper:]')"
   case "$role" in
     guest) variable="MSW_GITHUB_READ_TOKEN_${suffix}" ;;
@@ -227,13 +241,8 @@ app_credential_environment_token() {
     *) return 1 ;;
   esac
   value="${!variable:-}"
-  if [[ -z "$value" ]]; then
-    case "$role" in
-      guest) value="${MSW_GITHUB_READ_TOKEN:-}" ;;
-      host) value="${MSW_GITHUB_WRITE_TOKEN:-}" ;;
-    esac
-  fi
   [[ -n "$value" ]] || return 1
+  [[ "${#value}" -le 4096 && "$value" =~ ^ghs_[^[:space:][:cntrl:]]+$ ]] || return 1
   printf '%s' "$value"
 }
 
@@ -245,37 +254,47 @@ app_keychain_service() {
     *) return 1 ;;
   esac
 }
-
 app_keychain_get() {
-  local box="$1" role="$2" service raw
-  [[ -z "${MSW_TEST_KEYCHAIN_DIR:-}" ]] || return 1
+  local box="$1" role="$2" service raw expiry_state allow_expired="${3:-0}"
   app_metadata_profile_present "$box" "$role" || return 1
   service="$(app_keychain_service "$box" "$role")"
-  raw="$("$SECURITY_BIN" find-generic-password -w -s "$service" -a profile 2>/dev/null)" || return 1
-  # Native MSW Monitor keeps the access/refresh pair as one atomic Keychain
-  # record. This broker emits only the access token to callers such as Git.
+  if [[ "$allow_expired" != 1 ]]; then
+    expiry_state="$(app_profile_expiry_state "$box" "$role" 2>/dev/null || true)"
+    [[ "$expiry_state" == valid || "$expiry_state" == expiring ]] || return 1
+  fi
+  raw="$(keychain_get "$service" profile)" || return 1
+  # The native broker stores only a short-lived installation token. A
+  # refresh_token or schema-v2 user token is deliberately rejected.
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
   "$JQ_BIN" -e '
     type == "object" and
-    .schemaVersion == 2 and
-    (.accessToken | type == "string" and length > 0) and
-    (.refreshToken | type == "string" and length > 0) and
+    .schemaVersion == 3 and
+    (.grantID | type == "string" and length > 0) and
+    (.accessToken |
+      type == "string" and
+      length > 0 and
+      length <= 4096 and
+      test("^ghs_[^[:space:][:cntrl:]]+$") and
+      (test("^(ghp_|gho_|ghu_|ghr_|github_pat_)"; "i") | not)
+    ) and
     (.accessExpiresAt | type == "string" and length > 0) and
-    (.refreshExpiresAt | type == "string" and length > 0) and
-    (.generation | type == "number" and . > 0)
+    (.generation | type == "number" and . > 0) and
+    (.refreshToken // null) == null
   ' <<<"$raw" >/dev/null 2>&1 || return 1
   "$JQ_BIN" -r '.accessToken' <<<"$raw"
 }
 
 app_keychain_has() {
   local box="$1" role="$2"
-  [[ -z "${MSW_TEST_KEYCHAIN_DIR:-}" ]] || return 1
   app_metadata_profile_present "$box" "$role" || return 1
   app_keychain_get "$box" "$role" >/dev/null 2>&1
 }
 
 app_credential_available() {
   local box="$1" role="$2"
+  app_metadata_profile_present "$box" "$role" || return 1
+  [[ "$(app_metadata_value "$box" "$role" provider 2>/dev/null || true)" == github-app-installation ]] || return 1
+  [[ "$(app_metadata_value "$box" "$role" recoveryState 2>/dev/null || true)" == ready ]] || return 1
   app_credential_environment_token "$box" "$role" >/dev/null 2>&1 ||
     app_keychain_has "$box" "$role"
 }
@@ -288,6 +307,18 @@ app_credential_value() {
     app_keychain_get "$box" "$role"
   fi
 }
+app_credential_value_for_cleanup() {
+  local box="$1" role="$2" value
+  if value="$(app_credential_environment_token "$box" "$role" 2>/dev/null)"; then
+    printf '%s' "$value"
+  else
+    # Secret removal may be the recovery path for an expired grant. The
+    # installation token is still structurally validated, but expiry is not
+    # used to decide whether it may authenticate this local config mutation.
+    app_keychain_get "$box" "$role" 1
+  fi
+}
+
 
 app_metadata_value() {
   local box="$1" role="$2" field="$3" key
@@ -302,6 +333,28 @@ app_metadata_profile_present() {
   local box="$1" role="$2" value
   value="$(app_metadata_value "$box" "$role" workspace 2>/dev/null || true)"
   [[ "$value" == "$box" ]]
+}
+
+app_repository_allowed() {
+  local box="$1" role="$2" repository="$3" key
+  [[ -f "$APP_CREDENTIALS_FILE" && ! -L "$APP_CREDENTIALS_FILE" ]] || return 1
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  key="$box.$role"
+  "$JQ_BIN" -e --arg key "$key" --arg repository "${repository,,}" '
+    (
+      .entries[$key].provider == "github-app-installation" and
+      .entries[$key].recoveryState == "ready" and
+      ((.entries[$key].repositoryNames // []) | map(ascii_downcase) | index($repository)) != null
+    )
+  ' "$APP_CREDENTIALS_FILE" >/dev/null 2>&1
+}
+
+require_repository_access() {
+  local box="$1" repository="$2" role="${3:-guest}"
+  if app_metadata_profile_present "$box" "$role"; then
+    app_repository_allowed "$box" "$role" "$repository" ||
+      fatal "repository '$repository' is not assigned to workspace '$box' for the $role grant"
+  fi
 }
 
 write_metadata() {
@@ -405,7 +458,7 @@ assert_not_quarantined() {
   [[ "${MSW_ALLOW_QUARANTINED:-0}" == 1 ]] && return 0
   file="$(quarantine_file "$box")"
   if [[ -e "$file" || -L "$file" ]]; then
-    fatal "workspace '$box' is quarantined; repair it with: msw github setup $box OWNER/REPO"
+    fatal "workspace '$box' is quarantined; repair it from MSW Monitor's Connect GitHub flow"
   fi
   for role in guest host; do
     if app_metadata_profile_present "$box" "$role" &&
@@ -499,10 +552,13 @@ setup_transaction_trap() {
 
 read_token_for_workspace() {
   local box="$1"
-  app_credential_value "$box" guest 2>/dev/null ||
-    keychain_get "$READ_KEYCHAIN_SERVICE" "$box"
+  if app_metadata_profile_present "$box" guest; then
+    app_credential_value "$box" guest
+    return
+  fi
+  [[ "${MSW_TEST_MODE:-0}" == 1 ]] || return 1
+  keychain_get "$READ_KEYCHAIN_SERVICE" "$box"
 }
-
 
 
 workspace_msb() {
@@ -525,13 +581,28 @@ workspace_msb_with_read_token() {
   fi
   "$MSB_BIN" "$@" 9>&-
 }
+workspace_msb_with_read_token_for_cleanup() {
+  local box="$1" token="" status
+  shift
+  if token="$(app_credential_value_for_cleanup "$box" guest 2>/dev/null)"; then
+    if GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+      status=0
+    else
+      status=$?
+    fi
+    unset token
+    return "$status"
+  fi
+  "$MSB_BIN" "$@" 9>&-
+}
+
 
 start_sandbox() {
   local box="$1"
   assert_not_quarantined "$box"
   if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
     { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
-    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
+    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
   fi
   workspace_msb_with_read_token "$box" start -q "$box"
 }
@@ -574,19 +645,19 @@ ensure_running() {
 guest_exec() {
   local box="$1"; shift
   ensure_running "$box"
-  workspace_msb "$box" exec --no-tty "$box" -- "$@"
+  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
 }
 
 guest_exec_w() {
   local box="$1" workdir="$2"; shift 2
   ensure_running "$box"
-  workspace_msb "$box" exec --no-tty -w "$workdir" "$box" -- "$@"
+  workspace_msb_with_read_token "$box" exec --no-tty -w "$workdir" "$box" -- "$@"
 }
 
 guest_script() {
   local box="$1" script="$2"; shift 2
   ensure_running "$box"
-  printf '%s\n' "$script" | workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$@"
+  printf '%s\n' "$script" | workspace_msb_with_read_token "$box" exec --no-tty "$box" -- bash -s -- "$@"
 }
 
 validate_relative_path() {
@@ -743,7 +814,7 @@ cmd_restart() {
     note "Restarting $box"
     if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
       { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
     fi
     workspace_msb_with_read_token "$box" restart -q -t 60 "$box"
   done < <(for_targets "$target")
@@ -979,6 +1050,7 @@ cmd_clone() {
   local box="$1" repo="${2:-}" destination="${3:-}" remote repo_name parent
   validate_workspace "$box"
   validate_github_repo "$repo"
+  require_repository_access "$box" "$repo" guest
   repo_name="${repo#*/}"
   if [[ -z "$destination" ]]; then destination="$repo_name"; fi
   validate_relative_path "$destination"
@@ -1016,12 +1088,16 @@ SCRIPT
 }
 
 pull_one() {
-  local box="$1" relative="$2" repo_root
+  local box="$1" relative="$2" repo_root remote_raw canonical_repo
   repo_root="$(resolve_guest_repo "$box" "$relative")"
   note "$box:$relative"
+  remote_raw="$(guest_exec_w "$box" "$repo_root" git config --get remote.origin.url)"
+  canonical_repo="$(normalize_github_remote "$remote_raw")"
+  canonical_repo="${canonical_repo#https://github.com/}"
+  canonical_repo="${canonical_repo%.git}"
+  require_repository_access "$box" "$canonical_repo" guest
   guest_exec_w "$box" "$repo_root" git pull --ff-only --prune
 }
-
 cmd_pull() {
   local box="$1" target="${2:-all}" repo failed=0
   validate_workspace "$box"
@@ -1073,7 +1149,7 @@ remove_github_secret() {
     printf 'msw: could not inspect workspace %s before removing its GitHub secret\n' "$box" >&2
     return 1
   fi
-  workspace_msb "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
+  workspace_msb_with_read_token_for_cleanup "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
 }
 
 host_safe_path() {
@@ -1186,18 +1262,18 @@ push_impl() {
   local box="$1" relative="$2" force_mode="$3" assume_yes="$4" quiet_mode="${5:-0}"
   validate_workspace "$box"
   validate_relative_path "$relative"
-  assert_not_quarantined "$box"
-  local access
-  access="$(metadata_access "$box" 2>/dev/null || true)"
-  [[ "$access" == host-write ]] || fatal "host write access is not enabled (host write token missing or workspace is read-only); run: msw github setup $box OWNER/REPO"
-  keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "host write token missing; run: msw github setup $box OWNER/REPO"
-  [[ -x "$ASKPASS_BIN" ]] || fatal "host askpass helper missing; rerun setup.sh"
-  require_command_path git "$GIT_BIN"
-
+  if [[ "${MSW_TEST_MODE:-0}" == 1 ]] && ! app_metadata_profile_present "$box" guest; then
+    case "$(metadata_access "$box" 2>/dev/null || true)" in
+      read-only) fatal "workspace is read-only; host write token missing for $box" ;;
+      host-write) keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "host write token missing for $box" ;;
+    esac
+  fi
   local repo_root branch local_sha remote_raw canonical_url remote_sha ff_status commits
   repo_root="$(resolve_guest_repo "$box" "$relative")"
   remote_raw="$(guest_exec_w "$box" "$repo_root" git config --get remote.origin.url)"
   canonical_url="$(normalize_github_remote "$remote_raw")"
+  require_repository_access "$box" "${canonical_url#https://github.com/}" guest
+  require_repository_access "$box" "${canonical_url#https://github.com/}" host
   guest_exec_w "$box" "$repo_root" git fetch --prune origin
   branch="$(guest_exec_w "$box" "$repo_root" git symbolic-ref --quiet --short HEAD)" || fatal "detached HEAD cannot be pushed"
   guest_exec_w "$box" "$repo_root" git check-ref-format --branch "$branch" >/dev/null
@@ -1405,6 +1481,10 @@ cmd_github_verify() {
 }
 
 cmd_github_setup() {
+  if [[ "${MSW_TEST_MODE:-0}" != 1 ]]; then
+    fatal "legacy GitHub token setup was removed; use MSW Monitor's Connect GitHub flow"
+  fi
+
   local box="$1" repo="$2" mode="${3:-host-write}" read_token="" write_token="" host_write=1
   validate_workspace "$box"
   validate_github_repo "$repo"
@@ -1458,9 +1538,6 @@ INFO
   unset read_token write_token
   write_metadata "$box" "$repo" "$mode"
 
-  # Run verification in a fresh process. Bash disables errexit inside functions
-  # used directly as an `if` condition; a child process keeps every internal
-  # failure fatal while still allowing this parent to roll credentials back.
   if ! ( MSW_ALLOW_QUARANTINED=1 MSW_GITHUB_VERIFY_INHERITED=1 "${MSW_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" ); then
     if (( preexisting_quarantine )); then
       warn "verification failed; revoking untrusted repair credentials and keeping the workspace quarantined"
@@ -1536,6 +1613,9 @@ cmd_github_status() {
 cmd_github_remove() {
   local box="$1" meta_file cleanup_failed=0
   validate_workspace "$box"
+  if app_metadata_profile_present "$box" guest || app_metadata_profile_present "$box" host; then
+    fatal "schema-3 GitHub App grants must be revoked from MSW Monitor so the service grant is revoked; no local credentials were changed"
+  fi
   if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
   meta_file="$(metadata_file "$box")"
   rm -f "$meta_file"
@@ -1559,7 +1639,7 @@ cmd_github() {
   case "$sub" in
     setup)
       (( $# >= 2 && $# <= 3 )) || fatal "usage: msw github setup WORKSPACE OWNER/REPO [--read-only]"
-      cmd_github_setup "$1" "$2" "${3:-}"
+      cmd_github_setup "$@"
       ;;
     verify)
       (( $# >= 1 && $# <= 2 )) || fatal "usage: msw github verify WORKSPACE [REPO]"
@@ -1986,8 +2066,7 @@ Repositories
   msw identity "NAME" EMAIL [TARGET]    Set commit identity
 
 GitHub permissions
-  msw github setup WORKSPACE OWNER/REPO [--read-only]
-                                      Store tokens and run the permission test
+  Connect GitHub                           Use MSW Monitor's Connect GitHub flow
   msw github verify WORKSPACE [REPO]  Rerun the configured permission test
   msw github status [WORKSPACE|all]   Show credential presence
   msw github remove WORKSPACE         Remove that workspace's tokens
@@ -2201,15 +2280,13 @@ app_timestamp_epoch() {
 }
 
 app_profile_expiry_state() {
-  local box="$1" role="$2" access refresh now soon access_epoch refresh_epoch
+  local box="$1" role="$2" access now soon access_epoch
   access="$(app_metadata_value "$box" "$role" accessExpiresAt 2>/dev/null || true)"
-  refresh="$(app_metadata_value "$box" "$role" refreshExpiresAt 2>/dev/null || true)"
-  [[ -n "$access" && -n "$refresh" ]] || return 1
+  [[ -n "$access" ]] || return 1
   access_epoch="$(app_timestamp_epoch "$access")" || return 1
-  refresh_epoch="$(app_timestamp_epoch "$refresh")" || return 1
   now="$(date +%s)"
   soon=$((now + 3600))
-  if (( refresh_epoch <= now )); then
+  if (( access_epoch <= now )); then
     printf 'authorization-required'
   elif (( access_epoch <= soon )); then
     printf 'expiring'
@@ -2219,10 +2296,19 @@ app_profile_expiry_state() {
 }
 
 app_workspace_credential_state() {
-  local box="$1" access needs_restart host_needs_restart guest_expiry host_expiry
+  local box="$1" access needs_restart host_needs_restart guest_expiry host_expiry recovery_state host_recovery_state
   if app_workspace_quarantined "$box"; then
     printf 'Quarantined'
   elif app_metadata_profile_present "$box" guest; then
+    recovery_state="$(app_metadata_value "$box" guest recoveryState 2>/dev/null || true)"
+    if [[ -n "$recovery_state" && "$recovery_state" != ready ]]; then
+      case "$recovery_state" in
+        serviceUnavailable) printf 'Service unavailable' ;;
+        revoked|expired|installationRemoved|migrationRequired|quarantined) printf 'Needs authorization' ;;
+        *) printf 'Needs authorization' ;;
+      esac
+      return
+    fi
     access="$(metadata_access "$box" 2>/dev/null || true)"
     needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
     guest_expiry="$(app_profile_expiry_state "$box" guest 2>/dev/null || true)"
@@ -2232,6 +2318,14 @@ app_workspace_credential_state() {
     fi
     if [[ "$access" == host-write ]]; then
       host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
+      host_recovery_state="$(app_metadata_value "$box" host recoveryState 2>/dev/null || true)"
+      if [[ -n "$host_recovery_state" && "$host_recovery_state" != ready ]]; then
+        case "$host_recovery_state" in
+          serviceUnavailable) printf 'Service unavailable' ;;
+          *) printf 'Needs authorization' ;;
+        esac
+        return
+      fi
       host_expiry="$(app_profile_expiry_state "$box" host 2>/dev/null || true)"
       if ! app_metadata_profile_present "$box" host ||
         ! app_credential_available "$box" host || [[ -z "$host_expiry" ]]; then
@@ -2839,16 +2933,17 @@ app_cmd_github_state() {
     access=""
     provider="none"
     account_login=""
-    installation_id=""
-    access_expires=""
-    refresh_expires=""
     needs_restart=false
     if app_metadata_profile_present "$box" guest; then
       configured=true
       provider="$(app_metadata_value "$box" guest provider 2>/dev/null || true)"
-      [[ -n "$provider" ]] || provider="github-app-user"
-      repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
-      access="$(metadata_access "$box" 2>/dev/null || true)"
+      if [[ "$provider" != github-app-installation ]]; then
+        provider="legacy-broad-token"
+        access="unconfigured"
+      else
+        repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
+        access="$(metadata_access "$box" 2>/dev/null || true)"
+      fi
       account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
       installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
       access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
@@ -2894,6 +2989,10 @@ app_cmd_github_bind() {
     app_usage_error github-bind "mode must be host-write or read-only"
   app_require_config github-bind
   app_require_runtime github-bind
+  require_repository_access "$box" "$repo" guest
+  if [[ "$mode" == host-write ]]; then
+    require_repository_access "$box" "$repo" host
+  fi
   app_metadata_profile_present "$box" guest ||
     app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Guest GitHub authorization is not committed." "Authorize guest access in MSW Monitor first." "$box" false 77
   app_credential_available "$box" guest ||
@@ -2964,6 +3063,30 @@ app_cmd_github_quarantine() {
   github_lock_release
   app_emit_success github-quarantine "{\"workspace\":$(app_json_string "$box"),\"quarantined\":true,\"lifecycle\":\"Stopped\"}"
 }
+app_cmd_github_unbind() {
+  local box=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error github-unbind "missing value for --workspace"; box="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-unbind "github-unbind requires --format json"; shift 2 ;;
+      *) app_usage_error github-unbind "unknown github-unbind option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error github-unbind "workspace must be dev, playgrounds, or personal"
+  app_require_config github-unbind
+  app_require_runtime github-unbind
+  if ! github_lock_acquire "$box"; then
+    app_emit_error github-unbind "MSW_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then retry workspace credential removal." "$box" true 73
+  fi
+  if ! remove_github_secret "$box"; then
+    quarantine_workspace "$box" "GitHub App credential unbinding failed" >/dev/null 2>&1 || true
+    github_lock_release
+    app_emit_error github-unbind "MSW_GITHUB_UNBIND_FAILED" "The VM GitHub secret could not be removed and the workspace remains quarantined." "Repair the workspace, then retry removing GitHub access." "$box" true 77
+  fi
+  github_lock_release
+  app_emit_success github-unbind "{\"workspace\":$(app_json_string "$box"),\"unbound\":true}"
+}
+
 app_guest_repository_scan() {
 
   local box="$1" include_status="$2" credential_state="$3" quarantine_state="$4" requested_path="${5-}" script
@@ -3479,8 +3602,9 @@ app_cmd_apply() {
       reconciled_remote="$("$JQ_BIN" -r '.remoteCommit // empty' <<<"$reconciled_json")"
       reconciled_destination="$("$JQ_BIN" -r '.destinationState // empty' <<<"$reconciled_json")"
       [[ "$reconciled_remote" == "$expected_local" && "$reconciled_destination" == upToDate ]] ||
-        app_emit_error apply "MSW_RECONCILE_PENDING" "The host-only push did not converge to the reviewed destination state." "Refresh the repository before deciding whether another push is safe." "$box" true 69
-      app_emit_success apply "{\"workspace\":$(app_json_string "$box"),\"repositoryPath\":$(app_json_string "$path"),\"branch\":$(app_json_string "$expected_branch"),\"pushed\":true,\"reconciled\":true,\"outcome\":\"host-only push completed and the destination was freshly re-observed\"}"
+      app_emit_error apply "MSW_RECONCILE_PENDING" "The pushed repository destination did not match the reviewed commit." "Refresh the repository before deciding whether another push is safe." "$box" true 69
+      app_emit_success apply \
+        "{\"workspace\":$(app_json_string "$box"),\"action\":\"push\",\"pushed\":true,\"reconciled\":true,\"remoteCommit\":$(app_json_string "$reconciled_remote"),\"destinationState\":$(app_json_string "$reconciled_destination")}" || return
       ;;
   esac
 }
@@ -3536,6 +3660,7 @@ Machine-readable MSW Monitor commands:
   msw app ports [--workspace WORKSPACE] --format json
   msw app github-state [--workspace WORKSPACE] --format json
   msw app github-bind --workspace WORKSPACE --repository OWNER/REPO --mode read-only|host-write --format json
+  msw app github-unbind --workspace WORKSPACE --format json
   msw app github-quarantine --workspace WORKSPACE --format json
   msw app url --workspace WORKSPACE [--port PORT] [--scheme http|https] --format json
   msw app clone --workspace WORKSPACE --repository OWNER/REPO [--destination PATH] --format json
@@ -3587,6 +3712,7 @@ cmd_app() {
     ports) app_cmd_ports "$@" ;;
     github-state) app_cmd_github_state "$@" ;;
     github-bind) app_cmd_github_bind "$@" ;;
+    github-unbind) app_cmd_github_unbind "$@" ;;
     github-quarantine) app_cmd_github_quarantine "$@" ;;
     plan) app_cmd_plan "$@" ;;
     apply) app_cmd_apply "$@" ;;

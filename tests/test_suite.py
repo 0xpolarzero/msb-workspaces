@@ -308,9 +308,10 @@ class SyntaxAndStaticTests(MSWTestCase):
                 "docs/MSW-CHEATSHEET.md",
             ]
         )
-        for stale in ("msw auth", "msw selftest", "--skip-update"):
+        for stale in ("msw auth", "msw selftest", "--skip-update", "msw github setup dev"):
             self.assertNotIn(stale, docs)
-        self.assertIn("msw github setup dev", docs)
+        self.assertIn("Connect GitHub", docs)
+        self.assertIn("MSW Monitor", docs)
         self.assertIn("msw push dev", docs)
         self.assertIn("msw backup", docs)
 
@@ -372,6 +373,39 @@ class SyntaxAndStaticTests(MSWTestCase):
             env=askpass_env,
         )
         self.assertEqual(proc.stdout, value + "\n")
+    def test_askpass_reads_schema3_installation_token(self) -> None:
+        state_path = self.env.root / "askpass-app-security.json"
+        service = "msw.github.app.dev.host.tokens"
+        raw = json.dumps({
+            "schemaVersion": 3,
+            "grantID": "00000000-0000-0000-0000-000000000001",
+            "accessToken": "ghs_host_installation_token",
+            "accessExpiresAt": "2099-08-08T08:00:00Z",
+            "generation": 1,
+        })
+        security_env = self.env.env.copy()
+        security_env.update({
+            "MSW_FAKE_SECURITY_STATE": str(state_path),
+            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+        })
+        run_cmd(
+            [FAKE_SECURITY, "add-generic-password", "-s", service, "-a", "profile", "-w", raw],
+            env=security_env,
+        )
+        askpass_env = security_env.copy()
+        askpass_env.update({
+            "MSW_TEST_KEYCHAIN_DIR": "",
+            "MSW_APP_KEYCHAIN_SERVICE": service,
+            "MSW_APP_KEYCHAIN_ACCOUNT": "profile",
+            "MSW_JQ_BIN": shutil.which("jq") or "",
+            "MSW_KEYCHAIN_HOME": str(self.env.home),
+            "MSW_FAKE_SECURITY_HOME": str(self.env.home),
+        })
+        proc = run_cmd(
+            [PACKAGE / "bin/msw-git-askpass", "Password for https://github.com:"],
+            env=askpass_env,
+        )
+        self.assertEqual(proc.stdout, "ghs_host_installation_token\n")
 
 
 class InstallerAndDailyTests(MSWTestCase):
@@ -1458,9 +1492,9 @@ class PackagedBehaviorTests(MSWTestCase):
         document = json.loads(self.env.msw("app", "github-state", "--format", "json").stdout)
         self.assertTrue(document["ok"])
         workspaces = {item["workspace"]: item for item in document["result"]["workspaces"]}
-        self.assertEqual(workspaces["dev"]["provider"], "github-app-user")
-        self.assertEqual(workspaces["dev"]["accessMode"], "read-only")
-        self.assertEqual(workspaces["dev"]["verificationRepository"], "acme/demo")
+        self.assertEqual(workspaces["dev"]["provider"], "legacy-broad-token")
+        self.assertEqual(workspaces["dev"]["accessMode"], "unconfigured")
+        self.assertIsNone(workspaces["dev"]["verificationRepository"])
         self.assertEqual(workspaces["dev"]["accountLogin"], "alice")
         self.assertEqual(workspaces["dev"]["installationId"], "123")
         self.assertFalse(workspaces["dev"]["needsRestart"])
@@ -1532,34 +1566,36 @@ class PackagedBehaviorTests(MSWTestCase):
         credentials.parent.mkdir(parents=True, exist_ok=True)
         common = {
             "workspace": "dev",
-            "schemaVersion": 2,
-            "provider": "github-app-user",
+            "schemaVersion": 3,
+            "provider": "github-app-installation",
+            "grantID": "00000000-0000-0000-0000-000000000001",
             "accountLogin": "alice",
             "owner": "acme",
             "repositoryIDs": [12],
+            "repositoryNames": ["acme/demo"],
             "verificationRepository": "acme/demo",
             "installationID": 123,
             "accessExpiresAt": "2099-08-08T08:00:00Z",
-            "refreshExpiresAt": "2099-12-08T08:00:00Z",
             "needsRestart": False,
             "generation": 1,
             "quarantined": False,
+            "recoveryState": "ready",
             "updatedAt": "2026-08-08T00:00:00Z",
         }
         credentials.write_text(json.dumps({
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "entries": {
                 "dev.guest": common | {
-                    "role": "guest", "appClientID": "guest-public", "accessMode": "read-only",
+                    "role": "guest", "accessMode": "read-only",
                 },
                 "dev.host": common | {
-                    "role": "host", "appClientID": "host-public", "accessMode": "host-write",
+                    "role": "host", "accessMode": "host-write",
                 },
             },
         }))
         token_env = {
-            "MSW_GITHUB_READ_TOKEN_DEV": "ghu_read_fixture",
-            "MSW_GITHUB_WRITE_TOKEN_DEV": "ghu_write_fixture",
+            "MSW_GITHUB_READ_TOKEN_DEV": "ghs_read_fixture",
+            "MSW_GITHUB_WRITE_TOKEN_DEV": "ghs_write_fixture",
         }
 
         github = json.loads(self.env.msw(
