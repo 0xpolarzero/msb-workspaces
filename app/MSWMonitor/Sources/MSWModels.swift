@@ -231,12 +231,32 @@ struct MSWNetworkSnapshot: Codable, Sendable {
     let ip: String
 }
 
-struct MSWActionCapabilities: Codable, Sendable {
+struct MSWActionCapabilities: Codable, Sendable, Equatable {
     let canStart: Bool
     let canStop: Bool
     let canRestart: Bool
     let canOpenTerminal: Bool
     let canPush: Bool
+    let reason: String?
+    let recovery: String?
+
+    init(
+        canStart: Bool,
+        canStop: Bool,
+        canRestart: Bool,
+        canOpenTerminal: Bool,
+        canPush: Bool,
+        reason: String? = nil,
+        recovery: String? = nil
+    ) {
+        self.canStart = canStart
+        self.canStop = canStop
+        self.canRestart = canRestart
+        self.canOpenTerminal = canOpenTerminal
+        self.canPush = canPush
+        self.reason = reason
+        self.recovery = recovery
+    }
 }
 
 struct MSWPortsResponse: Codable, Sendable {
@@ -505,6 +525,71 @@ struct MSWProgressEvent: Codable, Sendable {
     let fraction: Double?
     let message: String
     let safeForDisplay: Bool
+}
+
+struct MSWRecoveryContext: Codable, Sendable, Equatable {
+    let code: String
+    let reason: String
+    let recovery: String?
+    let workspace: String?
+    let retryable: Bool
+}
+
+struct MSWOperationState: Identifiable, Codable, Sendable, Equatable {
+    enum Kind: String, Codable, Sendable {
+        case lifecycle
+        case push
+        case backup
+        case restore
+    }
+
+    enum Phase: String, Codable, Sendable {
+        case preparing
+        case awaitingConfirmation = "awaiting-confirmation"
+        case running
+        case verifying
+        case finished
+    }
+
+    enum Outcome: String, Codable, Sendable {
+        case pending
+        case succeeded
+        case failed
+        case unknown
+    }
+
+    let id: UUID
+    let kind: Kind
+    let workspace: String?
+    let action: String
+    let startedAt: Date
+    var updatedAt: Date
+    var phase: Phase
+    var fraction: Double?
+    var message: String
+    var outcome: Outcome
+    var recovery: MSWRecoveryContext?
+}
+
+struct MSWNotificationEvent: Identifiable, Codable, Sendable, Equatable {
+    enum Kind: String, Codable, Sendable {
+        case sustainedUnavailability = "sustained-unavailability"
+        case quarantine
+        case lifecycleLoss = "lifecycle-loss"
+        case operationFailure = "operation-failure"
+        case backupFailure = "backup-failure"
+        case credentialDeadline = "credential-deadline"
+    }
+
+    let id: UUID
+    let kind: Kind
+    let createdAt: Date
+    let workspace: String?
+    let title: String
+    let message: String
+    let recovery: String?
+    let deepLink: String
+    let generation: Int
 }
 
 struct MSWActivity: Identifiable, Codable, Sendable {

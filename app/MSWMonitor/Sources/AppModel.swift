@@ -2,7 +2,7 @@ import AppKit
 import Observation
 
 struct Workspace: Identifiable, Equatable, Sendable {
-    enum ID: String, CaseIterable, Sendable {
+    enum ID: String, CaseIterable, Codable, Sendable {
         case dev
         case playgrounds
         case personal
@@ -41,10 +41,15 @@ struct Workspace: Identifiable, Equatable, Sendable {
     var observedAt: Date?
     var networkHost: String?
     var quarantineReason: String?
+    var statusReason: String?
+    var recoveryAction: String?
     var nextAction: String
+    var serverCapabilities: MSWActionCapabilities
     var canStart: Bool
     var canStop: Bool
     var canRestart: Bool
+    var canOpenTerminal: Bool
+    var canPush: Bool
 
     init(
         id: ID,
@@ -55,10 +60,15 @@ struct Workspace: Identifiable, Equatable, Sendable {
         observedAt: Date? = nil,
         networkHost: String? = nil,
         quarantineReason: String? = nil,
+        statusReason: String? = nil,
+        recoveryAction: String? = nil,
         nextAction: String? = nil,
         canStart: Bool = true,
         canStop: Bool = false,
-        canRestart: Bool = false
+        canRestart: Bool = false,
+        canOpenTerminal: Bool = false,
+        canPush: Bool = false,
+        serverCapabilities: MSWActionCapabilities? = nil
     ) {
         self.id = id
         self.purpose = purpose ?? Self.defaultPurpose(for: id)
@@ -68,10 +78,23 @@ struct Workspace: Identifiable, Equatable, Sendable {
         self.observedAt = observedAt
         self.networkHost = networkHost
         self.quarantineReason = quarantineReason
+        self.statusReason = statusReason
+        self.recoveryAction = recoveryAction
         self.nextAction = nextAction ?? (state == .running ? "Open Terminal" : "Start")
+        self.serverCapabilities = serverCapabilities ?? MSWActionCapabilities(
+            canStart: canStart,
+            canStop: canStop,
+            canRestart: canRestart,
+            canOpenTerminal: canOpenTerminal,
+            canPush: canPush,
+            reason: statusReason,
+            recovery: recoveryAction
+        )
         self.canStart = canStart
         self.canStop = canStop
         self.canRestart = canRestart
+        self.canOpenTerminal = canOpenTerminal
+        self.canPush = canPush
     }
 
     private static func defaultPurpose(for id: ID) -> String {
@@ -91,7 +114,10 @@ final class AppModel {
     private(set) var lastObservedAt: Date?
     private(set) var isRefreshing = false
     private(set) var lastError: String?
+    private(set) var lastRecovery: MSWRecoveryContext?
     private(set) var activities: [MSWActivity] = []
+    private(set) var operationStates: [String: MSWOperationState] = [:]
+    private(set) var notificationEvents: [MSWNotificationEvent] = []
     private(set) var setupState: MSWBootstrapState = .initial
     private(set) var metricsByWorkspace: [String: MSWMetricsResponse] = [:]
     private(set) var repositoriesByWorkspace: [String: MSWRepositoriesResponse] = [:]
@@ -135,6 +161,16 @@ final class AppModel {
     private var pollingTask: Task<Void, Never>?
     private var refreshGeneration = 0
     private var refreshInFlight = 0
+    private var consecutiveRefreshFailures = 0
+    private var sustainedUnavailableNotified = false
+    private var notificationGeneration = 0
+    private var detailRequestGeneration = 0
+    private enum RefreshResult {
+        case applied(MSWStateResponse)
+        case failed
+        case superseded
+    }
+
 
 
     init(
@@ -153,7 +189,17 @@ final class AppModel {
         workspaces = Workspace.ID.allCases.map {
             fixtureMode
                 ? Workspace(id: $0)
-                : Workspace(id: $0, state: .unknown, freshness: .unavailable, nextAction: "Set up", canStart: false, canStop: false, canRestart: false)
+                : Workspace(
+                    id: $0,
+                    state: .unknown,
+                    freshness: .unavailable,
+                    statusReason: "No authoritative state has been observed.",
+                    recoveryAction: "Retry the observation or run setup.",
+                    nextAction: "Set up",
+                    canStart: false,
+                    canStop: false,
+                    canRestart: false
+                )
         }
     }
 
@@ -161,11 +207,25 @@ final class AppModel {
     var observationText: String {
         observationCount == 0 ? "Not yet refreshed" : "Observation #\(observationCount)"
     }
+    var isMaintenanceOperationInFlight: Bool {
+        operationStates.values.contains { operation in
+            (operation.kind == .backup || operation.kind == .restore) &&
+                operation.outcome == .pending
+        }
+    }
+
 
     var aggregateText: String {
-        if isRefreshing { return "Refreshing…" }
+        if isRefreshing { return lastObservedAt == nil ? "Observing…" : "Refreshing…" }
         if workspaces.contains(where: { $0.state == .quarantined }) { return "Action required" }
-        if lastError != nil { return "Needs attention" }
+        if client == nil { return lastError == nil ? "Ready" : "Needs attention" }
+        if client != nil && lastObservedAt == nil { return lastError == nil ? "Not observed" : "Unavailable" }
+        if lastError != nil || workspaces.contains(where: { $0.freshness != .fresh }) {
+            return lastObservedAt == nil ? "Needs attention" : "Showing last known state"
+        }
+        if workspaces.contains(where: { $0.state == .unknown || $0.state == .unavailable }) {
+            return "Needs attention"
+        }
         return "Ready"
     }
 
@@ -175,13 +235,15 @@ final class AppModel {
     }
 
     func refresh() {
-        observationCount += 1
-        guard client != nil else { return }
+        guard client != nil else {
+            observationCount += 1
+            return
+        }
         refreshGeneration += 1
         let generation = refreshGeneration
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
-            await self?.refreshRemote(generation: generation)
+            _ = await self?.refreshRemote(generation: generation)
         }
     }
 
@@ -300,13 +362,17 @@ final class AppModel {
 
 
     func refreshRemote() async {
-        guard client != nil else { return }
-        refreshGeneration += 1
-        await refreshRemote(generation: refreshGeneration)
+        _ = await refreshRemoteResult()
     }
 
-    private func refreshRemote(generation: Int) async {
-        guard let client else { return }
+    private func refreshRemoteResult() async -> RefreshResult {
+        guard client != nil else { return .failed }
+        refreshGeneration += 1
+        return await refreshRemote(generation: refreshGeneration)
+    }
+
+    private func refreshRemote(generation: Int) async -> RefreshResult {
+        guard let client else { return .failed }
         refreshInFlight += 1
         isRefreshing = true
         lastError = nil
@@ -318,24 +384,53 @@ final class AppModel {
         }
         do {
             let response = try await client.state()
-            guard generation == refreshGeneration else { return }
+            guard generation == refreshGeneration else { return .superseded }
             guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
-            apply(state: state, observedAt: response.observedAt)
+            let reconciledOperations = apply(state: state, observedAt: response.observedAt)
+            observationCount += 1
+            consecutiveRefreshFailures = 0
+            sustainedUnavailableNotified = false
+            lastRecovery = nil
             let activity = MSWActivity(
                 id: UUID(), createdAt: Date(), kind: .observation, title: "State refreshed",
                 detail: "MSW returned a state snapshot for \(state.workspaces.count) workspaces.",
                 workspace: nil, isFailure: false
             )
             await append(activity)
+            for operation in reconciledOperations {
+                let succeeded = operation.outcome == .succeeded
+                let activity = MSWActivity(
+                    id: UUID(), createdAt: Date(), kind: succeeded ? .operation : .failure,
+                    title: succeeded ? "\(operation.action.capitalized) verified" : "\(operation.action.capitalized) outcome unknown",
+                    detail: operation.message, workspace: operation.workspace, isFailure: !succeeded
+                )
+                await append(activity)
+            }
+            return .applied(state)
         } catch {
-            guard generation == refreshGeneration else { return }
-            markStateStale()
+            guard generation == refreshGeneration else { return .superseded }
             lastError = error.localizedDescription
+            lastRecovery = recoveryContext(for: error, fallbackRecovery: "Retry the observation or run diagnostics.")
+            markStateStale()
+            consecutiveRefreshFailures += 1
+            markVerifyingOperationsUnknown(reason: "A fresh state observation was unavailable, so the final outcome could not be verified.")
+            if consecutiveRefreshFailures >= 2, !sustainedUnavailableNotified {
+                sustainedUnavailableNotified = true
+                emitNotification(
+                    kind: .sustainedUnavailability,
+                    workspace: nil,
+                    title: "MSW remains unavailable",
+                    message: "Workspace state could not be observed after repeated attempts.",
+                    recovery: lastRecovery?.recovery ?? "Retry or run diagnostics.",
+                    deepLink: "msw-monitor://diagnostics"
+                )
+            }
             let activity = MSWActivity(
                 id: UUID(), createdAt: Date(), kind: .failure, title: "Refresh failed",
                 detail: error.localizedDescription, workspace: nil, isFailure: true
             )
             await append(activity)
+            return .failed
         }
     }
 
@@ -369,8 +464,12 @@ final class AppModel {
 
     func cancelPendingLifecycle() {
         if let workspace = pendingLifecycleWorkspace,
-           let originalState = pendingLifecycleOriginalState {
-            updateState(workspace, to: originalState)
+           pendingLifecycleOriginalState != nil {
+            finishOperation(
+                key: operationKey(kind: .lifecycle, workspace: workspace.rawValue),
+                outcome: .unknown,
+                message: "The reviewed operation was cancelled before apply."
+            )
         }
         clearPendingLifecyclePlan()
     }
@@ -382,35 +481,50 @@ final class AppModel {
         pendingLifecyclePlan = nil
     }
 
-    func loadMetrics(for id: Workspace.ID) {
-        guard let operationService else { detailError = "MSW metrics are unavailable in fixture mode."; return }
+    private func beginDetailRequest() -> Int {
+        detailRequestGeneration += 1
         isDetailLoading = true
         detailError = nil
+        return detailRequestGeneration
+    }
+
+    private func finishDetailRequest(_ generation: Int) {
+        guard generation == detailRequestGeneration else { return }
+        isDetailLoading = false
+    }
+
+    func loadMetrics(for id: Workspace.ID) {
+        guard let operationService else { detailError = "MSW metrics are unavailable in fixture mode."; return }
+        let request = beginDetailRequest()
         Task { [weak self] in
             do {
                 let result = try await operationService.metrics(workspace: id.rawValue)
-                self?.metricsByWorkspace[id.rawValue] = result
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.metricsByWorkspace[id.rawValue] = result
             } catch {
-                self?.detailError = error.localizedDescription
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = error.localizedDescription
             }
-            self?.isDetailLoading = false
+            self?.finishDetailRequest(request)
         }
     }
 
     func loadRepositories(for id: Workspace.ID) {
         guard let operationService else { detailError = "Repository inspection is unavailable in fixture mode."; return }
-        isDetailLoading = true
-        detailError = nil
+        let request = beginDetailRequest()
         Task { [weak self] in
             do {
                 let result = try await operationService.repositories(workspace: id.rawValue)
-                self?.repositoriesByWorkspace[id.rawValue] = result
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.repositoriesByWorkspace[id.rawValue] = result
             } catch {
-                self?.detailError = error.localizedDescription
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = error.localizedDescription
             }
-            self?.isDetailLoading = false
+            self?.finishDetailRequest(request)
         }
     }
+
 
     func reviewPush(for repository: MSWRepositorySnapshot, workspace id: Workspace.ID) {
         guard let operationService else {
@@ -418,24 +532,24 @@ final class AppModel {
             return
         }
         guard requireActionSafety(for: id, action: .push, operation: "Push", detail: true) else { return }
-        isDetailLoading = true
-        detailError = nil
+        let request = beginDetailRequest()
         Task { [weak self] in
             do {
                 let plan = try await operationService.pushPlan(
                     workspace: id.rawValue,
                     repositories: [repository.path]
                 )
-                guard let self else { return }
+                guard let self, request == self.detailRequestGeneration else { return }
                 guard self.requireActionSafety(for: id, action: .push, operation: "Push", detail: true) else {
-                    self.isDetailLoading = false
+                    self.finishDetailRequest(request)
                     return
                 }
                 self.pendingPushPlan = plan
             } catch {
-                self?.detailError = error.localizedDescription
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = error.localizedDescription
             }
-            self?.isDetailLoading = false
+            self?.finishDetailRequest(request)
         }
     }
 
@@ -457,6 +571,7 @@ final class AppModel {
         pendingPushPlan = nil
         isDetailLoading = true
         detailError = nil
+        beginOperation(kind: .push, workspace: workspace.rawValue, action: "push", message: "Pushing reviewed changes.")
         Task { [weak self] in
             guard let self else { return }
             guard self.requireActionSafety(for: workspace, action: .push, operation: "Push", detail: true) else {
@@ -466,11 +581,17 @@ final class AppModel {
             do {
                 let result = try await operationService.applyPushPlan(plan, confirmation: confirmation)
                 self.maintenanceMessage = "Pushed \(result.repositoryPath) from \(result.workspace)."
+                self.finishOperation(
+                    key: self.operationKey(kind: .push, workspace: workspace.rawValue),
+                    outcome: result.reconciled ? .succeeded : .unknown,
+                    message: result.reconciled ? result.outcome : "The push returned without authoritative reconciliation."
+                )
                 self.loadRepositories(for: workspace)
                 await self.refreshRemote()
             } catch {
                 self.detailError = error.localizedDescription
                 self.isDetailLoading = false
+                self.failOperation(kind: .push, workspace: workspace.rawValue, action: "push", error: error)
             }
         }
     }
@@ -479,31 +600,35 @@ final class AppModel {
         pendingPushPlan = nil
     }
 
-    func loadPorts() {
+    func loadPorts(for id: Workspace.ID? = nil) {
         guard let operationService else { detailError = "Port inspection is unavailable in fixture mode."; return }
-        isDetailLoading = true
-        detailError = nil
+        let request = beginDetailRequest()
         Task { [weak self] in
             do {
-                self?.portsSnapshot = try await operationService.ports()
+                let result = try await operationService.ports(workspace: id?.rawValue)
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.portsSnapshot = result
             } catch {
-                self?.detailError = error.localizedDescription
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = error.localizedDescription
             }
-            self?.isDetailLoading = false
+            self?.finishDetailRequest(request)
         }
     }
 
     func loadGitHubState() {
         guard let operationService else { detailError = "GitHub state is unavailable in fixture mode."; return }
-        isDetailLoading = true
-        detailError = nil
+        let request = beginDetailRequest()
         Task { [weak self] in
             do {
-                self?.githubSnapshot = try await operationService.githubState()
+                let result = try await operationService.githubState()
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.githubSnapshot = result
             } catch {
-                self?.detailError = error.localizedDescription
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = error.localizedDescription
             }
-            self?.isDetailLoading = false
+            self?.finishDetailRequest(request)
         }
     }
 
@@ -512,16 +637,17 @@ final class AppModel {
             detailError = "MSW logs are unavailable in fixture mode."
             return
         }
-        isDetailLoading = true
-        detailError = nil
+        let request = beginDetailRequest()
         Task { [weak self] in
             do {
                 let result = try await operationService.logs(workspace: id.rawValue)
-                self?.logsByWorkspace[id.rawValue] = result
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.logsByWorkspace[id.rawValue] = result
             } catch {
-                self?.detailError = error.localizedDescription
+                guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = error.localizedDescription
             }
-            self?.isDetailLoading = false
+            self?.finishDetailRequest(request)
         }
     }
 
@@ -530,12 +656,12 @@ final class AppModel {
             detailError = "Diagnostics are unavailable in fixture mode."
             return
         }
-        isDetailLoading = true
-        detailError = nil
+        let request = beginDetailRequest()
         Task { [weak self] in
             let result = await diagnostics.checks()
-            self?.diagnosticChecks = result
-            self?.isDetailLoading = false
+            guard let self, request == self.detailRequestGeneration else { return }
+            self.diagnosticChecks = result
+            self.finishDetailRequest(request)
         }
     }
 
@@ -544,15 +670,44 @@ final class AppModel {
             detailError = "Backups are unavailable in fixture mode."
             return
         }
+        guard !isMaintenanceOperationInFlight else {
+            detailError = "Another backup or restore is already in progress. Wait for its outcome before starting a new maintenance operation."
+            return
+        }
         isDetailLoading = true
         detailError = nil
+        beginOperation(kind: .backup, workspace: nil, action: "backup", message: "Creating backup.")
         Task { [weak self] in
             do {
                 let result = try await diagnostics.backup(to: directory)
                 self?.backupResult = result
-                self?.maintenanceMessage = "Backup created at \(result.archive.lastPathComponent)."
+                let stopped = Set(result.stoppedWorkspaces)
+                let restarted = Set(result.restartedWorkspaces)
+                let operationKey = self?.operationKey(kind: .backup, workspace: nil) ?? "backup:all"
+                if stopped == restarted {
+                    self?.maintenanceMessage = "Backup created at \(result.archive.lastPathComponent)."
+                    self?.finishOperation(
+                        key: operationKey,
+                        outcome: .succeeded,
+                        message: "Backup completed."
+                    )
+                } else {
+                    let message = "Backup archive created, but not every workspace that was stopped was restarted. Review workspace state before retrying."
+                    self?.maintenanceMessage = message
+                    self?.detailError = message
+                    self?.finishOperation(key: operationKey, outcome: .unknown, message: message)
+                    self?.emitNotification(
+                        kind: .backupFailure,
+                        workspace: nil,
+                        title: "Backup restart incomplete",
+                        message: message,
+                        recovery: "Review Activity and workspace state before retrying.",
+                        deepLink: "msw-monitor://activity"
+                    )
+                }
             } catch {
                 self?.detailError = error.localizedDescription
+                self?.failOperation(kind: .backup, workspace: nil, action: "backup", error: error, notificationKind: .backupFailure)
             }
             self?.isDetailLoading = false
         }
@@ -567,21 +722,58 @@ final class AppModel {
             detailError = "Type RESTORE exactly before replacing workspace state."
             return
         }
+        guard !isMaintenanceOperationInFlight else {
+            detailError = "Another backup or restore is already in progress. Wait for its outcome before starting a new maintenance operation."
+            return
+        }
         isDetailLoading = true
         detailError = nil
+        beginOperation(kind: .restore, workspace: nil, action: "restore", message: "Restoring backup.")
         Task { [weak self] in
             do {
                 try await diagnostics.restore(archive: archive, confirmation: confirmation)
                 self?.maintenanceMessage = "Restore completed. Refreshing workspace state."
-                await self?.refreshRemote()
+                self?.markOperationVerifying(kind: .restore, workspace: nil, message: "Verifying restored workspace state.")
+                let refreshResult = await self?.refreshRemoteResult()
+                guard let self else { return }
+                let operationKey = self.operationKey(kind: .restore, workspace: nil)
+                switch refreshResult ?? .superseded {
+                case .applied(let state):
+                    guard self.restoreStateIsVerified(state) else {
+                        let message = "Restore completed, but the follow-up observation did not prove that every workspace is fresh and stopped. Review Activity before retrying."
+                        self.detailError = message
+                        self.markOperationUnknown(key: operationKey, reason: message)
+                        break
+                    }
+                    self.finishOperation(
+                        key: operationKey,
+                        outcome: .succeeded,
+                        message: "Restore was followed by a successful state observation."
+                    )
+                case .failed:
+                    let message = self.lastError ?? "Restore completed, but the restored state could not be verified."
+                    self.detailError = message
+                    self.markOperationUnknown(key: operationKey, reason: "The restore completed, but a fresh state observation was unavailable.")
+                case .superseded:
+                    let message = "Restore completed, but a newer state observation superseded its verification. Review Activity before retrying."
+                    self.detailError = message
+                    self.markOperationUnknown(key: operationKey, reason: message)
+                }
             } catch {
                 self?.detailError = error.localizedDescription
+                self?.failOperation(kind: .restore, workspace: nil, action: "restore", error: error)
             }
             self?.isDetailLoading = false
         }
     }
 
-    func clearDetailError() { detailError = nil }
+    func clearDetailError() {
+        detailRequestGeneration += 1
+        detailError = nil
+        if !isMaintenanceOperationInFlight {
+            isDetailLoading = false
+        }
+    }
 
     nonisolated static func validatedWorkspaceURL(
         _ raw: String,
@@ -619,10 +811,24 @@ final class AppModel {
             return false
         }
         if action.allowsQuarantine {
+            return workspace.serverCapabilities.canStop
+        }
+        guard workspace.state != .quarantined,
+              workspace.credential != .quarantined else { return false }
+        switch action {
+        case .lifecycle(let lifecycle):
+            switch lifecycle {
+            case .start: return workspace.serverCapabilities.canStart
+            case .stop: return workspace.serverCapabilities.canStop
+            case .restart: return workspace.serverCapabilities.canRestart
+            }
+        case .terminal:
+            return workspace.serverCapabilities.canOpenTerminal
+        case .push:
+            return workspace.serverCapabilities.canPush
+        case .zed, .site:
             return true
         }
-        return workspace.state != .quarantined &&
-            workspace.credential != .quarantined
     }
 
     @discardableResult
@@ -677,9 +883,13 @@ final class AppModel {
         workspaces = workspaces.map { workspace in
             var stale = workspace
             stale.freshness = .stale
+            stale.statusReason = "The latest observation failed; this is the last known snapshot."
+            stale.recoveryAction = lastRecovery?.recovery ?? "Retry the observation or run diagnostics."
             stale.canStart = false
             stale.canStop = false
             stale.canRestart = false
+            stale.canOpenTerminal = false
+            stale.canPush = false
             stale.nextAction = "Retry"
             return stale
         }
@@ -704,6 +914,12 @@ final class AppModel {
         if confirmation == nil {
             pendingLifecycleOriginalState = workspaces.first(where: { $0.id == id })?.state
         }
+        beginOperation(
+            kind: .lifecycle,
+            workspace: id.rawValue,
+            action: action.rawValue,
+            message: confirmation == nil ? "Preparing a reviewed \(action.rawValue) operation." : "Applying the reviewed operation."
+        )
         updateState(id, to: action == .start ? .starting : action == .stop ? .stopping : .restarting)
         Task { [weak self] in
             do {
@@ -715,15 +931,13 @@ final class AppModel {
                 )
                 await MainActor.run {
                     guard let self else { return }
-                    guard self.requireActionSafety(for: id, action: .lifecycle(action), operation: action.rawValue.capitalized) else {
-                        self.pendingLifecycleOriginalState = nil
-                        return
-                    }
-                    self.apply(result: result)
+                    self.markOperationVerifying(
+                        kind: .lifecycle,
+                        workspace: id.rawValue,
+                        message: "\(result.outcome) Verifying with a fresh state observation."
+                    )
                     self.pendingLifecycleOriginalState = nil
                 }
-                let activity = MSWActivity(id: UUID(), createdAt: Date(), kind: .operation, title: "\(action.rawValue.capitalized) completed", detail: result.outcome, workspace: id.rawValue, isFailure: false)
-                await self?.append(activity)
                 await self?.refreshRemote()
             } catch let error as MSWOperationCoordinator.CoordinatorError {
                 if case let .confirmationRequired(plan) = error {
@@ -736,6 +950,13 @@ final class AppModel {
                         self.pendingLifecyclePlan = plan
                         self.pendingLifecycleAction = action
                         self.pendingLifecycleWorkspace = id
+                        self.updateOperation(
+                            kind: .lifecycle,
+                            workspace: id.rawValue,
+                            phase: .awaitingConfirmation,
+                            outcome: .pending,
+                            message: plan.effects
+                        )
                         if let originalState = self.pendingLifecycleOriginalState {
                             self.updateState(id, to: originalState)
                         }
@@ -745,8 +966,10 @@ final class AppModel {
                 }
                 await MainActor.run {
                     self?.lastError = error.localizedDescription
+                    self?.lastRecovery = self?.recoveryContext(for: error, workspace: id.rawValue, fallbackRecovery: "Refresh state before retrying.")
                     self?.pendingLifecycleOriginalState = nil
                     self?.updateState(id, to: .unknown)
+                    self?.failOperation(kind: .lifecycle, workspace: id.rawValue, action: action.rawValue, error: error)
                 }
                 let activity = MSWActivity(id: UUID(), createdAt: Date(), kind: .failure, title: "\(action.rawValue.capitalized) failed", detail: error.localizedDescription, workspace: id.rawValue, isFailure: true)
                 await self?.append(activity)
@@ -754,8 +977,10 @@ final class AppModel {
             } catch {
                 await MainActor.run {
                     self?.lastError = error.localizedDescription
+                    self?.lastRecovery = self?.recoveryContext(for: error, workspace: id.rawValue, fallbackRecovery: "Refresh state before retrying.")
                     self?.pendingLifecycleOriginalState = nil
                     self?.updateState(id, to: .unknown)
+                    self?.failOperation(kind: .lifecycle, workspace: id.rawValue, action: action.rawValue, error: error)
                 }
                 let activity = MSWActivity(id: UUID(), createdAt: Date(), kind: .failure, title: "\(action.rawValue.capitalized) failed", detail: error.localizedDescription, workspace: id.rawValue, isFailure: true)
                 await self?.append(activity)
@@ -764,12 +989,23 @@ final class AppModel {
         }
     }
 
-    private func apply(state: MSWStateResponse, observedAt: Date?) {
+    @discardableResult
+    private func apply(state: MSWStateResponse, observedAt: Date?) -> [MSWOperationState] {
+        let previousByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
+        let hadAuthoritativeObservation = lastObservedAt != nil
         lastObservedAt = observedAt ?? Date()
         let snapshots = Dictionary(uniqueKeysWithValues: state.workspaces.map { ($0.id, $0) })
         workspaces = Workspace.ID.allCases.map { id in
             guard let snapshot = snapshots[id.rawValue] else {
-                return Workspace(id: id, state: .unknown, freshness: .unavailable, nextAction: "Retry", canStart: false)
+                return Workspace(
+                    id: id,
+                    state: .unknown,
+                    freshness: .unavailable,
+                    statusReason: "MSW omitted this workspace from the latest observation.",
+                    recoveryAction: "Retry the observation or run diagnostics.",
+                    nextAction: "Retry",
+                    canStart: false
+                )
             }
             // Unknown quarantine state is fail-closed for every action except
             // the safe Stop path, which the CLI exposes independently.
@@ -778,10 +1014,19 @@ final class AppModel {
             let lifecycle = isQuarantined
                 ? Workspace.State.quarantined
                 : Workspace.State(rawValue: snapshot.lifecycle.rawValue) ?? .unknown
-            let capabilities = isQuarantined
+            let safeCapabilities = isQuarantined
                 ? MSWActionCapabilities(canStart: false, canStop: snapshot.actionCapabilities.canStop, canRestart: false, canOpenTerminal: false, canPush: false)
                 : snapshot.actionCapabilities
+            let capabilities = snapshot.freshness == .fresh
+                ? safeCapabilities
+                : MSWActionCapabilities(canStart: false, canStop: false, canRestart: false, canOpenTerminal: false, canPush: false)
             let stateObservedAt = snapshot.statusObservedAt ?? observedAt
+            let reason: String? = isQuarantined
+                ? (snapshot.quarantine.reason ?? "Workspace safety state could not be verified.")
+                : snapshot.freshness == .fresh ? snapshot.actionCapabilities.reason : "This is not a fresh authoritative snapshot."
+            let recovery: String? = isQuarantined
+                ? (snapshot.actionCapabilities.recovery ?? "Stop safely or run diagnostics before retrying other actions.")
+                : snapshot.actionCapabilities.recovery
             return Workspace(
                 id: id,
                 purpose: snapshot.purpose,
@@ -790,21 +1035,65 @@ final class AppModel {
                 freshness: snapshot.freshness,
                 observedAt: stateObservedAt,
                 networkHost: snapshot.network.host,
-                quarantineReason: isQuarantined
-                    ? (snapshot.quarantine.reason ?? "Workspace safety state could not be verified.")
-                    : nil,
+                quarantineReason: isQuarantined ? reason : nil,
+                statusReason: reason,
+                recoveryAction: recovery,
                 nextAction: nextAction(snapshot, isQuarantined: isQuarantined),
                 canStart: capabilities.canStart,
                 canStop: capabilities.canStop,
-                canRestart: capabilities.canRestart
+                canRestart: capabilities.canRestart,
+                canOpenTerminal: capabilities.canOpenTerminal,
+                canPush: capabilities.canPush,
+                serverCapabilities: snapshot.actionCapabilities
             )
         }
+        for workspace in workspaces {
+            let previous = previousByID[workspace.id]
+            if hadAuthoritativeObservation,
+               previous != nil,
+               workspace.state == .quarantined,
+               previous?.state != .quarantined {
+                emitNotification(
+                    kind: .quarantine,
+                    workspace: workspace.id.rawValue,
+                    title: "\(workspace.id.rawValue) is quarantined",
+                    message: workspace.quarantineReason ?? "Workspace safety could not be verified.",
+                    recovery: workspace.recoveryAction,
+                    deepLink: workspaceDeepLink(workspace.id.rawValue, section: "overview")
+                )
+            }
+            let lifecycleOperation = operationStates[operationKey(kind: .lifecycle, workspace: workspace.id.rawValue)]
+            let lifecycleExpected = lifecycleOperation?.phase == .running || lifecycleOperation?.phase == .verifying
+            if previous?.freshness == .fresh,
+               previous?.state == .running,
+               workspace.freshness == .fresh,
+               workspace.state == .stopped || workspace.state == .exited,
+               !lifecycleExpected {
+                emitNotification(
+                    kind: .lifecycleLoss,
+                    workspace: workspace.id.rawValue,
+                    title: "\(workspace.id.rawValue) stopped",
+                    message: "A fresh observation shows that the workspace is no longer running.",
+                    recovery: workspace.canStart ? "Start the workspace when ready." : workspace.recoveryAction,
+                    deepLink: workspaceDeepLink(workspace.id.rawValue, section: "overview")
+                )
+            }
+            if hadAuthoritativeObservation,
+               previous != nil,
+               credentialDeadlineIsVisible(workspace: workspace, snapshot: snapshots[workspace.id.rawValue]),
+               previous?.credential != workspace.credential {
+                emitNotification(
+                    kind: .credentialDeadline,
+                    workspace: workspace.id.rawValue,
+                    title: "\(workspace.id.rawValue) credentials need attention",
+                    message: "The current credential state is \(workspace.credential.rawValue).",
+                    recovery: workspace.recoveryAction ?? "Review GitHub access for this workspace.",
+                    deepLink: workspaceDeepLink(workspace.id.rawValue, section: "github")
+                )
+            }
+        }
         invalidatePendingPlansIfUnsafe()
-    }
-
-    private func apply(result: MSWApplyResult) {
-        guard let id = Workspace.ID(rawValue: result.workspace) else { return }
-        updateState(id, to: result.action == MSWLifecycleAction.start.rawValue ? .running : result.action == MSWLifecycleAction.stop.rawValue ? .stopped : .running)
+        return reconcileVerifyingOperations()
     }
 
     private func updateState(_ id: Workspace.ID, to state: Workspace.State) {
@@ -819,22 +1108,26 @@ final class AppModel {
         case .quarantined: workspaces[index].nextAction = workspaces[index].canStop ? "Stop or Repair" : "Repair"
         case .unknown, .unavailable: workspaces[index].nextAction = "Retry"
         }
+        workspaces[index].canStart = false
+        workspaces[index].canStop = false
+        workspaces[index].canRestart = false
+        workspaces[index].canOpenTerminal = false
+        workspaces[index].canPush = false
+        guard workspaces[index].freshness == .fresh || client == nil else { return }
+        let capabilities = workspaces[index].serverCapabilities
         switch state {
         case .running:
-            workspaces[index].canStart = false
-            workspaces[index].canStop = true
-            workspaces[index].canRestart = true
+            workspaces[index].canStop = capabilities.canStop
+            workspaces[index].canRestart = capabilities.canRestart
+            workspaces[index].canOpenTerminal = capabilities.canOpenTerminal
+            workspaces[index].canPush = capabilities.canPush
         case .stopped, .exited:
-            workspaces[index].canStart = true
-            workspaces[index].canStop = false
-            workspaces[index].canRestart = false
+            workspaces[index].canStart = capabilities.canStart
+            workspaces[index].canPush = capabilities.canPush
         case .starting, .stopping, .restarting, .unknown, .unavailable:
-            workspaces[index].canStart = false
-            workspaces[index].canStop = false
-            workspaces[index].canRestart = false
+            break
         case .quarantined:
-            workspaces[index].canStart = false
-            workspaces[index].canRestart = false
+            workspaces[index].canStop = capabilities.canStop
         }
     }
 
@@ -854,6 +1147,7 @@ final class AppModel {
     }
 
     private func nextAction(_ snapshot: MSWWorkspaceSnapshot, isQuarantined: Bool = false) -> String {
+        guard snapshot.freshness == .fresh else { return "Retry" }
         guard !isQuarantined else {
             return snapshot.actionCapabilities.canStop ? "Stop or Repair" : "Repair"
         }
@@ -865,6 +1159,255 @@ final class AppModel {
         }
     }
 
+    func recordProgress(_ event: MSWProgressEvent) {
+        guard event.safeForDisplay else { return }
+        let candidates = operationStates.keys.filter { key in
+            guard let operation = operationStates[key] else { return false }
+            return operation.outcome == .pending &&
+                (event.workspace == nil || operation.workspace == event.workspace)
+        }
+        guard let key = candidates.sorted().first, var operation = operationStates[key] else { return }
+        operation.phase = .running
+        operation.fraction = event.fraction.map { min(max($0, 0), 1) }
+        operation.message = event.message
+        operation.updatedAt = Date()
+        operationStates[key] = operation
+    }
+
+    func drainNotificationEvents() -> [MSWNotificationEvent] {
+        defer { notificationEvents.removeAll(keepingCapacity: true) }
+        return notificationEvents
+    }
+
+    private func operationKey(kind: MSWOperationState.Kind, workspace: String?) -> String {
+        "\(kind.rawValue):\(workspace ?? "all")"
+    }
+
+    private func beginOperation(
+        kind: MSWOperationState.Kind,
+        workspace: String?,
+        action: String,
+        message: String
+    ) {
+        let key = operationKey(kind: kind, workspace: workspace)
+        let now = Date()
+        if var existing = operationStates[key], existing.outcome == .pending {
+            existing.phase = .running
+            existing.updatedAt = now
+            existing.message = message
+            operationStates[key] = existing
+            return
+        }
+        operationStates[key] = MSWOperationState(
+            id: UUID(), kind: kind, workspace: workspace, action: action,
+            startedAt: now, updatedAt: now, phase: .running, fraction: nil,
+            message: message, outcome: .pending, recovery: nil
+        )
+    }
+
+    private func updateOperation(
+        kind: MSWOperationState.Kind,
+        workspace: String?,
+        phase: MSWOperationState.Phase,
+        outcome: MSWOperationState.Outcome,
+        message: String
+    ) {
+        let key = operationKey(kind: kind, workspace: workspace)
+        guard var operation = operationStates[key] else { return }
+        operation.phase = phase
+        operation.outcome = outcome
+        operation.message = message
+        operation.updatedAt = Date()
+        operationStates[key] = operation
+    }
+
+    private func markOperationVerifying(
+        kind: MSWOperationState.Kind,
+        workspace: String?,
+        message: String
+    ) {
+        updateOperation(kind: kind, workspace: workspace, phase: .verifying, outcome: .pending, message: message)
+    }
+
+    private func finishOperation(
+        key: String,
+        outcome: MSWOperationState.Outcome,
+        message: String
+    ) {
+        guard var operation = operationStates[key] else { return }
+        operation.phase = .finished
+        operation.outcome = outcome
+        operation.message = message
+        operation.fraction = outcome == .succeeded ? 1 : operation.fraction
+        operation.updatedAt = Date()
+        operationStates[key] = operation
+    }
+
+    private func failOperation(
+        kind: MSWOperationState.Kind,
+        workspace: String?,
+        action: String,
+        error: Error,
+        notificationKind: MSWNotificationEvent.Kind = .operationFailure
+    ) {
+        let key = operationKey(kind: kind, workspace: workspace)
+        if operationStates[key] == nil {
+            beginOperation(kind: kind, workspace: workspace, action: action, message: error.localizedDescription)
+        }
+        let recovery = recoveryContext(
+            for: error,
+            workspace: workspace,
+            fallbackRecovery: "Review the latest state, then retry when it is safe."
+        )
+        finishOperation(key: key, outcome: .failed, message: error.localizedDescription)
+        if var operation = operationStates[key] {
+            operation.recovery = recovery
+            operationStates[key] = operation
+        }
+        emitNotification(
+            kind: notificationKind,
+            workspace: workspace,
+            title: "\(action.capitalized) failed",
+            message: recovery.reason,
+            recovery: recovery.recovery,
+            deepLink: workspace.map { workspaceDeepLink($0, section: "activity") } ?? "msw-monitor://activity"
+        )
+    }
+
+    private func reconcileVerifyingOperations() -> [MSWOperationState] {
+        var reconciled: [MSWOperationState] = []
+        for (key, current) in operationStates where current.phase == .verifying && current.kind == .lifecycle {
+            guard let workspaceID = current.workspace,
+                  let workspace = workspaces.first(where: { $0.id.rawValue == workspaceID }) else {
+                continue
+            }
+            let matches: Bool
+            switch current.action {
+            case MSWLifecycleAction.start.rawValue, MSWLifecycleAction.restart.rawValue:
+                matches = workspace.state == .running
+            case MSWLifecycleAction.stop.rawValue:
+                matches = workspace.state == .stopped || workspace.state == .exited
+            default:
+                matches = false
+            }
+            guard workspace.freshness == .fresh else {
+                finishOperation(
+                    key: key,
+                    outcome: .unknown,
+                    message: "The operation returned, but no fresh workspace state was available to verify it."
+                )
+                if let operation = operationStates[key] { reconciled.append(operation) }
+                continue
+            }
+            finishOperation(
+                key: key,
+                outcome: matches ? .succeeded : .unknown,
+                message: matches
+                    ? "A fresh observation verified the \(current.action) outcome."
+                    : "A fresh observation did not match the expected \(current.action) outcome."
+            )
+            if !matches {
+                emitNotification(
+                    kind: .operationFailure,
+                    workspace: workspaceID,
+                    title: "\(current.action.capitalized) outcome unknown",
+                    message: "The latest state did not match the expected operation outcome.",
+                    recovery: "Review the workspace state before taking another action.",
+                    deepLink: workspaceDeepLink(workspaceID, section: "activity")
+                )
+            }
+            if let operation = operationStates[key] { reconciled.append(operation) }
+        }
+        return reconciled
+    }
+
+    private func markOperationUnknown(key: String, reason: String) {
+        guard let operation = operationStates[key], operation.phase == .verifying else { return }
+        finishOperation(key: key, outcome: .unknown, message: reason)
+        emitNotification(
+            kind: .operationFailure,
+            workspace: operation.workspace,
+            title: "\(operation.action.capitalized) outcome unknown",
+            message: reason,
+            recovery: "Re-establish observation and review state; do not replay automatically.",
+            deepLink: operation.workspace.map { workspaceDeepLink($0, section: "activity") } ?? "msw-monitor://activity"
+        )
+    }
+
+    private func markVerifyingOperationsUnknown(reason: String) {
+        let keys = operationStates.compactMap { key, operation in
+            operation.phase == .verifying ? key : nil
+        }
+        for key in keys {
+            markOperationUnknown(key: key, reason: reason)
+        }
+    }
+    private func restoreStateIsVerified(_ state: MSWStateResponse) -> Bool {
+        let expectedIDs = Set(Workspace.ID.allCases.map(\.rawValue))
+        guard state.workspaces.count == expectedIDs.count,
+              Set(state.workspaces.map(\.id)) == expectedIDs else {
+            return false
+        }
+        return state.workspaces.allSatisfy { snapshot in
+            snapshot.freshness == .fresh &&
+                (snapshot.lifecycle == .stopped || snapshot.lifecycle == .exited)
+        }
+    }
+
+
+    private func recoveryContext(
+        for error: Error,
+        workspace: String? = nil,
+        fallbackRecovery: String
+    ) -> MSWRecoveryContext {
+        if case let MSWClientError.protocolFailure(protocolError) = error {
+            return MSWRecoveryContext(
+                code: protocolError.code,
+                reason: protocolError.message,
+                recovery: protocolError.recovery ?? fallbackRecovery,
+                workspace: protocolError.workspace ?? workspace,
+                retryable: protocolError.retryable
+            )
+        }
+        return MSWRecoveryContext(
+            code: "MSW_UNAVAILABLE",
+            reason: error.localizedDescription,
+            recovery: fallbackRecovery,
+            workspace: workspace,
+            retryable: true
+        )
+    }
+
+    private func credentialDeadlineIsVisible(
+        workspace: Workspace,
+        snapshot: MSWWorkspaceSnapshot?
+    ) -> Bool {
+        if workspace.credential == .expiring { return true }
+        let deadline = [snapshot?.credential.accessExpiresAt, snapshot?.credential.refreshExpiresAt]
+            .compactMap { $0 }
+            .min()
+        return deadline.map { $0 <= Date().addingTimeInterval(7 * 24 * 60 * 60) } ?? false
+    }
+
+    private func emitNotification(
+        kind: MSWNotificationEvent.Kind,
+        workspace: String?,
+        title: String,
+        message: String,
+        recovery: String?,
+        deepLink: String
+    ) {
+        notificationGeneration += 1
+        notificationEvents.append(MSWNotificationEvent(
+            id: UUID(), kind: kind, createdAt: Date(), workspace: workspace,
+            title: title, message: message, recovery: recovery,
+            deepLink: deepLink, generation: notificationGeneration
+        ))
+    }
+
+    private func workspaceDeepLink(_ workspace: String, section: String) -> String {
+        "msw-monitor://workspace/\(workspace)?section=\(section)"
+    }
 
     private func append(_ activity: MSWActivity) async {
         await activityStore.append(activity)

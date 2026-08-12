@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import XCTest
+import UserNotifications
 @testable import MSWMonitor
 
 @MainActor
@@ -76,6 +77,36 @@ private actor CommandRecorder {
 
 private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
+private final class FailingNotificationCenter: MSWNotificationCenterControlling {
+    private(set) var addInvocationCount = 0
+
+    func authorizationStatus() async -> UNAuthorizationStatus { .authorized }
+
+    func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
+        true
+    }
+
+    func add(_ request: UNNotificationRequest) async throws {
+        addInvocationCount += 1
+        throw NSError(domain: "NotificationTest", code: 1)
+    }
+}
+
+@MainActor
+private func makeNotificationEvent() -> MSWNotificationEvent {
+    MSWNotificationEvent(
+        id: UUID(),
+        kind: .operationFailure,
+        createdAt: Date(),
+        workspace: "dev",
+        title: "Operation failed",
+        message: "The operation failed.",
+        recovery: "Review Activity.",
+        deepLink: "msw-monitor://workspace/dev?section=activity",
+        generation: 1
+    )
+}
+
 @MainActor
 final class AppModelTests: XCTestCase {
     func testInitialWorkspacesAreFixedAndStopped() {
@@ -96,6 +127,269 @@ final class AppModelTests: XCTestCase {
 
         model.refresh()
         XCTAssertEqual(model.observationText, "Observation #2")
+    }
+
+    func testNotificationDeliveryCapsPersistentFailures() async {
+        let defaults = UserDefaults(suiteName: "notification-retry-\(UUID().uuidString)")!
+        defaults.set(true, forKey: "notifications.category.operations.enabled")
+        let center = FailingNotificationCenter()
+        let coordinator = NotificationCoordinator(
+            defaults: defaults,
+            notificationCenter: center,
+            retryDelays: [.milliseconds(1), .milliseconds(1)]
+        )
+
+        await coordinator.deliver(makeNotificationEvent())
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertEqual(center.addInvocationCount, 3)
+        XCTAssertEqual(coordinator.permanentFailures.count, 1)
+        XCTAssertEqual(coordinator.permanentFailures.first?.attempts, 3)
+        XCTAssertNotNil(coordinator.notificationFailureMessage)
+
+        await coordinator.retryFailedNotifications()
+        XCTAssertTrue(coordinator.permanentFailures.isEmpty)
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertEqual(center.addInvocationCount, 6)
+        XCTAssertEqual(coordinator.permanentFailures.count, 1)
+        XCTAssertEqual(coordinator.permanentFailures.first?.attempts, 3)
+        coordinator.clearPermanentFailures()
+        XCTAssertNil(coordinator.notificationFailureMessage)
+    }
+
+    func testClientBackedColdLaunchAndFailedObservationsRemainTruthful() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-cold-launch-truth-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let failure = #"{"schemaVersion":1,"requestId":"state-failed","ok":false,"command":"state","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_RUNTIME_UNAVAILABLE","message":"runtime unavailable","recovery":"Repair MSW and retry.","workspace":null,"retryable":true}}"#
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            printf '%s\n' '\(failure)'
+            exit 1
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client)
+
+        XCTAssertEqual(model.aggregateText, "Not observed")
+        XCTAssertEqual(model.observationCount, 0)
+        XCTAssertTrue(model.workspaces.allSatisfy { $0.state == .unknown && $0.freshness == .unavailable })
+
+        await model.refreshRemote()
+        XCTAssertEqual(model.aggregateText, "Unavailable")
+        XCTAssertEqual(model.observationCount, 0)
+        XCTAssertEqual(model.lastRecovery?.code, "MSW_RUNTIME_UNAVAILABLE")
+        XCTAssertEqual(model.lastRecovery?.recovery, "Repair MSW and retry.")
+        XCTAssertTrue(model.notificationEvents.isEmpty)
+
+        await model.refreshRemote()
+        XCTAssertEqual(model.observationCount, 0)
+        let events = model.drainNotificationEvents()
+        XCTAssertEqual(events.map(\.kind), [.sustainedUnavailability])
+        XCTAssertEqual(events.first?.deepLink, "msw-monitor://diagnostics")
+    }
+
+    func testFirstAuthoritativeObservationDoesNotNotifyForExistingQuarantine() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-notification-baseline-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stateURL = temporary.appendingPathComponent("state.json")
+        try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .quarantined)).write(to: stateURL)
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            /bin/cat "\(stateURL.path)"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client)
+
+        await model.refreshRemote()
+        XCTAssertTrue(model.drainNotificationEvents().isEmpty)
+
+        try encoder.encode(makeTestStateEnvelope(devLifecycle: .stopped, devQuarantine: .clear)).write(to: stateURL)
+        await model.refreshRemote()
+        XCTAssertTrue(model.drainNotificationEvents().isEmpty)
+
+        try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .quarantined)).write(to: stateURL)
+        await model.refreshRemote()
+        XCTAssertEqual(model.drainNotificationEvents().map(\.kind), [.quarantine])
+    }
+
+    func testFailedRefreshPreservesLastKnownSnapshotAndServerCapabilities() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-last-known-state-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stateURL = temporary.appendingPathComponent("state.json")
+        try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .clear)).write(to: stateURL)
+        let failureMarker = temporary.appendingPathComponent("fail")
+        let executable = temporary.appendingPathComponent("msw")
+        let failure = #"{"schemaVersion":1,"requestId":"state-failed","ok":false,"command":"state","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_STATE_UNAVAILABLE","message":"state unavailable","recovery":"Run diagnostics.","workspace":"dev","retryable":true}}"#
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            if [ -e "\(failureMarker.path)" ]; then
+                printf '%s\n' '\(failure)'
+                exit 1
+            fi
+            /bin/cat "\(stateURL.path)"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client)
+        await model.refreshRemote()
+
+        let fresh = try XCTUnwrap(model.workspaces.first(where: { $0.id == .dev }))
+        XCTAssertEqual(model.observationCount, 1)
+        XCTAssertEqual(model.aggregateText, "Ready")
+        XCTAssertEqual(fresh.state, .running)
+        XCTAssertTrue(fresh.canOpenTerminal)
+        XCTAssertTrue(fresh.canPush)
+        XCTAssertTrue(fresh.serverCapabilities.canOpenTerminal)
+        XCTAssertTrue(fresh.serverCapabilities.canPush)
+
+        try Data().write(to: failureMarker)
+        await model.refreshRemote()
+
+        let stale = try XCTUnwrap(model.workspaces.first(where: { $0.id == .dev }))
+        XCTAssertEqual(model.observationCount, 1)
+        XCTAssertEqual(model.aggregateText, "Showing last known state")
+        XCTAssertEqual(stale.state, .running)
+        XCTAssertEqual(stale.freshness, .stale)
+        XCTAssertFalse(stale.canOpenTerminal)
+        XCTAssertFalse(stale.canPush)
+        XCTAssertTrue(stale.serverCapabilities.canOpenTerminal)
+        XCTAssertTrue(stale.serverCapabilities.canPush)
+        XCTAssertEqual(stale.statusReason, "The latest observation failed; this is the last known snapshot.")
+        XCTAssertEqual(stale.recoveryAction, "Run diagnostics.")
+    }
+
+    func testLifecycleOperationStaysVerifyingUntilFreshMatchingObservation() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-operation-verification-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stoppedURL = temporary.appendingPathComponent("stopped.json")
+        let runningURL = temporary.appendingPathComponent("running.json")
+        let planURL = temporary.appendingPathComponent("plan.json")
+        let applyURL = temporary.appendingPathComponent("apply.json")
+        let observedOnce = temporary.appendingPathComponent("observed-once")
+        try encoder.encode(makeTestStateEnvelope(devLifecycle: .stopped, devQuarantine: .clear)).write(to: stoppedURL)
+        try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .clear)).write(to: runningURL)
+        try encoder.encode(MSWEnvelope(
+            schemaVersion: 1, requestId: "plan-start", ok: true, command: "plan", observedAt: Date(),
+            result: MSWLifecyclePlan(
+                planId: "plan-start", action: "start", workspace: "dev",
+                expiresAt: Date().addingTimeInterval(300), confirmationPhrase: "START dev", effects: "Starting dev."
+            )
+        )).write(to: planURL)
+        try encoder.encode(MSWEnvelope(
+            schemaVersion: 1, requestId: "apply-start", ok: true, command: "apply", observedAt: Date(),
+            result: MSWApplyResult(workspace: "dev", action: "start", reconciled: true, outcome: "Start applied.")
+        )).write(to: applyURL)
+
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            if [ -e "\(observedOnce.path)" ]; then
+                /bin/sleep 1
+                /bin/cat "\(runningURL.path)"
+            else
+                : > "\(observedOnce.path)"
+                /bin/cat "\(stoppedURL.path)"
+            fi
+        elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then
+            /bin/cat "\(planURL.path)"
+        elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
+            /bin/cat "\(applyURL.path)"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(
+            client: client,
+            operationCoordinator: MSWOperationCoordinator(client: client)
+        )
+        await model.refreshRemote()
+        model.start(.dev)
+
+        for _ in 0..<40 {
+            if model.operationStates["lifecycle:dev"]?.phase == .verifying { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let verifying = try XCTUnwrap(model.operationStates["lifecycle:dev"])
+        XCTAssertEqual(verifying.phase, .verifying)
+        XCTAssertEqual(verifying.outcome, .pending)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .starting)
+        XCTAssertFalse(model.activities.contains { $0.title == "Start completed" })
+
+        for _ in 0..<80 {
+            if model.operationStates["lifecycle:dev"]?.phase == .finished,
+               model.activities.contains(where: { $0.title == "Start verified" }) { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let finished = try XCTUnwrap(model.operationStates["lifecycle:dev"])
+        XCTAssertEqual(finished.phase, .finished)
+        XCTAssertEqual(finished.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertTrue(model.activities.contains { $0.title == "Start verified" })
     }
 
     func testRepairInvalidatesResolutionAndPrefersManagedRuntime() async throws {

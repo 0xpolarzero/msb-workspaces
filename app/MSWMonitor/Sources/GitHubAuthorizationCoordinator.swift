@@ -38,6 +38,23 @@ struct GitHubAuthorizationDiscovery: Sendable, Equatable {
     let installations: [GitHubInstallation]
 }
 
+struct GitHubWorkspaceVerificationResult: Codable, Sendable, Equatable, Identifiable {
+    let workspace: String
+    let accessMode: String
+    let verificationRepository: String
+    let verified: Bool
+    let lifecycleRestored: Bool
+    let safetyResult: String
+    let checkedAt: Date
+
+    var id: String { workspace }
+}
+
+struct GitHubAuthorizationCommitResult: Sendable, Equatable {
+    let metadata: [WorkspaceCredentialMetadata]
+    let verifications: [GitHubWorkspaceVerificationResult]
+}
+
 enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
     case invalidSelection
     case invalidAppConfiguration
@@ -50,6 +67,12 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
     case serviceUnavailable
     case scopeMismatch
     case revocationFailed
+    case authorizationCancelled
+    case authorizationDenied(String?)
+    case authorizationFailed
+    case verificationUnavailable(String)
+    case verificationFailed(String)
+    case lifecycleRestoreFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -64,6 +87,19 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
         case .serviceUnavailable: return "MSW Connect is unavailable. The existing workspace access was left unchanged."
         case .scopeMismatch: return "The authorization service returned broader access than requested. The grant was rejected."
         case .revocationFailed: return "The service could not prove that the requested GitHub grant was revoked."
+        case .authorizationCancelled:
+            return "GitHub authorization was cancelled. Your existing access and saved setup choices were left unchanged."
+        case .authorizationDenied(let reason):
+            return reason.map { "GitHub denied authorization: \($0). No workspace access was changed." }
+                ?? "GitHub denied authorization. No workspace access was changed."
+        case .authorizationFailed:
+            return "GitHub authorization failed unexpectedly. Your existing access and saved setup choices were left unchanged."
+        case .verificationUnavailable(let workspace):
+            return "Verification is unavailable for \(workspace). No new access was committed; retry after the MSW runtime is available."
+        case .verificationFailed(let workspace):
+            return "GitHub access for \(workspace) could not be verified. The new grant was not committed."
+        case .lifecycleRestoreFailed(let workspace):
+            return "GitHub access for \(workspace) verified, but its previous VM lifecycle could not be restored. Review the workspace before retrying."
         }
     }
 }
@@ -103,6 +139,7 @@ actor GitHubAuthorizationCoordinator {
     private let now: @Sendable () -> Date
     private let journalURL: URL?
     private var pending: [UUID: PendingAuthorization] = [:]
+    private var latestVerifications: [GitHubWorkspaceVerificationResult] = []
 
     init(
         broker: CredentialBroker,
@@ -143,12 +180,53 @@ actor GitHubAuthorizationCoordinator {
                 MSWConnectError.rateLimited,
                 MSWConnectError.sessionCleanupFailed {
             throw GitHubAuthorizationError.serviceUnavailable
-        } catch MSWConnectError.sessionExpired {
+        } catch MSWConnectError.sessionExpired, MSWConnectError.callbackExpired {
             throw GitHubAuthorizationError.authorizationSessionExpired
         } catch MSWConnectError.cancelled {
-            throw MSWConnectError.cancelled
+            throw GitHubAuthorizationError.authorizationCancelled
+        } catch MSWConnectError.authorizationDenied(let reason) {
+            throw GitHubAuthorizationError.authorizationDenied(reason)
+        } catch MSWConnectError.invalidConfiguration {
+            throw GitHubAuthorizationError.invalidAppConfiguration
+        } catch MSWConnectError.malformedResponse,
+                MSWConnectError.invalidCallback,
+                MSWConnectError.callbackStateMismatch,
+                MSWConnectError.callbackReplayed {
+            throw GitHubAuthorizationError.authorizationFailed
         }
         catch {
+            throw GitHubAuthorizationError.authorizationFailed
+        }
+    }
+
+    /// Restores a nonsecret authorization selection after the setup window or
+    /// app is relaunched. This never opens a browser and never creates a grant.
+    func resumeAuthorization() async throws -> GitHubAuthorizationDiscovery? {
+        try await recoverPendingAuthorization()
+        let session: MSWConnectSession
+        do {
+            guard let restored = try await connect.restoreSession() else { return nil }
+            session = restored
+        } catch MSWConnectError.sessionExpired {
+            throw GitHubAuthorizationError.authorizationSessionExpired
+        } catch {
+            throw GitHubAuthorizationError.serviceUnavailable
+        }
+        do {
+            let installations = try await connect.installations()
+            let discovery = GitHubAuthorizationDiscovery(
+                sessionID: session.sessionID,
+                account: session.account,
+                installations: installations
+            )
+            pending[session.sessionID] = PendingAuthorization(
+                discovery: discovery,
+                expiresAt: min(session.expiresAt, now().addingTimeInterval(15 * 60))
+            )
+            return discovery
+        } catch MSWConnectError.sessionExpired {
+            throw GitHubAuthorizationError.authorizationSessionExpired
+        } catch {
             throw GitHubAuthorizationError.serviceUnavailable
         }
     }
@@ -183,8 +261,32 @@ actor GitHubAuthorizationCoordinator {
         sessionID: UUID,
         assignments: [GitHubWorkspaceAssignment]
     ) async throws -> [WorkspaceCredentialMetadata] {
+        try await commitAssignments(
+            sessionID: sessionID,
+            assignments: assignments,
+            requireVerification: false
+        ).metadata
+    }
+
+    func commitAssignmentsWithVerification(
+        sessionID: UUID,
+        assignments: [GitHubWorkspaceAssignment]
+    ) async throws -> GitHubAuthorizationCommitResult {
+        try await commitAssignments(
+            sessionID: sessionID,
+            assignments: assignments,
+            requireVerification: true
+        )
+    }
+
+    private func commitAssignments(
+        sessionID: UUID,
+        assignments: [GitHubWorkspaceAssignment],
+        requireVerification: Bool
+    ) async throws -> GitHubAuthorizationCommitResult {
         removeExpiredSessions()
         try await recoverPendingAuthorization()
+        latestVerifications = []
         guard let authorization = pending[sessionID] else {
             throw GitHubAuthorizationError.authorizationSessionExpired
         }
@@ -307,13 +409,16 @@ actor GitHubAuthorizationCoordinator {
 
             for plan in plannedCommits {
                 committed.append((plan.assignment.workspace, plan.role))
-                try await commit(
+                if let verification = try await commit(
                     plan.grant,
                     workspace: plan.assignment.workspace,
                     role: plan.role,
                     assignment: plan.assignment,
-                    verificationRepository: plan.verificationRepository
-                )
+                    verificationRepository: plan.verificationRepository,
+                    requireVerification: requireVerification
+                ) {
+                    recordVerification(verification)
+                }
             }
 
             journal.phase = .localCommitted
@@ -382,7 +487,10 @@ actor GitHubAuthorizationCoordinator {
             try persistJournal(journal)
             pending.removeValue(forKey: sessionID)
             try? removeJournal()
-            return result
+            return GitHubAuthorizationCommitResult(
+                metadata: result,
+                verifications: latestVerifications.sorted { $0.workspace < $1.workspace }
+            )
         } catch let error as GitHubAuthorizationError {
             if preserveLocalState {
                 throw error
@@ -398,8 +506,10 @@ actor GitHubAuthorizationCoordinator {
             )
             pending.removeValue(forKey: sessionID)
             if rollbackSucceeded {
+                markVerificationRollback("Previous access was restored and replacement grants were removed.")
                 try? removeJournal()
             } else {
+                markVerificationRollback("Recovery is incomplete; affected access was quarantined.")
                 throw GitHubAuthorizationError.revocationFailed
             }
             throw error
@@ -415,8 +525,10 @@ actor GitHubAuthorizationCoordinator {
             )
             pending.removeValue(forKey: sessionID)
             if rollbackSucceeded {
+                markVerificationRollback("Previous access was restored and replacement grants were removed.")
                 try? removeJournal()
             } else {
+                markVerificationRollback("Recovery is incomplete; affected access was quarantined.")
                 throw GitHubAuthorizationError.revocationFailed
             }
             throw GitHubAuthorizationError.scopeMismatch
@@ -432,8 +544,10 @@ actor GitHubAuthorizationCoordinator {
             )
             pending.removeValue(forKey: sessionID)
             if rollbackSucceeded {
+                markVerificationRollback("Previous access was restored and replacement grants were removed.")
                 try? removeJournal()
             } else {
+                markVerificationRollback("Recovery is incomplete; affected access was quarantined.")
                 throw GitHubAuthorizationError.revocationFailed
             }
             if let connectError = error as? MSWConnectError {
@@ -459,6 +573,17 @@ actor GitHubAuthorizationCoordinator {
 
     func metadata() async -> [WorkspaceCredentialMetadata] {
         await broker.allMetadata()
+    }
+
+    func verificationResults() -> [GitHubWorkspaceVerificationResult] {
+        latestVerifications.sorted { $0.workspace < $1.workspace }
+    }
+
+    func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> MSWIdentityResult {
+        guard let mswClient else { throw GitHubAuthorizationError.serviceUnavailable }
+        let response = try await mswClient.setIdentity(name: name, email: email, workspace: workspace)
+        guard let result = response.result else { throw GitHubAuthorizationError.authorizationFailed }
+        return result
     }
 
     func connectedAccount() async -> GitHubAccount? {
@@ -598,8 +723,9 @@ actor GitHubAuthorizationCoordinator {
         workspace: String,
         role: CredentialRole,
         assignment: GitHubWorkspaceAssignment,
-        verificationRepository: String
-    ) async throws {
+        verificationRepository: String,
+        requireVerification: Bool
+    ) async throws -> GitHubWorkspaceVerificationResult? {
         let accessMode = role == .host ? "host-write" : "read-only"
         var stored = false
         do {
@@ -618,18 +744,104 @@ actor GitHubAuthorizationCoordinator {
             )
             stored = true
             if let mswClient {
-                _ = try await mswClient.bindGitHubCredentials(
+                let response = try await mswClient.bindGitHubCredentials(
                     workspace: workspace,
                     accessMode: accessMode,
                     verificationRepository: verificationRepository
                 )
+                guard let result = response.result else {
+                    let verification = verificationResult(
+                        workspace: workspace,
+                        assignment: assignment,
+                        verified: false,
+                        lifecycleRestored: false,
+                        safetyResult: "MSW returned no verification result; rollback is required."
+                    )
+                    recordVerification(verification)
+                    throw GitHubAuthorizationError.verificationFailed(workspace)
+                }
+                let verification = verificationResult(
+                    workspace: workspace,
+                    assignment: assignment,
+                    verified: result.verified,
+                    lifecycleRestored: result.lifecycleRestored,
+                    safetyResult: result.verified && result.lifecycleRestored
+                        ? "Repository permissions verified and the prior VM lifecycle was restored."
+                        : "Verification did not complete; rollback is required."
+                )
+                guard result.verified else {
+                    recordVerification(verification)
+                    throw GitHubAuthorizationError.verificationFailed(workspace)
+                }
+                guard result.lifecycleRestored else {
+                    recordVerification(verification)
+                    throw GitHubAuthorizationError.lifecycleRestoreFailed(workspace)
+                }
                 try await broker.markBound(workspace: workspace, role: role)
+                return verification
+            } else if requireVerification {
+                let verification = verificationResult(
+                    workspace: workspace,
+                    assignment: assignment,
+                    verified: false,
+                    lifecycleRestored: false,
+                    safetyResult: "The MSW verification service is unavailable; rollback is required."
+                )
+                recordVerification(verification)
+                throw GitHubAuthorizationError.verificationUnavailable(workspace)
             }
+            return nil
         } catch {
+            if stored, !latestVerifications.contains(where: { $0.workspace == workspace }) {
+                recordVerification(verificationResult(
+                    workspace: workspace,
+                    assignment: assignment,
+                    verified: false,
+                    lifecycleRestored: false,
+                    safetyResult: "Verification failed before MSW returned a final result; rollback is required."
+                ))
+            }
             if stored {
                 try? await broker.quarantine(workspace: workspace, role: role)
             }
             throw error
+        }
+    }
+
+    private func verificationResult(
+        workspace: String,
+        assignment: GitHubWorkspaceAssignment,
+        verified: Bool,
+        lifecycleRestored: Bool,
+        safetyResult: String
+    ) -> GitHubWorkspaceVerificationResult {
+        GitHubWorkspaceVerificationResult(
+            workspace: workspace,
+            accessMode: assignment.accessMode,
+            verificationRepository: assignment.verificationRepository,
+            verified: verified,
+            lifecycleRestored: lifecycleRestored,
+            safetyResult: safetyResult,
+            checkedAt: now()
+        )
+    }
+
+    private func recordVerification(_ result: GitHubWorkspaceVerificationResult) {
+        latestVerifications.removeAll { $0.workspace == result.workspace }
+        latestVerifications.append(result)
+    }
+
+    private func markVerificationRollback(_ safetyResult: String) {
+        latestVerifications = latestVerifications.map {
+            GitHubWorkspaceVerificationResult(
+                workspace: $0.workspace,
+                accessMode: $0.accessMode,
+                verificationRepository: $0.verificationRepository,
+                verified: $0.verified,
+                lifecycleRestored: $0.lifecycleRestored,
+                safetyResult: safetyResult,
+                checkedAt: $0.checkedAt
+            )
         }
     }
 

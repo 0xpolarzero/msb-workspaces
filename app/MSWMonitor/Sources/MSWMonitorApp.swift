@@ -1,5 +1,7 @@
 import AppKit
+import Observation
 import SwiftUI
+import UserNotifications
 
 @main
 struct MSWMonitorApp: App {
@@ -7,7 +9,7 @@ struct MSWMonitorApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView()
+            SettingsView(authorizationCoordinator: appDelegate.authorizationCoordinator)
         }
     }
 }
@@ -20,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let connect: MSWConnectClient
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: MSWClient
+    let authorizationCoordinator: GitHubAuthorizationCoordinator?
     override init() {
         let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -48,11 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.credentialBroker = broker
         self.connect = connect
         self.tokenRefreshCoordinator = refresher
-        self.client = MSWClient(
+        let mswClient = MSWClient(
             runner: runner,
             credentialBroker: broker,
             tokenRefreshCoordinator: refresher
         )
+        self.client = mswClient
+        self.authorizationCoordinator = broker.map {
+            GitHubAuthorizationCoordinator(broker: $0, connect: connect, mswClient: mswClient)
+        }
         super.init()
     }
 
@@ -80,16 +87,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             runner: runner,
             hostService: MSWHostServiceController()
         )
-        let authorization = credentialBroker.map {
-            GitHubAuthorizationCoordinator(broker: $0, connect: connect, mswClient: client)
-        }
         let controller = StatusBarController(
             model: model,
             bootstrapCoordinator: bootstrap,
-            authorizationCoordinator: authorization
+            authorizationCoordinator: authorizationCoordinator
         )
         statusBarController = controller
         model.setPollingVisible(false)
+        UNUserNotificationCenter.current().delegate = self
+        observeNotificationEvents(from: model)
 
         if ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") {
             Task {
@@ -107,5 +113,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func openGitHubSetup() {
         statusBarController?.showSetupForGitHubAuthorization()
+    }
+
+    private func observeNotificationEvents(from model: AppModel) {
+        withObservationTracking {
+            _ = model.notificationEvents.count
+        } onChange: { [weak self, weak model] in
+            Task { @MainActor in
+                guard let self, let model else { return }
+                await NotificationCoordinator.shared.deliverPendingEvents(from: model)
+                self.observeNotificationEvents(from: model)
+            }
+        }
+        if !model.notificationEvents.isEmpty {
+            Task { await NotificationCoordinator.shared.deliverPendingEvents(from: model) }
+        }
+    }
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        guard let deepLink = NotificationCoordinator.deepLink(from: response) else { return }
+        await MainActor.run {
+            statusBarController?.showDetails(for: deepLink)
+        }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound]
     }
 }

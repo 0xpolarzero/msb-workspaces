@@ -26,13 +26,13 @@ final class StatusBarController {
         let content = MonitorView(
             model: model,
             quit: { NSApplication.shared.terminate(nil) },
-            openDetails: { [weak self] in self?.showDetails() },
+            openDetails: { [weak self] route in self?.showDetails(route: route) },
             openSettings: { [weak self] in self?.showSettings() },
             openSetup: bootstrapCoordinator == nil ? nil : { [weak self] in self?.showSetup() }
         )
         popover.behavior = ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") ? .applicationDefined : .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 410, height: 600)
+        popover.contentSize = NSSize(width: 430, height: 620)
         let hostingController = NSHostingController(rootView: content)
         hostingController.view.setAccessibilityIdentifier("monitor.popover")
         popover.contentViewController = hostingController
@@ -48,7 +48,8 @@ final class StatusBarController {
         button.identifier = NSUserInterfaceItemIdentifier("statusItem.button")
         button.setAccessibilityIdentifier("statusItem.button")
         button.setAccessibilityLabel("MSW Monitor")
-        button.toolTip = "MSW Monitor — \(model.aggregateText)"
+        let initialHealth = MonitorHealth.resolve(model)
+        button.toolTip = "MSW Monitor — \(initialHealth.title). \(initialHealth.detail)"
         button.target = self
         button.action = #selector(togglePopover)
         observeModelStatus()
@@ -68,7 +69,7 @@ final class StatusBarController {
         }
     }
 
-    private func showDetails() {
+    private func showDetails(route: DetailRoute) {
         popover.performClose(nil)
         model.setPollingVisible(false)
         if detailWindowController == nil {
@@ -77,7 +78,7 @@ final class StatusBarController {
                 onClose: { [weak model] in model?.setPollingVisible(false) }
             )
         }
-        detailWindowController?.show()
+        detailWindowController?.show(route: route)
         model.setPollingVisible(true)
     }
 
@@ -89,9 +90,27 @@ final class StatusBarController {
         showSetup()
     }
 
+    func showDetails(for deepLink: URL) {
+        let components = URLComponents(url: deepLink, resolvingAgainstBaseURL: false)
+        let requestedSection = components?.queryItems?
+            .first(where: { $0.name == "section" })?
+            .value ?? (deepLink.host == "workspace" ? "overview" : deepLink.host ?? "overview")
+        let workspace = deepLink.host == "workspace"
+            ? deepLink.pathComponents
+                .filter { $0 != "/" }
+                .first
+                .flatMap(Workspace.ID.init(rawValue:))
+            : nil
+        showDetails(route: DetailRoute(workspace: workspace, section: DetailSection(deepLinkValue: requestedSection)))
+    }
+
     private func showSettings() {
         popover.performClose(nil)
         model.setPollingVisible(false)
+        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController(
                 authorizationCoordinator: authorizationCoordinator,
@@ -134,38 +153,19 @@ final class StatusBarController {
 
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
-        let hasCritical = model.workspaces.contains {
-            guard $0.state != .quarantined else { return true }
-            switch $0.credential {
-            case .legacy, .removalPending, .quarantined:
-                return true
-            default:
-                return false
-            }
-        }
-        let hasAttention = model.lastError != nil || model.workspaces.contains {
-            $0.freshness == .stale || $0.freshness == .unavailable ||
-                $0.credential != .ready && $0.credential != .readOnly
-        }
-        let symbol: String
-        if hasCritical {
-            symbol = "exclamationmark.octagon.fill"
+        let health = MonitorHealth.resolve(model)
+        if health.severity == .critical {
             button.contentTintColor = .systemRed
-        } else if hasAttention {
-            symbol = "exclamationmark.triangle.fill"
+        } else if health.severity == .attention {
             button.contentTintColor = .systemOrange
-        } else if model.isRefreshing {
-            symbol = "arrow.triangle.2.circlepath"
-            button.contentTintColor = nil
         } else {
-            symbol = "circle.dotted"
             button.contentTintColor = nil
         }
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "MSW Monitor") {
+        if let image = NSImage(systemSymbolName: health.symbol, accessibilityDescription: "MSW Monitor") {
             image.isTemplate = true
             button.image = image
         }
-        button.toolTip = "MSW Monitor — \(model.aggregateText). \(model.aggregateDetail)"
-        button.setAccessibilityValue("\(model.aggregateText). \(model.aggregateDetail)")
+        button.toolTip = "MSW Monitor — \(health.title). \(health.detail)"
+        button.setAccessibilityValue("\(health.title). \(health.detail)")
     }
 }

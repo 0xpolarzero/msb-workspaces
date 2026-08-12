@@ -32,6 +32,7 @@ final class MSWMonitorUITests: XCTestCase {
 
 
         assertText("MSW Monitor", identifier: "monitor.title", in: app)
+        assertText("Not observed", identifier: "monitor.health", in: app)
         assertText("dev", identifier: "workspace.dev.name", in: app)
         assertText("Stopped", identifier: "workspace.dev.state", in: app)
         assertText("playgrounds", identifier: "workspace.playgrounds.name", in: app)
