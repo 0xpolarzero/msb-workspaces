@@ -117,6 +117,7 @@
     .agent-table td:first-child { width: 34%; }
     .status { padding: 10px 12px; border-radius: 9px; background: var(--amber-soft); color: var(--amber); }
     .status strong { display: block; color: inherit; }
+.status.good { background: var(--green-soft); color: var(--green); }
     .small { color: var(--muted); font-size: .86rem; }
     footer { margin-top: 38px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .84rem; }
   </style>
@@ -126,11 +127,12 @@
   <header class="hero">
     <div class="eyebrow">MSW Monitor · Product UX review</div>
     <h1>Make every workspace action trustworthy, recoverable, and obvious.</h1>
-    <p class="lede">The app has a solid native foundation, but it is not yet a best-in-class operational experience. The next gains are not ornamental: users need one truthful health model, explicit workspace scope, reviewed destructive actions, real operation progress, recovery paths that tell them exactly what to do next, and opt-in alerts when the app is hidden.</p>
+    <p class="lede">The review found several trust gaps, then the implementation pass closed the highest-risk contracts: health now waits for an authoritative baseline, destructive GitHub changes require scoped review, Connect-to-Apply retains verification results, and workspace scope/capabilities are explicit. Remaining work is concentrated in start-and-open compound actions, per-section loading/navigation polish, backup preflight detail, accessibility, and the deployment-supplied GitHub App installation link.</p>
     <div class="meta">
       <span class="pill">Review date: 2026-08-11</span>
+      <span class="pill">Verification refreshed: 2026-08-14</span>
       <span class="pill">8 parallel Sol audits</span>
-      <span class="pill">Read-only source review</span>
+      <span class="pill">Implementation + evidence pass</span>
       <span class="pill">Native macOS app</span>
     </div>
   </header>
@@ -138,8 +140,8 @@
   <section class="grid">
     <article class="card verdict span-8">
       <h2>Executive verdict</h2>
-      <p><strong>Prioritize trust before polish.</strong> The monitor can say “Ready” before a real workspace baseline exists, can present destructive GitHub revocation as a one-click action, and can show operation success before authoritative reconciliation. Those are product-level trust breaks. Fix them before investing in more panels, decorative treatment, or lower-frequency capabilities.</p>
-      <p>The existing fail-closed model and transactional services are a strong base. The UX currently hides too much of that safety logic: quarantine reasons, freshness, server capability limits, verification outcomes, partial backup results, and hidden-state alerts are either collapsed into generic labels or omitted.</p>
+      <p><strong>Prioritize trust before polish.</strong> The implementation pass now closes the most consequential trust breaks: cold launch reports “Not observed,” destructive GitHub revocation is reviewed and phrase-gated, Connect-to-Apply commits only after verification, and detail routes carry workspace scope. The remaining contract gaps are narrower: stopped-workspace start-and-open actions, backup preflight/rollback detail, per-section request state, and inclusive interaction polish.</p>
+      <p>The fail-closed model and transactional services are now surfaced more honestly through health states, freshness/quarantine reasons, operation phases, verification summaries, notification categories, and deep links. The report below marks each original finding as shipped, partial, or open instead of presenting the pre-remediation review as current behavior.</p>
     </article>
     <article class="card span-4">
       <h3>Priority legend</h3>
@@ -147,6 +149,16 @@
       <p><span class="priority p1">P1</span> High-frequency friction or recovery gap. Ship in the next product pass.</p>
       <p><span class="priority p2">P2</span> Polish, density, and completeness after the contract is truthful.</p>
     </article>
+  </section>
+
+  <section class="section">
+    <div class="card">
+      <h2>Implementation status</h2>
+      <p>The original UX findings remain useful as acceptance criteria, but their status changed during the remediation pass.</p>
+      <div class="status good"><strong>Shipped</strong> Unified health/baseline semantics; destructive GitHub impact review; verification-aware Connect-to-Apply; workspace-scoped detail routes and capability propagation; resumable setup choices and explicit completion; opt-in notification categories with deduplicated deep links.</div>
+      <div class="status"><strong>Partial</strong> Lifecycle/backup reconciliation, typed recovery presentation, Details/Settings consolidation, and backup/restore review are materially improved but still have the gaps called out below.</div>
+      <div class="status"><strong>Open</strong> Truthful stopped-workspace start-and-open actions, full accessibility focus/announcement coverage, and the approved release installation URL input.</div>
+    </div>
   </section>
 
   <section class="section">
@@ -171,27 +183,27 @@
     <div class="grid">
       <article class="card finding p0-card span-6">
         <div class="title"><h3>1. Never say “Ready” before an authoritative baseline</h3><span class="priority p0">P0</span></div>
-        <p class="why">Cold launch creates real workspaces as <em>unknown/unavailable</em>, but the aggregate headline returns “Ready” whenever there is no request error. The status item independently turns amber. Manual refresh also increments the visible observation counter before a remote observation succeeds.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">AppModel.swift:152-179</span> initializes unknown/unavailable state, returns “Ready,” and increments <code>observationCount</code> before the client call. <span class="ref">StatusBarController.swift:135-169</span> derives a separate severity.</div>
-        <p class="fix"><strong>Change:</strong> derive headline, glyph, detail, card state, and next action from one reducer over lifecycle, freshness, quarantine, credential, setup, and operation state. Use “Not observed” on cold launch, “Showing last known state” when stale, and count only successful observations. Never let an unavailable or unknown workspace produce “Ready.”</p>
+        <p class="why">Fixed. Cold launch remains <em>not observed</em>; aggregate health distinguishes not observed, unavailable, stale, quarantined, recovery-required, refreshing, and ready. Observation count advances only in fixture mode or after a successful remote observation.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">AppModel.swift:331-423, 425-440</span> derives health from authoritative observation and freshness, while <span class="ref">MonitorView.swift:66-104</span> and <span class="ref">StatusBarController.swift:164-179</span> consume the same model. The native smoke path asserts <code>Not observed</code> before refresh.</div>
+        <p class="fix"><strong>Status:</strong> Shipped and covered by the native model/UI verification. Remaining work is accessibility announcement/focus polish, not the Ready-before-baseline contract.</p>
       </article>
       <article class="card finding p0-card span-6">
         <div class="title"><h3>2. Put a reviewed confirmation boundary around GitHub revocation</h3><span class="priority p0">P0</span></div>
-        <p class="why">Removing one workspace grant and disconnecting the account invoke destructive credential cleanup directly from buttons. The user is not shown the affected repositories, local unbinding, remote authorization limits, quarantine risk, or recovery path.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">SettingsView.swift:154-166, 261-300</span> and <span class="ref">SetupView.swift:312-337, 755-801</span> call removal/disconnect directly. The intended contract requires workspace-name confirmation in <span class="ref">docs/MSW-MONITOR-MACOS26-OAUTH.plan.md:666-674</span>.</div>
-        <p class="fix"><strong>Change:</strong> show a scoped impact review. For workspace removal, name the workspace and repositories and require typing the workspace name. For account disconnect, list all affected workspaces and require a distinct <code>DISCONNECT</code> phrase. State local effects, what cannot be revoked remotely, possible quarantine, and the exact post-action verification.</p>
+        <p class="why">Fixed. Workspace removal and account disconnect now open a scoped impact review, list affected owners/repositories, explain VM-held and service-grant effects, preserve quarantine on uncertain cleanup, and require an exact phrase.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">SettingsView.swift:141-151, 365-397, 646-748</span> provides the sheet, impact list, credential effects, workspace-name phrase, and <code>DISCONNECT</code> phrase. <span class="ref">GitHubAuthorizationCoordinator.swift:647-728</span> performs ordered cleanup and typed recovery.</div>
+        <p class="fix"><strong>Status:</strong> Shipped. The destructive boundary is now explicit before any revocation or local credential mutation.</p>
       </article>
       <article class="card finding p0-card span-6">
         <div class="title"><h3>3. Do not mark onboarding or access complete without verification</h3><span class="priority p0">P0</span></div>
-        <p class="why">The setup copy says “Applying and verifying,” but the bind result includes <code>verified</code> and <code>lifecycleRestored</code> fields that are discarded. Any non-throwing bind is followed by <code>markBound</code>. System bootstrap can also set completion before the explicit final decision and without the promised identity step.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">GitHubAuthorizationCoordinator.swift:620-627</span> ignores <span class="ref">MSWModels.swift:338-344</span> verification fields. <span class="ref">SetupView.swift:847-869</span> persists completion during bootstrap or “Finish without GitHub.”</div>
-        <p class="fix"><strong>Change:</strong> require <code>verified == true</code> per workspace, handle <code>lifecycleRestored == false</code> as a visible recovery state, and show a workspace-by-workspace result. Make the wizard’s final screen explicit: System ready, GitHub configured or skipped, identity configured, workspaces verified, and a deliberate Done action.</p>
+        <p class="why">Fixed. Connect-to-Apply requires valid reviewed assignments and runs verification before returning committed metadata. Setup retains per-workspace verification and lifecycle-restoration results, blocks completion until the GitHub decision, identity decision, and verification gate are satisfied, and exposes a deliberate Done action.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">GitHubAuthorizationCoordinator.swift:315-595</span> journals grant creation, verifies scope/lifecycle, and rolls back or quarantines on failure. <span class="ref">SetupView.swift:932-965, 1786-1797</span> renders retained results and gates completion.</div>
+        <p class="fix"><strong>Status:</strong> Shipped for the reviewed assignment flow. Live service/browser issuance remains an environment prerequisite documented in Verification and limits.</p>
       </article>
       <article class="card finding p0-card span-6">
         <div class="title"><h3>4. Make workspace scope and capabilities impossible to miss</h3><span class="priority p0">P0</span></div>
-        <p class="why">Details silently defaults to <code>dev</code> and has no persistent workspace selector. The only scope change is a menu side effect before opening a generic Overview. Meanwhile the server returns terminal/push capabilities, but the model retains only lifecycle capabilities, so action affordances are derived from broad state instead of authoritative permissions.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">DetailView.swift:36-80, 108-120</span> defaults to Overview/dev. <span class="ref">MonitorView.swift:202-218</span> gates integrations by running/fresh state. <span class="ref">MSWModels.swift:234-240</span> exposes more capability fields than <span class="ref">AppModel.swift:781-799</span> stores.</div>
-        <p class="fix"><strong>Change:</strong> carry <em>workspace + destination</em> in every route, put a visible workspace picker in Details, include scope in titles and confirmations, and preserve it across sections. Retain all server capability flags plus reason/recovery codes and use them in both view gates and service entry points.</p>
+        <p class="why">Fixed. Details no longer silently defaults to <code>dev</code>; every route carries an optional workspace and section, and scoped sections refuse to act until a workspace is chosen. Server action capabilities, reasons, and recovery text now reach the model and card gates.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">DetailView.swift:43-82, 126-145, 260-295</span> defines typed routes and a persistent workspace picker. <span class="ref">AppModel.swift:1003-1050</span> and <span class="ref">MonitorView.swift:207-249</span> enforce capability/freshness/quarantine safety at both model and UI boundaries.</div>
+        <p class="fix"><strong>Status:</strong> Shipped. Remaining navigation polish is tracked under finding 8.</p>
       </article>
     </div>
   </section>
@@ -201,15 +213,15 @@
     <div class="grid">
       <article class="card finding p1-card span-6">
         <div class="title"><h3>5. Show real progress and outcome reconciliation</h3><span class="priority p1">P1</span></div>
-        <p class="why">Lifecycle actions show optimistic Starting/Stopping/Restarting, then record “completed” before the following refresh confirms the result. Backup and restore collapse long-running work to “Working…” and do not surface partial restart outcomes. The protocol already has progress events.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">AppModel.swift:693-764</span> applies and records completion before refresh. <span class="ref">MSWModels.swift:499-508</span> defines progress events that are not surfaced. <span class="ref">DetailView.swift:353-355, 508-525</span> shows generic work/restore UI.</div>
-        <p class="fix"><strong>Change:</strong> render a durable operation row with phase, fraction, elapsed time, affected workspace, and safe cancellation rules. Keep lifecycle operations in “Verifying” until a fresh matching snapshot. If the app or child process disappears, show “Outcome unknown,” reconcile safely, and never replay automatically.</p>
+        <p class="why">Partial. Lifecycle actions now enter <em>Verifying</em> and reconcile against a fresh state observation; backup and restore have review sheets, phase rows, retained results, and explicit unknown-outcome messaging. Protocol progress events and richer backup/restore reconciliation are still not fully surfaced.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">AppModel.swift:1099-1186, 860-959</span> holds lifecycle/maintenance operations in verification and records partial restart results. <span class="ref">DetailView.swift:604-645, 1074-1155</span> renders phases, review boundaries, and outcome warnings.</div>
+        <p class="fix"><strong>Status:</strong> Partial. Finish progress-event rendering and make every final state authoritative or explicitly “Outcome unknown.”</p>
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>6. Turn every failure into a next action</h3><span class="priority p1">P1</span></div>
-        <p class="why">Protocol errors carry code, recovery text, affected workspace, and retryability, but the UI mostly renders a truncated message. Quarantine reasons are visible only inside an accessibility label. Settings compresses distinct credential conditions into “Needs attention.”</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">MSWModels.swift:52-59</span> carries recovery metadata. <span class="ref">MonitorView.swift:97-111, 218-220</span> exposes only a short footer/error and hidden quarantine detail. <span class="ref">SettingsView.swift:141-149</span> collapses recovery states.</div>
-        <p class="fix"><strong>Change:</strong> show cause, affected scope, freshness/verification age, what is blocked, and one primary action: Retry, Setup, Reauthorize, Restart, Stop safely, Repair, Open Login Items, or Run Diagnostics. Keep the last good snapshot visible with an explicit stale banner.</p>
+        <p class="why">Partial. Recovery context now carries cause, affected scope, recovery text, freshness, quarantine state, and verification age into monitor, setup, details, and notification surfaces. Some settings states and background operation errors still need a single primary action and consistent focus transfer.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">AppModel.swift:339-423, 604-618</span> exposes health/recovery state; <span class="ref">MonitorView.swift:119-133</span>, <span class="ref">SetupView.swift:755-772</span>, and <span class="ref">DetailView.swift:710-728</span> render recovery actions and stale-cache language.</div>
+        <p class="fix"><strong>Status:</strong> Partial. Consolidate the remaining error presenters around one actionable recovery and accessibility announcement contract.</p>
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>7. Replace “start first” friction with truthful compound actions</h3><span class="priority p1">P1</span></div>
@@ -219,27 +231,27 @@
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>8. Make Details and Settings one coherent navigation system</h3><span class="priority p1">P1</span></div>
-        <p class="why">Activity and Repositories both open generic Details; the detail selection always starts at Overview. Settings exists both as the native Settings scene and a separate custom window. Independent detail requests share one loading flag, error, and maintenance message.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">MonitorView.swift:119-126, 208-211</span> routes named actions generically. <span class="ref">MSWMonitorApp.swift:8-12</span> defines a Settings scene while <span class="ref">StatusBarController.swift:92-104</span> creates another window. <span class="ref">AppModel.swift:100-105, 385-580</span> shares request state.</div>
-        <p class="fix"><strong>Change:</strong> use typed deep links for section and workspace, remove duplicate Settings presentation, and give each section its own request generation, loading state, timestamp, stale indicator, error, and retry. Preserve cached data under “Last known / Updating” rather than replacing context with a spinner.</p>
+        <p class="why">Partial. Typed deep links, workspace/section routes, a persistent Details picker, and cached-content/error language are implemented. The separate native Settings scene and custom Settings window remain, and independent detail sections still share more request state than ideal.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">DetailView.swift:43-82, 260-325</span> carries scope and section; <span class="ref">SettingsView.swift:108-151</span> centralizes tab navigation but the app still exposes both Settings presentation paths. <span class="ref">DetailView.swift:702-728</span> preserves cached context on failure.</div>
+        <p class="fix"><strong>Status:</strong> Partial. Remove duplicate Settings presentation and give each detail section isolated loading/error/freshness state.</p>
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>9. Make backup and restore honest and reviewable</h3><span class="priority p1">P1</span></div>
-        <p class="why">The UI says backups contain “workspace data and diagnostics only,” but the documented archive includes code, Docker images/volumes, databases, guest credentials, and VM state. Selecting a directory starts the backup immediately. Restore accepts a file and a generic phrase without a preview or structured result.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">DetailView.swift:325-373, 411-429</span> starts backup after a directory pick and uses a generic restore sheet. <span class="ref">MSWOperationService.swift:163-185</span> retains backup stopped/restarted lists but discards restore detail. The archive contents are documented in <span class="ref">docs/SETUP-GUIDE.md:281-299</span>.</div>
-        <p class="fix"><strong>Change:</strong> preview destination, sensitive contents, required space, running workspaces, stop/restart effects, archive generation, checksum, and rollback behavior. Afterward show each workspace’s outcome, warnings, and next safe action. Distinguish rolled back, rollback uncertain, and no mutation.</p>
+        <p class="why">Partial. Backup now discloses sensitive archive scope, separates destination selection from execution, shows running-workspace effects, and requires an explicit restore review plus <code>RESTORE</code> phrase. Required free space, pre-apply checksum validation, and structured rollback proof remain unavailable in the runtime contract.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">DetailView.swift:558-645, 731-782, 1074-1155</span> provides archive scope, review dialogs, stop/restart result lists, and unknown-outcome warnings. <span class="ref">AppModel.swift:860-959</span> reconciles backup restart sets and restore observations.</div>
+        <p class="fix"><strong>Status:</strong> Partial. Add capacity/checksum/rollback metadata when the service exposes it; never imply a stronger restore guarantee than the runtime proves.</p>
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>10. Make GitHub setup explicit, resumable, and safe</h3><span class="priority p1">P1</span></div>
-        <p class="why">After authorization, the first installation is silently seeded into every workspace; an enabled but incomplete workspace can be omitted from Apply; closing Setup cancels the session and clears drafts. “Read + write” hides the guest-read/host-only-push trust boundary.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">SetupView.swift:538-575, 614-688, 741-752</span> filters incomplete drafts, seeds owners, and clears authorization on disappearance. <span class="ref">SetupView.swift:401-408</span> labels the mode “Read + write,” while <span class="ref">docs/GITHUB-SETUP.md:5-10</span> describes separate roles.</div>
-        <p class="fix"><strong>Change:</strong> keep “Choose an owner” until explicit selection, block Review while any enabled workspace is incomplete, retain drafts/session across window close, and provide “I’ve installed it — Refresh.” Rename modes to “Read in VM” and “Read in VM + push from this Mac,” with a visible two-grant preview.</p>
+        <p class="why">Partial. Setup now resumes drafts, preserves existing access on cancellation, requires an explicit GitHub decision and identity decision before Done, prevents incomplete enabled assignments from reaching Apply, and retains verification results. The access-mode label still needs a clearer guest-read/host-write product name, and the installation URL is a deployment input rather than a checked-in release value.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">SetupView.swift:341-375, 1248-1264, 1786-1797, 1960-1990</span> gates completion, validates drafts, persists resume state, and clears it only on Done. <span class="ref">docs/GITHUB-SETUP.md:25-39</span> documents the safe installation-link boundary.</div>
+        <p class="fix"><strong>Status:</strong> Partial. Rename access modes for trust clarity and provide the approved installation URL in the signed/release build.</p>
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>11. Add opt-in background notifications with deep links</h3><span class="priority p1">P1</span></div>
-        <p class="why">This is a menu-bar monitor: its primary surface is hidden most of the time. The product plan calls for opt-in categories and deduplicated alerts for sustained unavailability, quarantine, lifecycle loss, long-operation completion/failure, backup failure, and credential deadlines, but the source has no UserNotifications implementation or notification controls.</p>
-        <div class="evidence"><strong>Observed</strong>A scoped search of <code>app/MSWMonitor/Sources</code>, tests, and UI tests found no <code>UserNotifications</code>, <code>UNUserNotification</code>, or authorization implementation. The intended contract is <span class="ref">docs/MSW-MONITOR-MACOS26-OAUTH.plan.md:345, 737-747</span>.</div>
-        <p class="fix"><strong>Change:</strong> add Settings categories with permission requested only when a category is enabled. Deduplicate by workspace/event/generation, suppress polling noise, include a deep link to the affected workspace/section, and keep repository content, usernames, tokens, and stderr out of notifications.</p>
+        <p class="why">Fixed. Notification categories are opt-in, permission is requested only when a category is enabled, events are deduplicated by kind/workspace/generation, retries are bounded, and deep links target the affected workspace or section without secret material.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">NotificationCoordinator.swift:5-35, 146-203, 252-356</span> owns category preferences, authorization, dedupe, retry, and payload construction. <span class="ref">AppModel.swift:610-618, 1251-1288, 1446-1469</span> emits sustained-unavailability, quarantine, lifecycle, credential, backup, and operation events.</div>
+        <p class="fix"><strong>Status:</strong> Shipped. Remaining work is accessibility/UX polish for category settings and test coverage for every notification trigger.</p>
       </article>
     </div>
   </section>
@@ -288,11 +300,11 @@
       <table>
         <thead><tr><th>Phase</th><th>Ship</th><th>Acceptance gate</th></tr></thead>
         <tbody>
-          <tr><td>1 · Safety contract</td><td>Unified health/severity reducer; successful-observation semantics; authoritative capability propagation; verification-aware GitHub bind; destructive confirmation flows.</td><td>Cold launch never says Ready; every destructive action has a scoped review; no credential is shown as bound until verification passes.</td></tr>
-          <tr><td>2 · Scope and action</td><td>Workspace + section routes; persistent workspace picker; truthful start-and-open actions; visible quarantine/freshness reasons and primary recovery CTA.</td><td>A user can tell which workspace they are viewing and what each disabled action requires without opening a log or guessing.</td></tr>
-          <tr><td>3 · Operations and recovery</td><td>Per-operation progress/outcome reconciliation; typed protocol recovery; section-local loading/error state; backup/restore preview and partial-success reporting.</td><td>Every long operation has phase, elapsed time, effect, and final verified outcome—or “Outcome unknown” with safe reconciliation.</td></tr>
-          <tr><td>4 · Onboarding finish</td><td>Explicit Welcome → System → Access/Skip → Identity → Review → Done flow; resumable GitHub session/drafts; per-workspace verification summary.</td><td>Closing and reopening Setup resumes safely; no incomplete enabled workspace is silently omitted; completion is deliberate.</td></tr>
-          <tr><td>5 · Inclusive polish</td><td>Focus transfer/restoration, VoiceOver announcements, keyboard coverage, large text, contrast/transparency, localization, flexible sizing, unified status visuals, and opt-in notifications.</td><td>Manual and fixture-driven UI passes cover the matrix in <span class="ref">docs/MSW-MONITOR-MACOS26-OAUTH.plan.md:899-907</span>; hidden-state alerts are deduplicated and deep-linked.</td></tr>
+          <tr><td>1 · Safety contract</td><td>Shipped: unified health/severity semantics; successful-observation meaning; authoritative capability propagation; verification-aware GitHub bind; destructive confirmation flows.</td><td>Cold launch reports Not observed; destructive actions require scoped review; grants are not shown as verified until the verification gate passes.</td></tr>
+          <tr><td>2 · Scope and action</td><td>Partial: workspace + section routes, persistent picker, truthful recovery state. Stopped-workspace start-and-open actions remain.</td><td>A user can tell which workspace they are viewing and what each disabled action requires; compound start/open behavior is still pending.</td></tr>
+          <tr><td>3 · Operations and recovery</td><td>Partial: verification-aware lifecycle, operation rows, recovery metadata, notification delivery, and backup/restore review are shipped. Progress-event and rollback detail remain.</td><td>Every long operation has a review boundary and a visible final/unknown outcome; richer authoritative progress and rollback proof remain.</td></tr>
+          <tr><td>4 · Onboarding finish</td><td>Shipped for the fixture and injected authorization paths: explicit Readiness → GitHub/Skip → Identity → Review → Done, resumable drafts, per-workspace verification summary.</td><td>Closing and reopening Setup resumes safely; no incomplete enabled workspace is silently omitted; completion is deliberate.</td></tr>
+          <tr><td>5 · Inclusive polish</td><td>Open: focus transfer/restoration, VoiceOver announcements, keyboard coverage, large text, contrast/transparency, localization, flexible sizing, and complete notification-trigger coverage.</td><td>Manual and fixture-driven UI passes cover the matrix in <span class="ref">docs/MSW-MONITOR-MACOS26-OAUTH.plan.md:899-907</span>; hidden-state alerts are deduplicated and deep-linked.</td></tr>
         </tbody>
       </table>
     </div>
@@ -303,14 +315,14 @@
     <div class="grid">
       <article class="card span-4"><h3 class="good">Safety foundations</h3><p>Quarantine and freshness gates are fail-closed in the model; pending lifecycle/push plans are invalidated when state becomes unsafe. Push and restore require explicit phrases and initially focus Cancel.</p></article>
       <article class="card span-4"><h3 class="good">Native interaction base</h3><p>The app uses standard SwiftUI controls, a real status item, a transient production popover, reusable windows, tooltips, keyboard shortcuts for Refresh/Quit, and named workspace accessibility groups.</p></article>
-      <article class="card span-4"><h3 class="good">Unit confidence</h3><p>The focused unit suite passed 38 tests with zero failures, including authorization, quarantine, stale-plan cancellation, protocol validation, backup safety checks, and workspace URL validation.</p></article>
+      <article class="card span-4"><h3 class="good">Unit confidence</h3><p>The focused unit suite passed 57 tests with zero failures, including authorization, quarantine, stale-plan cancellation, protocol validation, recovery-boundary handling, workspace URL validation, notification delivery, and both all-workspace and single-target identity verification gates.</p></article>
     </div>
   </section>
 
   <section class="section">
     <h2>Review method and agent coverage</h2>
     <div class="card">
-      <p>Eight independent read-only Sol runs inspected the checked-in SwiftUI/AppKit sources, model/service code, product docs, and tests. Findings below were consolidated only when supported by source evidence; recommendations are intentionally limited to user-visible UI/UX outcomes.</p>
+      <p>Eight independent Sol runs inspected the checked-in SwiftUI/AppKit sources, model/service code, product docs, and tests. Findings were consolidated only when supported by source evidence; the implementation status above reflects the subsequent remediation pass and verification results.</p>
       <table class="agent-table">
         <thead><tr><th>Focus</th><th>Smithers run</th></tr></thead>
         <tbody>
@@ -331,20 +343,24 @@
     <h2>Verification and limits</h2>
     <div class="card">
       <ul>
-        <li><strong>Build:</strong> <code>app/MSWMonitor/Scripts/build.sh</code> passed. Bundle: <code>app/MSWMonitor/build/MSWMonitor.app</code>. Log: <code>app/MSWMonitor/build/logs/build.log</code>.</li>
-        <li><strong>Unit tests:</strong> <code>app/MSWMonitor/Scripts/test.sh</code> passed: 38 tests, 0 failures. Log: <code>app/MSWMonitor/build/logs/test.log</code>. Result: <code>app/MSWMonitor/build/DerivedData/Tests/Logs/Test/Test-MSWMonitor-2026.08.11_19-02-27-+0200.xcresult</code>.</li>
-        <li><strong>UI smoke:</strong> <code>app/MSWMonitor/Scripts/smoke-test.sh</code> built the UI test products but the runner stopped before assertions with “Timed out while enabling automation mode.” This is an Automation/Accessibility environment failure, not a failed UI assertion. Log: <code>app/MSWMonitor/build/logs/smoke-ui.log</code>. Result: <code>app/MSWMonitor/build/DerivedData/Smoke/Logs/Test/Test-MSWMonitor-2026.08.11_19-02-48-+0200.xcresult</code>.</li>
-        <li><strong>Runtime cleanup:</strong> <code>pgrep -x MSWMonitor</code> returned no remaining instance after the smoke attempt.</li>
-        <li><strong>Unified log query:</strong> inspected the last five minutes using predicates <code>process == "MSWMonitor"</code> and <code>process == "MSWMonitor" AND (messageType == error OR messageType == fault)</code>. The query was used to check for app-level faults; no app-level fault was established from this run, and raw framework/test-host log noise is intentionally not reproduced.</li>
-        <li><strong>Semantic UI evidence:</strong> the checked-in test contract names <code>statusItem.button</code>, <code>monitor.popover</code>, <code>monitor.title</code>, the three workspace name/state pairs, <code>observation.value</code>, <code>refresh.button</code>, and <code>quit.button</code> in <span class="ref">app/MSWMonitor/UITests/MSWMonitorUITests.swift:21-53</span>. The current smoke run did not reach those assertions, so this report does not claim runtime observation of those values.</li>
-        <li><strong>Fixture versus production:</strong> UI-test mode constructs a deterministic fixture model with Stopped workspaces and an Observation counter; production constructs the client-backed model in <span class="ref">app/MSWMonitor/Sources/MSWMonitorApp.swift:64-92</span>. Fixture values are not live sandbox telemetry.</li>
+        <li><strong>Build:</strong> <code>app/MSWMonitor/Scripts/build.sh</code> passed and produced <code>app/MSWMonitor/build/MSWMonitor.app</code>. Log: <code>app/MSWMonitor/build/logs/build.log</code>.</li>
+        <li><strong>Installation URL input:</strong> a synthetic valid installation URL passed through <code>MSW_CONNECT_INSTALLATION_URL</code> into the built <code>MSWConnectInstallationURL</code> key; a following default build produced an empty value. The release slug remains intentionally unset until an approved value is supplied.</li>
+        <li><strong>Unit tests:</strong> <code>app/MSWMonitor/Scripts/test.sh</code> passed: 57 tests, 0 failures. Log: <code>app/MSWMonitor/build/logs/test.log</code>. Result: <code>app/MSWMonitor/build/DerivedData/Tests/Logs/Test/Test-MSWMonitor-2026.08.14_16-06-46-+0200.xcresult</code>.</li>
+        <li><strong>UI smoke:</strong> <code>app/MSWMonitor/Scripts/smoke-test.sh</code> passed 6 UI tests with 0 failures against the rebuilt canonical bundle in fixture modes. Log: <code>app/MSWMonitor/build/logs/smoke-ui.log</code>. Result: <code>app/MSWMonitor/build/DerivedData/Smoke/Logs/Test/Test-MSWMonitor-2026.08.14_16-07-12-+0200.xcresult</code>.</li>
+        <li><strong>Runtime cleanup:</strong> the UI flow clicked <code>quit.button</code>; the subsequent <code>pgrep -x MSWMonitor</code> check returned no remaining instance.</li>
+        <li><strong>Semantic UI evidence:</strong> <code>statusItem.button</code> was labeled <code>MSW Monitor</code>; the application menu exposed <code>About MSW Monitor</code>, <code>Settings…</code>, <code>Hide MSW Monitor</code>, and <code>Quit MSW Monitor</code>; <code>monitor.title</code> was <code>MSW Monitor</code>; <code>monitor.health</code> was <code>Not observed</code>; workspace rows were <code>dev</code>/<code>Stopped</code>, <code>playgrounds</code>/<code>Stopped</code>, and <code>personal</code>/<code>Stopped</code>; <code>observation.value</code> changed from <code>Not yet refreshed</code> to <code>Observation #1</code> after <code>refresh.button</code>; <code>quit.button</code> reached <code>notRunning</code>.</li>
+        <li><strong>GitHub UI E2E evidence:</strong> fixture-driven UI tests passed successful authorization → owner/repository selection → review → Apply → retained verification → setup completion; cancel → retry generation isolation; unavailable Connect with the optional path preserved; setup review completion semantics. The injected coordinator/browser/session path is deterministic and does not use a GitHub credential.</li>
+        <li><strong>OAuth unit evidence:</strong> the current unit suite covers native authorization URL creation without endpoint preflight, successful callback/account and installation discovery, callback/session rejection for unknown, expired, and replayed state, cancellation, unavailable callback exchange, repository-scope validation, and verified Connect-to-Apply persistence/rollback. The browser and transport are injected test doubles; no GitHub credential or token is stored in test artifacts.</li>
+        <li><strong>Live-service limit:</strong> the configured external Connect endpoint was unavailable from this machine during probing (DNS resolution failed), so a real GitHub account/browser authorization and live grant issuance were not completed. The unavailable-service path is covered independently by deterministic transport tests; this report does not claim live GitHub E2E success.</li>
+        <li><strong>Fixture versus production:</strong> UI-test mode uses a deterministic fixture model with Stopped workspaces and an Observation counter; production constructs the client-backed model in <span class="ref">app/MSWMonitor/Sources/MSWMonitorApp.swift:64-94</span>. Fixture values are not live sandbox telemetry.</li>
+        <li><strong>Unified log evidence:</strong> after the smoke test, queried a three-minute window with <code>log show --last 3m --style compact --info --debug --predicate 'process == "MSWMonitor"'</code> and the matching error/fault predicate <code>process == "MSWMonitor" AND (messageType == "error" OR messageType == "fault")</code>. The records were framework/AppKit/AppIntents/SQLite diagnostics; the app has no intentional application-level logger and emitted no application-specific failure.</li>
       </ul>
-      <div class="status"><strong>Interpretation</strong>The source review is complete and evidence-backed. The native build and model tests are green. Runtime accessibility verification remains blocked by the local automation-mode timeout and should be rerun after narrowly scoped Automation/Accessibility permission is restored.</div>
+      <div class="status"><strong>Interpretation</strong>The implementation and evidence pass close findings 1–4 and 11, materially improve findings 5, 6, 8, 9, and 10, and leave findings 7, accessibility, and the approved release installation URL as explicit remaining work. Build output, 57 model tests, and 6 UI tests passed. The external Connect service was unavailable during this run, so live GitHub authorization remains an explicit deployment/integration prerequisite rather than a claimed result. Native fixture values remain deterministic and are not live sandbox telemetry.</div>
     </div>
   </section>
 
   <footer>
-    Prepared from the checked-in MSW Monitor source of truth and product documentation. No product source files were edited for this review; this HTML report is the only deliverable added.
+    Prepared from the checked-in MSW Monitor source, product documentation, and the verified implementation pass. Product changes span <code>app/MSWMonitor/Sources/</code>, tests, scripts, and <code>docs/GITHUB-SETUP.md</code>; this HTML report records the review, current status, and evidence.
   </footer>
 </main>
 </body>

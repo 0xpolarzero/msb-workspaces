@@ -106,6 +106,102 @@ struct Workspace: Identifiable, Equatable, Sendable {
     }
 }
 
+enum WorkspaceAction: Equatable, Sendable {
+    case start
+    case stop
+    case restart
+    case openTerminal
+    case openZed
+    case openSite
+    case push
+
+    var title: String {
+        switch self {
+        case .start: return "Start"
+        case .stop: return "Stop"
+        case .restart: return "Restart"
+        case .openTerminal: return "Open Terminal"
+        case .openZed: return "Open in Zed"
+        case .openSite: return "Open Site"
+        case .push: return "Push"
+        }
+    }
+}
+
+extension Workspace.CredentialState {
+    var needsAttention: Bool {
+        switch self {
+        case .ready, .readOnly, .unconfigured:
+            return false
+        case .legacy, .expiring, .needsRestart, .needsAuthorization, .serviceUnavailable,
+             .removalPending, .quarantined:
+            return true
+        }
+    }
+}
+
+struct WorkspaceActionAvailability: Equatable, Sendable {
+    let isAllowed: Bool
+    let reason: String?
+    let recovery: String?
+}
+
+extension Workspace {
+    func actionAvailability(for action: WorkspaceAction) -> WorkspaceActionAvailability {
+        guard freshness == .fresh else {
+            return WorkspaceActionAvailability(
+                isAllowed: false,
+                reason: freshness == .neverObserved
+                    ? "No authoritative state has been observed for \(id.rawValue)."
+                    : "The last known state for \(id.rawValue) is not fresh.",
+                recovery: "Retry the observation before attempting \(action.title.lowercased())."
+            )
+        }
+        guard state != .unknown, state != .unavailable else {
+            return WorkspaceActionAvailability(
+                isAllowed: false,
+                reason: "The authoritative state for \(id.rawValue) is unavailable.",
+                recovery: serverCapabilities.recovery ?? recoveryAction
+            )
+        }
+        if action != .stop, state == .quarantined || credential == .quarantined {
+            return WorkspaceActionAvailability(
+                isAllowed: false,
+                reason: "\(action.title) is blocked because \(id.rawValue) is quarantined. \(quarantineReason ?? "Workspace safety state could not be verified.")",
+                recovery: serverCapabilities.recovery ?? recoveryAction
+            )
+        }
+
+        let capability: Bool
+        switch action {
+        case .start: capability = serverCapabilities.canStart
+        case .stop: capability = serverCapabilities.canStop
+        case .restart: capability = serverCapabilities.canRestart
+        case .openTerminal, .openZed, .openSite: capability = serverCapabilities.canOpenTerminal
+        case .push: capability = serverCapabilities.canPush
+        }
+        return WorkspaceActionAvailability(
+            isAllowed: capability,
+            reason: capability ? nil : (serverCapabilities.reason ?? "MSW did not authorize \(action.title.lowercased()) for \(id.rawValue)."),
+            recovery: capability ? nil : (serverCapabilities.recovery ?? recoveryAction)
+        )
+    }
+}
+
+struct MonitorHealth: Equatable, Sendable {
+    enum Severity: Equatable, Sendable {
+        case normal
+        case neutral
+        case attention
+        case critical
+    }
+
+    let title: String
+    let detail: String
+    let symbol: String
+    let severity: Severity
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -119,6 +215,7 @@ final class AppModel {
     private(set) var operationStates: [String: MSWOperationState] = [:]
     private(set) var notificationEvents: [MSWNotificationEvent] = []
     private(set) var setupState: MSWBootstrapState = .initial
+    private(set) var startupRecoveryBlockedReason: String?
     private(set) var metricsByWorkspace: [String: MSWMetricsResponse] = [:]
     private(set) var repositoriesByWorkspace: [String: MSWRepositoriesResponse] = [:]
     private(set) var portsSnapshot: MSWPortsResponse?
@@ -140,25 +237,17 @@ final class AppModel {
         case zed
         case site
         case push
-
-        var allowsQuarantine: Bool {
-            switch self {
-            case .lifecycle(let action):
-                return action.rawValue == MSWLifecycleAction.stop.rawValue
-            case .terminal, .zed, .site, .push:
-                return false
-            }
-        }
     }
 
     private var pendingLifecycleOriginalState: Workspace.State?
+    private var startupRecoveryRetry: (() -> Void)?
     private let client: MSWClient?
     private let operationCoordinator: MSWOperationCoordinator?
     private let operationService: MSWOperationService?
     private let diagnostics: MSWDiagnostics?
     private let activityStore: MSWActivityStore
-    private var refreshTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
+    private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
     private var refreshInFlight = 0
     private var consecutiveRefreshFailures = 0
@@ -178,17 +267,41 @@ final class AppModel {
         operationCoordinator: MSWOperationCoordinator? = nil,
         operationService: MSWOperationService? = nil,
         diagnostics: MSWDiagnostics? = nil,
-        activityStore: MSWActivityStore = MSWActivityStore()
+        activityStore: MSWActivityStore = MSWActivityStore(),
+        startupRecoveryBlockedReason: String? = nil,
+        startupRecoveryRetry: (() -> Void)? = nil
     ) {
         self.client = client
         self.operationCoordinator = operationCoordinator
         self.operationService = operationService
         self.diagnostics = diagnostics
         self.activityStore = activityStore
-        let fixtureMode = client == nil
+        self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
+        self.startupRecoveryRetry = startupRecoveryRetry
         workspaces = Workspace.ID.allCases.map {
-            fixtureMode
-                ? Workspace(id: $0)
+            if let startupRecoveryBlockedReason {
+                return Workspace(
+                    id: $0,
+                    state: .quarantined,
+                    credential: .quarantined,
+                    freshness: .unavailable,
+                    quarantineReason: startupRecoveryBlockedReason,
+                    statusReason: "Startup authorization recovery is blocked.",
+                    recoveryAction: "Retry authorization recovery before using workspace credentials.",
+                    nextAction: "Recover authorization",
+                    canStart: false,
+                    canStop: false,
+                    canRestart: false
+                )
+            }
+            return client == nil
+                ? Workspace(
+                    id: $0,
+                    statusReason: "No authoritative state has been observed.",
+                    recoveryAction: "Connect MSW and retry the observation.",
+                    nextAction: "Observe",
+                    canStart: false
+                )
                 : Workspace(
                     id: $0,
                     state: .unknown,
@@ -205,7 +318,7 @@ final class AppModel {
 
 
     var observationText: String {
-        observationCount == 0 ? "Not yet refreshed" : "Observation #\(observationCount)"
+        observationCount == 0 ? (client == nil ? "Not yet refreshed" : "Not observed") : "Observation #\(observationCount)"
     }
     var isMaintenanceOperationInFlight: Bool {
         operationStates.values.contains { operation in
@@ -216,26 +329,105 @@ final class AppModel {
 
 
     var aggregateText: String {
-        if isRefreshing { return lastObservedAt == nil ? "Observing…" : "Refreshing…" }
-        if workspaces.contains(where: { $0.state == .quarantined }) { return "Action required" }
-        if client == nil { return lastError == nil ? "Ready" : "Needs attention" }
-        if client != nil && lastObservedAt == nil { return lastError == nil ? "Not observed" : "Unavailable" }
-        if lastError != nil || workspaces.contains(where: { $0.freshness != .fresh }) {
-            return lastObservedAt == nil ? "Needs attention" : "Showing last known state"
-        }
-        if workspaces.contains(where: { $0.state == .unknown || $0.state == .unavailable }) {
-            return "Needs attention"
-        }
-        return "Ready"
+        health.title
     }
 
     var aggregateDetail: String {
-        guard let lastObservedAt else { return "No state observation yet" }
-        return "Observed \(lastObservedAt.formatted(date: .abbreviated, time: .shortened))"
+        health.detail
+    }
+
+    var health: MonitorHealth {
+        if let startupRecoveryBlockedReason {
+            return MonitorHealth(
+                title: "Authorization recovery blocked",
+                detail: "Workspace credentials remain protected until startup recovery succeeds. \(startupRecoveryBlockedReason)",
+                symbol: "exclamationmark.octagon.fill",
+                severity: .critical
+            )
+        }
+        let observed = lastObservedAt.map {
+            "Last observed \($0.formatted(date: .abbreviated, time: .shortened))"
+        } ?? "No successful state observation yet"
+
+        if workspaces.contains(where: { $0.state == .quarantined || $0.credential == .quarantined }) {
+            return MonitorHealth(
+                title: "Action required",
+                detail: "A workspace is quarantined. Unsafe actions are blocked. \(observed)",
+                symbol: "exclamationmark.octagon.fill",
+                severity: .critical
+            )
+        }
+        guard lastObservedAt != nil else {
+            if isRefreshing {
+                return MonitorHealth(
+                    title: "Observing…",
+                    detail: "Requesting an authoritative workspace snapshot.",
+                    symbol: "arrow.triangle.2.circlepath",
+                    severity: .neutral
+                )
+            }
+            if let lastError {
+                return MonitorHealth(
+                    title: "Unavailable",
+                    detail: "No authoritative baseline is available. \(lastError)",
+                    symbol: "exclamationmark.triangle.fill",
+                    severity: .attention
+                )
+            }
+            return MonitorHealth(
+                title: "Not observed",
+                detail: observed,
+                symbol: "questionmark.circle",
+                severity: .neutral
+            )
+        }
+        if workspaces.contains(where: { $0.state == .unavailable || $0.freshness == .unavailable }) {
+            return MonitorHealth(
+                title: "Unavailable",
+                detail: "Some workspace state is unavailable. Last-known values remain visible. \(observed)",
+                symbol: "exclamationmark.triangle.fill",
+                severity: .attention
+            )
+        }
+        if lastError != nil || workspaces.contains(where: { $0.freshness == .stale }) {
+            let failure = lastError.map { " \($0)" } ?? ""
+            return MonitorHealth(
+                title: "Showing last known state",
+                detail: "Workspace data is stale; fresh-state actions are blocked. \(observed)\(failure)",
+                symbol: "clock.badge.exclamationmark",
+                severity: .attention
+            )
+        }
+        if workspaces.contains(where: { $0.state == .exited || $0.credential.needsAttention }) {
+            return MonitorHealth(
+                title: "Needs attention",
+                detail: "One or more workspaces has a recovery step. \(observed)",
+                symbol: "exclamationmark.triangle.fill",
+                severity: .attention
+            )
+        }
+        if isRefreshing {
+            return MonitorHealth(
+                title: "Refreshing…",
+                detail: "Keeping the last verified snapshot visible. \(observed)",
+                symbol: "arrow.triangle.2.circlepath",
+                severity: .normal
+            )
+        }
+        return MonitorHealth(
+            title: "Ready",
+            detail: "All workspace state is fresh and actions are available. \(observed)",
+            symbol: "checkmark.circle.fill",
+            severity: .normal
+        )
     }
 
     func refresh() {
-        guard client != nil else {
+        if startupRecoveryBlockedReason != nil {
+            startupRecoveryRetry?()
+            return
+        }
+        if client == nil {
             observationCount += 1
             return
         }
@@ -805,29 +997,32 @@ final class AppModel {
     }
 
     private func isActionSafe(for workspace: Workspace, action: SafetyAction) -> Bool {
-        guard workspace.freshness == .fresh,
-              workspace.state != .unknown,
-              workspace.state != .unavailable else {
-            return false
+        actionAvailability(for: workspace, action: action).isAllowed
+    }
+
+    func actionAvailability(for id: Workspace.ID, action: WorkspaceAction) -> WorkspaceActionAvailability {
+        guard let workspace = workspaces.first(where: { $0.id == id }) else {
+            return WorkspaceActionAvailability(
+                isAllowed: false,
+                reason: "The selected workspace is unavailable.",
+                recovery: "Refresh workspace state and select a valid workspace."
+            )
         }
-        if action.allowsQuarantine {
-            return workspace.serverCapabilities.canStop
-        }
-        guard workspace.state != .quarantined,
-              workspace.credential != .quarantined else { return false }
+        return workspace.actionAvailability(for: action)
+    }
+
+    private func actionAvailability(for workspace: Workspace, action: SafetyAction) -> WorkspaceActionAvailability {
         switch action {
         case .lifecycle(let lifecycle):
             switch lifecycle {
-            case .start: return workspace.serverCapabilities.canStart
-            case .stop: return workspace.serverCapabilities.canStop
-            case .restart: return workspace.serverCapabilities.canRestart
+            case .start: return workspace.actionAvailability(for: .start)
+            case .stop: return workspace.actionAvailability(for: .stop)
+            case .restart: return workspace.actionAvailability(for: .restart)
             }
-        case .terminal:
-            return workspace.serverCapabilities.canOpenTerminal
-        case .push:
-            return workspace.serverCapabilities.canPush
-        case .zed, .site:
-            return true
+        case .terminal: return workspace.actionAvailability(for: .openTerminal)
+        case .zed: return workspace.actionAvailability(for: .openZed)
+        case .site: return workspace.actionAvailability(for: .openSite)
+        case .push: return workspace.actionAvailability(for: .push)
         }
     }
 
@@ -838,11 +1033,12 @@ final class AppModel {
         operation: String,
         detail: Bool = false
     ) -> Bool {
-        guard isActionSafe(for: id, action: action) else {
-            let requirement = action.allowsQuarantine
-                ? "fresh, known"
-                : "fresh, known, quarantine-clear"
-            let message = "\(operation) is blocked until \(id.rawValue) has a \(requirement) observation."
+        guard let workspace = workspaces.first(where: { $0.id == id }) else { return false }
+        let availability = actionAvailability(for: workspace, action: action)
+        guard availability.isAllowed else {
+            let message = [availability.reason, availability.recovery]
+                .compactMap { $0 }
+                .joined(separator: " ")
             if detail {
                 detailError = message
             } else {

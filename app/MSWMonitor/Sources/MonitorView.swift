@@ -1,103 +1,5 @@
 import SwiftUI
 
-struct MonitorHealth {
-    enum Severity {
-        case normal
-        case neutral
-        case attention
-        case critical
-    }
-
-    let title: String
-    let detail: String
-    let symbol: String
-    let severity: Severity
-
-    @MainActor
-    static func resolve(_ model: AppModel) -> MonitorHealth {
-        let observed = model.lastObservedAt.map {
-            "Last observed \($0.formatted(date: .abbreviated, time: .shortened))"
-        } ?? "No successful state observation yet"
-
-        if model.workspaces.contains(where: { $0.state == .quarantined || $0.credential == .quarantined }) {
-            return MonitorHealth(
-                title: "Action required",
-                detail: "A workspace is quarantined. Unsafe actions are blocked. \(observed)",
-                symbol: "exclamationmark.octagon.fill",
-                severity: .critical
-            )
-        }
-        if let error = model.lastError {
-            return MonitorHealth(
-                title: "Needs attention",
-                detail: "Refresh failed; showing last known state. \(error)",
-                symbol: "exclamationmark.triangle.fill",
-                severity: .attention
-            )
-        }
-        if model.lastObservedAt == nil || model.workspaces.contains(where: {
-            $0.state == .unknown || $0.freshness == .neverObserved
-        }) {
-            return MonitorHealth(
-                title: model.isRefreshing ? "Observing…" : "Not observed",
-                detail: model.isRefreshing ? "Requesting an authoritative workspace snapshot." : observed,
-                symbol: model.isRefreshing ? "arrow.triangle.2.circlepath" : "questionmark.circle",
-                severity: .neutral
-            )
-        }
-        if model.workspaces.contains(where: { $0.state == .unavailable || $0.freshness == .unavailable }) {
-            return MonitorHealth(
-                title: "Unavailable",
-                detail: "Some workspace state is unavailable. Last-known values remain visible. \(observed)",
-                symbol: "exclamationmark.triangle.fill",
-                severity: .attention
-            )
-        }
-        if model.workspaces.contains(where: { $0.freshness == .stale }) {
-            return MonitorHealth(
-                title: "Showing last known state",
-                detail: "Workspace data is stale; actions that require fresh state are blocked. \(observed)",
-                symbol: "clock.badge.exclamationmark",
-                severity: .attention
-            )
-        }
-        if model.workspaces.contains(where: { $0.state == .exited || $0.credential.needsAttention }) {
-            return MonitorHealth(
-                title: "Needs attention",
-                detail: "One or more workspaces has a recovery step. \(observed)",
-                symbol: "exclamationmark.triangle.fill",
-                severity: .attention
-            )
-        }
-        if model.isRefreshing {
-            return MonitorHealth(
-                title: "Refreshing…",
-                detail: "Keeping the last verified snapshot visible. \(observed)",
-                symbol: "arrow.triangle.2.circlepath",
-                severity: .normal
-            )
-        }
-        return MonitorHealth(
-            title: "Ready",
-            detail: observed,
-            symbol: "checkmark.circle.fill",
-            severity: .normal
-        )
-    }
-}
-
-private extension Workspace.CredentialState {
-    var needsAttention: Bool {
-        switch self {
-        case .ready, .readOnly, .unconfigured:
-            return false
-        case .legacy, .expiring, .needsRestart, .needsAuthorization, .serviceUnavailable,
-             .removalPending, .quarantined:
-            return true
-        }
-    }
-}
-
 struct MonitorView: View {
     static let title = "MSW Monitor"
 
@@ -135,7 +37,7 @@ struct MonitorView: View {
         .padding(16)
         .frame(minWidth: 360, idealWidth: 420, maxWidth: 480, minHeight: 360, idealHeight: 590, maxHeight: 720)
         .confirmationDialog(
-            "Confirm workspace action",
+            model.pendingLifecyclePlan.map { "\($0.action.capitalized) \($0.workspace)?" } ?? "Confirm workspace action",
             isPresented: Binding(
                 get: { model.pendingLifecyclePlan != nil },
                 set: { if !$0 { model.cancelPendingLifecycle() } }
@@ -159,7 +61,7 @@ struct MonitorView: View {
         }
     }
 
-    private var health: MonitorHealth { MonitorHealth.resolve(model) }
+    private var health: MonitorHealth { model.health }
 
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -185,7 +87,12 @@ struct MonitorView: View {
             Button {
                 model.refresh()
             } label: {
-                Label(model.lastError == nil ? "Refresh" : "Retry", systemImage: "arrow.clockwise")
+                Label(
+                    model.startupRecoveryBlockedReason == nil
+                        ? (model.lastError == nil ? "Refresh" : "Retry")
+                        : "Retry recovery",
+                    systemImage: "arrow.clockwise"
+                )
             }
             .buttonStyle(.borderless)
             .keyboardShortcut("r")
@@ -231,7 +138,7 @@ struct MonitorView: View {
                         .help("Review or repair MSW Monitor setup")
                 }
                 Button("Activity") {
-                    openDetails(DetailRoute(workspace: nil, section: .activity))
+                    openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .activity))
                 }
                 .accessibilityIdentifier("activity.button")
                 Button("Settings", action: openSettings)

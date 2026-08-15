@@ -1,5 +1,4 @@
 import AppKit
-import AuthenticationServices
 import CryptoKit
 import Foundation
 
@@ -9,17 +8,17 @@ struct MSWConnectConfiguration: Sendable, Equatable {
     let redirectURL: URL
     let authorizationPath: String
     let callbackPath: String
-    let installationURL: URL
+    let installationURL: URL?
     let scopeAttestationPublicKey: Data?
     let requiresScopeAttestation: Bool
 
     init(
-        baseURL: URL = URL(string: "https://connect.microsandbox.dev")!,
-        clientID: String = "msw-monitor",
+        baseURL: URL = URL(string: "https://connect.invalid")!,
+        clientID: String = "",
         redirectURL: URL = URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
         authorizationPath: String = "/oauth/authorize",
         callbackPath: String = "/oauth/callback",
-        installationURL: URL = URL(string: "https://github.com/apps/msw-monitor/installations/new")!,
+        installationURL: URL? = nil,
         scopeAttestationPublicKey: Data? = nil,
         requiresScopeAttestation: Bool = false
     ) {
@@ -57,11 +56,25 @@ struct MSWConnectConfiguration: Sendable, Equatable {
             isSafeEndpointPath(value.path)
     }
 
+    var isConfigured: Bool {
+        guard !clientID.isEmpty,
+              baseURL.host?.lowercased() != "connect.invalid" else {
+            return false
+        }
+        do {
+            try validate()
+            return true
+        } catch {
+            return false
+        }
+    }
+
 
     func validate() throws {
         guard Self.isSafeClientID(clientID),
               let scheme = baseURL.scheme?.lowercased(),
               scheme == "https" || (scheme == "http" && baseURL.host?.isLoopback == true),
+              baseURL.host != nil,
               baseURL.user == nil,
               baseURL.password == nil,
               baseURL.port == nil,
@@ -71,7 +84,7 @@ struct MSWConnectConfiguration: Sendable, Equatable {
               Self.isSafeEndpointPath(authorizationPath),
               Self.isSafeEndpointPath(callbackPath),
               callbackPath == redirectURL.path,
-              Self.isSafeInstallationURL(installationURL),
+              installationURL.map(Self.isSafeInstallationURL) ?? true,
               let redirectScheme = redirectURL.scheme?.lowercased(),
               redirectScheme == "msw",
               redirectURL.user == nil,
@@ -130,7 +143,7 @@ enum MSWConnectError: Error, LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidConfiguration:
-            return "MSW Connect authorization is not configured with a safe HTTPS endpoint and callback."
+            return "GitHub connection is not configured in this build. A deployed MSW Connect service and registered app client are required; no browser page was opened."
         case .invalidCallback:
             return "MSW Connect returned an invalid authorization callback."
         case .callbackStateMismatch:
@@ -208,123 +221,166 @@ struct URLSessionMSWConnectTransport: MSWConnectHTTPTransport, Sendable {
     }
 }
 
+@MainActor
 protocol MSWConnectBrowserAuthenticating: Sendable {
     func authenticate(url: URL, callbackScheme: String) async throws -> URL
 }
 
-private final class MSWConnectContinuationGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var completed = false
+/// Opens the Connect authorization page in the user's default browser and
+/// resumes when macOS delivers the `msw://` callback URL to the app.
+///
+/// The wait is bound to the exact authorization it opened: the expected
+/// callback scheme, host, path, and `state` are parsed from the authorize URL,
+/// and any other callback is ignored. A stale tab from a cancelled attempt
+/// therefore cannot terminate the retry that replaced it.
+@MainActor
+final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Sendable {
+    /// Single shared instance. The app delegate routes `msw://` URL events to
+    /// this instance, so any pending authorization must live here rather than
+    /// in a view-local instance.
+    static let shared = MSWConnectBrowser()
 
-    func finish(_ action: () -> Void) {
-        lock.lock()
-        guard !completed else {
-            lock.unlock()
-            return
+    private struct ExpectedCallback {
+        let scheme: String
+        let host: String
+        let path: String
+        let state: String
+
+        init?(authorizeURL: URL, scheme: String) {
+            guard let components = URLComponents(url: authorizeURL, resolvingAgainstBaseURL: false),
+                  let state = components.queryItems?.first(where: { $0.name == "state" })?.value,
+                  !state.isEmpty,
+                  let redirect = components.queryItems?.first(where: { $0.name == "redirect_uri" })?.value,
+                  let redirectComponents = URLComponents(string: redirect),
+                  let host = redirectComponents.host?.lowercased(),
+                  !host.isEmpty else {
+                return nil
+            }
+            self.scheme = scheme.lowercased()
+            self.host = host
+            self.path = redirectComponents.path
+            self.state = state
         }
-        completed = true
-        lock.unlock()
-        action()
-    }
-}
 
-final class MSWConnectBrowser: NSObject, ASWebAuthenticationPresentationContextProviding, MSWConnectBrowserAuthenticating, @unchecked Sendable {
-    private var session: ASWebAuthenticationSession?
-    private var activeFinish: ((Result<URL, Error>) -> Void)?
-    private var authenticationGeneration = 0
+        func matches(_ callback: URL) -> Bool {
+            guard callback.scheme?.lowercased() == scheme,
+                  callback.host?.lowercased() == host,
+                  callback.path == path,
+                  let components = URLComponents(url: callback, resolvingAgainstBaseURL: false),
+                  let state = components.queryItems?.first(where: { $0.name == "state" })?.value else {
+                return false
+            }
+            return state == self.state
+        }
+    }
+
+    private let opener: (URL) -> Bool
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var generation = 0
+    private var expectedCallback: ExpectedCallback?
+    private var timeoutTask: Task<Void, Never>?
+
+    /// The authorization page expires after ten minutes
+    /// (`MSWConnectClient.startAuthorization`), so abandon the wait at the
+    /// same point rather than hanging forever on a browser tab nobody returns to.
+    private static let callbackTimeout: Duration = .seconds(600)
+
+    init(opener: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+        self.opener = opener
+    }
+
+    /// True while a callback wait is installed. Test support.
+    var isWaiting: Bool { continuation != nil }
+
+    /// The `state` value of the callback currently being waited for. Test support.
+    var expectedState: String? { expectedCallback?.state }
 
     func authenticate(url: URL, callbackScheme: String) async throws -> URL {
-        let generation = await MainActor.run { () -> Int in
-            authenticationGeneration += 1
-            return authenticationGeneration
+        guard !Task.isCancelled else {
+            throw MSWConnectError.cancelled
         }
+        guard let expected = ExpectedCallback(authorizeURL: url, scheme: callbackScheme) else {
+            throw MSWConnectError.invalidConfiguration
+        }
+        // Displace any previous attempt's wait before installing this one, so
+        // a cancel/retry cannot leave two generations competing for the slot.
+        clearPending()
+        generation &+= 1
+        let currentGeneration = generation
+        expectedCallback = expected
+
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
-                let gate = MSWConnectContinuationGate()
-                let finish: (Result<URL, Error>) -> Void = { result in
-                    gate.finish {
-                        switch result {
-                        case .success(let callbackURL):
-                            continuation.resume(returning: callbackURL)
-                        case .failure(let error):
-                            continuation.resume(throwing: error)
-                        }
-                    }
+                guard expectedCallback != nil, self.continuation == nil else {
+                    continuation.resume(throwing: MSWConnectError.cancelled)
+                    return
                 }
-                Task { @MainActor [weak self] in
-                    guard let self else {
-                        finish(.failure(MSWConnectError.cancelled))
-                        return
-                    }
-                    guard self.authenticationGeneration == generation else {
-                        finish(.failure(MSWConnectError.cancelled))
-                        return
-                    }
-                    self.activeFinish = finish
-                    let authentication = ASWebAuthenticationSession(
-                        url: url,
-                        callbackURLScheme: callbackScheme
-                    ) { [weak self] callbackURL, error in
-                        Task { @MainActor in
-                            guard let self,
-                                  self.authenticationGeneration == generation else {
-                                finish(.failure(MSWConnectError.cancelled))
-                                return
-                            }
-                            self.session = nil
-                            self.activeFinish = nil
-                            if let callbackURL {
-                                finish(.success(callbackURL))
-                            } else if let authError = error as? ASWebAuthenticationSessionError,
-                                      authError.code == .canceledLogin {
-                                finish(.failure(MSWConnectError.cancelled))
-                            } else {
-                                finish(.failure(MSWConnectError.transportUnavailable))
-                            }
-                        }
-                    }
-                    authentication.presentationContextProvider = self
-                    authentication.prefersEphemeralWebBrowserSession = false
-                    self.session = authentication
-                    guard authentication.start() else {
-                        self.session = nil
-                        self.activeFinish = nil
-                        finish(.failure(MSWConnectError.transportUnavailable))
-                        return
-                    }
+                self.continuation = continuation
+                guard opener(url) else {
+                    complete(.failure(MSWConnectError.transportUnavailable))
+                    return
+                }
+                timeoutTask = Task { [weak self] in
+                    try? await Task.sleep(for: Self.callbackTimeout)
+                    guard !Task.isCancelled else { return }
+                    self?.fail(generation: currentGeneration, with: MSWConnectError.callbackExpired)
                 }
             }
-        }, onCancel: { [weak self] in
-            Task { @MainActor in
-                self?.cancelAuthentication(generation: generation)
+        }, onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancel(generation: currentGeneration)
             }
         })
     }
 
-    @MainActor
-    private func finishAuthentication(_ result: Result<URL, Error>) {
-        session = nil
-        let finish = activeFinish
-        activeFinish = nil
-        finish?(result)
+    /// Handles a URL event delivered to the app. Returns true when this
+    /// browser consumed the URL; otherwise the caller may ignore it. A URL
+    /// that does not match the pending authorization (wrong scheme, host,
+    /// path, or state) is left untouched so the correct callback can arrive.
+    @discardableResult
+    func handleCallback(_ url: URL) -> Bool {
+        guard let expected = expectedCallback, continuation != nil, expected.matches(url) else {
+            return false
+        }
+        complete(.success(url))
+        return true
     }
 
-    @MainActor
-    private func cancelAuthentication(generation: Int) {
-        guard authenticationGeneration == generation else { return }
-        session?.cancel()
-        finishAuthentication(.failure(MSWConnectError.cancelled))
+    private func clearPending() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        expectedCallback = nil
+        complete(.failure(MSWConnectError.cancelled))
     }
 
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        NSApp.keyWindow ?? NSApp.windows.first ?? NSWindow(
-            contentRect: .zero,
-            styleMask: [],
-            backing: .buffered,
-            defer: true
-        )
+    private func cancel(generation: Int) {
+        guard generation == self.generation else { return }
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        complete(.failure(MSWConnectError.cancelled))
+    }
+
+    private func fail(generation: Int, with error: Error) {
+        guard generation == self.generation else { return }
+        timeoutTask = nil
+        complete(.failure(error))
+    }
+
+    private func complete(_ result: Result<URL, Error>) {
+        guard let continuation else { return }
+        self.continuation = nil
+        expectedCallback = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+        switch result {
+        case .success(let callbackURL):
+            continuation.resume(returning: callbackURL)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
     }
 }
+
 protocol MSWConnectKeychainStoring: CredentialKeychainStoring {}
 
 struct GitHubAccount: Codable, Sendable, Equatable {
@@ -615,6 +671,7 @@ actor MSWConnectClient {
         return MSWConnectAuthorizationStart(url: url, state: state, codeVerifier: verifier, expiresAt: expiresAt)
     }
 
+
     func authorize(browser: MSWConnectBrowserAuthenticating) async throws -> GitHubAuthorizationDiscovery {
         try configuration.validate()
         if let restored = try restoreSession() {
@@ -626,14 +683,19 @@ actor MSWConnectClient {
             )
         }
         let start = try startAuthorization()
-        let callback = try await browser.authenticate(url: start.url, callbackScheme: configuration.callbackScheme)
-        let connected = try await completeAuthorization(callbackURL: callback)
-        let installations = try await self.installations()
-        return GitHubAuthorizationDiscovery(
-            sessionID: connected.sessionID,
-            account: connected.account,
-            installations: installations
-        )
+        do {
+            let callback = try await browser.authenticate(url: start.url, callbackScheme: configuration.callbackScheme)
+            let connected = try await completeAuthorization(callbackURL: callback)
+            let installations = try await self.installations()
+            return GitHubAuthorizationDiscovery(
+                sessionID: connected.sessionID,
+                account: connected.account,
+                installations: installations
+            )
+        } catch {
+            pending.removeValue(forKey: start.state)
+            throw error
+        }
     }
 
     func completeAuthorization(callbackURL: URL) async throws -> MSWConnectSession {
@@ -718,7 +780,10 @@ actor MSWConnectClient {
             guard stored.issuer == configuration.baseURL.absoluteString,
                   stored.clientID == configuration.clientID,
                   stored.redirectURI == configuration.redirectURL.absoluteString else {
-                try keychain.delete(service: sessionService, account: sessionAccount)
+                // A session minted by another configuration — or read by an
+                // unconfigured build whose sentinel base URL can never match —
+                // must be retained, never deleted: the owning configuration
+                // can still restore it later.
                 return nil
             }
             guard stored.expiresAt > now() else {
@@ -745,7 +810,6 @@ actor MSWConnectClient {
             throw MSWConnectError.malformedResponse
         }
     }
-
     func currentSession() -> MSWConnectSession? {
         guard let session, session.expiresAt > now() else { return nil }
         return session

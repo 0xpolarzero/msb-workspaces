@@ -60,7 +60,9 @@ msw identity "Your Full Name" work@example.com dev
 
 ## 3. Connect GitHub
 
-GitHub authorization is completed in **MSW Monitor**, not in the CLI. Open **Settings** → **GitHub** → **Connect GitHub** (the first-run setup window exposes the same action), complete the hosted authorization, select the GitHub owner and repositories, and review the guest-read/host-write assignments before applying them.
+GitHub authorization is completed in **MSW Monitor**, not in the CLI. Open **Settings** → **GitHub** → **Connect GitHub** (the first-run setup window exposes the same action). The authorization page opens in your default browser; builds without a configured Connect endpoint show the connection as unavailable instead of offering a page that cannot connect. After authorizing, select the GitHub owner and repositories, and review the guest-read/host-write assignments before applying them.
+
+If the connected account has no installed MSW GitHub App, the setup window offers **Install MSW App in GitHub** when the signed build has a verified installation URL configured. Approve the app for the intended owner, then return to MSW Monitor and connect GitHub again. Builds without that release-supplied URL show a safe unavailable-link message instead of opening an arbitrary address; ask the release administrator for the approved installation action.
 
 The Connect service issues short-lived grants scoped to the selected owner, repositories, and workspace. Repeat the flow for `dev`, `playgrounds`, and `personal` when their repository scopes differ. The legacy `msw github setup` token prompt was removed; invoking it only reports the migration path.
 

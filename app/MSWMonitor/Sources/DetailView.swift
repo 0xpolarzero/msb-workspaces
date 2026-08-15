@@ -48,6 +48,21 @@ struct DetailRoute: Equatable {
         self.workspace = workspace
         self.section = section
     }
+
+    init?(deepLink: URL) {
+        guard deepLink.scheme == "msw-monitor" else { return nil }
+        let components = URLComponents(url: deepLink, resolvingAgainstBaseURL: false)
+        let workspace = deepLink.host == "workspace"
+            ? deepLink.pathComponents
+                .filter { $0 != "/" }
+                .first
+                .flatMap(Workspace.ID.init(rawValue:))
+            : nil
+        let requestedSection = components?.queryItems?
+            .first(where: { $0.name == "section" })?
+            .value ?? (deepLink.host == "workspace" ? "overview" : deepLink.host ?? "overview")
+        self.init(workspace: workspace, section: DetailSection(deepLinkValue: requestedSection))
+    }
 }
 
 @Observable
@@ -72,14 +87,28 @@ final class DetailWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private let navigation: DetailNavigationState
     private let model: AppModel
+    private let openSettings: @MainActor (SettingsSection) -> Void
+    private let openSetup: @MainActor () -> Void
     private let onClose: @MainActor () -> Void
 
-    init(model: AppModel, onClose: @escaping @MainActor () -> Void) {
+    init(
+        model: AppModel,
+        openSettings: @escaping @MainActor (SettingsSection) -> Void,
+        openSetup: @escaping @MainActor () -> Void,
+        onClose: @escaping @MainActor () -> Void
+    ) {
         self.model = model
         navigation = DetailNavigationState(
             route: DetailRoute(workspace: model.selectedWorkspace, section: .overview)
         )
-        let view = DetailView(model: model, navigation: navigation)
+        self.openSettings = openSettings
+        self.openSetup = openSetup
+        let view = DetailView(
+            model: model,
+            navigation: navigation,
+            openSettings: openSettings,
+            openSetup: openSetup
+        )
         let hosting = NSHostingController(rootView: view)
         window = NSWindow(contentViewController: hosting)
         self.onClose = onClose
@@ -110,6 +139,8 @@ final class DetailWindowController: NSObject, NSWindowDelegate {
 struct DetailView: View {
     @Bindable var model: AppModel
     @Bindable private var navigation: DetailNavigationState
+    let openSettings: (SettingsSection) -> Void
+    let openSetup: () -> Void
     @State private var restoreArchive: URL?
     @State private var backupDestination: URL?
     @State private var reviewBackup = false
@@ -118,9 +149,16 @@ struct DetailView: View {
     @State private var pushConfirmation = ""
     @State private var maintenanceOperation: MaintenanceOperation?
 
-    fileprivate init(model: AppModel, navigation: DetailNavigationState) {
+    fileprivate init(
+        model: AppModel,
+        navigation: DetailNavigationState,
+        openSettings: @escaping (SettingsSection) -> Void,
+        openSetup: @escaping () -> Void
+    ) {
         self.model = model
         self.navigation = navigation
+        self.openSettings = openSettings
+        self.openSetup = openSetup
     }
 
     var body: some View {
@@ -797,7 +835,7 @@ private struct AggregateStatusView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        let health = MonitorHealth.resolve(model)
+        let health = model.health
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: health.symbol)
                 .font(.title2)

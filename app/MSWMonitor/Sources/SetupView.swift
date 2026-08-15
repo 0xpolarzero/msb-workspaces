@@ -6,10 +6,16 @@ final class SetupWindowController {
     private let window: NSWindow
 
     init(
-        coordinator: BootstrapCoordinator?,
+        coordinator: (any MSWBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
-        openSettings: @escaping () -> Void,
-        closeSetup: @escaping () -> Void = {}
+        openSettings: @escaping (SettingsSection) -> Void,
+        closeSetup: @escaping () -> Void = {},
+        uiTestMode: Bool = false,
+        uiTestStartsInReview: Bool = false,
+        uiTestGitHubScenario: String? = nil,
+        uiTestBootstrapReconnect: Bool = false,
+        startupRecoveryBlockedReason: String? = nil,
+        retryStartupRecovery: @escaping () -> Void = {}
     ) {
         let fallbackBroker = try? CredentialBroker()
         let authorization = authorizationCoordinator ?? fallbackBroker.map {
@@ -20,10 +26,18 @@ final class SetupWindowController {
                 coordinator: coordinator,
                 authorizationCoordinator: authorization,
                 openSettings: openSettings,
-                closeSetup: closeSetup
+                closeSetup: closeSetup,
+                uiTestMode: uiTestMode,
+                uiTestStartsInReview: uiTestStartsInReview,
+                uiTestGitHubScenario: uiTestGitHubScenario,
+                uiTestBootstrapReconnect: uiTestBootstrapReconnect,
+                startupRecoveryBlockedReason: startupRecoveryBlockedReason,
+                retryStartupRecovery: retryStartupRecovery
             )
         )
         window = NSWindow(contentViewController: hosting)
+        window.identifier = NSUserInterfaceItemIdentifier("setup.window")
+        hosting.view.setAccessibilityIdentifier("setup.window")
         window.title = "Set up MSW Monitor"
         window.setContentSize(NSSize(width: 620, height: 700))
         window.minSize = NSSize(width: 560, height: 560)
@@ -71,6 +85,47 @@ private struct SetupResumeState: Codable {
     var identityConfiguredWorkspaces: Set<String>
     var identitySkipped: Bool
     var verificationResults: [GitHubWorkspaceVerificationResult]
+    var verifiedIdentityByWorkspace: [String: SetupVerifiedIdentity]?
+}
+
+struct SetupVerifiedIdentity: Codable, Equatable {
+    let name: String
+    let email: String
+}
+
+enum SetupIdentityVerification {
+    static func isComplete(
+        requiredWorkspaces: Set<String>,
+        configuredWorkspaces: Set<String>,
+        verifiedByWorkspace: [String: SetupVerifiedIdentity],
+        target: String,
+        name: String,
+        email: String
+    ) -> Bool {
+        let targets = target == "all" ? requiredWorkspaces : Set([target])
+        guard targets.isSubset(of: configuredWorkspaces) else { return false }
+        let expected = SetupVerifiedIdentity(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            email: email.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        return targets.allSatisfy { verifiedByWorkspace[$0] == expected }
+    }
+
+    static func hasUnverifiedEdits(
+        configuredWorkspaces: Set<String>,
+        verifiedByWorkspace: [String: SetupVerifiedIdentity],
+        target: String,
+        name: String,
+        email: String
+    ) -> Bool {
+        guard !configuredWorkspaces.isEmpty else { return false }
+        let targets = target == "all" ? configuredWorkspaces : Set([target])
+        let expected = SetupVerifiedIdentity(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            email: email.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        return targets.contains { verifiedByWorkspace[$0] != expected }
+    }
 }
 
 private enum AuthorizationIssueKind: String {
@@ -86,19 +141,68 @@ private struct AuthorizationIssue: Identifiable {
     let message: String
     var id: String { kind.rawValue }
 }
+private struct RepositoryLoadIdentity: Equatable, Sendable {
+    let generation: Int
+    let workspace: Workspace.ID
+    let installationID: Int
+    let sessionID: UUID
+}
+
+private enum SetupStep: String, CaseIterable, Identifiable {
+    case readiness
+    case github
+    case identity
+    case review
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .readiness: return "Readiness"
+        case .github: return "GitHub"
+        case .identity: return "Identity"
+        case .review: return "Review"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .readiness: return "checkmark.shield"
+        case .github: return "person.crop.circle.badge.checkmark"
+        case .identity: return "person.text.rectangle"
+        case .review: return "checkmark.circle"
+        }
+    }
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .readiness: return "setup.step.readiness"
+        case .github: return "setup.step.github"
+        case .identity: return "setup.step.identity"
+        case .review: return "setup.step.review"
+        }
+    }
+}
 
 struct SetupView: View {
-    let coordinator: BootstrapCoordinator?
+    let coordinator: (any MSWBootstrapCoordinating)?
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    let openSettings: () -> Void
+    let openSettings: (SettingsSection) -> Void
     let closeSetup: () -> Void
-
+    let uiTestMode: Bool
+    let uiTestStartsInReview: Bool
+    let uiTestGitHubScenario: String?
+    let uiTestBootstrapReconnect: Bool
+    let startupRecoveryBlockedReason: String?
+    let retryStartupRecovery: () -> Void
     @State private var checks: [MSWPreflightCheck] = []
     @State private var state = MSWBootstrapState.initial
     @State private var isRunning = false
     @State private var isChecking = true
+    @State private var lastPreflightAt: Date?
     @State private var passedChecksExpanded = false
-    @State private var githubExpanded = true
+    @State private var requirementsExpanded = false
+    @State private var advisoriesExpanded = false
     @State private var error: String?
     @State private var notice: String?
 
@@ -116,27 +220,38 @@ struct SetupView: View {
     @State private var authorizationMayCancel = false
     @State private var isReviewing = false
     @State private var authorizationTask: Task<Void, Never>?
+    @State private var authorizationGeneration = 0
+    @State private var uiTestAuthorizationAttempts = 0
+    @State private var repositoryLoadGeneration = 0
+    @State private var activeRepositoryLoad: RepositoryLoadIdentity?
     @State private var authorizationIssue: AuthorizationIssue?
     @State private var verificationResults: [GitHubWorkspaceVerificationResult] = []
     @State private var githubSkipped = false
+    @State private var githubReconnectRequired = false
     @State private var identityName = ""
     @State private var identityEmail = ""
     @State private var identityTarget = "all"
     @State private var identityConfiguredWorkspaces: Set<String> = []
+    @State private var verifiedIdentityByWorkspace: [String: SetupVerifiedIdentity] = [:]
+
     @State private var identitySkipped = false
     @State private var isSavingIdentity = false
     @State private var identityStatus = ""
-    @State private var isFinalReview = false
+    @State private var activeStep: SetupStep = .readiness
+    @State private var githubContextLoaded = false
+    @State private var githubAttentionWorkspace: String?
+
 
     private static let resumeStateKey = "setup.resume.nonsecret.v1"
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Set up MSW Monitor").font(.largeTitle.weight(.semibold))
-                Text("A resumable, reviewed setup for this Mac, three isolated workspaces, and optional GitHub access.")
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Set up MSW Monitor")
+                    .font(.largeTitle.weight(.semibold))
+                Text("Complete four quick steps. GitHub and Git identity are optional and can be configured later.")
                     .foregroundStyle(.secondary)
-                setupOverview
+                setupStepper
             }
             .padding(.horizontal, 24)
             .padding(.top, 22)
@@ -144,17 +259,7 @@ struct SetupView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    setupProgress
-                    requirementsCard
-                    preflight
-                    Divider()
-                    githubBoundary
-                    Divider()
-                    identitySection
-                    if isFinalReview {
-                        Divider()
-                        finalReview
-                    }
+                    activeStepContent
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 24)
@@ -166,21 +271,46 @@ struct SetupView: View {
         }
         .frame(minWidth: 560, idealWidth: 620, minHeight: 560, idealHeight: 700)
         .task {
-            restoreResumeState()
-            loadPreflight()
-            await loadExistingMetadata()
-            await restoreCachedAuthorization()
+            if uiTestMode {
+                loadUITestState()
+            } else {
+                restoreResumeState()
+                loadPreflight()
+                await loadExistingMetadata()
+                await restoreCachedAuthorization()
+                githubContextLoaded = true
+            }
         }
         .onDisappear { pauseAuthorization() }
-        .onChange(of: drafts) { _, _ in persistResumeState() }
-        .onChange(of: githubSkipped) { _, _ in persistResumeState() }
-        .onChange(of: identityName) { _, _ in persistResumeState() }
-        .onChange(of: identityEmail) { _, _ in persistResumeState() }
-        .onChange(of: identityTarget) { _, _ in persistResumeState() }
-        .onChange(of: identityConfiguredWorkspaces) { _, _ in persistResumeState() }
-        .onChange(of: identitySkipped) { _, _ in persistResumeState() }
-        .onChange(of: verificationResults) { _, _ in persistResumeState() }
-        .accessibilityIdentifier("setup.window")
+        .onChange(of: drafts) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: githubSkipped) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: identityName) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: identityEmail) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: identityTarget) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: identityConfiguredWorkspaces) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: identitySkipped) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: verificationResults) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: verifiedIdentityByWorkspace) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.root")
     }
 
     private var blockingChecks: [MSWPreflightCheck] {
@@ -190,18 +320,23 @@ struct SetupView: View {
     private var warningChecks: [MSWPreflightCheck] {
         checks.filter { $0.status == .needsAction && $0.id == "memory" }
     }
-
     private var passedChecks: [MSWPreflightCheck] {
         checks.filter { $0.status == .pass }
+    }
+    private var canConnectGitHub: Bool {
+        if uiTestGitHubScenario == "unavailable" {
+            return false
+        }
+        return uiTestGitHubScenario != nil ||
+            (authorizationCoordinator != nil &&
+             authorizationCoordinator?.isConfigured == true &&
+             !isRunning)
     }
 
     private var systemReady: Bool {
         !checks.isEmpty && blockingChecks.isEmpty
     }
 
-    private var canConnectGitHub: Bool {
-        systemReady && state.phase == .complete && !isRunning && !isChecking
-    }
 
     private var canFinishWithoutGitHub: Bool {
         systemReady && state.phase == .complete
@@ -215,105 +350,232 @@ struct SetupView: View {
         githubSkipped || !existingMetadata.isEmpty || !verificationResults.isEmpty
     }
 
+
     private var identityDecisionMade: Bool {
-        identitySkipped || Set(Workspace.ID.allCases.map(\.rawValue)).isSubset(of: identityConfiguredWorkspaces)
+        identitySkipped || SetupIdentityVerification.isComplete(
+            requiredWorkspaces: Set(Workspace.ID.allCases.map(\.rawValue)),
+            configuredWorkspaces: identityConfiguredWorkspaces,
+            verifiedByWorkspace: verifiedIdentityByWorkspace,
+            target: identityTarget,
+            name: identityName,
+            email: identityEmail
+        )
     }
+
+    private var identityHasUnverifiedEdits: Bool {
+        guard !identitySkipped else { return false }
+        return SetupIdentityVerification.hasUnverifiedEdits(
+            configuredWorkspaces: identityConfiguredWorkspaces,
+            verifiedByWorkspace: verifiedIdentityByWorkspace,
+            target: identityTarget,
+            name: identityName,
+            email: identityEmail
+        )
+    }
+
 
     private var verificationAllowsCompletion: Bool {
         verificationResults.allSatisfy { $0.verified && $0.lifecycleRestored } &&
             existingMetadata.allSatisfy { $0.recoveryState == .ready && !$0.quarantined }
     }
 
+    /// Pure decision, unit-tested directly: Review/Done stay unavailable until
+    /// the restored GitHub context has finished loading, even when persisted
+    /// completed choices would otherwise satisfy every other gate.
+    static func allowsReviewCompletion(
+        contextLoaded: Bool,
+        systemReady: Bool,
+        githubDecided: Bool,
+        identityDecided: Bool,
+        verificationsAllowCompletion: Bool
+    ) -> Bool {
+        contextLoaded &&
+            systemReady &&
+            githubDecided &&
+            identityDecided &&
+            verificationsAllowCompletion
+    }
+
     private var canCompleteReview: Bool {
-        canFinishWithoutGitHub && githubDecisionMade && identityDecisionMade && verificationAllowsCompletion
+        Self.allowsReviewCompletion(
+            contextLoaded: githubContextLoaded,
+            systemReady: canFinishWithoutGitHub,
+            githubDecided: githubDecisionMade,
+            identityDecided: identityDecisionMade,
+            verificationsAllowCompletion: verificationAllowsCompletion
+        )
     }
 
     private var hostIntegrationNeedsPackagedBuild: Bool {
         checks.contains { $0.id == "host-integration" && $0.status == .unavailable }
     }
 
-    private var setupOverview: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(checks.isEmpty ? "Checking system readiness…" : "\(passedChecks.count) of \(checks.count) checks ready")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-                if isRunning {
-                    Text("Working on \(label(for: state.phase).lowercased())…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if !blockingChecks.isEmpty {
-                    Text("\(blockingChecks.count) need attention")
-                        .font(.caption.weight(.medium))
-                }
+    @ViewBuilder
+    private var activeStepContent: some View {
+        if let startupRecoveryBlockedReason {
+            startupRecoveryBlockedContent(startupRecoveryBlockedReason)
+        } else {
+            switch activeStep {
+            case .readiness:
+                requirementsCard
+                preflight
+            case .github:
+                githubBoundary
+            case .identity:
+                identitySection
+            case .review:
+                finalReview
             }
-            ProgressView(
-                value: checks.isEmpty ? 0 : Double(passedChecks.count),
-                total: Double(max(checks.count, 1))
-            )
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("setup.overview")
     }
 
-    private var setupProgress: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func startupRecoveryBlockedContent(_ reason: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Authorization recovery blocked", systemImage: "exclamationmark.octagon.fill")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.red)
+            Text("MSW Monitor did not expose workspace credentials because an interrupted GitHub authorization transaction could not be reconciled safely.")
+                .font(.callout)
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Retry recovery after checking MSW Connect availability. Existing workspace access remains protected until recovery succeeds.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
-                Text("Setup progress").font(.title3.weight(.semibold))
-                Spacer()
-                if state.completedPhases.isEmpty && state.startedAt == nil {
-                    Text("Not started").foregroundStyle(.secondary)
-                } else if state.phase == .complete {
-                    Text("System verified").foregroundStyle(.green)
-                } else {
-                    Text("Current: \(label(for: state.phase))").foregroundStyle(.secondary)
-                }
-            }
-            ForEach(Array(setupPhases.enumerated()), id: \.element) { index, phase in
-                let complete = phaseIsComplete(phase)
-                let current = phaseIsCurrent(phase)
-                HStack(alignment: .firstTextBaseline, spacing: 9) {
-                    Image(systemName: complete ? "checkmark.circle.fill" : (current ? "circle.inset.filled" : "circle"))
-                        .foregroundStyle(complete ? .green : (current ? Color.accentColor : .secondary))
-                        .accessibilityHidden(true)
-                    Text("Step \(index + 1): \(label(for: phase))")
-                        .font(.callout.weight(current ? .semibold : .regular))
-                    Spacer()
-                    if current {
-                        Text(guidance(for: phase)).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Step \(index + 1), \(label(for: phase)), \(complete ? "complete" : (current ? "current" : "pending"))")
-                .accessibilityIdentifier("setup.phase.\(phase.rawValue)")
-            }
-            if let startedAt = state.startedAt, state.phase != .complete {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text("Elapsed \(durationLabel(context.date.timeIntervalSince(startedAt))). Closing this window pauses the view, not the saved setup state.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("setup.elapsed")
-                }
+                Button("Retry authorization recovery", action: retryStartupRecovery)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("setup.recovery.retry.button")
+                Button("Open GitHub settings") { openSettings(.github) }
+                    .accessibilityIdentifier("setup.recovery.settings.button")
             }
         }
-        .padding(12)
+        .padding(14)
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("setup.recovery-blocked")
+    }
+
+    private var setupStepper: some View {
+        HStack(spacing: 0) {
+            ForEach(SetupStep.allCases) { step in
+                if step != .readiness {
+                    Rectangle()
+                        .fill(.quaternary)
+                        .frame(width: 22, height: 1)
+                }
+                Button {
+                    selectStep(step)
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: stepIsComplete(step) ? "checkmark.circle.fill" : step.symbol)
+                            .font(.body.weight(.semibold))
+                        Text(step.title)
+                            .font(.caption.weight(activeStep == step ? .semibold : .regular))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(
+                        stepIsComplete(step)
+                            ? Color.green
+                            : (activeStep == step ? Color.accentColor : Color.secondary)
+                    )
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .disabled(!canSelectStep(step))
+                .opacity(canSelectStep(step) ? 1 : 0.55)
+                .accessibilityIdentifier(step.accessibilityIdentifier)
+                .accessibilityValue(
+                    stepIsComplete(step)
+                        ? "Complete"
+                        : (activeStep == step ? "Current step" : "Not available yet")
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityIdentifier("setup.progress")
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.stepper")
+    }
+
+    private var githubStepComplete: Bool {
+        githubDecisionMade && verificationAllowsCompletion
+    }
+
+    private var identityStepComplete: Bool {
+        identityDecisionMade
+    }
+
+    private func stepIsComplete(_ step: SetupStep) -> Bool {
+        switch step {
+        case .readiness: return canFinishWithoutGitHub
+        case .github: return githubStepComplete
+        case .identity: return identityStepComplete
+        case .review: return canCompleteReview
+        }
+    }
+
+    private func canSelectStep(_ step: SetupStep) -> Bool {
+        switch step {
+        case .readiness:
+            return true
+        case .github:
+            return githubContextLoaded &&
+                (canFinishWithoutGitHub || (systemReady && githubReconnectRequired))
+        case .identity:
+            return githubContextLoaded && canFinishWithoutGitHub && githubStepComplete
+        case .review:
+            return canCompleteReview
+        }
+    }
+    private func selectStep(_ step: SetupStep) {
+        guard canSelectStep(step) else { return }
+        activeStep = step
+    }
+    private func advanceFromReadiness() {
+        guard githubContextLoaded else { return }
+        if canFinishWithoutGitHub || githubReconnectRequired {
+            activeStep = .github
+        } else {
+            runSetup()
+        }
+    }
+    private func advanceFromGitHub() {
+        guard githubStepComplete else { return }
+        activeStep = .identity
+    }
+
+    private func advanceFromIdentity() {
+        guard identityStepComplete else { return }
+        activeStep = .review
+    }
+
+    private func moveBack() {
+        switch activeStep {
+        case .readiness:
+            break
+        case .github:
+            activeStep = .readiness
+        case .identity:
+            activeStep = .github
+        case .review:
+            activeStep = .identity
+        }
     }
 
     private var requirementsCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Before continuing").font(.title3.weight(.semibold))
-            Label("Apple Silicon Mac running macOS 26 or later, with at least 20 GiB free; 16 GiB memory is recommended.", systemImage: "desktopcomputer")
-            Label("A complete signed build may request macOS approval for its host helper. Setup never hides an administrator prompt in Terminal.", systemImage: "lock.shield")
-            Label("MSW installs an app-managed signed toolchain when available; a supported local source installer is the recovery path for development builds.", systemImage: "hammer")
-            Label("GitHub is optional. Connecting requires the system browser, network access, and an installed MSW GitHub App for each chosen owner.", systemImage: "safari")
-            Text("Deep verification may temporarily start workspaces and run test containers. It restores their prior lifecycle before setup can be completed.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        DisclosureGroup(isExpanded: $requirementsExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Apple Silicon Mac running macOS 26 or later.", systemImage: "desktopcomputer")
+                Label("A signed build may ask to approve its host helper in macOS settings.", systemImage: "lock.shield")
+                Label("GitHub is optional and uses your default browser.", systemImage: "safari")
+            }
+            .padding(.top, 8)
+        } label: {
+            Label("What you need", systemImage: "list.bullet.clipboard")
+                .font(.headline)
         }
-        .font(.callout)
-        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.requirements")
     }
 
@@ -323,6 +585,11 @@ struct SetupView: View {
                 Text("System readiness").font(.title3.weight(.semibold))
                 Spacer()
                 if isChecking { ProgressView().controlSize(.small) }
+                if let lastPreflightAt {
+                    Text("Checked \(verificationAge(lastPreflightAt))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             if checks.isEmpty {
                 Text("Checking this Mac…").foregroundStyle(.secondary)
@@ -341,11 +608,19 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.preflight.attention")
                 }
                 if !warningChecks.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Advisory", systemImage: "info.circle.fill")
-                            .foregroundStyle(.secondary)
-                        ForEach(warningChecks) { check in preflightRow(check, prominent: false) }
+                    DisclosureGroup(isExpanded: $advisoriesExpanded) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(warningChecks) { check in preflightRow(check, prominent: false) }
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        Label(
+                            "\(warningChecks.count) advisory \(warningChecks.count == 1 ? "check" : "checks")",
+                            systemImage: "info.circle.fill"
+                        )
+                        .foregroundStyle(.secondary)
                     }
+                    .accessibilityIdentifier("setup.preflight.advisory.toggle")
                 }
                 if !passedChecks.isEmpty {
                     DisclosureGroup(isExpanded: $passedChecksExpanded) {
@@ -404,145 +679,192 @@ struct SetupView: View {
     }
 
     private var githubBoundary: some View {
-        DisclosureGroup(isExpanded: $githubExpanded) {
-            VStack(alignment: .leading, spacing: 12) {
-                if let account {
-                    Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityIdentifier("setup.github.account")
-                    Text(githubIdentityDisclosure(account))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Each workspace is a separate trust domain. Assign is off until you deliberately enable it; no owner or repository is selected automatically.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Connect through the system browser. MSW requests identity (login, display name, and public email when available) plus access only to repositories installed for the selected owner. No grant is created until you review and apply workspace assignments.")
-                        .foregroundStyle(.secondary)
-                    Button("Connect GitHub", action: beginAuthorization)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!canConnectGitHub || isAuthorizing)
-                        .accessibilityIdentifier("setup.github.connect.button")
-                }
-                if account != nil {
-                    if installations.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label("MSW App is not installed for an owner yet.", systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text("Install the MSW App for the GitHub owner that should provide repositories, then connect GitHub again.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if githubInstallationURL != nil {
-                                Button("Install MSW App in GitHub", action: openGitHubInstallation)
-                                    .accessibilityIdentifier("setup.github.install.button")
-                            }
-                        }
-                        .padding(10)
-                        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                    ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
-                        assignmentCard(for: workspace)
-                    }
-                    if isReviewing {
-                        reviewCard
-                    } else {
-                        Button("Review workspace access") { isReviewing = true }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!hasValidAssignments || isAuthorizing)
-                            .accessibilityIdentifier("setup.github.review.button")
-                    }
-                    Button("Manage connected account in Settings", action: openSettings)
-                        .disabled(isAuthorizing)
-                }
-
-                if isAuthorizing {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(authorizationStatus).font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        if authorizationMayCancel {
-                            Button("Cancel wait", action: pauseAuthorization)
-                                .keyboardShortcut(.cancelAction)
-                                .accessibilityIdentifier("setup.github.cancel.button")
-                        }
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("setup.github.progress")
-                }
-
-                if let authorizationIssue {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Label(issueTitle(authorizationIssue.kind), systemImage: issueSymbol(authorizationIssue.kind))
-                            .font(.callout.weight(.semibold))
-                        Text(authorizationIssue.message).font(.caption)
-                        Text(issueRecovery(authorizationIssue.kind)).font(.caption).foregroundStyle(.secondary)
-                        Button("Retry GitHub authorization", action: beginAuthorization)
-                            .disabled(!canConnectGitHub || isAuthorizing)
-                            .accessibilityIdentifier("setup.github.retry.button")
-                    }
-                    .padding(10)
-                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("setup.github.issue.\(authorizationIssue.kind.rawValue)")
-                }
-
-                if !existingMetadata.isEmpty {
-                    Text("Existing assignments").font(.headline)
-                    ForEach(groupedExistingMetadata, id: \.workspace) { group in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(group.workspace)
-                                    .font(.callout.weight(.medium))
-                                if group.needsAttention {
-                                    Text("Needs attention: \(group.states.joined(separator: ", "))")
-                                        .font(.caption)
-                                        .foregroundStyle(.orange)
-                                } else {
-                                    Text("\(group.accessModes.joined(separator: " + ")) · \(group.repositoryNames.joined(separator: ", "))")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            Button("Reauthorize") { beginAuthorization() }
-                                .disabled(isAuthorizing || !canConnectGitHub)
-                            Button("Manage", action: openSettings)
-                                .disabled(isAuthorizing)
-                        }
-                    }
-                }
-
-                if !authorizationStatus.isEmpty && !isAuthorizing {
-                    Text(authorizationStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(4)
-                        .accessibilityIdentifier("setup.github.status")
-                }
-
-                if !verificationResults.isEmpty {
-                    verificationResultsCard
-                }
-
-                if canFinishWithoutGitHub && account == nil && existingMetadata.isEmpty {
-                    Button(githubSkipped ? "GitHub will be skipped" : "Continue without GitHub") {
-                        githubSkipped = true
-                        authorizationIssue = nil
-                        authorizationStatus = "GitHub skipped by choice. You can connect later from Settings."
-                    }
-                    .disabled(githubSkipped)
-                    .accessibilityIdentifier("setup.github.skip.button")
-                }
-            }
-            .padding(.top, 10)
-        } label: {
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("GitHub access").font(.title3.weight(.semibold))
-                Text("Connect once, assign per workspace")
+                Text("Optional — connect, review, and apply per workspace")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            if let account {
+                Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .accessibilityIdentifier("setup.github.account")
+                Text(githubIdentityDisclosure(account))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Choose which workspaces can see which repositories. Nothing is changed until you review and apply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label("GitHub is not connected", systemImage: "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.github.disconnected")
+                Text("GitHub is optional. You can connect it now or configure it later in Settings.")
+                    .font(.caption)
+            }
+
+            if let workspace = githubAttentionWorkspace {
+                Label(
+                    "GitHub access for \(workspace) needs attention.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("setup.github.attention")
+            }
+
+            if (authorizationCoordinator == nil && uiTestGitHubScenario == nil) ||
+                uiTestGitHubScenario == "unavailable" {
+                Text(uiTestGitHubScenario == "unavailable"
+                    ? "GitHub connection is unavailable. The existing access and saved choices remain unchanged; retry after MSW Connect is available."
+                    : "GitHub connection is unavailable in this build. You can continue without it and configure it later from Settings.")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.github.unavailable")
+            } else if uiTestGitHubScenario != nil {
+                Button(isAuthorizing ? "Opening GitHub…" : "Connect GitHub", action: beginAuthorization)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canConnectGitHub || isAuthorizing)
+                    .accessibilityIdentifier("setup.github.connect.button")
+            } else if !(authorizationCoordinator?.isConfigured ?? false) {
+                Text("GitHub connection isn't available yet. Continue and connect later in Settings.")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.github.unavailable")
+            } else {
+                Text("Connect GitHub opens the authorization page in your default browser.")
+                    .foregroundStyle(.secondary)
+                Button(isAuthorizing ? "Opening GitHub…" : "Connect GitHub", action: beginAuthorization)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canConnectGitHub || isAuthorizing)
+                    .accessibilityIdentifier("setup.github.connect.button")
+            }
+            if canFinishWithoutGitHub {
+                Button("Continue without GitHub") {
+                    githubSkipped = true
+                    authorizationIssue = nil
+                    githubAttentionWorkspace = nil
+                    authorizationStatus = "GitHub skipped by choice. You can connect later from Settings."
+                    activeStep = .identity
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(githubSkipped)
+                .accessibilityIdentifier("setup.github.skip.button")
+            }
+
+            if account != nil {
+                if installations.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("MSW App is not installed for an owner yet.", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("Install the MSW App for the GitHub owner that should provide repositories, then connect GitHub again.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if Self.validatedInstallationURL(githubInstallationURL) != nil {
+                            Button("Install MSW App in GitHub", action: openGitHubInstallation)
+                                .accessibilityIdentifier("setup.github.install.button")
+                        } else {
+                            Text("This build has no verified GitHub App installation link. Ask your release administrator for the approved installation URL.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
+                ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
+                    assignmentCard(for: workspace)
+                }
+                if isReviewing {
+                    reviewCard
+                }
+                Button("Manage connected account in Settings") { openSettings(.github) }
+                    .disabled(isAuthorizing)
+            }
+
+            if isAuthorizing {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(authorizationStatus).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if authorizationMayCancel {
+                        Button("Cancel wait", action: pauseAuthorization)
+                            .keyboardShortcut(.cancelAction)
+                            .accessibilityIdentifier("setup.github.cancel.button")
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("setup.github.progress")
+            }
+
+            if let authorizationIssue {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label(issueTitle(authorizationIssue.kind), systemImage: issueSymbol(authorizationIssue.kind))
+                        .font(.callout.weight(.semibold))
+                    LabeledContent("Cause", value: authorizationIssue.message)
+                    LabeledContent("Affected", value: githubAffectedScope)
+                    LabeledContent("Last verified", value: githubVerificationAge)
+                    LabeledContent("Blocked", value: "Applying reviewed GitHub workspace grants")
+                    Text(issueRecovery(authorizationIssue.kind)).font(.caption).foregroundStyle(.secondary)
+                    Button("Retry GitHub authorization", action: beginAuthorization)
+                        .disabled(!canConnectGitHub || isAuthorizing)
+                        .accessibilityIdentifier("setup.github.retry.button")
+                }
+                .font(.caption)
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("setup.github.issue.\(authorizationIssue.kind.rawValue)")
+            }
+
+            if !existingMetadata.isEmpty {
+                Text("Existing assignments").font(.headline)
+                ForEach(groupedExistingMetadata, id: \.workspace) { group in
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(group.workspace)
+                                .font(.callout.weight(.medium))
+                            if group.needsAttention {
+                                Text("Needs attention: \(group.states.joined(separator: ", "))")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            } else {
+                                Text("\(group.accessModes.joined(separator: " + ")) · \(group.repositoryNames.joined(separator: ", "))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button("Reauthorize") { beginAuthorization() }
+                            .disabled(isAuthorizing || !canConnectGitHub)
+                        Button("Manage") { openSettings(.github) }
+                            .disabled(isAuthorizing)
+                    }
+                }
+            }
+
+            if !authorizationStatus.isEmpty && !isAuthorizing {
+                Text(authorizationStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .accessibilityIdentifier("setup.github.status")
+            }
+
+            if !verificationResults.isEmpty {
+                verificationResultsCard
+            }
+
+            if canFinishWithoutGitHub && !existingMetadata.isEmpty && account == nil {
+                Button("Continue with existing GitHub access") {
+                    githubSkipped = false
+                    authorizationStatus = "Existing access will be kept. Connect again only if you need to change repository assignments."
+                }
+                .accessibilityIdentifier("setup.github.keep.button")
+            }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github-boundary")
     }
 
@@ -556,6 +878,7 @@ struct SetupView: View {
                 Spacer()
                 Toggle("Assign", isOn: draftBinding(for: workspace).enabled)
                     .toggleStyle(.checkbox)
+                    .disabled(isAuthorizing)
                     .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).assign")
             }
             if draft.enabled {
@@ -568,6 +891,7 @@ struct SetupView: View {
                 .onChange(of: draft.installationID) { _, value in
                     selectInstallation(for: workspace, installationID: value)
                 }
+                .disabled(isAuthorizing)
                 .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).owner")
             }
             if draft.enabled && !repositories.isEmpty {
@@ -576,6 +900,7 @@ struct SetupView: View {
                     ForEach(repositories) { repository in
                         Toggle(repository.fullName, isOn: repositoryBinding(for: workspace, repositoryID: repository.id))
                             .toggleStyle(.checkbox)
+                            .disabled(isAuthorizing)
                             .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).repository.\(repository.id)")
                     }
                 }
@@ -586,11 +911,13 @@ struct SetupView: View {
                         Text(repository.fullName).tag(Optional(repository.id))
                     }
                 }
+                .disabled(isAuthorizing)
                 .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).verification")
                 Picker("Access mode", selection: draftBinding(for: workspace).accessMode) {
                     Text("Read-only").tag("read-only")
                     Text("Read + write").tag("read-write")
                 }
+                .disabled(isAuthorizing)
                 .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).access")
                 Text(draft.accessMode == "read-write"
                     ? "Guest: Contents read + Metadata read. Host only: Contents read/write. The write credential is never placed in the VM."
@@ -608,7 +935,6 @@ struct SetupView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 10).stroke(.quaternary, lineWidth: 1)
         }
-        .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue)")
     }
 
     private var reviewCard: some View {
@@ -619,14 +945,6 @@ struct SetupView: View {
                 .foregroundStyle(.secondary)
             ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
                 reviewLine(for: workspace)
-            }
-            HStack {
-                Button("Back") { isReviewing = false }
-                    .keyboardShortcut(.cancelAction)
-                Button(isAuthorizing ? "Applying…" : "Apply assignments") { commitAssignments() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isAuthorizing || !hasValidAssignments)
-                    .accessibilityIdentifier("setup.github.apply.button")
             }
         }
         .padding(12)
@@ -674,28 +992,43 @@ struct SetupView: View {
                     Text("Checked \(result.checkedAt.formatted(date: .abbreviated, time: .standard))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    if !result.verified || !result.lifecycleRestored {
+                        Text("Blocked: GitHub repository access for \(result.workspace) until verification and lifecycle restoration succeed.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Reauthorize \(result.workspace)", action: beginAuthorization)
+                            .disabled(!canConnectGitHub || isAuthorizing)
+                    }
                 }
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("setup.github.verification.\(result.workspace)")
             }
         }
         .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github.verifications")
     }
 
     private var identitySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Git identity").font(.title3.weight(.semibold))
-            Text("MSW writes only the reviewed Git author name and email to the selected workspaces. These fields are editable and are never inferred silently from a token.")
+            Text("MSW writes the reviewed author name and email to the selected workspaces.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if !canFinishWithoutGitHub {
+                Label("You can enter these values now. Saving becomes available after system setup finishes.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             TextField("Full name", text: $identityName)
                 .textContentType(.name)
+                .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Git author full name")
                 .accessibilityIdentifier("setup.identity.name")
             TextField("Email", text: $identityEmail)
                 .textContentType(.emailAddress)
+                .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Git author email")
                 .accessibilityIdentifier("setup.identity.email")
             Picker("Apply to", selection: $identityTarget) {
@@ -716,18 +1049,28 @@ struct SetupView: View {
                     .disabled(!canSaveIdentity || isSavingIdentity)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("setup.identity.save.button")
-                Button(identitySkipped ? "Identity will be skipped" : "Skip identity for now") {
+                Button("Skip identity for now") {
                     identitySkipped = true
                     identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
                 .disabled(identitySkipped || isSavingIdentity)
                 .accessibilityIdentifier("setup.identity.skip.button")
             }
-            if !identityStatus.isEmpty {
+            if identityHasUnverifiedEdits {
+                Label(
+                    "Identity changed since the last verification. Save and verify again before finishing.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("setup.identity.status")
+            } else if !identityStatus.isEmpty {
                 Text(identityStatus).font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("setup.identity.status")
             }
-            if !identityConfiguredWorkspaces.isEmpty {
+            if !identityConfiguredWorkspaces.isEmpty && !identityHasUnverifiedEdits {
                 Label(
                     "Verified for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))",
                     systemImage: "checkmark.circle.fill"
@@ -736,21 +1079,33 @@ struct SetupView: View {
                 .foregroundStyle(.green)
             }
         }
-        .disabled(!canFinishWithoutGitHub || isRunning)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.identity")
     }
 
     private var finalReview: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Final review").font(.title2.weight(.semibold))
+            Text("Ready to finish")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("setup.final-review.title")
+            Text("Your choices are ready to apply.")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("setup.final-review.summary")
             Text("Nothing is marked complete until you review this summary and choose Done.")
                 .foregroundStyle(.secondary)
             reviewStatusLine(
                 title: "System and workspaces",
-                value: canFinishWithoutGitHub ? "Deep setup completed and retained state is ready." : "Not verified yet.",
+                value: canFinishWithoutGitHub ? "Ready" : "Not verified yet",
                 ready: canFinishWithoutGitHub
             )
+            if !canFinishWithoutGitHub && systemReady {
+                Button(isRunning ? "Verifying workspaces…" : "Verify workspaces now") {
+                    runSetup()
+                }
+                .disabled(isRunning || coordinator == nil)
+                .controlSize(.small)
+                .accessibilityIdentifier("setup.review.verify.button")
+            }
             reviewStatusLine(
                 title: "GitHub",
                 value: githubReviewSummary,
@@ -761,22 +1116,10 @@ struct SetupView: View {
                 value: identityReviewSummary,
                 ready: identityDecisionMade
             )
-            HStack {
-                Button("Back to setup") { isFinalReview = false }
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Done", action: completeSetup)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canCompleteReview)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("setup.done.button")
-            }
         }
         .padding(14)
         .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityIdentifier("setup.final-review")
     }
-
     private func reviewStatusLine(title: String, value: String, ready: Bool) -> some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: ready ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -790,21 +1133,16 @@ struct SetupView: View {
         .accessibilityElement(children: .combine)
     }
 
+    @ViewBuilder
     private var stickyFooter: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 10) {
-                footerStatus
-                footerActions
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                footerStatus
-                footerActions.frame(maxWidth: .infinity, alignment: .trailing)
-            }
+        HStack(alignment: .center, spacing: 10) {
+            footerStatus
+            Spacer(minLength: 12)
+            footerActions
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
         .background(.bar)
-        .accessibilityIdentifier("setup.footer")
     }
 
     private var footerStatus: some View {
@@ -816,15 +1154,12 @@ struct SetupView: View {
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
-            } else if !blockingChecks.isEmpty {
+            } else if activeStep == .readiness && !blockingChecks.isEmpty {
                 Label("Resolve the highlighted checks to continue.", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-            } else if state.phase == .complete && systemReady {
-                Label("System setup is verified. Review GitHub and identity choices before finishing.", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
             } else {
-                Label("Continue verifies workspaces, then restores their prior state.", systemImage: "info.circle.fill")
-                    .foregroundStyle(.secondary)
+                Label(footerGuidance, systemImage: footerStatusSymbol)
+                    .foregroundStyle(activeStep == .review ? .green : .secondary)
             }
         }
         .font(.caption)
@@ -832,32 +1167,105 @@ struct SetupView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("setup.status")
-        .accessibilityValue(error ?? notice ?? (state.phase == .complete && systemReady ? "Ready." : "Continue verifies workspaces, then restores their prior state."))
+        .accessibilityValue(error ?? notice ?? footerGuidance)
+    }
+
+    private var footerGuidance: String {
+        switch activeStep {
+        case .readiness:
+            return canFinishWithoutGitHub
+                ? "System setup is verified. Continue to GitHub."
+                : "Continue verifies workspaces, then restores their prior state."
+        case .github:
+            return githubStepComplete
+                ? "GitHub choice saved. Continue to identity."
+                : "Connect GitHub or continue without it."
+        case .identity:
+            return identityStepComplete
+                ? "Identity choice saved. Review before finishing."
+                : "Save and verify identity, or skip it for now."
+        case .review:
+            return canCompleteReview
+                ? "Everything is ready. Choose Done to finish setup."
+                : "Complete the required choices before finishing."
+        }
+    }
+
+    private var footerStatusSymbol: String {
+        switch activeStep {
+        case .readiness: return canFinishWithoutGitHub ? "checkmark.circle.fill" : "info.circle.fill"
+        case .github: return githubStepComplete ? "checkmark.circle.fill" : "info.circle.fill"
+        case .identity: return identityStepComplete ? "checkmark.circle.fill" : "info.circle.fill"
+        case .review: return canCompleteReview ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+        }
     }
 
     private var footerActions: some View {
         HStack(spacing: 10) {
-            Button(isChecking ? "Checking…" : "Retry", action: loadPreflight)
-                .disabled(isChecking || isRunning || coordinator == nil)
-                .accessibilityIdentifier("setup.retry.button")
-            if hostIntegrationNeedsPackagedBuild {
-                Label("Install a complete signed build", systemImage: "lock.circle")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("setup.signed-build.required")
-            } else {
-                if canFinishWithoutGitHub {
-                    Button("Review setup") { isFinalReview = true }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isRunning)
-                        .keyboardShortcut(.defaultAction)
-                        .accessibilityIdentifier("setup.review.button")
+            if activeStep != .readiness && !(activeStep == .github && isReviewing) {
+                Button("Back", action: moveBack)
+                    .keyboardShortcut(.cancelAction)
+            }
+
+            switch activeStep {
+            case .readiness:
+                Button(isChecking ? "Checking…" : "Retry", action: loadPreflight)
+                    .disabled(isChecking || isRunning || coordinator == nil)
+                    .accessibilityIdentifier("setup.retry.button")
+                if hostIntegrationNeedsPackagedBuild {
+                    Label("Install a complete signed build", systemImage: "lock.circle")
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("setup.signed-build.required")
                 } else {
-                    Button(isChecking ? "Checking…" : (blockingChecks.isEmpty ? "Continue" : "Repair & Continue"), action: runSetup)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isRunning || coordinator == nil || isChecking || checks.isEmpty)
-                        .keyboardShortcut(.defaultAction)
-                        .accessibilityIdentifier("setup.primary-action")
+                    Button(
+                        isChecking
+                            ? "Checking…"
+                            : (canFinishWithoutGitHub ? "Continue" : (blockingChecks.isEmpty ? "Continue" : "Repair & Continue")),
+                        action: advanceFromReadiness
+                    )
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        isRunning ||
+                            isChecking ||
+                            checks.isEmpty ||
+                            !githubContextLoaded ||
+                            (!canFinishWithoutGitHub && coordinator == nil)
+                    )
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("setup.primary-action")
                 }
+            case .github:
+                if isReviewing {
+                    Button("Back") { isReviewing = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button(isAuthorizing ? "Applying…" : "Apply assignments", action: commitAssignments)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isAuthorizing || !hasValidAssignments)
+                        .accessibilityIdentifier("setup.github.apply.button")
+                } else {
+                    if account != nil {
+                        Button("Review workspace access") { isReviewing = true }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!hasValidAssignments || isAuthorizing)
+                            .accessibilityIdentifier("setup.github.review.button")
+                    }
+                    Button("Continue", action: advanceFromGitHub)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!githubStepComplete || isAuthorizing)
+                        .keyboardShortcut(.defaultAction)
+                }
+            case .identity:
+                Button("Review setup", action: advanceFromIdentity)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!identityStepComplete || isSavingIdentity)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("setup.review.button")
+            case .review:
+                Button("Done", action: completeSetup)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canCompleteReview)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("setup.done.button")
             }
         }
         .fixedSize()
@@ -865,6 +1273,10 @@ struct SetupView: View {
 
     private var validDrafts: [WorkspaceAssignmentDraft] {
         drafts.values.filter(isReviewable).sorted { $0.workspace.rawValue < $1.workspace.rawValue }
+    }
+
+    private var enabledDrafts: [WorkspaceAssignmentDraft] {
+        drafts.values.filter(\.enabled)
     }
 
     private var groupedExistingMetadata: [(
@@ -884,11 +1296,13 @@ struct SetupView: View {
                     states: states,
                     needsAttention: entries.contains { $0.recoveryState != .ready || $0.quarantined }
                 )
-    }
+            }
             .sorted { $0.workspace < $1.workspace }
     }
 
-    private var hasValidAssignments: Bool { !validDrafts.isEmpty }
+    private var hasValidAssignments: Bool {
+        !enabledDrafts.isEmpty && enabledDrafts.allSatisfy(isReviewable)
+    }
 
     private func isReviewable(_ draft: WorkspaceAssignmentDraft) -> Bool {
         guard draft.enabled,
@@ -940,38 +1354,93 @@ struct SetupView: View {
 
 
     private func beginAuthorization() {
-        guard let authorizationCoordinator else {
+        if uiTestGitHubScenario == "unavailable" {
+            authorizationIssue = AuthorizationIssue(
+                kind: .unavailable,
+                message: "The deterministic test service is unavailable. Existing access and saved choices remain unchanged."
+            )
+            authorizationStatus = ""
+            return
+        }
+        if uiTestGitHubScenario == nil, authorizationCoordinator == nil {
             authorizationIssue = AuthorizationIssue(
                 kind: .unavailable,
                 message: "GitHub authorization is unavailable in this build."
             )
             return
         }
+
         pauseAuthorization()
+        authorizationGeneration &+= 1
+        let generation = authorizationGeneration
         isAuthorizing = true
         authorizationMayCancel = true
         isReviewing = false
         authorizationIssue = nil
-        authorizationStatus = "Opening MSW Connect in the system browser…"
-        let browser = MSWConnectBrowser()
+        authorizationStatus = "Opening GitHub in your default browser…"
+        uiTestAuthorizationAttempts += 1
+
+        if let scenario = uiTestGitHubScenario {
+            let shouldHoldForCancellation = scenario == "cancel-retry" && uiTestAuthorizationAttempts == 1
+            authorizationTask = Task {
+                if shouldHoldForCancellation {
+                    try? await Task.sleep(for: .seconds(30))
+                } else {
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                guard !Task.isCancelled else { return }
+                let discovery = Self.uiTestDiscovery(
+                    sessionID: Self.uiTestAuthorizationSessionID,
+                    includeInstallation: scenario != "no-installation"
+                )
+                await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
+                    account = discovery.account
+                    installations = discovery.installations
+                    githubInstallationURL = Self.validatedInstallationURL(
+                        URL(string: "https://github.com/apps/msw/installations/new")
+                    )
+                    authorizationSessionID = discovery.sessionID
+                    if let installation = discovery.installations.first {
+                        repositoriesByInstallation[installation.id] = Self.uiTestRepositories
+                    }
+                    isAuthorizing = false
+                    authorizationMayCancel = false
+                    authorizationTask = nil
+                    githubSkipped = false
+                    githubAttentionWorkspace = nil
+                    authorizationStatus = discovery.installations.isEmpty
+                        ? "Connected as @\(discovery.account.login), but no MSW App installation was found. Install the app, then connect GitHub again."
+                        : "Connected as @\(discovery.account.login). Assign repositories to each workspace, then review before applying."
+                    prefillIdentity(from: discovery.account)
+                }
+            }
+            return
+        }
+
+        guard let authorizationCoordinator else { return }
+        let browser = MSWConnectBrowser.shared
         authorizationTask = Task {
             do {
                 let discovery = try await authorizationCoordinator.beginAuthorization(browser: browser)
                 let installURL = await authorizationCoordinator.installationURL()
                 await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
                     account = discovery.account
                     installations = discovery.installations
-                    githubInstallationURL = installURL
+                    githubInstallationURL = Self.validatedInstallationURL(installURL)
                     authorizationSessionID = discovery.sessionID
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
+                    githubAttentionWorkspace = nil
                     authorizationStatus = "Connected as @\(discovery.account.login). Assign repositories to each workspace, then review before applying."
                     prefillIdentity(from: discovery.account)
                 }
             } catch {
                 await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
@@ -981,22 +1450,115 @@ struct SetupView: View {
             }
         }
     }
+    private static let uiTestAuthorizationSessionID = UUID(uuidString: "E2E00000-0000-4000-8000-000000000001")!
+    private static let uiTestAccount = GitHubAccount(
+        login: "octocat",
+        id: 1,
+        name: "Octo Cat",
+        email: "octo@example.com"
+    )
+
+    private static let uiTestInstallation = GitHubInstallation(
+        id: 42,
+        account: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
+        repositorySelection: "selected"
+    )
+
+    private static let uiTestRepositories = [
+        GitHubRepository(
+            id: 1001,
+            fullName: "acme/one",
+            name: "one",
+            owner: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
+            private: true,
+            defaultBranch: "main"
+        ),
+        GitHubRepository(
+            id: 1002,
+            fullName: "acme/two",
+            name: "two",
+            owner: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
+            private: true,
+            defaultBranch: "main"
+        )
+    ]
+
+    private static func uiTestDiscovery(
+        sessionID: UUID,
+        includeInstallation: Bool
+    ) -> GitHubAuthorizationDiscovery {
+        GitHubAuthorizationDiscovery(
+            sessionID: sessionID,
+            account: uiTestAccount,
+            installations: includeInstallation ? [uiTestInstallation] : []
+        )
+    }
+
+    private func invalidateRepositoryLoad() -> Bool {
+        guard activeRepositoryLoad != nil else { return false }
+        authorizationGeneration &+= 1
+        authorizationTask?.cancel()
+        activeRepositoryLoad = nil
+        repositoryLoadGeneration += 1
+        return true
+    }
 
     private func loadRepositories(for workspace: Workspace.ID, installationID: Int?) {
-        guard let authorizationCoordinator,
-              let sessionID = authorizationSessionID,
+        let cancelledLoad = invalidateRepositoryLoad()
+        if cancelledLoad {
+            authorizationTask = nil
+            isAuthorizing = false
+            authorizationMayCancel = false
+            authorizationIssue = nil
+            authorizationStatus = "Select the repositories for each workspace."
+        }
+        guard let sessionID = authorizationSessionID,
               let installationID else {
             return
         }
-        if repositoriesByInstallation[installationID] != nil { return }
+        if uiTestGitHubScenario != nil {
+            repositoriesByInstallation[installationID] = Self.uiTestRepositories
+            isAuthorizing = false
+            authorizationMayCancel = false
+            authorizationTask = nil
+            authorizationStatus = "Select the repositories for each workspace."
+            return
+        }
+        guard let authorizationCoordinator else {
+            return
+        }
+        if repositoriesByInstallation[installationID] != nil {
+            if cancelledLoad {
+                authorizationIssue = nil
+                authorizationStatus = "Select the repositories for each workspace."
+            }
+            return
+        }
+        repositoryLoadGeneration += 1
+        let identity = RepositoryLoadIdentity(
+            generation: repositoryLoadGeneration,
+            workspace: workspace,
+            installationID: installationID,
+            sessionID: sessionID
+        )
+        activeRepositoryLoad = identity
         isAuthorizing = true
         authorizationMayCancel = true
+        authorizationIssue = nil
         authorizationStatus = "Loading repositories allowed by the selected installation…"
-        authorizationTask?.cancel()
         authorizationTask = Task {
             do {
-                let repositories = try await authorizationCoordinator.repositories(sessionID: sessionID, installationID: installationID)
+                let repositories = try await authorizationCoordinator.repositories(
+                    sessionID: sessionID,
+                    installationID: installationID
+                )
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
+                    guard activeRepositoryLoad == identity,
+                          repositoryLoadGeneration == identity.generation else {
+                        return
+                    }
+                    activeRepositoryLoad = nil
                     repositoriesByInstallation[installationID] = repositories
                     isAuthorizing = false
                     authorizationMayCancel = false
@@ -1004,7 +1566,13 @@ struct SetupView: View {
                     authorizationStatus = "Select the repositories for each workspace."
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
+                    guard activeRepositoryLoad == identity,
+                          repositoryLoadGeneration == identity.generation else {
+                        return
+                    }
+                    activeRepositoryLoad = nil
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
@@ -1016,11 +1584,6 @@ struct SetupView: View {
     }
 
     private func commitAssignments() {
-        guard let authorizationCoordinator,
-              let sessionID = authorizationSessionID else {
-            authorizationStatus = "Connect GitHub before applying workspace assignments."
-            return
-        }
         let assignments: [GitHubWorkspaceAssignment] = validDrafts.compactMap { draft in
             guard let installationID = draft.installationID,
                   let verificationID = draft.verificationRepositoryID,
@@ -1041,11 +1604,52 @@ struct SetupView: View {
             authorizationStatus = "Choose a selected verification repository for every assigned workspace."
             return
         }
+
+        authorizationGeneration &+= 1
+        let generation = authorizationGeneration
         isAuthorizing = true
         authorizationMayCancel = false
         authorizationIssue = nil
         authorizationStatus = "Creating reviewed grants, binding guest/host access, and verifying repository boundaries…"
         authorizationTask?.cancel()
+
+        if uiTestGitHubScenario != nil {
+            authorizationTask = Task {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled else { return }
+                let verifications = assignments.map {
+                    GitHubWorkspaceVerificationResult(
+                        workspace: $0.workspace,
+                        accessMode: $0.accessMode,
+                        verificationRepository: $0.verificationRepository,
+                        verified: true,
+                        lifecycleRestored: true,
+                        safetyResult: "Repository scope and workspace lifecycle verified.",
+                        checkedAt: Date()
+                    )
+                }
+                await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
+                    existingMetadata = []
+                    verificationResults = verifications
+                    isAuthorizing = false
+                    authorizationMayCancel = false
+                    authorizationTask = nil
+                    githubAttentionWorkspace = nil
+                    authorizationSessionID = nil
+                    isReviewing = false
+                    authorizationStatus = "Applied \(assignments.count) scoped grant records. Verification results are retained below for final review."
+                }
+            }
+            return
+        }
+
+        guard let authorizationCoordinator,
+              let sessionID = authorizationSessionID else {
+            authorizationStatus = "Connect GitHub before applying workspace assignments."
+            isAuthorizing = false
+            return
+        }
         authorizationTask = Task {
             do {
                 let result = try await authorizationCoordinator.commitAssignmentsWithVerification(
@@ -1054,19 +1658,21 @@ struct SetupView: View {
                 )
                 let refreshed = await authorizationCoordinator.metadata()
                 await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
                     existingMetadata = refreshed
                     verificationResults = result.verifications
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
+                    githubAttentionWorkspace = nil
                     authorizationSessionID = nil
                     isReviewing = false
-                    authorizationStatus = "Applied \(result.metadata.count) scoped grant records. Verification results are retained below for final review."
                 }
             } catch {
                 let retained = await authorizationCoordinator.verificationResults()
                 let refreshed = await authorizationCoordinator.metadata()
                 await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
                     verificationResults = retained
                     existingMetadata = refreshed
                     isAuthorizing = false
@@ -1086,20 +1692,59 @@ struct SetupView: View {
             }
             return
         }
-        authorizationTask?.cancel()
+        let wasRepositoryLoad = activeRepositoryLoad != nil
+        if wasRepositoryLoad {
+            _ = invalidateRepositoryLoad()
+        } else {
+            authorizationGeneration &+= 1
+            authorizationTask?.cancel()
+        }
         authorizationTask = nil
         if isAuthorizing {
             authorizationIssue = AuthorizationIssue(
                 kind: .cancelled,
-                message: "The browser wait was cancelled. Existing access and saved owner/repository choices were preserved."
+                message: wasRepositoryLoad
+                    ? "Repository loading was cancelled. Existing access and saved owner/repository choices were preserved."
+                    : "The browser wait was cancelled. Existing access and saved owner/repository choices were preserved."
             )
+        }
+        if wasRepositoryLoad {
+            authorizationStatus = "Repository loading cancelled. Choose an owner to try again."
         }
         isAuthorizing = false
         authorizationMayCancel = false
     }
 
+    private static func validatedInstallationURL(_ value: URL?) -> URL? {
+        guard let value,
+              value.scheme?.lowercased() == "https",
+              value.host?.lowercased() == "github.com",
+              value.user == nil,
+              value.password == nil,
+              value.port == nil,
+              value.query == nil,
+              value.fragment == nil else {
+            return nil
+        }
+        let path = value.path
+        guard path.hasPrefix("/apps/"),
+              path.hasSuffix("/installations/new"),
+              !path.contains("?"),
+              !path.contains("#"),
+              !path.contains(".."),
+              !path.contains("//"),
+              path.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return nil
+        }
+        return value
+    }
+
     private func openGitHubInstallation() {
-        guard let githubInstallationURL else { return }
+        guard let githubInstallationURL = Self.validatedInstallationURL(githubInstallationURL) else {
+            return
+        }
         NSWorkspace.shared.open(githubInstallationURL)
     }
 
@@ -1111,11 +1756,16 @@ struct SetupView: View {
 
     private func restoreCachedAuthorization() async {
         guard let authorizationCoordinator else { return }
+        // An unconfigured build cannot use or validate a stored session;
+        // restoration is deferred to a configured build. Sessions are never
+        // deleted by configuration mismatches.
+        guard authorizationCoordinator.isConfigured else { return }
         do {
             guard let discovery = try await authorizationCoordinator.resumeAuthorization() else { return }
             account = discovery.account
             installations = discovery.installations
-            githubInstallationURL = await authorizationCoordinator.installationURL()
+            let installURL = await authorizationCoordinator.installationURL()
+            githubInstallationURL = Self.validatedInstallationURL(installURL)
             authorizationSessionID = discovery.sessionID
             authorizationStatus = "Resumed the cached @\(discovery.account.login) authorization. Review saved choices before applying."
             prefillIdentity(from: discovery.account)
@@ -1144,6 +1794,7 @@ struct SetupView: View {
             await MainActor.run {
                 state = savedState
                 checks = result
+                lastPreflightAt = Date()
                 isChecking = false
             }
         }
@@ -1175,6 +1826,7 @@ struct SetupView: View {
                 await MainActor.run {
                     state = savedState
                     checks = refreshedChecks
+                    lastPreflightAt = Date()
                     isRunning = false
                     notice = result.requiresApproval
                         ? (result.phase == MSWBootstrapState.Phase.hostIntegration.rawValue
@@ -1185,7 +1837,17 @@ struct SetupView: View {
             } catch {
                 await MainActor.run {
                     isRunning = false
-                    self.error = error.localizedDescription
+                    if let clientError = error as? MSWClientError,
+                       case .protocolFailure(let protocolError) = clientError,
+                       protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED" {
+                        // No readiness warning: take the user straight to the
+                        // GitHub step, where the attention state lives.
+                        githubReconnectRequired = true
+                        githubAttentionWorkspace = protocolError.workspace
+                        activeStep = .github
+                    } else {
+                        self.error = error.localizedDescription
+                    }
                 }
             }
         }
@@ -1193,8 +1855,10 @@ struct SetupView: View {
 
     private func completeSetup() {
         guard canCompleteReview else { return }
-        UserDefaults.standard.set(true, forKey: "setupCompleted")
-        UserDefaults.standard.removeObject(forKey: Self.resumeStateKey)
+        if !uiTestMode {
+            UserDefaults.standard.set(true, forKey: "setupCompleted")
+            UserDefaults.standard.removeObject(forKey: Self.resumeStateKey)
+        }
         closeSetup()
     }
 
@@ -1213,15 +1877,21 @@ struct SetupView: View {
         isSavingIdentity = true
         identitySkipped = false
         identityStatus = "Applying and verifying the reviewed identity…"
+        let name = identityName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = identityEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = identityTarget == "all" ? nil : identityTarget
         Task {
             do {
                 let result = try await authorizationCoordinator.setIdentity(
-                    name: identityName.trimmingCharacters(in: .whitespacesAndNewlines),
-                    email: identityEmail.trimmingCharacters(in: .whitespacesAndNewlines),
+                    name: name,
+                    email: email,
                     workspace: target
                 )
                 await MainActor.run {
+                    let verified = SetupVerifiedIdentity(name: name, email: email)
+                    for workspace in result.workspaces {
+                        verifiedIdentityByWorkspace[workspace] = verified
+                    }
                     identityConfiguredWorkspaces.formUnion(result.workspaces)
                     isSavingIdentity = false
                     identityStatus = "Verified \(result.name) <\(result.email)> for \(result.workspaces.joined(separator: ", "))."
@@ -1236,23 +1906,26 @@ struct SetupView: View {
     }
 
     private var githubReviewSummary: String {
-        if githubSkipped { return "Skipped by choice; no new grant will be created." }
+        if githubSkipped { return "Not connected — you can connect later in Settings." }
         if !verificationResults.isEmpty {
             return verificationResults.map {
-                "\($0.workspace): \($0.verified && $0.lifecycleRestored ? "verified" : "needs recovery") for \($0.verificationRepository)"
+                "\($0.workspace): \($0.verified && $0.lifecycleRestored ? "verified" : "needs attention") for \($0.verificationRepository)"
             }.joined(separator: "; ")
         }
         if !existingMetadata.isEmpty {
             return groupedExistingMetadata.map {
-                "\($0.workspace): \($0.needsAttention ? "needs attention" : $0.accessModes.joined(separator: " + "))"
+                $0.needsAttention
+                    ? "\($0.workspace): needs attention"
+                    : "\($0.workspace): \($0.repositoryNames.joined(separator: ", "))"
             }.joined(separator: "; ")
         }
-        return "Choose Connect GitHub or Continue without GitHub."
+        return "Not connected yet."
     }
 
     private var identityReviewSummary: String {
         if identitySkipped { return "Skipped by choice; configure it later in Workspace Settings." }
         if identityConfiguredWorkspaces.isEmpty { return "Not configured yet." }
+        if identityHasUnverifiedEdits { return "Changed since last verification; save and verify again." }
         return "Verified for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))."
     }
 
@@ -1286,6 +1959,21 @@ struct SetupView: View {
                 return AuthorizationIssue(kind: .unavailable, message: authorizationError.localizedDescription)
             default:
                 return AuthorizationIssue(kind: .failed, message: authorizationError.localizedDescription)
+            }
+        }
+        if let connectError = error as? MSWConnectError {
+            switch connectError {
+            case .cancelled:
+                return AuthorizationIssue(kind: .cancelled, message: connectError.localizedDescription)
+            case .sessionExpired, .callbackExpired:
+                return AuthorizationIssue(kind: .expired, message: connectError.localizedDescription)
+            case .authorizationDenied:
+                return AuthorizationIssue(kind: .denied, message: connectError.localizedDescription)
+            case .installationUnavailable, .installationRemoved,
+                 .transportUnavailable, .httpStatus, .rateLimited:
+                return AuthorizationIssue(kind: .unavailable, message: connectError.localizedDescription)
+            default:
+                return AuthorizationIssue(kind: .failed, message: connectError.localizedDescription)
             }
         }
         if error is CancellationError {
@@ -1327,6 +2015,24 @@ struct SetupView: View {
         }
     }
 
+    private var githubAffectedScope: String {
+        let workspaces = validDrafts.map { $0.workspace.rawValue }
+        return workspaces.isEmpty ? "GitHub setup for all workspaces" : workspaces.joined(separator: ", ")
+    }
+
+    private var githubVerificationAge: String {
+        let latest = existingMetadata.map(\.updatedAt).max()
+        return latest.map(verificationAge) ?? "Never verified"
+    }
+
+    private func verificationAge(_ date: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds) seconds ago" }
+        if seconds < 3_600 { return "\(seconds / 60) minutes ago" }
+        if seconds < 86_400 { return "\(seconds / 3_600) hours ago" }
+        return "\(seconds / 86_400) days ago"
+    }
+
     private func persistResumeState() {
         let resume = SetupResumeState(
             drafts: drafts,
@@ -1336,7 +2042,8 @@ struct SetupView: View {
             identityTarget: identityTarget,
             identityConfiguredWorkspaces: identityConfiguredWorkspaces,
             identitySkipped: identitySkipped,
-            verificationResults: verificationResults
+            verificationResults: verificationResults,
+            verifiedIdentityByWorkspace: verifiedIdentityByWorkspace
         )
         guard let data = try? JSONEncoder().encode(resume) else { return }
         UserDefaults.standard.set(data, forKey: Self.resumeStateKey)
@@ -1351,10 +2058,51 @@ struct SetupView: View {
         identityEmail = resume.identityEmail
         identityTarget = resume.identityTarget
         identityConfiguredWorkspaces = resume.identityConfiguredWorkspaces
+        verifiedIdentityByWorkspace = resume.verifiedIdentityByWorkspace ?? [:]
         identitySkipped = resume.identitySkipped
         verificationResults = resume.verificationResults
         notice = "Resumed saved setup choices. Review them before continuing."
     }
+    private func loadUITestState() {
+        let now = Date()
+        checks = [
+            MSWPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
+            MSWPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
+            MSWPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
+            MSWPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
+        ]
+        state = uiTestBootstrapReconnect
+            ? MSWBootstrapState(
+                phase: .workspaces,
+                startedAt: now,
+                updatedAt: now,
+                lastError: nil,
+                completedPhases: [.preflight, .toolchain, .hostIntegration]
+            )
+            : MSWBootstrapState(
+                phase: .complete,
+                startedAt: now,
+                updatedAt: now,
+                lastError: nil,
+                completedPhases: Set(MSWBootstrapState.Phase.allCases)
+            )
+        lastPreflightAt = now
+        isChecking = false
+        if uiTestStartsInReview {
+            githubSkipped = true
+            identitySkipped = true
+            identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
+            authorizationStatus = "GitHub skipped by choice. You can connect later from Settings."
+            activeStep = .review
+        } else {
+            githubSkipped = false
+            identitySkipped = false
+            identityStatus = ""
+            activeStep = .readiness
+        }
+        githubContextLoaded = true
+    }
+
 
     private func guidance(for phase: MSWBootstrapState.Phase) -> String {
         switch phase {

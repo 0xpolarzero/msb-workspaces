@@ -32,6 +32,18 @@ if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
   signingSettings+=("DEVELOPMENT_TEAM=${DEVELOPMENT_TEAM}")
 fi
 
+typeset -a connectSettings
+if [[ -n "${MSW_CONNECT_BASE_URL:-}" ]]; then
+  connectSettings+=("MSW_CONNECT_BASE_URL=${MSW_CONNECT_BASE_URL}")
+fi
+if [[ -n "${MSW_CONNECT_CLIENT_ID:-}" ]]; then
+  connectSettings+=("MSW_CONNECT_CLIENT_ID=${MSW_CONNECT_CLIENT_ID}")
+fi
+if [[ -n "${MSW_CONNECT_INSTALLATION_URL:-}" ]]; then
+  connectSettings+=("MSW_CONNECT_INSTALLATION_URL=${MSW_CONNECT_INSTALLATION_URL}")
+fi
+
+
 xcodebuild \
   -project "$APP_DIR/MSWMonitor.xcodeproj" \
   -scheme MSWMonitor \
@@ -42,6 +54,7 @@ xcodebuild \
   ONLY_ACTIVE_ARCH=YES \
   CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
   "${signingSettings[@]}" \
+  "${connectSettings[@]}" \
   build 2>&1 | tee "$LOG_DIR/build.log"
 
 test -x "$BUILD_DIR/MSWMonitor.app/Contents/MacOS/MSWMonitor"

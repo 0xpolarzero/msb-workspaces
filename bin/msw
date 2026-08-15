@@ -3610,7 +3610,7 @@ app_cmd_apply() {
 }
 
 app_cmd_bootstrap() {
-  local resume=0 events_fd="" format="" phase request_id output
+  local resume=0 events_fd="" format="" phase request_id output recovery detail
   while (( $# > 0 )); do
     case "$1" in
       --resume) resume=1; shift ;;
@@ -3634,12 +3634,31 @@ app_cmd_bootstrap() {
     fi
   done
 
+  # Deep verification must start each stopped workspace. A workspace whose
+  # GitHub credential is unavailable cannot start, so report it precisely and
+  # let the app route the user into the GitHub connection flow instead of
+  # failing with a generic verification error.
+  for box in "${WORKSPACES[@]}"; do
+    if { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; } &&
+      ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
+      ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
+      app_emit_error bootstrap "MSW_GITHUB_RECONNECT_REQUIRED" \
+        "GitHub is configured for '$box', but its credential is unavailable." \
+        "Connect GitHub for '$box' in MSW Monitor, then resume Setup." "$box" true 69
+    fi
+  done
+
   if [[ -n "$events_fd" ]]; then
     printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":0,"message":"Starting the complete deep verification. Workspaces may start temporarily and the previous running set will be restored.","safeForDisplay":true}\n' \
       "$(app_json_string "$request_id")" >&"$events_fd"
   fi
   if ! output="$(cmd_check --deep 2>&1)"; then
-    app_emit_error bootstrap "MSW_BOOTSTRAP_VERIFICATION_FAILED" "Workspace bootstrap verification failed." "Repair the reported MSW configuration or runtime issue, then resume Setup." "" true 69
+    recovery="Repair the reported MSW configuration or runtime issue, then resume Setup."
+    if [[ -n "$output" ]]; then
+      detail="$(app_redact "$output" | /usr/bin/tail -n 12 | /usr/bin/tr '\n' ' ')"
+      [[ -z "$detail" ]] || recovery="Verification reported: ${detail}"
+    fi
+    app_emit_error bootstrap "MSW_BOOTSTRAP_VERIFICATION_FAILED" "Workspace bootstrap verification failed." "$recovery" "" true 69
   fi
   if [[ -n "$events_fd" ]]; then
     printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":1,"message":"Deep verification passed and the previous running set was restored.","safeForDisplay":true}\n' \

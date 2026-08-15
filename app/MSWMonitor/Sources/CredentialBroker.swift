@@ -330,13 +330,27 @@ actor CredentialBroker {
     }
 
     func load(workspace: String, role: CredentialRole = .guest) throws -> CredentialBundle {
+        try loadStoredCredential(workspace: workspace, role: role, allowQuarantined: false)
+    }
+
+    /// Validates the stored credential bytes while the metadata is quarantined
+    /// during transaction recovery. Callers must restore the recovery state
+    /// only after the remote grant and local scope have been reconciled.
+    func loadForRecovery(workspace: String, role: CredentialRole = .guest) throws -> CredentialBundle {
+        try loadStoredCredential(workspace: workspace, role: role, allowQuarantined: true)
+    }
+
+    private func loadStoredCredential(
+        workspace: String,
+        role: CredentialRole,
+        allowQuarantined: Bool
+    ) throws -> CredentialBundle {
         guard WorkspaceID.isValid(workspace) else { throw CredentialBrokerError.invalidWorkspace }
         let key = metadataKey(workspace, role)
         guard let entry = metadata[key] else { throw CredentialBrokerError.missingCredential }
         guard entry.provider == "github-app-installation",
               Self.isValidScopedMetadata(entry),
-              entry.recoveryState == .ready,
-              !entry.quarantined,
+              (allowQuarantined || (entry.recoveryState == .ready && !entry.quarantined)),
               let grantID = entry.grantID else {
             if entry.provider == "legacy-broad-token" || entry.recoveryState == .migrationRequired {
                 throw CredentialBrokerError.legacyCredentialRequiresAuthorization

@@ -39,6 +39,8 @@
     <string>$(MSW_CONNECT_BASE_URL)</string>
     <key>MSWConnectClientID</key>
     <string>$(MSW_CONNECT_CLIENT_ID)</string>
+    <key>MSWConnectInstallationURL</key>
+    <string>$(MSW_CONNECT_INSTALLATION_URL)</string>
     <key>MSWConnectScopeAttestationPublicKey</key>
     <string>$(MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY)</string>
     <key>NSHighResolutionCapable</key>

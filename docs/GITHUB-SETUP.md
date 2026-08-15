@@ -22,6 +22,30 @@ For a workspace that needs a host-only push path, select:
 
 The owner must have installed the MSW GitHub App. Organization policy, SAML enforcement, or an unapproved installation can prevent authorization; MSW Monitor reports the recovery action instead of accepting an incomplete grant.
 
+### Recover when no installation is available
+
+If Connect returns an account with no GitHub App installation, MSW Monitor shows
+an **Install MSW App in GitHub** action when the signed build has a verified
+installation URL configured. Follow that action, approve the app for the
+intended owner, and return to MSW Monitor to connect GitHub again; the owner
+list is refreshed only by a new authorization session.
+
+The action is supplied through the `MSWConnectInstallationURL` Info.plist key
+and the `MSW_CONNECT_INSTALLATION_URL` build setting. Empty or malformed values
+are treated as absent, so the app does not open an arbitrary URL. This source
+tree intentionally leaves the release URL as a deployment input rather than
+publishing an unverified GitHub App slug. If no verified URL is present, the
+setup window explains that the release administrator must provide the approved
+installation link; continue without GitHub or use an existing assignment.
+For a local or release build, pass the approved installation URL explicitly:
+
+```bash
+MSW_CONNECT_INSTALLATION_URL="https://github.com/apps/<approved-slug>/installations/new" \
+  app/MSWMonitor/Scripts/build.sh
+```
+
+The placeholder must be replaced by the release administrator with the verified MSW GitHub App slug. Do not publish or ship an unverified slug; an empty setting is intentionally safe and keeps the install action unavailable.
+
 ## Connect a workspace
 
 Open **MSW Monitor** and choose **Settings** → **GitHub** → **Connect GitHub**. The first-run setup window exposes the same action.
@@ -29,7 +53,7 @@ Open **MSW Monitor** and choose **Settings** → **GitHub** → **Connect GitHub
 The flow is:
 
 1. MSW Monitor starts a Connect authorization session with a fresh state value.
-2. The default browser opens the Connect authorization page. Complete GitHub authorization there.
+2. The authorization page opens in your default browser. Complete GitHub authorization there; GitHub sends the callback back to MSW Monitor through the registered `msw://` URL scheme.
 3. Return to MSW Monitor. The app verifies the callback/session, account, and service issuer.
 4. Select the installed GitHub owner.
 5. Select the repositories available from that installation and choose the verification repository when required.
@@ -38,6 +62,9 @@ The flow is:
 8. If the workspace is running, MSW Monitor reports whether a restart is required before the new guest capability is active. It never silently restarts a VM.
 
 Repeat the flow for `dev`, `playgrounds`, and `personal` when their repository scopes differ. A workspace that does not use private GitHub repositories needs no grant.
+
+The GitHub step is always present in setup. Builds without a configured MSW Connect endpoint (an empty `MSW_CONNECT_BASE_URL`) show "GitHub connection isn't available yet" on that step, so onboarding never offers a page that cannot connect and always continues without GitHub. A build configured with a real endpoint shows **Connect GitHub**, which opens the authorization page in the default browser; provide the endpoint and client ID at build time through the `MSW_CONNECT_BASE_URL` and `MSW_CONNECT_CLIENT_ID` environment variables passed to `app/MSWMonitor/Scripts/build.sh`.
+
 
 The app shows an explicit state for each workspace:
 

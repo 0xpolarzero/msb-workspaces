@@ -1,33 +1,38 @@
 import AppKit
+import Observation
 import ServiceManagement
 import SwiftUI
 import UserNotifications
 
 @MainActor
-final class SettingsWindowController {
-    private let window: NSWindow
+@Observable
+final class SettingsNavigationState {
+    var section: SettingsSection
 
-    init(
-        authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
-        onConnect: @escaping () -> Void = {}
-    ) {
-        let hosting = NSHostingController(
-            rootView: SettingsView(
-                authorizationCoordinator: authorizationCoordinator,
-                onConnect: onConnect
-            )
-        )
-        window = NSWindow(contentViewController: hosting)
-        window.title = "MSW Monitor Settings"
-        window.setContentSize(NSSize(width: 700, height: 620))
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.isReleasedWhenClosed = false
-        window.center()
+    init(section: SettingsSection = .general) {
+        self.section = section
     }
+}
 
-    func show() {
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+enum SettingsSection: String, CaseIterable, Identifiable {
+    case general = "General"
+    case workspaces = "Workspaces"
+    case github = "GitHub"
+    case notifications = "Notifications"
+    case backup = "Backup"
+    case about = "About"
+
+    var id: String { rawValue }
+
+    init(deepLinkValue: String) {
+        switch deepLinkValue.lowercased() {
+        case "workspaces", "workspace": self = .workspaces
+        case "github", "github-access": self = .github
+        case "notifications", "notification": self = .notifications
+        case "backup", "backups": self = .backup
+        case "about": self = .about
+        default: self = .general
+        }
     }
 }
 
@@ -37,6 +42,7 @@ private struct WorkspaceGrantGroup: Identifiable, Equatable {
     let owner: String?
     let repositoryNames: [String]
     let accessModes: [String]
+    let verifiedAt: Date?
 
     var id: String { workspace }
 }
@@ -62,6 +68,7 @@ private enum GitHubConnectionState {
 }
 
 struct SettingsView: View {
+    @Bindable private var navigation: SettingsNavigationState
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let onConnect: () -> Void
     private let notificationCoordinator: NotificationCoordinator
@@ -85,37 +92,46 @@ struct SettingsView: View {
     @State private var updatingNotificationCategories: Set<MSWNotificationCategory> = []
 
     init(
+        navigation: SettingsNavigationState,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         notificationCoordinator: NotificationCoordinator = .shared,
         onConnect: @escaping () -> Void = {
             NSApp.sendAction(#selector(AppDelegate.openGitHubSetup), to: nil, from: nil)
         }
     ) {
+        self.navigation = navigation
         self.authorizationCoordinator = authorizationCoordinator
         self.notificationCoordinator = notificationCoordinator
         self.onConnect = onConnect
     }
 
     var body: some View {
-        TabView {
+        TabView(selection: $navigation.section) {
             generalSettings
                 .tabItem { Label("General", systemImage: "gear") }
+                .tag(SettingsSection.general)
 
             workspaceSettings
                 .tabItem { Label("Workspaces", systemImage: "square.grid.3x3") }
+                .tag(SettingsSection.workspaces)
 
             githubSettings
                 .tabItem { Label("GitHub", systemImage: "person.crop.circle.badge.checkmark") }
+                .tag(SettingsSection.github)
 
             notificationSettings
                 .tabItem { Label("Notifications", systemImage: "bell") }
+                .tag(SettingsSection.notifications)
 
             backupSettings
                 .tabItem { Label("Backup", systemImage: "externaldrive") }
+                .tag(SettingsSection.backup)
 
             aboutSettings
                 .tabItem { Label("About", systemImage: "info.circle") }
+                .tag(SettingsSection.about)
         }
+        .accessibilityIdentifier("settings.tabs")
         .frame(minWidth: 680, idealWidth: 700, minHeight: 560, idealHeight: 620)
         .transaction { transaction in
             if effectiveReducedMotion {
@@ -361,6 +377,13 @@ struct SettingsView: View {
                 .font(.caption)
             LabeledContent("Access", value: group.accessModes.joined(separator: " + "))
                 .font(.caption)
+            LabeledContent("Last verified", value: verificationAge(group.verifiedAt))
+                .font(.caption)
+            if needsRetry(group) {
+                Text("Blocked: GitHub-backed repository access and host pushes for \(group.workspace).")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             HStack {
                 if needsRetry(group) {
                     Button(recoveryActionTitle(for: group), action: onConnect)
@@ -390,7 +413,8 @@ struct SettingsView: View {
                     entries: entries,
                     owner: entries.compactMap(\.owner).first,
                     repositoryNames: Array(Set(entries.flatMap { $0.repositoryNames })).sorted(),
-                    accessModes: Array(Set(entries.map(\.accessMode))).sorted()
+                    accessModes: Array(Set(entries.map(\.accessMode))).sorted(),
+                    verifiedAt: entries.map(\.updatedAt).max()
                 )
             }
             .sorted { $0.workspace < $1.workspace }
@@ -469,9 +493,25 @@ struct SettingsView: View {
             return "Reinstall or reauthorize"
         }
         if group.entries.contains(where: \.needsRestart) {
-            return "Review restart requirement"
+            return "Open Setup to Review Restart"
         }
         return "Reauthorize"
+    }
+
+    private func verificationAge(_ date: Date?) -> String {
+        guard let date else { return "Never verified" }
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        let age: String
+        if seconds < 60 {
+            age = "\(seconds) seconds ago"
+        } else if seconds < 3_600 {
+            age = "\(seconds / 60) minutes ago"
+        } else if seconds < 86_400 {
+            age = "\(seconds / 3_600) hours ago"
+        } else {
+            age = "\(seconds / 86_400) days ago"
+        }
+        return "\(age) · \(date.formatted(date: .abbreviated, time: .shortened))"
     }
 
     private func repositorySummary(for group: WorkspaceGrantGroup) -> String {

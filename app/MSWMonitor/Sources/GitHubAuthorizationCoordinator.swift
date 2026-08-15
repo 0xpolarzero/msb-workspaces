@@ -76,8 +76,10 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidSelection: return "The GitHub owner, repository, or workspace assignment is invalid."
-        case .invalidAppConfiguration: return "MSW Connect authorization is not configured safely."
+        case .invalidSelection:
+            return "The GitHub owner, repository, or workspace assignment is invalid."
+        case .invalidAppConfiguration:
+            return "GitHub connection is not configured for this build. A deployed MSW Connect service and registered app client are required; no browser page was opened."
         case .guestAuthorizationRequired: return "Authorize guest read access before enabling host write access."
         case .authorizationSessionExpired: return "The MSW Connect authorization selection expired. Start Connect GitHub again."
         case .ownerNotInstalled: return "The selected GitHub owner has not installed the MSW App."
@@ -154,6 +156,9 @@ actor GitHubAuthorizationCoordinator {
         self.now = now
         self.journalURL = journalURL ?? Self.defaultJournalURL()
     }
+    nonisolated var isConfigured: Bool {
+        connect.configuration.isConfigured
+    }
 
     /// Starts one browser authorization session. The resulting session may
     /// create grants for all three workspaces; no workspace credential exists
@@ -161,12 +166,21 @@ actor GitHubAuthorizationCoordinator {
     func beginAuthorization(
         browser: (any MSWConnectBrowserAuthenticating)? = nil
     ) async throws -> GitHubAuthorizationDiscovery {
-        try await recoverPendingAuthorization()
+        do {
+            try await recoverPendingAuthorization()
+        } catch GitHubAuthorizationError.serviceUnavailable {
+            // Local roles are quarantined and the journal remains durable when
+            // remote cleanup is unavailable. A new browser session can repair
+            // that journal on the next commit without relying on an expired
+            // session from the interrupted transaction.
+        } catch {
+            throw error
+        }
         let authenticatingBrowser: any MSWConnectBrowserAuthenticating
         if let browser {
             authenticatingBrowser = browser
         } else {
-            authenticatingBrowser = await MainActor.run { MSWConnectBrowser() }
+            authenticatingBrowser = await MainActor.run { MSWConnectBrowser.shared }
         }
         do {
             let discovery = try await connect.authorize(browser: authenticatingBrowser)
@@ -175,6 +189,12 @@ actor GitHubAuthorizationCoordinator {
                 expiresAt: now().addingTimeInterval(15 * 60)
             )
             return discovery
+        } catch MSWConnectError.installationUnavailable,
+                MSWConnectError.installationRemoved {
+            throw GitHubAuthorizationError.ownerNotInstalled
+        } catch MSWConnectError.repositoryNotAllowed,
+                MSWConnectError.accountBoundaryViolation {
+            throw GitHubAuthorizationError.repositoryNotAllowed
         } catch MSWConnectError.transportUnavailable,
                 MSWConnectError.httpStatus,
                 MSWConnectError.rateLimited,
@@ -224,8 +244,17 @@ actor GitHubAuthorizationCoordinator {
                 expiresAt: min(session.expiresAt, now().addingTimeInterval(15 * 60))
             )
             return discovery
-        } catch MSWConnectError.sessionExpired {
-            throw GitHubAuthorizationError.authorizationSessionExpired
+        } catch MSWConnectError.installationUnavailable,
+                MSWConnectError.installationRemoved {
+            throw GitHubAuthorizationError.ownerNotInstalled
+        } catch MSWConnectError.repositoryNotAllowed,
+                MSWConnectError.accountBoundaryViolation {
+            throw GitHubAuthorizationError.repositoryNotAllowed
+        } catch MSWConnectError.transportUnavailable,
+                MSWConnectError.httpStatus,
+                MSWConnectError.rateLimited,
+                MSWConnectError.sessionCleanupFailed {
+            throw GitHubAuthorizationError.serviceUnavailable
         } catch {
             throw GitHubAuthorizationError.serviceUnavailable
         }
@@ -249,10 +278,14 @@ actor GitHubAuthorizationCoordinator {
             return repositories
         } catch let error as GitHubAuthorizationError {
             throw error
-        } catch MSWConnectError.installationUnavailable, MSWConnectError.httpStatus(404) {
+        } catch MSWConnectError.installationUnavailable,
+                MSWConnectError.installationRemoved,
+                MSWConnectError.httpStatus(404) {
             throw GitHubAuthorizationError.ownerNotInstalled
+
         } catch MSWConnectError.accountBoundaryViolation {
             throw GitHubAuthorizationError.repositoryNotAllowed
+
         } catch {
             throw GitHubAuthorizationError.serviceUnavailable
         }
@@ -440,14 +473,10 @@ actor GitHubAuthorizationCoordinator {
                     journal.oldGrantIDs = remainingOldGrants
                     journal.updatedAt = now()
                     try? persistJournal(journal)
-                    for created in createdGrants {
-                        try? await broker.updateRecoveryState(
-                            workspace: created.workspace,
-                            role: created.role,
-                            state: .quarantined,
-                            quarantined: true
-                        )
-                    }
+                    // The old grant may still be usable remotely. Quarantine
+                    // every role named by the journal, including roles being
+                    // removed by a read-write to read-only replacement.
+                    _ = await quarantineJournalRoles(journal)
                     pending.removeValue(forKey: sessionID)
                     preserveLocalState = true
                     throw GitHubAuthorizationError.revocationFailed
@@ -461,15 +490,10 @@ actor GitHubAuthorizationCoordinator {
                     try await broker.remove(workspace: entry.workspace, role: entry.role)
                 } catch {
                     localCleanupFailed = true
-                    try? await broker.updateRecoveryState(
-                        workspace: entry.workspace,
-                        role: entry.role,
-                        state: .quarantined,
-                        quarantined: true
-                    )
                 }
             }
             if localCleanupFailed {
+                _ = await quarantineJournalRoles(journal)
                 pending.removeValue(forKey: sessionID)
                 preserveLocalState = true
                 throw GitHubAuthorizationError.revocationFailed
@@ -552,10 +576,16 @@ actor GitHubAuthorizationCoordinator {
             }
             if let connectError = error as? MSWConnectError {
                 switch connectError {
-                case .sessionExpired:
+                case .sessionExpired, .sessionCleanupFailed:
                     throw GitHubAuthorizationError.authorizationSessionExpired
                 case .transportUnavailable, .httpStatus, .rateLimited:
                     throw GitHubAuthorizationError.serviceUnavailable
+                case .installationUnavailable, .installationRemoved:
+                    throw GitHubAuthorizationError.ownerNotInstalled
+                case .accountBoundaryViolation, .repositoryNotAllowed:
+                    throw GitHubAuthorizationError.repositoryNotAllowed
+                case .scopeAttestationInvalid:
+                    throw GitHubAuthorizationError.scopeMismatch
                 default:
                     break
                 }
@@ -572,7 +602,20 @@ actor GitHubAuthorizationCoordinator {
     }
 
     func metadata() async -> [WorkspaceCredentialMetadata] {
-        await broker.allMetadata()
+        // Settings must never inspect credential metadata while a durable
+        // authorization journal is still being reconciled. Recovery errors
+        // leave affected roles quarantined and the journal persisted for retry.
+        do {
+            try await recoverPendingAuthorization()
+            return await broker.allMetadata()
+        } catch {
+            // A malformed or otherwise unrecoverable journal must not expose
+            // any ready metadata. Quarantined records remain visible so the
+            // user can understand which access needs explicit repair.
+            return (await broker.allMetadata()).filter {
+                $0.quarantined || $0.recoveryState == .quarantined
+            }
+        }
     }
 
     func verificationResults() -> [GitHubWorkspaceVerificationResult] {
@@ -597,7 +640,7 @@ actor GitHubAuthorizationCoordinator {
         }
     }
 
-    func installationURL() async -> URL {
+    func installationURL() async -> URL? {
         connect.configuration.installationURL
     }
 
@@ -624,7 +667,7 @@ actor GitHubAuthorizationCoordinator {
                     state = .revoked
                 case .sessionExpired, .transportUnavailable, .httpStatus, .rateLimited:
                     state = .serviceUnavailable
-                case .installationRemoved:
+                case .installationUnavailable, .installationRemoved:
                     state = .installationRemoved
                 default:
                     state = .quarantined
@@ -663,7 +706,7 @@ actor GitHubAuthorizationCoordinator {
             let state: CredentialRecoveryState
             if let connectError = error as? MSWConnectError {
                 switch connectError {
-                case .installationRemoved:
+                case .installationUnavailable, .installationRemoved:
                     state = .installationRemoved
                 case .sessionExpired, .transportUnavailable, .httpStatus, .rateLimited:
                     state = .serviceUnavailable
@@ -711,7 +754,10 @@ actor GitHubAuthorizationCoordinator {
             throw GitHubAuthorizationError.scopeMismatch
         } catch MSWConnectError.sessionExpired {
             throw GitHubAuthorizationError.authorizationSessionExpired
-        } catch MSWConnectError.installationUnavailable, MSWConnectError.accountBoundaryViolation {
+        } catch MSWConnectError.installationUnavailable,
+                MSWConnectError.installationRemoved {
+            throw GitHubAuthorizationError.ownerNotInstalled
+        } catch MSWConnectError.accountBoundaryViolation {
             throw GitHubAuthorizationError.repositoryNotAllowed
         } catch MSWConnectError.transportUnavailable, MSWConnectError.httpStatus {
             throw GitHubAuthorizationError.serviceUnavailable
@@ -989,6 +1035,31 @@ actor GitHubAuthorizationCoordinator {
         guard let journalURL, FileManager.default.fileExists(atPath: journalURL.path) else { return }
         try FileManager.default.removeItem(at: journalURL)
     }
+    private func quarantineJournalRoles(_ journal: TransactionJournal) async -> Bool {
+        var succeeded = true
+        for key in journal.workspaceKeys {
+            let components = key.split(separator: ".")
+            guard components.count == 2,
+                  let role = CredentialRole(rawValue: String(components[1])),
+                  WorkspaceID.isValid(String(components[0])) else {
+                succeeded = false
+                continue
+            }
+            do {
+                // `quarantine` creates a durable record when local commit was
+                // only partial, so even a role absent from metadata is blocked
+                // before remote cleanup is retried.
+                try await broker.quarantine(
+                    workspace: String(components[0]),
+                    role: role
+                )
+            } catch {
+                succeeded = false
+            }
+        }
+        return succeeded
+    }
+
 
     private func reconcileCommittedJournal(_ journal: TransactionJournal) async throws {
         let expectedGrantIDs = Set(journal.newGrantIDs)
@@ -1025,7 +1096,7 @@ actor GitHubAuthorizationCoordinator {
             }
             guard entry.recoveryState == .ready, !entry.quarantined else {
                 do {
-                    let bundle = try await broker.load(workspace: entry.workspace, role: entry.role)
+                    let bundle = try await broker.loadForRecovery(workspace: entry.workspace, role: entry.role)
                     guard !bundle.credential.isAccessExpired else {
                         throw CredentialBrokerError.grantUnavailable
                     }
@@ -1058,6 +1129,11 @@ actor GitHubAuthorizationCoordinator {
         case .committed:
             try? removeJournal()
         case .localCommitted, .revokingOld:
+            guard await quarantineJournalRoles(journal) else {
+                journal.updatedAt = now()
+                try? persistJournal(journal)
+                throw GitHubAuthorizationError.revocationFailed
+            }
             var remaining = journal.oldGrantIDs
             for grantID in journal.oldGrantIDs {
                 do {
@@ -1070,6 +1146,9 @@ actor GitHubAuthorizationCoordinator {
                     journal.oldGrantIDs = remaining
                     journal.updatedAt = now()
                     try? persistJournal(journal)
+                    // The old grant may still be usable remotely. Keep every
+                    // journal role quarantined while the journal is retried.
+                    _ = await quarantineJournalRoles(journal)
                     throw GitHubAuthorizationError.serviceUnavailable
                 }
             }
@@ -1081,15 +1160,8 @@ actor GitHubAuthorizationCoordinator {
             )
             if !expectedGrantIDs.isSubset(of: presentGrantIDs) {
                 // A crash can leave a local commit only partially written.
-                // Revoke every replacement grant before quarantining the
-                // affected workspace records; otherwise a remote grant can
-                // outlive the local metadata that proves its scope.
-                for key in journal.workspaceKeys {
-                    let components = key.split(separator: ".")
-                    guard components.count == 2,
-                          let role = CredentialRole(rawValue: String(components[1])) else { continue }
-                    try? await broker.quarantine(workspace: String(components[0]), role: role)
-                }
+                // All journal roles were quarantined before this check; revoke
+                // every replacement grant before retaining the journal.
                 journal.phase = .rollingBack
                 var remainingNewGrants = journal.newGrantIDs
                 for grantID in journal.newGrantIDs {
@@ -1103,6 +1175,7 @@ actor GitHubAuthorizationCoordinator {
                         journal.newGrantIDs = remainingNewGrants
                         journal.updatedAt = now()
                         try? persistJournal(journal)
+                        _ = await quarantineJournalRoles(journal)
                         throw GitHubAuthorizationError.serviceUnavailable
                     }
                 }
@@ -1121,11 +1194,10 @@ actor GitHubAuthorizationCoordinator {
             try? persistJournal(journal)
             try? removeJournal()
         case .prepared, .rollingBack:
-            for key in journal.workspaceKeys {
-                let components = key.split(separator: ".")
-                guard components.count == 2,
-                      let role = CredentialRole(rawValue: String(components[1])) else { continue }
-                try? await broker.quarantine(workspace: String(components[0]), role: role)
+            guard await quarantineJournalRoles(journal) else {
+                journal.updatedAt = now()
+                try? persistJournal(journal)
+                throw GitHubAuthorizationError.revocationFailed
             }
             var remaining = journal.newGrantIDs
             for grantID in journal.newGrantIDs {

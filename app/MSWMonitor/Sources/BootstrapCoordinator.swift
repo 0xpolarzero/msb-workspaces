@@ -253,7 +253,14 @@ actor BootstrapStateStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
-actor BootstrapCoordinator {
+protocol MSWBootstrapCoordinating: AnyObject, Sendable {
+    func state() async -> MSWBootstrapState
+    func preflight() async -> [MSWPreflightCheck]
+    func run() async throws -> MSWBootstrapResult
+    func openHostApprovalSettings() async
+}
+
+actor BootstrapCoordinator: MSWBootstrapCoordinating {
     private let client: MSWClient
     private let runner: MSWCommandRunner
     private let stateStore: BootstrapStateStore
@@ -908,4 +915,68 @@ actor BootstrapCoordinator {
             return false
         }
     }
+}
+
+/// Deterministic bootstrap fixture for UI tests. The first `run()` throws the
+/// typed GitHub reconnect protocol error a real `msw app bootstrap` reports for
+/// a configured workspace whose credential is unavailable; later `run()` calls
+/// report a completed verification, mirroring a successful resume after the
+/// user reconnects GitHub.
+@MainActor
+final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
+    private var current: MSWBootstrapState
+    private var runCount = 0
+    private let failureWorkspace: String
+
+    init(failureWorkspace: String) {
+        self.failureWorkspace = failureWorkspace
+        let now = Date()
+        self.current = MSWBootstrapState(
+            phase: .workspaces,
+            startedAt: now,
+            updatedAt: now,
+            lastError: nil,
+            completedPhases: [.preflight, .toolchain, .hostIntegration]
+        )
+    }
+
+    func state() async -> MSWBootstrapState { current }
+
+    func preflight() async -> [MSWPreflightCheck] {
+        [
+            MSWPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
+            MSWPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
+            MSWPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
+            MSWPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
+        ]
+    }
+
+    func run() async throws -> MSWBootstrapResult {
+        runCount += 1
+        if runCount == 1 {
+            let failure = MSWClientError.protocolFailure(MSWProtocolError(
+                code: "MSW_GITHUB_RECONNECT_REQUIRED",
+                message: "GitHub is configured for '\(failureWorkspace)', but its credential is unavailable.",
+                recovery: "Connect GitHub for '\(failureWorkspace)' in MSW Monitor, then resume Setup.",
+                workspace: failureWorkspace,
+                retryable: true
+            ))
+            current.lastError = String(describing: failure)
+            current.updatedAt = Date()
+            throw failure
+        }
+        current.phase = .complete
+        current.completedPhases = Set(MSWBootstrapState.Phase.allCases)
+        current.lastError = nil
+        current.updatedAt = Date()
+        return MSWBootstrapResult(
+            resumed: true,
+            phase: MSWBootstrapState.Phase.complete.rawValue,
+            requiresApproval: false,
+            vmsStarted: true,
+            message: "Workspace bootstrap and deep verification completed; the previous running set was restored."
+        )
+    }
+
+    func openHostApprovalSettings() async {}
 }

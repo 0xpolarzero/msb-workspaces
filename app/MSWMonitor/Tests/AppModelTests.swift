@@ -128,6 +128,21 @@ final class AppModelTests: XCTestCase {
         model.refresh()
         XCTAssertEqual(model.observationText, "Observation #2")
     }
+    func testStartupRecoveryBlockedModelFailsClosedAndRetriesRecovery() {
+        var retryCount = 0
+        let model = AppModel(
+            startupRecoveryBlockedReason: "Recovery journal could not be reconciled.",
+            startupRecoveryRetry: { retryCount += 1 }
+        )
+
+        XCTAssertEqual(model.health.title, "Authorization recovery blocked")
+        XCTAssertEqual(model.workspaces.map(\.state), [.quarantined, .quarantined, .quarantined])
+        XCTAssertEqual(model.workspaces.map(\.credential), [.quarantined, .quarantined, .quarantined])
+        model.refresh()
+        XCTAssertEqual(retryCount, 1)
+        XCTAssertEqual(model.observationCount, 0)
+        XCTAssertEqual(model.observationText, "Not yet refreshed")
+    }
 
     func testNotificationDeliveryCapsPersistentFailures() async {
         let defaults = UserDefaults(suiteName: "notification-retry-\(UUID().uuidString)")!
@@ -559,7 +574,7 @@ final class AppModelTests: XCTestCase {
 
         model.start(.dev)
         try await Task.sleep(for: .milliseconds(50))
-        XCTAssertTrue(model.lastError?.contains("blocked") == true)
+        XCTAssertTrue(model.lastError?.contains("quarantined") == true)
         XCTAssertNotNil(model.pendingLifecyclePlan)
         model.cancelPendingLifecycle()
     }
@@ -1615,6 +1630,7 @@ final class AppModelTests: XCTestCase {
             )
         )
     }
+
     func testMSWConnectRejectsUnknownExpiredAndReplayedCallbacks() async throws {
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
@@ -1677,6 +1693,237 @@ final class AppModelTests: XCTestCase {
         }
     }
 
+    func testMSWConnectAuthorizationOpensBrowserWithoutEndpointPreflight() async throws {
+        let transport = QueueConnectTransport()
+        let client = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: transport,
+            keychain: InMemoryConnectKeychain(),
+            sessionService: "test-connect-authorize-\(UUID().uuidString)"
+        )
+        let browser = RecordingConnectBrowser()
+
+        do {
+            _ = try await client.authorize(browser: browser)
+            XCTFail("A cancelled browser authorization must fail.")
+        } catch let error as MSWConnectError {
+            XCTAssertEqual(error, .cancelled)
+        }
+
+        XCTAssertNotNil(browser.openedURL)
+        let requests = await transport.requests()
+        XCTAssertTrue(
+            requests.isEmpty,
+            "Authorization must let the browser reach the endpoint instead of issuing a fragile HEAD preflight."
+        )
+    }
+
+    func testDefaultBrowserIgnoresStaleCallbackAfterCancelRetry() async throws {
+        let browser = MSWConnectBrowser(opener: { _ in true })
+        let first = Task {
+            try await browser.authenticate(
+                url: Self.authorizeURL(state: "stale-state"),
+                callbackScheme: "msw"
+            )
+        }
+        try await Self.waitUntil { browser.expectedState == "stale-state" }
+
+        // Cancel the first attempt, then immediately retry: the cancellation
+        // handler may fire before OR after the retry installs its wait, and
+        // neither interleaving may disturb the retry.
+        first.cancel()
+        let retry = Task {
+            try await browser.authenticate(
+                url: Self.authorizeURL(state: "fresh-state"),
+                callbackScheme: "msw"
+            )
+        }
+        try await Self.waitUntil { browser.expectedState == "fresh-state" }
+
+        let firstResult = await first.result
+        guard case .failure(let firstError) = firstResult else {
+            return XCTFail("The cancelled first attempt must fail.")
+        }
+        XCTAssertEqual(firstError as? MSWConnectError, .cancelled)
+
+        let stale = URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=one&state=stale-state")!
+        XCTAssertFalse(browser.handleCallback(stale), "A callback from a cancelled attempt must be ignored.")
+        XCTAssertTrue(browser.isWaiting, "An ignored stale callback must not consume the wait.")
+
+        let fresh = URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=two&state=fresh-state")!
+        XCTAssertTrue(browser.handleCallback(fresh))
+        let value = try await retry.value
+        XCTAssertEqual(value.absoluteString, fresh.absoluteString)
+        XCTAssertFalse(browser.isWaiting)
+    }
+
+    func testDefaultBrowserIgnoresCallbacksFromOtherSchemesHostsPathsOrStates() async throws {
+        let browser = MSWConnectBrowser(opener: { _ in true })
+        let task = Task {
+            try await browser.authenticate(
+                url: Self.authorizeURL(state: "expected-state"),
+                callbackScheme: "msw"
+            )
+        }
+        try await Self.waitUntil { browser.expectedState == "expected-state" }
+
+        XCTAssertFalse(browser.handleCallback(
+            URL(string: "https://connect.microsandbox.dev/oauth/callback?code=x&state=expected-state")!
+        ))
+        XCTAssertFalse(browser.handleCallback(
+            URL(string: "msw://other.example.com/oauth/callback?code=x&state=expected-state")!
+        ))
+        XCTAssertFalse(browser.handleCallback(
+            URL(string: "msw://connect.microsandbox.dev/other/callback?code=x&state=expected-state")!
+        ))
+        XCTAssertFalse(browser.handleCallback(
+            URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=x&state=wrong-state")!
+        ))
+        XCTAssertFalse(browser.handleCallback(
+            URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=x")!
+        ))
+        XCTAssertTrue(browser.isWaiting, "Mismatched callbacks must leave the wait intact.")
+
+        let fresh = URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=ok&state=expected-state")!
+        XCTAssertTrue(browser.handleCallback(fresh))
+        let value = try await task.value
+        XCTAssertEqual(value.absoluteString, fresh.absoluteString)
+        XCTAssertFalse(browser.handleCallback(fresh), "After completion the slot is free for a new attempt.")
+    }
+
+    private static func authorizeURL(state: String) -> URL {
+        var components = URLComponents(string: "https://connect.test/oauth/authorize")!
+        components.queryItems = [
+            URLQueryItem(name: "client_id", value: "test-client"),
+            URLQueryItem(name: "redirect_uri", value: "msw://connect.microsandbox.dev/oauth/callback"),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: "challenge"),
+            URLQueryItem(name: "code_challenge_method", value: "S256")
+        ]
+        return components.url!
+    }
+
+    private static func waitUntil(_ condition: @MainActor () -> Bool) async throws {
+        for _ in 0..<200 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for the browser wait to install.")
+    }
+
+
+    func testReviewCompletionRequiresLoadedGitHubContextEvenWithPersistedCompletedChoices() {
+        // Review and Done must stay closed until the GitHub context loads.
+        XCTAssertFalse(SetupView.allowsReviewCompletion(
+            contextLoaded: false,
+            systemReady: true,
+            githubDecided: true,
+            identityDecided: true,
+            verificationsAllowCompletion: true
+        ), "Persisted completed choices must not enable Review/Done before the GitHub context loads.")
+        XCTAssertTrue(SetupView.allowsReviewCompletion(
+            contextLoaded: true,
+            systemReady: true,
+            githubDecided: true,
+            identityDecided: true,
+            verificationsAllowCompletion: true
+        ))
+        XCTAssertFalse(SetupView.allowsReviewCompletion(
+            contextLoaded: true,
+            systemReady: true,
+            githubDecided: false,
+            identityDecided: true,
+            verificationsAllowCompletion: true
+        ))
+        XCTAssertFalse(SetupView.allowsReviewCompletion(
+            contextLoaded: true,
+            systemReady: false,
+            githubDecided: true,
+            identityDecided: true,
+            verificationsAllowCompletion: true
+        ))
+    }
+
+    func testMSWConnectSessionSurvivesRestoreFromAnotherConfiguration() async throws {
+        let keychain = InMemoryConnectKeychain()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let sessionService = "test-connect-retained-\(UUID().uuidString)"
+
+        let transport = QueueConnectTransport()
+        let configuredClient = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: sessionService
+        )
+        let start = try await configuredClient.startAuthorization()
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-service-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        _ = try await configuredClient.completeAuthorization(
+            callbackURL: testCallbackURL(
+                configuration: testConnectConfiguration(),
+                state: start.state,
+                code: "one-time-code"
+            )
+        )
+
+        // A different configuration must neither restore nor delete the session.
+        let otherClient = MSWConnectClient(
+            configuration: MSWConnectConfiguration(
+                baseURL: URL(string: "https://other-connect.test")!,
+                clientID: "other-client"
+            ),
+            transport: QueueConnectTransport(),
+            keychain: keychain,
+            now: clock.now,
+            sessionService: sessionService
+        )
+        let otherRestored = try await otherClient.restoreSession()
+        XCTAssertNil(otherRestored)
+
+        // The unconfigured sentinel configuration must also leave it alone.
+        let sentinelClient = MSWConnectClient(
+            configuration: MSWConnectConfiguration(),
+            transport: QueueConnectTransport(),
+            keychain: keychain,
+            now: clock.now,
+            sessionService: sessionService
+        )
+        let sentinelRestored = try await sentinelClient.restoreSession()
+        XCTAssertNil(sentinelRestored)
+
+        // The owning configuration can still restore the retained session.
+        let restored = try await configuredClient.restoreSession()
+        XCTAssertEqual(restored?.account.login, "octocat")
+    }
+
+    func testMSWConnectAuthorizationSurfacesUnavailableCallbackExchange() async throws {
+        let transport = QueueConnectTransport()
+        let client = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: transport,
+            keychain: InMemoryConnectKeychain(),
+            sessionService: "test-connect-unavailable-\(UUID().uuidString)"
+        )
+
+        do {
+            _ = try await client.authorize(browser: TestConnectBrowser())
+            XCTFail("An unavailable callback exchange must fail.")
+        } catch let error as MSWConnectError {
+            XCTAssertEqual(error, .transportUnavailable)
+        }
+
+        let requests = await transport.requests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.httpMethod, "POST")
+        XCTAssertEqual(requests.first?.url?.path, "/oauth/callback")
+    }
+
     func testMSWConnectRejectsUnsafeClientConfiguration() {
         let configuration = MSWConnectConfiguration(
             baseURL: URL(string: "https://connect.test")!,
@@ -1690,6 +1937,111 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(error as? MSWConnectError, .invalidConfiguration)
         }
     }
+    func testMSWConnectAcceptsOnlyConfiguredGitHubInstallationURL() throws {
+        let approved = MSWConnectConfiguration(
+            baseURL: URL(string: "https://connect.test")!,
+            clientID: "test-client",
+            redirectURL: URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+            authorizationPath: "/oauth/authorize",
+            callbackPath: "/oauth/callback",
+            installationURL: URL(string: "https://github.com/apps/msw/installations/new")!
+        )
+        XCTAssertNoThrow(try approved.validate())
+        XCTAssertTrue(approved.isConfigured)
+
+        let rejected = [
+            URL(string: "https://github.com/apps/msw/installations/new?state=1")!,
+            URL(string: "https://example.com/apps/msw/installations/new")!,
+            URL(string: "https://github.com/apps/msw/installations/../new")!
+        ]
+        for installationURL in rejected {
+            let configuration = MSWConnectConfiguration(
+                baseURL: URL(string: "https://connect.test")!,
+                clientID: "test-client",
+                redirectURL: URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+                authorizationPath: "/oauth/authorize",
+                callbackPath: "/oauth/callback",
+                installationURL: installationURL
+            )
+            XCTAssertThrowsError(try configuration.validate()) { error in
+                XCTAssertEqual(error as? MSWConnectError, .invalidConfiguration)
+            }
+            XCTAssertFalse(configuration.isConfigured)
+        }
+    }
+
+    func testAuthorizationMapsRemovedInstallationToOwnerNotInstalled() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-installation-removed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let transport = QueueConnectTransport()
+        let keychain = InMemoryConnectKeychain()
+        let client = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-installation-removed-\(UUID().uuidString)"
+        )
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-installation-removed-broker-\(UUID().uuidString)"
+        )
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: client,
+            now: clock.now,
+            journalURL: temporary.appendingPathComponent("authorization-journal.json")
+        )
+        let owner = GitHubInstallationAccount(login: "acme", id: 42, type: "Organization")
+        let installation = GitHubInstallation(id: 42, account: owner, repositorySelection: "selected")
+        let repository = GitHubRepository(
+            id: 7,
+            fullName: "acme/one",
+            name: "one",
+            owner: owner,
+            private: true,
+            defaultBranch: "main"
+        )
+
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-service-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        await transport.enqueue(try testJSON(TestInstallationResponse(installations: [installation])))
+        let discovery = try await coordinator.beginAuthorization(browser: TestConnectBrowser())
+
+        await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: [repository])))
+        await transport.enqueue(
+            Data(#"{"error":{"code":"installation_removed","message":"installation removed"}}"#.utf8),
+            status: 404
+        )
+        let assignment = GitHubWorkspaceAssignment(
+            workspace: "dev",
+            owner: "acme",
+            installationID: installation.id,
+            repositoryIDs: [repository.id],
+            repositoryNames: [repository.fullName],
+            verificationRepository: repository.fullName
+        )
+
+        do {
+            _ = try await coordinator.commitAssignments(
+                sessionID: discovery.sessionID,
+                assignments: [assignment]
+            )
+            XCTFail("A removed installation must require owner reauthorization.")
+        } catch let error as GitHubAuthorizationError {
+            XCTAssertEqual(error, .ownerNotInstalled)
+        }
+    }
+
 
     func testOneConnectSessionCommitsIndependentWorkspaceGrants() async throws {
         let temporary = FileManager.default.temporaryDirectory
@@ -1922,6 +2274,443 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(quarantined?.recoveryState, .quarantined)
         XCTAssertTrue(quarantined?.quarantined == true)
     }
+    func testAuthorizationMetadataWaitsForPreparedJournalRecovery() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-startup-recovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let journalURL = temporary.appendingPathComponent("authorization-transaction.json")
+        let formatter = ISO8601DateFormatter()
+        let journal: [String: Any] = [
+            "transactionID": UUID().uuidString,
+            "sessionID": UUID().uuidString,
+            "workspaceKeys": ["dev.guest"],
+            "newGrantIDs": [],
+            "oldGrantIDs": [],
+            "phase": "prepared",
+            "updatedAt": formatter.string(from: Date())
+        ]
+        try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
+
+        let broker = try CredentialBroker(
+            keychain: InMemoryConnectKeychain(),
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-startup-recovery-\(UUID().uuidString)"
+        )
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            journalURL: journalURL
+        )
+
+        let metadata = await coordinator.metadata()
+
+        let entry = try XCTUnwrap(metadata.first { $0.id == "dev.guest" })
+        XCTAssertEqual(entry.recoveryState, .quarantined)
+        XCTAssertTrue(entry.quarantined)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
+    }
+
+    func testPreparedRecoveryQuarantinesPartialLocalCommitAndPreservesJournalOnServiceOutage() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-prepared-recovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let newGrantID = UUID()
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-prepared-recovery-\(UUID().uuidString)"
+        )
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: newGrantID,
+                accessToken: "ghs_partial_prepared",
+                accessExpiresAt: clock.value.addingTimeInterval(1800),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"]
+        )
+
+        let journalURL = temporary.appendingPathComponent("authorization-transaction.json")
+        let formatter = ISO8601DateFormatter()
+        let journal: [String: Any] = [
+            "transactionID": UUID().uuidString,
+            "sessionID": UUID().uuidString,
+            "workspaceKeys": ["dev.guest", "dev.host"],
+            "newGrantIDs": [newGrantID.uuidString],
+            "oldGrantIDs": [],
+            "phase": "prepared",
+            "updatedAt": formatter.string(from: clock.value)
+        ]
+        try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
+
+        let connect = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: QueueConnectTransport(),
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-prepared-connect-\(UUID().uuidString)"
+        )
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            now: clock.now,
+            journalURL: journalURL
+        )
+
+        do {
+            try await coordinator.recoverPendingAuthorization()
+            XCTFail("A prepared transaction with uncertain cleanup must remain durable.")
+        } catch let error as GitHubAuthorizationError {
+            XCTAssertEqual(error, .serviceUnavailable)
+        }
+
+        for role in CredentialRole.allCases {
+            let optionalEntry = try await broker.metadata(for: "dev", role: role)
+            let entry = try XCTUnwrap(optionalEntry)
+            XCTAssertEqual(entry.recoveryState, .quarantined)
+            XCTAssertTrue(entry.quarantined)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: journalURL.path))
+        let persisted = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: journalURL)
+        ) as? [String: Any]
+        XCTAssertEqual((persisted?["newGrantIDs"] as? [String])?.count, 1)
+    }
+
+    func testOldGrantRevokeTransportFailureQuarantinesEveryJournalRole() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-old-revoke-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let transport = QueueConnectTransport()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let configuration = testConnectConfiguration()
+        let sessionService = "test-old-revoke-connect-\(UUID().uuidString)"
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: sessionService
+        )
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-old-revoke-broker-\(UUID().uuidString)"
+        )
+        let oldGrantID = UUID()
+        for (role, accessMode, token) in [
+            (CredentialRole.guest, "read-only", "ghs_old_guest"),
+            (CredentialRole.host, "host-write", "ghs_old_host")
+        ] as [(CredentialRole, String, String)] {
+            try await broker.storeScopedCredential(
+                ScopedInstallationCredential(
+                    grantID: oldGrantID,
+                    accessToken: token,
+                    accessExpiresAt: clock.value.addingTimeInterval(1800),
+                    generation: 1
+                ),
+                workspace: "dev",
+                accessMode: accessMode,
+                verificationRepository: "acme/one",
+                installationID: 42,
+                role: role,
+                accountLogin: "octocat",
+                owner: "acme",
+                repositoryIDs: [7],
+                repositoryNames: ["acme/one"]
+            )
+        }
+
+        let start = try await connect.startAuthorization()
+        let sessionID = UUID()
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: sessionID,
+            sessionToken: "opaque-old-revoke-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        _ = try await connect.completeAuthorization(
+            callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "old-revoke")
+        )
+
+        let journalURL = temporary.appendingPathComponent("authorization-transaction.json")
+        let formatter = ISO8601DateFormatter()
+        let journal: [String: Any] = [
+            "transactionID": UUID().uuidString,
+            "sessionID": sessionID.uuidString,
+            "workspaceKeys": ["dev.guest", "dev.host"],
+            "newGrantIDs": [],
+            "oldGrantIDs": [oldGrantID.uuidString],
+            "phase": "revokingOld",
+            "updatedAt": formatter.string(from: clock.value)
+        ]
+        try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            now: clock.now,
+            journalURL: journalURL
+        )
+
+        do {
+            try await coordinator.recoverPendingAuthorization()
+            XCTFail("Transport failure must keep old-grant cleanup uncertain.")
+        } catch let error as GitHubAuthorizationError {
+            XCTAssertEqual(error, .serviceUnavailable)
+        }
+
+        for role in CredentialRole.allCases {
+            let optionalEntry = try await broker.metadata(for: "dev", role: role)
+            let entry = try XCTUnwrap(optionalEntry)
+            XCTAssertEqual(entry.recoveryState, .quarantined)
+            XCTAssertTrue(entry.quarantined)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: journalURL.path))
+        let persisted = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: journalURL)
+        ) as? [String: Any]
+        XCTAssertEqual(persisted?["phase"] as? String, "revokingOld")
+        XCTAssertEqual((persisted?["oldGrantIDs"] as? [String])?.count, 1)
+    }
+
+    func testReadWriteToReadOnlyRecoveryRemovesOldHostRole() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-access-replacement-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let transport = QueueConnectTransport()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let configuration = testConnectConfiguration()
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-access-replacement-connect-\(UUID().uuidString)"
+        )
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-access-replacement-broker-\(UUID().uuidString)"
+        )
+        let oldGuestID = UUID()
+        let oldHostID = UUID()
+        let newGuestID = UUID()
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: oldGuestID,
+                accessToken: "ghs_old_guest_replacement",
+                accessExpiresAt: clock.value.addingTimeInterval(1800),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"]
+        )
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: oldHostID,
+                accessToken: "ghs_old_host_replacement",
+                accessExpiresAt: clock.value.addingTimeInterval(1800),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "host-write",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .host,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"]
+        )
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: newGuestID,
+                accessToken: "ghs_new_guest_replacement",
+                accessExpiresAt: clock.value.addingTimeInterval(1800),
+                generation: 2
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"]
+        )
+
+        let start = try await connect.startAuthorization()
+        let sessionID = UUID()
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: sessionID,
+            sessionToken: "opaque-access-replacement-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        _ = try await connect.completeAuthorization(
+            callbackURL: testCallbackURL(
+                configuration: configuration,
+                state: start.state,
+                code: "access-replacement"
+            )
+        )
+        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+            grantID: oldGuestID,
+            revoked: true,
+            terminal: true,
+            revokedAt: clock.value
+        )))
+        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+            grantID: oldHostID,
+            revoked: true,
+            terminal: true,
+            revokedAt: clock.value
+        )))
+
+        let journalURL = temporary.appendingPathComponent("authorization-transaction.json")
+        let formatter = ISO8601DateFormatter()
+        let journal: [String: Any] = [
+            "transactionID": UUID().uuidString,
+            "sessionID": sessionID.uuidString,
+            "workspaceKeys": ["dev.guest", "dev.host"],
+            "newGrantIDs": [newGuestID.uuidString],
+            "oldGrantIDs": [oldGuestID.uuidString, oldHostID.uuidString],
+            "phase": "revokingOld",
+            "updatedAt": formatter.string(from: clock.value)
+        ]
+        try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            now: clock.now,
+            journalURL: journalURL
+        )
+
+        try await coordinator.recoverPendingAuthorization()
+        let optionalGuest = try await broker.metadata(for: "dev", role: .guest)
+        let guest = try XCTUnwrap(optionalGuest)
+        XCTAssertEqual(guest.grantID, newGuestID)
+        XCTAssertEqual(guest.recoveryState, .ready)
+        XCTAssertFalse(guest.quarantined)
+        let host = try await broker.metadata(for: "dev", role: .host)
+        XCTAssertNil(host)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
+        let revokeRequests = await transport.requests().filter { $0.httpMethod == "DELETE" }
+        XCTAssertEqual(revokeRequests.count, 2)
+    }
+
+    func testExpiredSessionRecoveryQuarantinesAndAllowsFreshAuthorizationRetry() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-expired-recovery-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let transport = QueueConnectTransport()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let configuration = testConnectConfiguration()
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-expired-recovery-connect-\(UUID().uuidString)"
+        )
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-expired-recovery-broker-\(UUID().uuidString)"
+        )
+        let oldGrantID = UUID()
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: oldGrantID,
+                accessToken: "ghs_expired_session_old",
+                accessExpiresAt: clock.value.addingTimeInterval(1800),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"]
+        )
+
+        let journalURL = temporary.appendingPathComponent("authorization-transaction.json")
+        let formatter = ISO8601DateFormatter()
+        let journal: [String: Any] = [
+            "transactionID": UUID().uuidString,
+            "sessionID": UUID().uuidString,
+            "workspaceKeys": ["dev.guest"],
+            "newGrantIDs": [],
+            "oldGrantIDs": [oldGrantID.uuidString],
+            "phase": "localCommitted",
+            "updatedAt": formatter.string(from: clock.value)
+        ]
+        try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            now: clock.now,
+            journalURL: journalURL
+        )
+
+        do {
+            try await coordinator.recoverPendingAuthorization()
+            XCTFail("An expired session cannot be treated as proof of revocation.")
+        } catch let error as GitHubAuthorizationError {
+            XCTAssertEqual(error, .serviceUnavailable)
+        }
+        let optionalQuarantined = try await broker.metadata(for: "dev", role: .guest)
+        let quarantined = try XCTUnwrap(optionalQuarantined)
+        XCTAssertEqual(quarantined.recoveryState, .quarantined)
+        XCTAssertTrue(quarantined.quarantined)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: journalURL.path))
+
+        let newSessionID = UUID()
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: newSessionID,
+            sessionToken: "opaque-fresh-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        await transport.enqueue(try testJSON(TestInstallationResponse(installations: [])))
+        let discovery = try await coordinator.beginAuthorization(browser: TestConnectBrowser())
+        XCTAssertEqual(discovery.sessionID, newSessionID)
+        XCTAssertEqual(discovery.account.login, "octocat")
+    }
+
 
     func testMSWConnectGrantRequestUsesReviewedRepositoryScope() async throws {
         let keychain = InMemoryConnectKeychain()
@@ -2156,6 +2945,536 @@ final class AppModelTests: XCTestCase {
         XCTAssertThrowsError(try keychain.load(service: "msw.github.write", account: "dev"))
     }
 
+    // MARK: - Verified Connect -> Apply integration
+    func testVerifiedConnectApplyPersistsScopedMetadataAfterMSWVerification() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-verified-connect-apply-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let metadataURL = temporary.appendingPathComponent("credentials.json")
+        let service = "test-verified-\(UUID().uuidString)"
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        let transport = QueueConnectTransport()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let configuration = testConnectConfiguration()
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-verified-connect-\(UUID().uuidString)"
+        )
+
+        let invocationURL = temporary.appendingPathComponent("msw-bind-invocations.log")
+        let bindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-bind",
+                ok: true,
+                command: "github-bind",
+                observedAt: clock.value,
+                result: MSWGitHubBindResult(
+                    workspace: "dev",
+                    accessMode: "read-only",
+                    verificationRepository: "acme/two",
+                    verified: true,
+                    lifecycleRestored: true
+                )
+            )),
+            as: UTF8.self
+        )
+        let hostBindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-bind-host",
+                ok: true,
+                command: "github-bind",
+                observedAt: clock.value,
+                result: MSWGitHubBindResult(
+                    workspace: "dev",
+                    accessMode: "host-write",
+                    verificationRepository: "acme/two",
+                    verified: true,
+                    lifecycleRestored: true
+                )
+            )),
+            as: UTF8.self
+        )
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "github-bind" ]; then
+            printf '%s\\n' "$*" >> "\(invocationURL.path)"
+            case "$*" in
+                *"--mode host-write"*) printf '%s\\n' '\(hostBindResponse)' ;;
+                *) printf '%s\\n' '\(bindResponse)' ;;
+            esac
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let mswClient = MSWClient(
+            runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: temporary,
+                configuredExecutable: executable
+            )),
+            credentialBroker: broker
+        )
+        let journalURL = temporary.appendingPathComponent("authorization-journal.json")
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            mswClient: mswClient,
+            now: clock.now,
+            journalURL: journalURL
+        )
+
+        let owner = GitHubInstallationAccount(login: "acme", id: 42, type: "Organization")
+        let installation = GitHubInstallation(id: 42, account: owner, repositorySelection: "selected")
+        let repositories = [
+            GitHubRepository(
+                id: 7,
+                fullName: "acme/one",
+                name: "one",
+                owner: owner,
+                private: true,
+                defaultBranch: "main"
+            ),
+            GitHubRepository(
+                id: 8,
+                fullName: "acme/two",
+                name: "two",
+                owner: owner,
+                private: true,
+                defaultBranch: "main"
+            )
+        ]
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-service-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        await transport.enqueue(try testJSON(TestInstallationResponse(installations: [installation])))
+
+        let discovery = try await coordinator.beginAuthorization(browser: TestConnectBrowser())
+        XCTAssertEqual(discovery.account.login, "octocat")
+        XCTAssertEqual(discovery.installations, [installation])
+
+        await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
+        let scopedRepositories = try await coordinator.repositories(
+            sessionID: discovery.sessionID,
+            installationID: installation.id
+        )
+        XCTAssertEqual(scopedRepositories.map(\.fullName), ["acme/one", "acme/two"])
+
+        let assignment = GitHubWorkspaceAssignment(
+            workspace: "dev",
+            owner: "acme",
+            installationID: installation.id,
+            repositoryIDs: [7, 8],
+            repositoryNames: ["acme/one", "acme/two"],
+            accessMode: "read-write",
+            verificationRepository: "acme/two"
+        )
+        await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
+        await transport.enqueue(try testJSON(MSWConnectGrant(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000071")!,
+            workspace: "dev",
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            installationID: installation.id,
+            repositoryIDs: [7, 8],
+            repositoryNames: ["acme/one", "acme/two"],
+            accessMode: "read-only",
+            verificationRepository: "acme/two",
+            accessToken: "ghs_verified_guest",
+            accessExpiresAt: clock.value.addingTimeInterval(1800),
+            generation: 1
+        )))
+        await transport.enqueue(try testJSON(MSWConnectGrant(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000072")!,
+            workspace: "dev",
+            role: .host,
+            accountLogin: "octocat",
+            owner: "acme",
+            installationID: installation.id,
+            repositoryIDs: [7, 8],
+            repositoryNames: ["acme/one", "acme/two"],
+            accessMode: "host-write",
+            verificationRepository: "acme/two",
+            accessToken: "ghs_verified_host",
+            accessExpiresAt: clock.value.addingTimeInterval(1800),
+            generation: 1
+        )))
+
+        let commit = try await coordinator.commitAssignmentsWithVerification(
+            sessionID: discovery.sessionID,
+            assignments: [assignment]
+        )
+        XCTAssertEqual(commit.metadata.map(\.id), ["dev.guest", "dev.host"])
+        let verification = try XCTUnwrap(commit.verifications.first)
+        XCTAssertEqual(verification.workspace, "dev")
+        XCTAssertEqual(verification.accessMode, "read-write")
+        XCTAssertEqual(verification.verificationRepository, "acme/two")
+        XCTAssertTrue(verification.verified)
+        XCTAssertTrue(verification.lifecycleRestored)
+
+        let guestMetadata = try XCTUnwrap(commit.metadata.first(where: { $0.role == .guest }))
+        XCTAssertEqual(guestMetadata.provider, "github-app-installation")
+        XCTAssertEqual(guestMetadata.grantID?.uuidString, "00000000-0000-0000-0000-000000000071")
+        XCTAssertEqual(guestMetadata.owner, "acme")
+        XCTAssertEqual(guestMetadata.accountLogin, "octocat")
+        XCTAssertEqual(guestMetadata.installationID, installation.id)
+        XCTAssertEqual(guestMetadata.repositoryIDs, [7, 8])
+        XCTAssertEqual(guestMetadata.repositoryNames, ["acme/one", "acme/two"])
+        XCTAssertEqual(guestMetadata.accessMode, "read-only")
+        XCTAssertEqual(guestMetadata.verificationRepository, "acme/two")
+        XCTAssertEqual(guestMetadata.recoveryState, .ready)
+        XCTAssertFalse(guestMetadata.quarantined)
+        XCTAssertFalse(guestMetadata.needsRestart)
+
+        let hostMetadata = try XCTUnwrap(commit.metadata.first(where: { $0.role == .host }))
+        XCTAssertEqual(hostMetadata.grantID?.uuidString, "00000000-0000-0000-0000-000000000072")
+        XCTAssertEqual(hostMetadata.accessMode, "host-write")
+        XCTAssertEqual(hostMetadata.recoveryState, .ready)
+        XCTAssertFalse(hostMetadata.quarantined)
+        XCTAssertFalse(hostMetadata.needsRestart)
+
+
+        let reloadedBroker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        let persisted = await reloadedBroker.allMetadata()
+        XCTAssertEqual(persisted.map(\.id), ["dev.guest", "dev.host"])
+        let persistedGuest = try await reloadedBroker.load(workspace: "dev", role: .guest)
+        let persistedHost = try await reloadedBroker.load(workspace: "dev", role: .host)
+        XCTAssertEqual(persistedGuest.credential.accessToken, "ghs_verified_guest")
+        XCTAssertEqual(persistedHost.credential.accessToken, "ghs_verified_host")
+
+        let invocations = try String(contentsOf: invocationURL, encoding: .utf8)
+        XCTAssertEqual(invocations.split(whereSeparator: { $0.isNewline }).count, 3)
+        XCTAssertTrue(invocations.contains("--workspace dev --repository acme/two --mode read-only"))
+        XCTAssertTrue(invocations.contains("--workspace dev --repository acme/two --mode host-write"))
+
+        let transportRequests = await transport.requests()
+        let grantRequests = transportRequests.filter { $0.url?.path == "/v1/grants" }
+        XCTAssertEqual(grantRequests.count, 2)
+        for request in grantRequests {
+            let body = try XCTUnwrap(request.httpBody)
+            let sent = try JSONDecoder().decode(MSWConnectGrantAssignment.self, from: body)
+            XCTAssertEqual(sent.repositoryIDs, [7, 8])
+            XCTAssertEqual(sent.repositoryNames, ["acme/one", "acme/two"])
+            XCTAssertEqual(sent.verificationRepository, "acme/two")
+            XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("access_token"))
+        }
+    }
+
+    func testVerifiedConnectApplyRollsBackAfterVerificationFailure() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-verified-connect-rollback-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let metadataURL = temporary.appendingPathComponent("credentials.json")
+        let service = "test-verified-rollback-\(UUID().uuidString)"
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let oldGrantID = UUID(uuidString: "00000000-0000-0000-0000-000000000081")!
+        let newGrantID = UUID(uuidString: "00000000-0000-0000-0000-000000000082")!
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: oldGrantID,
+                accessToken: "ghs_previous",
+                accessExpiresAt: clock.value.addingTimeInterval(1800),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"],
+            scopeDigest: "previous-scope"
+        )
+        try await broker.markBound(workspace: "dev", role: .guest)
+
+        let transport = QueueConnectTransport()
+        let configuration = testConnectConfiguration()
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-verified-rollback-connect-\(UUID().uuidString)"
+        )
+        let invocationURL = temporary.appendingPathComponent("msw-rollback-invocations.log")
+        let bindMarkerURL = temporary.appendingPathComponent("failed-bind")
+        let failedBindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-bind-failed",
+                ok: true,
+                command: "github-bind",
+                observedAt: clock.value,
+                result: MSWGitHubBindResult(
+                    workspace: "dev",
+                    accessMode: "read-only",
+                    verificationRepository: "acme/one",
+                    verified: false,
+                    lifecycleRestored: false
+                )
+            )),
+            as: UTF8.self
+        )
+        let restoredBindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-bind-restored",
+                ok: true,
+                command: "github-bind",
+                observedAt: clock.value,
+                result: MSWGitHubBindResult(
+                    workspace: "dev",
+                    accessMode: "read-only",
+                    verificationRepository: "acme/one",
+                    verified: true,
+                    lifecycleRestored: true
+                )
+            )),
+            as: UTF8.self
+        )
+        let unbindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-unbind",
+                ok: true,
+                command: "github-unbind",
+                observedAt: clock.value,
+                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+            )),
+            as: UTF8.self
+        )
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "github-bind" ]; then
+            printf '%s\\n' "$*" >> "\(invocationURL.path)"
+            if [ -e "\(bindMarkerURL.path)" ]; then
+                printf '%s\\n' '\(restoredBindResponse)'
+            else
+                : > "\(bindMarkerURL.path)"
+                printf '%s\\n' '\(failedBindResponse)'
+            fi
+        elif [ "$1" = "app" ] && [ "$2" = "github-unbind" ]; then
+            printf '%s\\n' "$*" >> "\(invocationURL.path)"
+            printf '%s\\n' '\(unbindResponse)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let mswClient = MSWClient(
+            runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: temporary,
+                configuredExecutable: executable
+            )),
+            credentialBroker: broker
+        )
+        let journalURL = temporary.appendingPathComponent("authorization-journal.json")
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            mswClient: mswClient,
+            now: clock.now,
+            journalURL: journalURL
+        )
+
+        let owner = GitHubInstallationAccount(login: "acme", id: 42, type: "Organization")
+        let installation = GitHubInstallation(id: 42, account: owner, repositorySelection: "selected")
+        let repositories = [
+            GitHubRepository(
+                id: 7,
+                fullName: "acme/one",
+                name: "one",
+                owner: owner,
+                private: true,
+                defaultBranch: "main"
+            )
+        ]
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-service-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        await transport.enqueue(try testJSON(TestInstallationResponse(installations: [installation])))
+
+        let discovery = try await coordinator.beginAuthorization(browser: TestConnectBrowser())
+        XCTAssertEqual(discovery.account.login, "octocat")
+        await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
+        let scopedRepositories = try await coordinator.repositories(
+            sessionID: discovery.sessionID,
+            installationID: installation.id
+        )
+        XCTAssertEqual(scopedRepositories.map(\.fullName), ["acme/one"])
+
+        let assignment = GitHubWorkspaceAssignment(
+            workspace: "dev",
+            owner: "acme",
+            installationID: installation.id,
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"],
+            accessMode: "read-only",
+            verificationRepository: "acme/one"
+        )
+        await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
+        await transport.enqueue(try testJSON(MSWConnectGrant(
+            id: newGrantID,
+            workspace: "dev",
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            installationID: installation.id,
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"],
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            accessToken: "ghs_replacement",
+            accessExpiresAt: clock.value.addingTimeInterval(1800),
+            generation: 2
+        )))
+        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+            grantID: newGrantID,
+            revoked: true,
+            terminal: true,
+            revokedAt: clock.value
+        )))
+
+        do {
+            _ = try await coordinator.commitAssignmentsWithVerification(
+                sessionID: discovery.sessionID,
+                assignments: [assignment]
+            )
+            XCTFail("A failed MSW verification must not commit replacement access.")
+        } catch let error as GitHubAuthorizationError {
+            XCTAssertEqual(error, .verificationFailed("dev"))
+        }
+
+        let verificationResults = await coordinator.verificationResults()
+        let verification = try XCTUnwrap(verificationResults.first)
+        XCTAssertFalse(verification.verified)
+        XCTAssertFalse(verification.lifecycleRestored)
+        XCTAssertTrue(verification.safetyResult.contains("Previous access was restored"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
+
+        let restoredMetadata = try await broker.metadata(for: "dev", role: .guest)
+        let restored = try XCTUnwrap(restoredMetadata)
+        XCTAssertEqual(restored.grantID, oldGrantID)
+        XCTAssertEqual(restored.recoveryState, .ready)
+        XCTAssertFalse(restored.quarantined)
+        XCTAssertFalse(restored.needsRestart)
+        let restoredBundle = try await broker.load(workspace: "dev", role: .guest)
+        XCTAssertEqual(restoredBundle.credential.accessToken, "ghs_previous")
+
+        let invocations = try String(contentsOf: invocationURL, encoding: .utf8)
+        XCTAssertEqual(invocations.split(whereSeparator: { $0.isNewline }).count, 3)
+        XCTAssertEqual(invocations.components(separatedBy: "github-unbind").count - 1, 1)
+        XCTAssertEqual(invocations.components(separatedBy: "--mode read-only").count - 1, 2)
+        let requests = await transport.requests()
+        let revokedPaths = requests
+            .filter { $0.httpMethod == "DELETE" }
+            .compactMap { $0.url?.path }
+        XCTAssertEqual(revokedPaths, ["/v1/grants/\(newGrantID.uuidString)"])
+        XCTAssertFalse(revokedPaths.contains("/v1/grants/\(oldGrantID.uuidString)"))
+    }
+
+    func testIdentityVerificationGateDisablesCompletionAfterEdit() {
+        let workspaces = Set(["dev", "playgrounds", "personal"])
+        let saved = SetupVerifiedIdentity(name: "Ada Lovelace", email: "ada@example.test")
+        let verified = Dictionary(uniqueKeysWithValues: workspaces.map { ($0, saved) })
+        var visibleName = "Ada Lovelace"
+
+        XCTAssertTrue(
+            SetupIdentityVerification.isComplete(
+                requiredWorkspaces: workspaces,
+                configuredWorkspaces: workspaces,
+                verifiedByWorkspace: verified,
+                target: "all",
+                name: visibleName,
+                email: saved.email
+            )
+        )
+
+        visibleName = "Ada Lovelace (edited)"
+
+        XCTAssertFalse(
+            SetupIdentityVerification.isComplete(
+                requiredWorkspaces: workspaces,
+                configuredWorkspaces: workspaces,
+                verifiedByWorkspace: verified,
+                target: "all",
+                name: visibleName,
+                email: saved.email
+            ),
+            "Done must be disabled after a visible identity edit without a new verification."
+        )
+    }
+    func testIdentityVerificationGateAllowsVerifiedSingleTarget() {
+        let requiredWorkspaces = Set(["dev", "playgrounds", "personal"])
+        let saved = SetupVerifiedIdentity(name: "Ada Lovelace", email: "ada@example.test")
+
+        XCTAssertTrue(
+            SetupIdentityVerification.isComplete(
+                requiredWorkspaces: requiredWorkspaces,
+                configuredWorkspaces: ["dev"],
+                verifiedByWorkspace: ["dev": saved],
+                target: "dev",
+                name: saved.name,
+                email: saved.email
+            )
+        )
+
+        XCTAssertFalse(
+            SetupIdentityVerification.isComplete(
+                requiredWorkspaces: requiredWorkspaces,
+                configuredWorkspaces: ["dev"],
+                verifiedByWorkspace: ["dev": saved],
+                target: "all",
+                name: saved.name,
+                email: saved.email
+            ),
+            "All-workspace completion must still require every workspace."
+        )
+    }
+
+
     private func testConnectConfiguration() -> MSWConnectConfiguration {
         MSWConnectConfiguration(
             baseURL: URL(string: "https://connect.test")!,
@@ -2256,6 +3575,7 @@ private final class TestConnectClock: @unchecked Sendable {
     func now() -> Date { value }
 }
 
+@MainActor
 private struct TestConnectBrowser: MSWConnectBrowserAuthenticating {
     func authenticate(url: URL, callbackScheme: String) async throws -> URL {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
@@ -2268,6 +3588,20 @@ private struct TestConnectBrowser: MSWConnectBrowserAuthenticating {
             URLQueryItem(name: "state", value: state)
         ]
         return components.url!
+    }
+}
+
+@MainActor
+private final class RecordingConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Sendable {
+    private var storage: URL?
+
+    var openedURL: URL? {
+        storage
+    }
+
+    func authenticate(url: URL, callbackScheme: String) async throws -> URL {
+        storage = url
+        throw MSWConnectError.cancelled
     }
 }
 

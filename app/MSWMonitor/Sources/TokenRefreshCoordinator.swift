@@ -99,6 +99,7 @@ actor TokenRefreshCoordinator {
         } catch MSWConnectError.sessionExpired,
                 MSWConnectError.grantNotFound,
                 MSWConnectError.grantRevoked,
+                MSWConnectError.installationUnavailable,
                 MSWConnectError.installationRemoved,
                 MSWConnectError.scopeMismatch,
                 MSWConnectError.scopeAttestationMissing,

@@ -7,28 +7,38 @@ final class StatusBarController {
     let statusItem: NSStatusItem
     let popover: NSPopover
 
-    private let bootstrapCoordinator: BootstrapCoordinator?
+    private let bootstrapCoordinator: (any MSWBootstrapCoordinating)?
     private let authorizationCoordinator: GitHubAuthorizationCoordinator?
+    private let settingsNavigation: SettingsNavigationState
+    private let startupRecoveryBlockedReason: String?
+    private let retryStartupRecovery: () -> Void
     private var detailWindowController: DetailWindowController?
     private var setupWindowController: SetupWindowController?
-    private var settingsWindowController: SettingsWindowController?
 
     init(
         model: AppModel,
-        bootstrapCoordinator: BootstrapCoordinator? = nil,
-        authorizationCoordinator: GitHubAuthorizationCoordinator? = nil
+        bootstrapCoordinator: (any MSWBootstrapCoordinating)? = nil,
+        authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
+        settingsNavigation: SettingsNavigationState = SettingsNavigationState(),
+        startupRecoveryBlockedReason: String? = nil,
+        retryStartupRecovery: @escaping () -> Void = {}
     ) {
         self.model = model
         self.bootstrapCoordinator = bootstrapCoordinator
         self.authorizationCoordinator = authorizationCoordinator
+        self.settingsNavigation = settingsNavigation
+        self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
+        self.retryStartupRecovery = retryStartupRecovery
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         popover = NSPopover()
         let content = MonitorView(
             model: model,
             quit: { NSApplication.shared.terminate(nil) },
             openDetails: { [weak self] route in self?.showDetails(route: route) },
-            openSettings: { [weak self] in self?.showSettings() },
-            openSetup: bootstrapCoordinator == nil ? nil : { [weak self] in self?.showSetup() }
+            openSettings: { [weak self] in self?.showSettings(section: .general) },
+            openSetup: (bootstrapCoordinator != nil || startupRecoveryBlockedReason != nil)
+                ? { [weak self] in self?.showSetup() }
+                : nil
         )
         popover.behavior = ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") ? .applicationDefined : .transient
         popover.animates = false
@@ -48,7 +58,7 @@ final class StatusBarController {
         button.identifier = NSUserInterfaceItemIdentifier("statusItem.button")
         button.setAccessibilityIdentifier("statusItem.button")
         button.setAccessibilityLabel("MSW Monitor")
-        let initialHealth = MonitorHealth.resolve(model)
+        let initialHealth = model.health
         button.toolTip = "MSW Monitor — \(initialHealth.title). \(initialHealth.detail)"
         button.target = self
         button.action = #selector(togglePopover)
@@ -56,6 +66,11 @@ final class StatusBarController {
     }
 
     var statusButton: NSStatusBarButton? { statusItem.button }
+    func tearDown() {
+        setupWindowController?.close()
+        popover.performClose(nil)
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
 
     @objc func togglePopover() {
         guard let button = statusItem.button else { return }
@@ -75,6 +90,8 @@ final class StatusBarController {
         if detailWindowController == nil {
             detailWindowController = DetailWindowController(
                 model: model,
+                openSettings: { [weak self] section in self?.showSettings(section: section) },
+                openSetup: { [weak self] in self?.showSetup() },
                 onClose: { [weak model] in model?.setPollingVisible(false) }
             )
         }
@@ -91,46 +108,40 @@ final class StatusBarController {
     }
 
     func showDetails(for deepLink: URL) {
-        let components = URLComponents(url: deepLink, resolvingAgainstBaseURL: false)
-        let requestedSection = components?.queryItems?
-            .first(where: { $0.name == "section" })?
-            .value ?? (deepLink.host == "workspace" ? "overview" : deepLink.host ?? "overview")
-        let workspace = deepLink.host == "workspace"
-            ? deepLink.pathComponents
-                .filter { $0 != "/" }
-                .first
-                .flatMap(Workspace.ID.init(rawValue:))
-            : nil
-        showDetails(route: DetailRoute(workspace: workspace, section: DetailSection(deepLinkValue: requestedSection)))
+        guard let route = DetailRoute(deepLink: deepLink) else { return }
+        showDetails(route: route)
     }
 
-    private func showSettings() {
+    private func showSettings(section: SettingsSection) {
         popover.performClose(nil)
         model.setPollingVisible(false)
-        if NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController(
-                authorizationCoordinator: authorizationCoordinator,
-                onConnect: { [weak self] in
-                    self?.showSetup()
-                }
-            )
-        }
-        settingsWindowController?.show()
+        settingsNavigation.section = section
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func showSetup() {
         popover.performClose(nil)
         model.setPollingVisible(false)
         if setupWindowController == nil {
+            let arguments = ProcessInfo.processInfo.arguments
+            let uiTestGitHubScenario = arguments.compactMap { argument -> String? in
+                let prefix = "--ui-test-github-"
+                return argument.hasPrefix(prefix) ? String(argument.dropFirst(prefix.count)) : nil
+            }.first
             setupWindowController = SetupWindowController(
                 coordinator: bootstrapCoordinator,
                 authorizationCoordinator: authorizationCoordinator,
-                openSettings: { [weak self] in self?.showSettings() },
-                closeSetup: { [weak self] in self?.setupWindowController?.close() }
+                openSettings: { [weak self] section in self?.showSettings(section: section) },
+                closeSetup: { [weak self] in self?.setupWindowController?.close() },
+                uiTestMode: arguments.contains("--ui-test-setup") ||
+                    arguments.contains("--ui-test-setup-review") ||
+                    uiTestGitHubScenario != nil,
+                uiTestStartsInReview: arguments.contains("--ui-test-setup-review"),
+                uiTestGitHubScenario: uiTestGitHubScenario,
+                uiTestBootstrapReconnect: arguments.contains("--ui-test-setup-reconnect"),
+                startupRecoveryBlockedReason: startupRecoveryBlockedReason,
+                retryStartupRecovery: retryStartupRecovery
             )
         }
         setupWindowController?.show()
@@ -153,7 +164,7 @@ final class StatusBarController {
 
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
-        let health = MonitorHealth.resolve(model)
+        let health = model.health
         if health.severity == .critical {
             button.contentTintColor = .systemRed
         } else if health.severity == .attention {

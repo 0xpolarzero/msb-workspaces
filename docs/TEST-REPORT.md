@@ -18,9 +18,10 @@ The smoke flow proves the app bundle and status-item/popover UI. The app's works
 
 - Bundle exercised: `app/MSWMonitor/build/MSWMonitor.app`.
 - UI smoke mode: `--ui-test-open-popover`; production mode remains `.transient`.
-- UI result bundle: `app/MSWMonitor/build/DerivedData/Smoke/Logs/Test/Test-MSWMonitor-2026.08.11_02-55-53-+0200.xcresult`.
+- UI result bundle: `app/MSWMonitor/build/DerivedData/Smoke/Logs/Test/Test-MSWMonitor-2026.08.14_14-54-25-+0200.xcresult`.
 - Complete UI output: `app/MSWMonitor/build/logs/smoke-ui.log`.
-- Result: `MSWMonitorUITests/testStatusItemPopoverRefreshAndQuit()` passed with zero failures.
+- Result: all 3 `MSWMonitorUITests` cases passed with zero failures (`testSetupCanReviewAndFinishInFixtureMode()`, `testSetupReviewExplainsCompletionState()`, and `testStatusItemPopoverRefreshAndQuit()`).
+  - Model suite: `app/MSWMonitor/Scripts/test.sh` passed 54 tests with zero failures. Result: `app/MSWMonitor/build/DerivedData/Tests/Logs/Test/Test-MSWMonitor-2026.08.14_14-53-55-+0200.xcresult`.
 - Observed semantic values:
   - `statusItem.button`: accessibility label `MSW Monitor`.
   - Application menu title: `MSW Monitor`.
@@ -36,6 +37,8 @@ The smoke flow proves the app bundle and status-item/popover UI. The app's works
   - `process == "MSWMonitor"`
   - `process == "MSWMonitor" AND (messageType == error OR messageType == fault)`
   No narrower wall-clock interval was recorded. These logs are framework diagnostics; the app has no intentional application-level logger.
+
+- Live-service limit: the configured MSW Connect endpoint was unavailable from this machine during probing (DNS resolution failed). Deterministic transport tests cover successful authorization, unavailable callback exchange, scope validation, and verified Connect-to-Apply rollback; no real GitHub account or credential was used.
 
 The native app values above are deterministic fixture values from the current scaffold, not live sandbox telemetry. The smoke test does not prove VM health, `msw` integration, lifecycle actions, telemetry, signing, notarization, or release readiness.
 
@@ -120,7 +123,7 @@ The portable simulator suite cannot instantiate Apple's Virtualization framework
 
 ### Real macOS canary
 
-A real Apple Silicon macOS run against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. The full host setup did not complete workspace recreation: it reached browser/loopback configuration and then stopped because `sudo` requires an interactive terminal and password. Rerun `./setup.sh --recreate-workspaces` from an interactive terminal.
+A prior real Apple Silicon macOS canary against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. This is historical evidence, not part of the current 2026-08-14 run; current verification used no GitHub credentials and the configured Connect endpoint was unavailable from this machine.
 
 ## The only checks you need to run
 

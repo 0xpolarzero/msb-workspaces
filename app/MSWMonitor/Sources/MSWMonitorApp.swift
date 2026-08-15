@@ -9,7 +9,10 @@ struct MSWMonitorApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView(authorizationCoordinator: appDelegate.authorizationCoordinator)
+            SettingsView(
+                navigation: appDelegate.settingsNavigation,
+                authorizationCoordinator: appDelegate.authorizationCoordinator
+            )
         }
     }
 }
@@ -22,14 +25,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let connect: MSWConnectClient
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: MSWClient
+    let settingsNavigation = SettingsNavigationState()
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     override init() {
         let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let connectBaseURL = configuredBaseURL.flatMap(URL.init(string:)) ?? MSWConnectConfiguration().baseURL
+        let connectBaseURL = configuredBaseURL.flatMap { value in
+            value.isEmpty ? nil : URL(string: value)
+        } ?? MSWConnectConfiguration().baseURL
         let configuredClientID = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectClientID") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let connectClientID = configuredClientID.flatMap { $0.isEmpty ? nil : $0 } ?? MSWConnectConfiguration().clientID
+        let connectClientID = configuredClientID.flatMap { value in
+            value.isEmpty ? nil : value
+        } ?? MSWConnectConfiguration().clientID
+        let configuredInstallationURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectInstallationURL") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let installationURL = configuredInstallationURL.flatMap { value in
+            value.isEmpty ? nil : URL(string: value)
+        }
         let configuredAttestation = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectScopeAttestationPublicKey") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let scopeAttestationKey = configuredAttestation.flatMap { value in
@@ -38,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let connectConfiguration = MSWConnectConfiguration(
             baseURL: connectBaseURL,
             clientID: connectClientID,
+            installationURL: installationURL,
             scopeAttestationPublicKey: scopeAttestationKey,
             requiresScopeAttestation: !(configuredAttestation?.isEmpty ?? true)
         )
@@ -62,48 +76,140 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         super.init()
     }
+    /// Routes `msw://` callback URLs from the default browser to the pending
+    /// authorization session (the same route as `NSApplicationDelegate`
+    /// URL-event delivery).
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where MSWConnectBrowser.shared.handleCallback(url) {
+            return
+        }
+    }
+
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let isUnitTestHost = ProcessInfo.processInfo.environment["XCInjectBundleInto"] == "unused"
         if isUnitTestHost {
             return
         }
+        let arguments = ProcessInfo.processInfo.arguments
         let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             ProcessInfo.processInfo.environment["XCInjectBundleInto"] != nil
-        let fixtureMode = ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") || isTestHost
-        let model: AppModel
-        let coordinator: MSWOperationCoordinator?
+        let fixtureMode = arguments.contains("--ui-test-open-popover") ||
+            arguments.contains("--ui-test-setup") ||
+            arguments.contains("--ui-test-setup-review") ||
+            arguments.contains("--ui-test-setup-reconnect") ||
+            arguments.contains(where: { $0.hasPrefix("--ui-test-github-") }) ||
+            isTestHost
         if fixtureMode {
-            model = AppModel()
-            coordinator = nil
-        } else {
-            coordinator = MSWOperationCoordinator(client: client)
-            let service = MSWOperationService(client: client, coordinator: coordinator)
-            let diagnostics = MSWDiagnostics(client: client)
-            model = AppModel(client: client, operationCoordinator: coordinator, operationService: service, diagnostics: diagnostics)
+            installApplication(fixtureMode: true, credentialAccessAllowed: true)
+            return
         }
-        let bootstrap = fixtureMode ? nil : BootstrapCoordinator(
-            client: client,
-            runner: runner,
-            hostService: MSWHostServiceController()
-        )
+
+        // Do not expose the credential-backed model until every durable
+        // authorization journal has been reconciled.
+        Task { @MainActor [weak self] in
+            await self?.recoverAndInstall()
+        }
+    }
+
+    private func recoverAndInstall() async {
+        let recoveryResult: Result<Void, Error>
+        if let authorizationCoordinator {
+            do {
+                try await authorizationCoordinator.recoverPendingAuthorization()
+                recoveryResult = .success(())
+            } catch {
+                recoveryResult = .failure(error)
+            }
+        } else {
+            recoveryResult = .success(())
+        }
+
+        switch recoveryResult {
+        case .success:
+            installApplication(fixtureMode: false, credentialAccessAllowed: true)
+        case .failure(let error):
+            installApplication(
+                fixtureMode: false,
+                credentialAccessAllowed: false,
+                startupRecoveryBlockedReason: error.localizedDescription
+            )
+        }
+    }
+
+    private func retryStartupRecovery() {
+        Task { @MainActor [weak self] in
+            await self?.recoverAndInstall()
+        }
+    }
+
+    private func installApplication(
+        fixtureMode: Bool,
+        credentialAccessAllowed: Bool,
+        startupRecoveryBlockedReason: String? = nil
+    ) {
+        let model: AppModel
+        let operationCoordinator: MSWOperationCoordinator?
+        let startupRecoveryRetry: (() -> Void)? = startupRecoveryBlockedReason == nil
+            ? nil
+            : { [weak self] in self?.retryStartupRecovery() }
+        if fixtureMode || !credentialAccessAllowed {
+            model = AppModel(
+                startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
+                startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry
+            )
+            operationCoordinator = nil
+        } else {
+            operationCoordinator = MSWOperationCoordinator(client: client)
+            let service = MSWOperationService(client: client, coordinator: operationCoordinator)
+            let diagnostics = MSWDiagnostics(client: client)
+            model = AppModel(
+                client: client,
+                operationCoordinator: operationCoordinator,
+                operationService: service,
+                diagnostics: diagnostics
+            )
+        }
+        let bootstrap: (any MSWBootstrapCoordinating)?
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-setup-reconnect") {
+            bootstrap = MSWBootstrapUITestStub(failureWorkspace: "dev")
+        } else if fixtureMode || !credentialAccessAllowed {
+            bootstrap = nil
+        } else {
+            bootstrap = BootstrapCoordinator(
+                client: client,
+                runner: runner,
+                hostService: MSWHostServiceController()
+            )
+        }
+        statusBarController?.tearDown()
         let controller = StatusBarController(
             model: model,
             bootstrapCoordinator: bootstrap,
-            authorizationCoordinator: authorizationCoordinator
+            authorizationCoordinator: authorizationCoordinator,
+            settingsNavigation: settingsNavigation,
+            startupRecoveryBlockedReason: startupRecoveryBlockedReason,
+            retryStartupRecovery: retryStartupRecovery
         )
         statusBarController = controller
         model.setPollingVisible(false)
         UNUserNotificationCenter.current().delegate = self
         observeNotificationEvents(from: model)
-
-        if ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") {
-            Task {
-                try? await Task.sleep(for: .milliseconds(100))
-                controller.togglePopover()
+        let arguments = ProcessInfo.processInfo.arguments
+        let uiTestGitHubFlow = arguments.contains(where: { $0.hasPrefix("--ui-test-github-") })
+        if arguments.contains("--ui-test-open-popover") ||
+            arguments.contains("--ui-test-setup") ||
+            arguments.contains("--ui-test-setup-review") ||
+            uiTestGitHubFlow {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(150))
+                if arguments.contains("--ui-test-open-popover") {
+                    controller.togglePopover()
+                } else {
+                    controller.showSetupForFirstLaunch()
+                }
             }
         } else if !UserDefaults.standard.bool(forKey: "setupCompleted") {
-            // Setup is a normal window in first-run mode; the status item remains
             // available so setup can be resumed or closed without losing state.
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(150))
@@ -111,6 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+
     @objc func openGitHubSetup() {
         statusBarController?.showSetupForGitHubAuthorization()
     }

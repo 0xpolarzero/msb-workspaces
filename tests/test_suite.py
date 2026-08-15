@@ -542,6 +542,38 @@ class InstallerAndDailyTests(MSWTestCase):
         }
         self.assertEqual(after, before)
 
+    def test_app_bootstrap_typed_reconnect_error_when_github_credential_missing(self) -> None:
+        meta = self.env.home / ".config/msw/github/dev.conf"
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
+        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", check=False, timeout=90)
+        self.assertNotEqual(proc.returncode, 0)
+        envelope = json.loads(proc.stdout)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "MSW_GITHUB_RECONNECT_REQUIRED")
+        self.assertEqual(envelope["error"]["workspace"], "dev")
+        self.assertIn("Connect GitHub for 'dev'", envelope["error"]["recovery"])
+        self.assertTrue(envelope["error"]["retryable"])
+        # An already-running workspace is verified without a false reconnect error.
+        meta.unlink()
+        self.env.msw("start", "dev")
+        meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
+        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", timeout=90)
+        self.assertTrue(json.loads(proc.stdout)["ok"])
+        meta.unlink()
+        # Other verification failures carry the sanitized check output so the
+        # user can see why verification failed instead of a generic message.
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine.write_text("failed setup transaction\n")
+        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", check=False, timeout=90)
+        self.assertNotEqual(proc.returncode, 0)
+        envelope = json.loads(proc.stdout)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "MSW_BOOTSTRAP_VERIFICATION_FAILED")
+        self.assertIn("Verification reported:", envelope["error"]["recovery"])
+        self.assertIn("quarantined", envelope["error"]["recovery"])
+        quarantine.unlink()
+
     def test_lifecycle_resize_restart_token_guard_and_proxy(self) -> None:
         self.env.msw("start", "dev")
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
