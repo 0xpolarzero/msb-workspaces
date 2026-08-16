@@ -2356,7 +2356,6 @@ final class AppModelTests: XCTestCase {
         }
         XCTAssertNil(try store.load(), "A cancelled call must not write the session record.")
     }
-
     func testConnectionPresentationNeverClaimsDisconnectedWhileSignedIn() {
         let deviceAccount = GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com")
         let coordinatorAccount = GitHubAccount(login: "monalisa", id: 2, name: "Mona Lisa", email: nil)
@@ -2388,6 +2387,7 @@ final class AppModelTests: XCTestCase {
             .notConnected
         )
     }
+
     func testGitHubDeviceFlowInstallationWithZeroRepositoriesDecodesEmpty() async throws {
         // An installation can exist while granting access to zero repositories;
         // the repositories endpoint must surface that as an empty list so the

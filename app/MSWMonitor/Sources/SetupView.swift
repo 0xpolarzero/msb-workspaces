@@ -416,7 +416,6 @@ struct SetupView: View {
         }
         return "Signed in as @\(login), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
     }
-
     /// Pure derivation, unit-tested: which state the GitHub connection header
     /// must present. A device account is authoritative whenever present
     /// because it only exists on the device-flow path this build presents.
@@ -833,17 +832,13 @@ struct SetupView: View {
                 Text("Choose which workspaces can see which repositories. Nothing is changed until you review and apply.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
-                Label("GitHub is not connected", systemImage: "person.crop.circle.badge.questionmark")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("setup.github.disconnected")
-                Text("GitHub is optional. You can connect it now or configure it later in Settings.")
-                    .font(.caption)
             }
 
             if let workspace = githubAttentionWorkspace {
                 Label(
-                    "GitHub access for \(workspace) needs attention.",
+                    githubAttentionReapplyRequired
+                        ? "GitHub access for \(workspace) needs attention. Re-apply GitHub access for \(workspace) to finish reconnecting."
+                        : "GitHub access for \(workspace) needs attention.",
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .font(.callout)
