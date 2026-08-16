@@ -1,35 +1,65 @@
 import Foundation
 
 
-struct GitHubWorkspaceAssignment: Sendable, Equatable, Identifiable {
-    let id: UUID
+enum GitHubRepositoryAccessMode: String, Codable, Sendable, CaseIterable, Equatable {
+    case readOnly = "read-only"
+    case readWrite = "read-write"
+
+    var label: String {
+        switch self {
+        case .readOnly: "Read-only"
+        case .readWrite: "Read & write"
+        }
+    }
+}
+
+/// Canonical non-secret repository policy. Repository identity is never
+/// reconstructed from a display name: every selection carries the stable
+/// GitHub repository and installation/owner identities used to mint grants.
+struct GitHubRepositoryPolicy: Codable, Sendable, Equatable, Identifiable {
     let workspace: String
-    let owner: String
+    let repositoryID: Int
+    let fullName: String
     let installationID: Int
-    let repositoryIDs: [Int]
-    let repositoryNames: [String]
-    let accessMode: String
-    let verificationRepository: String
+    let ownerID: Int
+    let ownerLogin: String
+    let ownerType: String?
+    let mode: GitHubRepositoryAccessMode
+
+    var id: String { "\(workspace).\(installationID).\(repositoryID)" }
 
     init(
-        id: UUID = UUID(),
         workspace: String,
-        owner: String,
+        repositoryID: Int,
+        fullName: String,
         installationID: Int,
-        repositoryIDs: [Int],
-        repositoryNames: [String],
-        accessMode: String = "read-only",
-        verificationRepository: String
+        ownerID: Int,
+        ownerLogin: String,
+        ownerType: String?,
+        mode: GitHubRepositoryAccessMode = .readOnly
     ) {
-        self.id = id
         self.workspace = workspace
-        self.owner = owner
+        self.repositoryID = repositoryID
+        self.fullName = fullName
         self.installationID = installationID
-        self.repositoryIDs = repositoryIDs
-        self.repositoryNames = repositoryNames
-        self.accessMode = accessMode
-        self.verificationRepository = verificationRepository
+        self.ownerID = ownerID
+        self.ownerLogin = ownerLogin
+        self.ownerType = ownerType
+        self.mode = mode
     }
+}
+
+private struct GitHubGrantPartition: Sendable, Equatable {
+    let workspace: String
+    let installationID: Int
+    let ownerID: Int
+    let ownerLogin: String
+    let ownerType: String?
+    let repositories: [GitHubRepositoryPolicy]
+
+    var readRepositories: [GitHubRepositoryPolicy] { repositories }
+    var writeRepositories: [GitHubRepositoryPolicy] { repositories.filter { $0.mode == .readWrite } }
+    var accessMode: String { writeRepositories.isEmpty ? "read-only" : "read-write" }
 }
 
 struct GitHubAuthorizationDiscovery: Sendable, Equatable {
@@ -40,6 +70,8 @@ struct GitHubAuthorizationDiscovery: Sendable, Equatable {
 
 struct GitHubWorkspaceVerificationResult: Codable, Sendable, Equatable, Identifiable {
     let workspace: String
+    let installationID: Int
+    let role: CredentialRole
     let accessMode: String
     let verificationRepository: String
     let verified: Bool
@@ -47,7 +79,7 @@ struct GitHubWorkspaceVerificationResult: Codable, Sendable, Equatable, Identifi
     let safetyResult: String
     let checkedAt: Date
 
-    var id: String { workspace }
+    var id: String { "\(workspace).\(installationID).\(role.rawValue)" }
 }
 
 struct GitHubAuthorizationCommitResult: Sendable, Equatable {
@@ -73,11 +105,12 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
     case verificationUnavailable(String)
     case verificationFailed(String)
     case lifecycleRestoreFailed(String)
+    case multipleInstallationsUnsupported(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidSelection:
-            return "The GitHub owner, repository, or workspace assignment is invalid."
+            return "The GitHub repository policy is invalid."
         case .invalidAppConfiguration:
             return "GitHub connection is not configured for this build. A deployed MSW Connect service and registered app client are required; no browser page was opened."
         case .guestAuthorizationRequired: return "Authorize guest read access before enabling host write access."
@@ -102,6 +135,8 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
             return "GitHub access for \(workspace) could not be verified. The new grant was not committed."
         case .lifecycleRestoreFailed(let workspace):
             return "GitHub access for \(workspace) verified, but its previous VM lifecycle could not be restored. Review the workspace before retrying."
+        case .multipleInstallationsUnsupported(let workspace):
+            return "GitHub access for \(workspace) can use repositories from one installation at a time because the MSW host credential protocol carries one credential per workspace and role."
         }
     }
 }
@@ -162,7 +197,7 @@ actor GitHubAuthorizationCoordinator {
 
     /// Starts one browser authorization session. The resulting session may
     /// create grants for all three workspaces; no workspace credential exists
-    /// until commitAssignments has reviewed and applied the complete set.
+    /// until commitPolicy has reviewed and applied the complete set.
     func beginAuthorization(
         browser: (any MSWConnectBrowserAuthenticating)? = nil
     ) async throws -> GitHubAuthorizationDiscovery {
@@ -290,31 +325,31 @@ actor GitHubAuthorizationCoordinator {
             throw GitHubAuthorizationError.serviceUnavailable
         }
     }
-    func commitAssignments(
+    func commitPolicy(
         sessionID: UUID,
-        assignments: [GitHubWorkspaceAssignment]
+        policy: [GitHubRepositoryPolicy]
     ) async throws -> [WorkspaceCredentialMetadata] {
-        try await commitAssignments(
+        try await commitPolicy(
             sessionID: sessionID,
-            assignments: assignments,
+            policy: policy,
             requireVerification: false
         ).metadata
     }
 
-    func commitAssignmentsWithVerification(
+    func commitPolicyWithVerification(
         sessionID: UUID,
-        assignments: [GitHubWorkspaceAssignment]
+        policy: [GitHubRepositoryPolicy]
     ) async throws -> GitHubAuthorizationCommitResult {
-        try await commitAssignments(
+        try await commitPolicy(
             sessionID: sessionID,
-            assignments: assignments,
+            policy: policy,
             requireVerification: true
         )
     }
 
-    private func commitAssignments(
+    private func commitPolicy(
         sessionID: UUID,
-        assignments: [GitHubWorkspaceAssignment],
+        policy: [GitHubRepositoryPolicy],
         requireVerification: Bool
     ) async throws -> GitHubAuthorizationCommitResult {
         removeExpiredSessions()
@@ -323,21 +358,23 @@ actor GitHubAuthorizationCoordinator {
         guard let authorization = pending[sessionID] else {
             throw GitHubAuthorizationError.authorizationSessionExpired
         }
-        guard !assignments.isEmpty,
-              Set(assignments.map(\.workspace)).count == assignments.count,
-              assignments.allSatisfy(Self.isValidAssignment) else {
+        guard !policy.isEmpty,
+              policy.allSatisfy(Self.isValidPolicy),
+              Set(policy.map(\.id)).count == policy.count else {
             throw GitHubAuthorizationError.invalidSelection
         }
+        let partitions = try Self.partition(policy)
         let discoveredInstallations = Dictionary(uniqueKeysWithValues: authorization.discovery.installations.map { ($0.id, $0) })
-        guard assignments.allSatisfy({
+        guard partitions.allSatisfy({
             guard let installation = discoveredInstallations[$0.installationID] else { return false }
-            return installation.account.login.caseInsensitiveCompare($0.owner) == .orderedSame
+            return installation.account.id == $0.ownerID &&
+                installation.account.login.caseInsensitiveCompare($0.ownerLogin) == .orderedSame
         }) else {
             throw GitHubAuthorizationError.ownerNotInstalled
         }
 
         let existingEntries = (await broker.allMetadata()).filter { entry in
-            assignments.contains { $0.workspace == entry.workspace }
+            partitions.contains { $0.workspace == entry.workspace }
         }
         var previous: [String: PreviousCredential] = [:]
         for entry in existingEntries {
@@ -350,7 +387,7 @@ actor GitHubAuthorizationCoordinator {
 
         var createdGrants: [(workspace: String, role: CredentialRole, grant: MSWConnectGrant)] = []
         var plannedCommits: [(
-            assignment: GitHubWorkspaceAssignment,
+            partition: GitHubGrantPartition,
             role: CredentialRole,
             grant: MSWConnectGrant,
             verificationRepository: String
@@ -361,10 +398,10 @@ actor GitHubAuthorizationCoordinator {
             sessionID: sessionID,
             workspaceKeys: Array(Set(
                 existingEntries.map { "\($0.workspace).\($0.role.rawValue)" } +
-                    assignments.flatMap { assignment in
-                        assignment.accessMode == "read-write"
-                            ? ["\(assignment.workspace).guest", "\(assignment.workspace).host"]
-                            : ["\(assignment.workspace).guest"]
+                    partitions.flatMap { partition in
+                        partition.writeRepositories.isEmpty
+                            ? ["\(partition.workspace).guest"]
+                            : ["\(partition.workspace).guest", "\(partition.workspace).host"]
                     }
             )).sorted(),
             newGrantIDs: [],
@@ -378,75 +415,75 @@ actor GitHubAuthorizationCoordinator {
             // Recovery can then revoke grants created before a process crash.
             try persistJournal(journal)
             // Create and validate every remote grant before changing local
-            // credentials. A failed assignment therefore cannot leave a
+            // credentials. A failed partition therefore cannot leave a
             // partially committed workspace set behind.
-            for assignment in assignments {
+            for partition in partitions {
                 let repositories = try await repositories(
                     sessionID: sessionID,
-                    installationID: assignment.installationID
+                    installationID: partition.installationID
                 )
                 let allowed = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0) })
-                guard assignment.repositoryIDs.allSatisfy({
-                    guard let repository = allowed[$0] else { return false }
-                    return repository.owner.login.caseInsensitiveCompare(assignment.owner) == .orderedSame
-                }),
-                let verification = repositories.first(where: {
-                    $0.fullName.caseInsensitiveCompare(assignment.verificationRepository) == .orderedSame &&
-                        $0.owner.login.caseInsensitiveCompare(assignment.owner) == .orderedSame
-                }),
-                assignment.repositoryIDs.contains(verification.id) else {
+                guard partition.repositories.allSatisfy({ selected in
+                    guard let repository = allowed[selected.repositoryID] else { return false }
+                    return repository.id == selected.repositoryID &&
+                        repository.fullName.caseInsensitiveCompare(selected.fullName) == .orderedSame &&
+                        repository.owner.id == partition.ownerID &&
+                        repository.owner.login.caseInsensitiveCompare(partition.ownerLogin) == .orderedSame
+                }) else {
                     throw GitHubAuthorizationError.repositoryNotAllowed
                 }
-                let names = assignment.repositoryIDs.compactMap { allowed[$0]?.fullName }
-                guard names.count == assignment.repositoryIDs.count else {
-                    throw GitHubAuthorizationError.repositoryNotAllowed
-                }
+                let readScope = Self.sortedScope(partition.readRepositories)
+                let readVerification = readScope[0].fullName
 
                 let guest = try await createGrant(
-                    assignment: assignment,
+                    partition: partition,
                     role: .guest,
                     accessMode: "read-only",
-                    repositoryNames: names
+                    scope: readScope,
+                    verificationRepository: readVerification
                 )
-                createdGrants.append((assignment.workspace, .guest, guest))
+                createdGrants.append((partition.workspace, .guest, guest))
                 journal.newGrantIDs.append(guest.id)
                 journal.updatedAt = now()
                 try persistJournal(journal)
                 plannedCommits.append((
-                    assignment,
+                    partition,
                     .guest,
                     guest,
-                    verification.fullName
+                    readVerification
                 ))
 
-                if assignment.accessMode == "read-write" {
+                if !partition.writeRepositories.isEmpty {
+                    let writeScope = Self.sortedScope(partition.writeRepositories)
+                    let writeVerification = writeScope[0].fullName
                     let host = try await createGrant(
-                        assignment: assignment,
+                        partition: partition,
                         role: .host,
                         accessMode: "host-write",
-                        repositoryNames: names
+                        scope: writeScope,
+                        verificationRepository: writeVerification
                     )
-                    createdGrants.append((assignment.workspace, .host, host))
+                    createdGrants.append((partition.workspace, .host, host))
                     journal.newGrantIDs.append(host.id)
                     journal.updatedAt = now()
                     try persistJournal(journal)
                     plannedCommits.append((
-                        assignment,
+                        partition,
                         .host,
                         host,
-                        verification.fullName
+                        writeVerification
                     ))
                 }
             }
 
 
             for plan in plannedCommits {
-                committed.append((plan.assignment.workspace, plan.role))
+                committed.append((plan.partition.workspace, plan.role))
                 if let verification = try await commit(
                     plan.grant,
-                    workspace: plan.assignment.workspace,
+                    workspace: plan.partition.workspace,
                     role: plan.role,
-                    assignment: plan.assignment,
+                    partition: plan.partition,
                     verificationRepository: plan.verificationRepository,
                     requireVerification: requireVerification
                 ) {
@@ -513,7 +550,7 @@ actor GitHubAuthorizationCoordinator {
             try? removeJournal()
             return GitHubAuthorizationCommitResult(
                 metadata: result,
-                verifications: latestVerifications.sorted { $0.workspace < $1.workspace }
+                verifications: latestVerifications.sorted { $0.id < $1.id }
             )
         } catch let error as GitHubAuthorizationError {
             if preserveLocalState {
@@ -594,13 +631,6 @@ actor GitHubAuthorizationCoordinator {
         }
     }
 
-    func commitAuthorization(
-        sessionID: UUID,
-        assignment: GitHubWorkspaceAssignment
-    ) async throws -> [WorkspaceCredentialMetadata] {
-        try await commitAssignments(sessionID: sessionID, assignments: [assignment])
-    }
-
     func metadata() async -> [WorkspaceCredentialMetadata] {
         // Settings must never inspect credential metadata while a durable
         // authorization journal is still being reconciled. Recovery errors
@@ -619,7 +649,7 @@ actor GitHubAuthorizationCoordinator {
     }
 
     func verificationResults() -> [GitHubWorkspaceVerificationResult] {
-        latestVerifications.sorted { $0.workspace < $1.workspace }
+        latestVerifications.sorted { $0.id < $1.id }
     }
 
     func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> MSWIdentityResult {
@@ -803,20 +833,21 @@ actor GitHubAuthorizationCoordinator {
     }
 
     private func createGrant(
-        assignment: GitHubWorkspaceAssignment,
+        partition: GitHubGrantPartition,
         role: CredentialRole,
         accessMode: String,
-        repositoryNames: [String]
+        scope: [GitHubRepositoryPolicy],
+        verificationRepository: String
     ) async throws -> MSWConnectGrant {
         let request = MSWConnectGrantAssignment(
-            workspace: assignment.workspace,
+            workspace: partition.workspace,
             role: role,
-            owner: assignment.owner,
-            installationID: assignment.installationID,
-            repositoryIDs: assignment.repositoryIDs,
-            repositoryNames: repositoryNames,
+            owner: partition.ownerLogin,
+            installationID: partition.installationID,
+            repositoryIDs: scope.map(\.repositoryID),
+            repositoryNames: scope.map(\.fullName),
             accessMode: accessMode,
-            verificationRepository: assignment.verificationRepository
+            verificationRepository: verificationRepository
         )
         do {
             return try await connect.createGrant(request)
@@ -838,7 +869,7 @@ actor GitHubAuthorizationCoordinator {
         _ grant: MSWConnectGrant,
         workspace: String,
         role: CredentialRole,
-        assignment: GitHubWorkspaceAssignment,
+        partition: GitHubGrantPartition,
         verificationRepository: String,
         requireVerification: Bool
     ) async throws -> GitHubWorkspaceVerificationResult? {
@@ -853,7 +884,7 @@ actor GitHubAuthorizationCoordinator {
                 installationID: grant.installationID,
                 role: role,
                 accountLogin: grant.accountLogin,
-                owner: assignment.owner,
+                owner: partition.ownerLogin,
                 repositoryIDs: grant.repositoryIDs,
                 repositoryNames: grant.repositoryNames,
                 scopeDigest: grant.scopeDigest
@@ -868,7 +899,9 @@ actor GitHubAuthorizationCoordinator {
                 guard let result = response.result else {
                     let verification = verificationResult(
                         workspace: workspace,
-                        assignment: assignment,
+                        partition: partition,
+                        role: role,
+                        verificationRepository: verificationRepository,
                         verified: false,
                         lifecycleRestored: false,
                         safetyResult: "MSW returned no verification result; rollback is required."
@@ -878,7 +911,9 @@ actor GitHubAuthorizationCoordinator {
                 }
                 let verification = verificationResult(
                     workspace: workspace,
-                    assignment: assignment,
+                    partition: partition,
+                    role: role,
+                    verificationRepository: verificationRepository,
                     verified: result.verified,
                     lifecycleRestored: result.lifecycleRestored,
                     safetyResult: result.verified && result.lifecycleRestored
@@ -898,7 +933,9 @@ actor GitHubAuthorizationCoordinator {
             } else if requireVerification {
                 let verification = verificationResult(
                     workspace: workspace,
-                    assignment: assignment,
+                    partition: partition,
+                    role: role,
+                    verificationRepository: verificationRepository,
                     verified: false,
                     lifecycleRestored: false,
                     safetyResult: "The MSW verification service is unavailable; rollback is required."
@@ -908,10 +945,14 @@ actor GitHubAuthorizationCoordinator {
             }
             return nil
         } catch {
-            if stored, !latestVerifications.contains(where: { $0.workspace == workspace }) {
+            if stored, !latestVerifications.contains(where: {
+                $0.workspace == workspace && $0.installationID == partition.installationID && $0.role == role
+            }) {
                 recordVerification(verificationResult(
                     workspace: workspace,
-                    assignment: assignment,
+                    partition: partition,
+                    role: role,
+                    verificationRepository: verificationRepository,
                     verified: false,
                     lifecycleRestored: false,
                     safetyResult: "Verification failed before MSW returned a final result; rollback is required."
@@ -926,15 +967,19 @@ actor GitHubAuthorizationCoordinator {
 
     private func verificationResult(
         workspace: String,
-        assignment: GitHubWorkspaceAssignment,
+        partition: GitHubGrantPartition,
+        role: CredentialRole,
+        verificationRepository: String,
         verified: Bool,
         lifecycleRestored: Bool,
         safetyResult: String
     ) -> GitHubWorkspaceVerificationResult {
         GitHubWorkspaceVerificationResult(
             workspace: workspace,
-            accessMode: assignment.accessMode,
-            verificationRepository: assignment.verificationRepository,
+            installationID: partition.installationID,
+            role: role,
+            accessMode: role == .host ? "host-write" : "read-only",
+            verificationRepository: verificationRepository,
             verified: verified,
             lifecycleRestored: lifecycleRestored,
             safetyResult: safetyResult,
@@ -943,7 +988,7 @@ actor GitHubAuthorizationCoordinator {
     }
 
     private func recordVerification(_ result: GitHubWorkspaceVerificationResult) {
-        latestVerifications.removeAll { $0.workspace == result.workspace }
+        latestVerifications.removeAll { $0.id == result.id }
         latestVerifications.append(result)
     }
 
@@ -951,6 +996,8 @@ actor GitHubAuthorizationCoordinator {
         latestVerifications = latestVerifications.map {
             GitHubWorkspaceVerificationResult(
                 workspace: $0.workspace,
+                installationID: $0.installationID,
+                role: $0.role,
                 accessMode: $0.accessMode,
                 verificationRepository: $0.verificationRepository,
                 verified: $0.verified,
@@ -971,7 +1018,7 @@ actor GitHubAuthorizationCoordinator {
         let workspaces = Set(workspaceKeys.compactMap { $0.split(separator: ".").first.map(String.init) })
 
         // Remove the newly delivered VM secret while the newly stored guest
-        // token is still available. Rebinding an old assignment happens only
+        // token is still available. Rebinding an old policy happens only
         // after every rollback step has succeeded.
         if let mswClient {
             for workspace in workspaces {
@@ -1288,21 +1335,49 @@ actor GitHubAuthorizationCoordinator {
             try? removeJournal()
         }
     }
-    private static func isValidAssignment(_ assignment: GitHubWorkspaceAssignment) -> Bool {
-        let names = assignment.repositoryNames.map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    private static func isValidPolicy(_ policy: GitHubRepositoryPolicy) -> Bool {
+        WorkspaceID.isValid(policy.workspace) &&
+            policy.repositoryID > 0 &&
+            isSafeRepositoryName(policy.fullName) &&
+            policy.installationID > 0 &&
+            policy.ownerID > 0 &&
+            isSafeIdentifier(policy.ownerLogin) &&
+            policy.fullName.split(separator: "/").first.map(String.init)?.caseInsensitiveCompare(policy.ownerLogin) == .orderedSame
+    }
+
+    private static func partition(_ policy: [GitHubRepositoryPolicy]) throws -> [GitHubGrantPartition] {
+        let byWorkspace = Dictionary(grouping: policy, by: \.workspace)
+        for (workspace, entries) in byWorkspace where Set(entries.map(\.installationID)).count != 1 {
+            throw GitHubAuthorizationError.multipleInstallationsUnsupported(workspace)
         }
-        return WorkspaceID.isValid(assignment.workspace) &&
-            isSafeIdentifier(assignment.owner) &&
-            assignment.installationID > 0 &&
-            !assignment.repositoryIDs.isEmpty &&
-            assignment.repositoryIDs.count == Set(assignment.repositoryIDs).count &&
-            assignment.repositoryIDs.count == names.count &&
-            assignment.repositoryIDs.allSatisfy({ $0 > 0 }) &&
-            names.count == Set(names).count &&
-            names.allSatisfy(isSafeRepositoryName) &&
-            names.contains(assignment.verificationRepository.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) &&
-            (assignment.accessMode == "read-only" || assignment.accessMode == "read-write")
+        return try byWorkspace.keys.sorted().map { workspace in
+            guard let entries = byWorkspace[workspace],
+                  let first = entries.first,
+                  entries.allSatisfy({
+                      $0.installationID == first.installationID &&
+                      $0.ownerID == first.ownerID &&
+                      $0.ownerLogin.caseInsensitiveCompare(first.ownerLogin) == .orderedSame &&
+                      $0.ownerType == first.ownerType
+                  }) else {
+                throw GitHubAuthorizationError.invalidSelection
+            }
+            return GitHubGrantPartition(
+                workspace: workspace,
+                installationID: first.installationID,
+                ownerID: first.ownerID,
+                ownerLogin: first.ownerLogin,
+                ownerType: first.ownerType,
+                repositories: sortedScope(entries)
+            )
+        }
+    }
+
+    private static func sortedScope(_ scope: [GitHubRepositoryPolicy]) -> [GitHubRepositoryPolicy] {
+        scope.sorted {
+            let left = $0.fullName.lowercased()
+            let right = $1.fullName.lowercased()
+            return left == right ? $0.repositoryID < $1.repositoryID : left < right
+        }
     }
 
     private static func isSafeIdentifier(_ value: String) -> Bool {

@@ -31,7 +31,7 @@ Connect GitHub from **MSW Monitor** rather than pasting tokens into the CLI:
 
 1. Open `MSW Monitor` → **Settings** → **GitHub**.
 2. Choose **Connect GitHub** and complete the hosted authorization flow.
-3. Select the GitHub owner and repositories for each workspace, then review the guest-read and host-write grants before applying them.
+3. In the repository-first editor, select each workspace that may use a repository and opt individual repositories into **Read & write** only when needed. New selections default to **Read-only**.
 
 The Connect service issues short-lived, workspace-scoped grants. The app stores only grant metadata and the scoped installation credentials required by the host/VM boundary; the guest receives a read-only capability and `msw push` uses the separate host-write capability. The CLI's former `msw github setup` token prompt is removed. See [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
 

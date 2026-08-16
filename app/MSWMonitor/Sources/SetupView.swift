@@ -58,13 +58,10 @@ final class SetupWindowController {
     func close() { window.close() }
 }
 
-private struct WorkspaceAssignmentDraft: Codable, Equatable, Identifiable {
+private struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
     let workspace: Workspace.ID
     var installationID: Int?
-    var repositoryIDs: Set<Int>
-    var verificationRepositoryID: Int?
-    var accessMode: String
-    var enabled: Bool
+    var repositoryModes: [Int: GitHubRepositoryAccessMode]
 
     var id: Workspace.ID { workspace }
 
@@ -72,16 +69,13 @@ private struct WorkspaceAssignmentDraft: Codable, Equatable, Identifiable {
         Self(
             workspace: workspace,
             installationID: nil,
-            repositoryIDs: [],
-            verificationRepositoryID: nil,
-            accessMode: "read-only",
-            enabled: false
+            repositoryModes: [:]
         )
     }
 }
 
 private struct SetupResumeState: Codable {
-    var drafts: [String: WorkspaceAssignmentDraft]
+    var repositoryPolicy: [GitHubRepositoryPolicy]
     var githubSkipped: Bool
     var identityName: String
     var identityEmail: String
@@ -146,13 +140,6 @@ private struct AuthorizationIssue: Identifiable {
     let message: String
     var id: String { kind.rawValue }
 }
-private struct RepositoryLoadIdentity: Equatable, Sendable {
-    let generation: Int
-    let workspace: Workspace.ID
-    let installationID: Int
-    let sessionID: UUID
-}
-
 /// Single source of truth for the GitHub connection header so it can never
 /// contradict the connection section (device flow when configured).
 enum GitHubConnectionPresentation: Equatable {
@@ -266,8 +253,9 @@ struct SetupView: View {
     @State private var githubInstallationURL: URL?
     @State private var repositoriesByInstallation: [Int: [GitHubRepository]] = [:]
     @State private var drafts = Dictionary(uniqueKeysWithValues: Workspace.ID.allCases.map {
-        ($0.rawValue, WorkspaceAssignmentDraft.initial($0))
+        ($0.rawValue, WorkspaceRepositoryDraft.initial($0))
     })
+    @State private var retainedRepositoryPolicy: [GitHubRepositoryPolicy] = []
     @State private var existingMetadata: [WorkspaceCredentialMetadata] = []
     @State private var authorizationSessionID: UUID?
     @State private var authorizationStatus = ""
@@ -277,8 +265,6 @@ struct SetupView: View {
     @State private var authorizationTask: Task<Void, Never>?
     @State private var authorizationGeneration = 0
     @State private var uiTestAuthorizationAttempts = 0
-    @State private var repositoryLoadGeneration = 0
-    @State private var activeRepositoryLoad: RepositoryLoadIdentity?
     @State private var authorizationIssue: AuthorizationIssue?
     @State private var verificationResults: [GitHubWorkspaceVerificationResult] = []
     @State private var githubSkipped = false
@@ -320,7 +306,6 @@ struct SetupView: View {
     @State private var deviceRepositoryCheckInFlight = false
     @State private var lastDeviceRepositoryCheckAt: Date?
     @State private var deviceAccessibleRepositories: [GitHubRepository] = []
-    @State private var workspaceAllowlists: [String: Set<String>] = [:]
 
     /// Memberwise init re-declared because a struct containing property
     /// wrappers drops defaulted stored properties from the synthesized
@@ -361,7 +346,7 @@ struct SetupView: View {
         self.openDeviceVerificationPage = openDeviceVerificationPage
     }
 
-    private static let resumeStateKey = "setup.resume.nonsecret.v1"
+    private static let resumeStateKey = "setup.repository-policy.v2"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -558,7 +543,7 @@ struct SetupView: View {
     }
 
     /// Whether a real re-apply control exists on the current path: the
-    /// browser authorization flow (`beginAuthorization` + assignment commit)
+    /// browser authorization flow (`beginAuthorization` + policy commit)
     /// is the only proven host-side credential writer, and it requires the
     /// MSW Connect coordinator to be configured (or the deterministic
     /// UI-test fixture). When it is not, the banner must not name a re-apply
@@ -1116,12 +1101,18 @@ struct SetupView: View {
                 Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .accessibilityIdentifier("setup.github.account")
-                Text(githubIdentityDisclosure(account))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Choose which workspaces can see which repositories. Nothing is changed until you review and apply.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if deviceAccount != nil {
+                    Text("Repository selection is managed on GitHub. This direct connection does not mint the scoped workspace grants required for per-workspace or write controls.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(githubIdentityDisclosure(account))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Choose repository access by workspace. Nothing is changed until you review and apply.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             if let workspace = githubAttentionWorkspace {
@@ -1218,8 +1209,8 @@ struct SetupView: View {
                     .padding(10)
                     .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 }
-                ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
-                    assignmentCard(for: workspace)
+                if !repositoriesByInstallation.isEmpty {
+                    repositoryPolicyEditor
                 }
                 if isReviewing {
                     reviewCard
@@ -1264,7 +1255,7 @@ struct SetupView: View {
             }
 
             if !existingMetadata.isEmpty {
-                Text("Existing assignments").font(.headline)
+                Text("Existing repository access").font(.headline)
                 ForEach(groupedExistingMetadata, id: \.workspace) { group in
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -1275,7 +1266,7 @@ struct SetupView: View {
                                     .font(.caption)
                                     .foregroundStyle(.orange)
                             } else {
-                                Text("\(group.accessModes.joined(separator: " + ")) · \(group.repositoryNames.joined(separator: ", "))")
+                                Text(group.repositoryNames.joined(separator: ", "))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -1304,7 +1295,7 @@ struct SetupView: View {
             if canFinishWithoutGitHub && !existingMetadata.isEmpty && account == nil {
                 Button("Continue with existing GitHub access") {
                     githubSkipped = false
-                    authorizationStatus = "Existing access will be kept. Connect again only if you need to change repository assignments."
+                    authorizationStatus = "Existing access will be kept. Connect again only if you need to change repository policy."
                 }
                 .accessibilityIdentifier("setup.github.keep.button")
             }
@@ -1315,18 +1306,7 @@ struct SetupView: View {
 
     private var deviceFlowSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let deviceAccount {
-                let connected = Self.deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount)
-                Label(
-                    Self.deviceAccountLabel(
-                        login: deviceAccount.login,
-                        repositoryCount: deviceRepositoryCount,
-                        refreshIssue: deviceRefreshIssue
-                    ),
-                    systemImage: connected ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-                )
-                .foregroundStyle(connected ? Color.green : (deviceRefreshIssue != nil ? Color.red : Color.orange))
-                .accessibilityIdentifier("setup.github.account")
+            if deviceAccount != nil {
                 Text("Your credential is stored in the Mac Keychain. Workspaces never see it; GitHub access for workspaces is host-mediated.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1379,7 +1359,10 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.github.waiting")
                 }
                 if !deviceAccessibleRepositories.isEmpty {
-                    workspaceAccessSection
+                    Text("Repository selection for this connection is controlled by the GitHub App installation. Per-workspace and write grants require MSW Connect, so this direct connection does not offer those controls.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("setup.github.device-scope")
                 }
             } else if isConnectingDevice {
                 if let authorization = deviceAuthorization {
@@ -1423,88 +1406,20 @@ struct SetupView: View {
         }
     }
 
-    private var workspaceAccessSection: some View {
-        WorkspaceGitHubAccessEditor(
-            repositories: deviceAccessibleRepositories,
-            allowlists: workspaceAllowlists,
-            onToggle: setWorkspaceAllowlist
+    private var repositoryPolicyEditor: some View {
+        RepositoryWorkspacePolicyEditor(
+            installations: installations,
+            repositoriesByInstallation: repositoriesByInstallation,
+            drafts: $drafts,
+            disabled: isAuthorizing
         )
-        .accessibilityIdentifier("setup.github.workspace-access")
-    }
-
-    private func assignmentCard(for workspace: Workspace.ID) -> some View {
-        let draft = drafts[workspace.rawValue] ?? .initial(workspace)
-        let installationsForWorkspace = installations
-        let repositories = draft.installationID.flatMap { repositoriesByInstallation[$0] } ?? []
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(workspace.rawValue).font(.headline)
-                Spacer()
-                Toggle("Assign", isOn: draftBinding(for: workspace).enabled)
-                    .toggleStyle(.checkbox)
-                    .disabled(isAuthorizing)
-                    .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).assign")
-            }
-            if draft.enabled {
-                Picker("Owner installation", selection: draftBinding(for: workspace).installationID) {
-                    Text("Choose an owner").tag(Int?.none)
-                    ForEach(installationsForWorkspace) { installation in
-                        Text(installation.displayName).tag(Optional(installation.id))
-                    }
-                }
-                .onChange(of: draft.installationID) { _, value in
-                    selectInstallation(for: workspace, installationID: value)
-                }
-                .disabled(isAuthorizing)
-                .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).owner")
-            }
-            if draft.enabled && !repositories.isEmpty {
-                Text("Allowed repositories").font(.caption.weight(.semibold))
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(repositories) { repository in
-                        Toggle(repository.fullName, isOn: repositoryBinding(for: workspace, repositoryID: repository.id))
-                            .toggleStyle(.checkbox)
-                            .disabled(isAuthorizing)
-                            .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).repository.\(repository.id)")
-                    }
-                }
-                .padding(.leading, 4)
-                Picker("Verification repository", selection: draftBinding(for: workspace).verificationRepositoryID) {
-                    Text("Choose a selected repository").tag(Int?.none)
-                    ForEach(repositories.filter { draft.repositoryIDs.contains($0.id) }) { repository in
-                        Text(repository.fullName).tag(Optional(repository.id))
-                    }
-                }
-                .disabled(isAuthorizing)
-                .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).verification")
-                Picker("Access mode", selection: draftBinding(for: workspace).accessMode) {
-                    Text("Read-only").tag("read-only")
-                    Text("Read + write").tag("read-write")
-                }
-                .disabled(isAuthorizing)
-                .accessibilityIdentifier("setup.github.workspace.\(workspace.rawValue).access")
-                Text(draft.accessMode == "read-write"
-                    ? "Guest: Contents read + Metadata read. Host only: Contents read/write. The write credential is never placed in the VM."
-                    : "Guest: Contents read + Metadata read. Direct VM pushes remain rejected by GitHub.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else if draft.enabled && draft.installationID != nil {
-                Text("No repositories are available for this installation.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        }
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10).stroke(.quaternary, lineWidth: 1)
-        }
+        .accessibilityIdentifier("setup.github.repository-policy")
     }
 
     private var reviewCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Review and apply").font(.headline)
-            Text("Review the connected identity, owner, exact repository allowlist, verification repository, and guest/host permissions. Unconfigured workspaces remain unchanged.")
+            Text("Review each repository-to-workspace choice. Verification repositories are selected deterministically from each role-eligible scope. Unconfigured workspaces remain unchanged.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
@@ -1517,10 +1432,9 @@ struct SetupView: View {
     }
 
     private func reviewLine(for workspace: Workspace.ID) -> some View {
-        let draft = drafts[workspace.rawValue] ?? .initial(workspace)
-        guard isReviewable(draft),
-              let installationID = draft.installationID,
-              let installation = installations.first(where: { $0.id == installationID }) else {
+        let selected = selectedPolicy.filter { $0.workspace == workspace.rawValue }
+        guard let first = selected.first,
+              let installation = installations.first(where: { $0.id == first.installationID }) else {
             let hasExistingAccess = existingMetadata.contains { $0.workspace == workspace.rawValue }
             return AnyView(
                 Text("\(workspace.rawValue): \(hasExistingAccess ? "Existing access remains unchanged" : "Not configured — no grant will be created")")
@@ -1529,11 +1443,9 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
             )
         }
-        let repositories = repositoriesByInstallation[installationID] ?? []
-        let selected = repositories.filter { draft.repositoryIDs.contains($0.id) }
-        let verification = selected.first(where: { $0.id == draft.verificationRepositoryID })?.fullName ?? "Unknown"
+        let access = selected.map { "\($0.fullName) — \($0.mode.label)" }.joined(separator: ", ")
         return AnyView(
-            Text("\(workspace.rawValue): owner \(installation.displayName) · repositories \(selected.map(\.fullName).joined(separator: ", ")) · verification \(verification) · \(draft.accessMode == "read-write" ? "Read + write" : "Read-only")")
+            Text("\(workspace.rawValue): \(installation.displayName) · \(access)")
                 .font(.caption)
                 .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
         )
@@ -1550,7 +1462,7 @@ struct SetupView: View {
                             ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
                     )
                     .foregroundStyle(result.verified && result.lifecycleRestored ? .green : .orange)
-                    Text("\(result.accessMode) · \(result.verificationRepository)")
+                    Text("\(result.role == .host ? GitHubRepositoryAccessMode.readWrite.label : GitHubRepositoryAccessMode.readOnly.label) · \(result.verificationRepository)")
                         .font(.caption)
                     Text(result.safetyResult).font(.caption).foregroundStyle(.secondary)
                     Text("Checked \(result.checkedAt.formatted(date: .abbreviated, time: .standard))")
@@ -1565,7 +1477,7 @@ struct SetupView: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("setup.github.verification.\(result.workspace)")
+                .accessibilityIdentifier("setup.github.verification.\(result.workspace).\(result.role.rawValue)")
             }
         }
         .padding(10)
@@ -1804,7 +1716,7 @@ struct SetupView: View {
                     Button("Back") { isReviewing = false }
                         .keyboardShortcut(.cancelAction)
                         .disabled(isSkippingGitHub)
-                    Button(isAuthorizing ? "Applying…" : "Apply assignments", action: commitAssignments)
+                    Button(isAuthorizing ? "Applying…" : "Apply repository access", action: commitPolicy)
                         .buttonStyle(.borderedProminent)
                         .disabled(isAuthorizing || !hasValidAssignments || isSkippingGitHub)
                         .accessibilityIdentifier("setup.github.apply.button")
@@ -1837,17 +1749,35 @@ struct SetupView: View {
         .fixedSize()
     }
 
-    private var validDrafts: [WorkspaceAssignmentDraft] {
-        drafts.values.filter(isReviewable).sorted { $0.workspace.rawValue < $1.workspace.rawValue }
+    private var selectedPolicy: [GitHubRepositoryPolicy] {
+        let policy = drafts.values.flatMap { policyEntries(for: $0) }
+        return policy.sorted { $0.id < $1.id }
     }
 
-    private var enabledDrafts: [WorkspaceAssignmentDraft] {
-        drafts.values.filter(\.enabled)
+    private func policyEntries(for draft: WorkspaceRepositoryDraft) -> [GitHubRepositoryPolicy] {
+        guard let installationID = draft.installationID,
+              let installation = installations.first(where: { $0.id == installationID }),
+              let repositories = repositoriesByInstallation[installationID] else { return [] }
+        let byID = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0) })
+        var result: [GitHubRepositoryPolicy] = []
+        for (repositoryID, mode) in draft.repositoryModes {
+            guard let repository = byID[repositoryID] else { continue }
+            result.append(GitHubRepositoryPolicy(
+                workspace: draft.workspace.rawValue,
+                repositoryID: repository.id,
+                fullName: repository.fullName,
+                installationID: installation.id,
+                ownerID: installation.account.id,
+                ownerLogin: installation.account.login,
+                ownerType: installation.account.type,
+                mode: mode
+            ))
+        }
+        return result
     }
 
     private var groupedExistingMetadata: [(
         workspace: String,
-        accessModes: [String],
         repositoryNames: [String],
         states: [String],
         needsAttention: Bool
@@ -1857,7 +1787,6 @@ struct SetupView: View {
                 let states = Array(Set(entries.map { $0.recoveryState.rawValue })).sorted()
                 return (
                     workspace: workspace,
-                    accessModes: Array(Set(entries.map(\.accessMode))).sorted(),
                     repositoryNames: Array(Set(entries.flatMap { $0.repositoryNames })).sorted(),
                     states: states,
                     needsAttention: entries.contains { $0.recoveryState != .ready || $0.quarantined }
@@ -1867,55 +1796,7 @@ struct SetupView: View {
     }
 
     private var hasValidAssignments: Bool {
-        !enabledDrafts.isEmpty && enabledDrafts.allSatisfy(isReviewable)
-    }
-
-    private func isReviewable(_ draft: WorkspaceAssignmentDraft) -> Bool {
-        guard draft.enabled,
-              let installationID = draft.installationID,
-              let verificationID = draft.verificationRepositoryID,
-              let repositories = repositoriesByInstallation[installationID] else {
-            return false
-        }
-        let selected = repositories.filter { draft.repositoryIDs.contains($0.id) }
-        return !selected.isEmpty &&
-            selected.count == draft.repositoryIDs.count &&
-            selected.contains { $0.id == verificationID }
-    }
-
-    private func draftBinding(for workspace: Workspace.ID) -> Binding<WorkspaceAssignmentDraft> {
-        Binding(
-            get: { drafts[workspace.rawValue] ?? .initial(workspace) },
-            set: { drafts[workspace.rawValue] = $0 }
-        )
-    }
-
-    private func repositoryBinding(for workspace: Workspace.ID, repositoryID: Int) -> Binding<Bool> {
-        Binding(
-            get: { drafts[workspace.rawValue]?.repositoryIDs.contains(repositoryID) == true },
-            set: { selected in
-                var draft = drafts[workspace.rawValue] ?? .initial(workspace)
-                if selected {
-                    draft.repositoryIDs.insert(repositoryID)
-                } else {
-                    draft.repositoryIDs.remove(repositoryID)
-                    if draft.verificationRepositoryID == repositoryID {
-                        draft.verificationRepositoryID = nil
-                    }
-                }
-                drafts[workspace.rawValue] = draft
-            }
-        )
-    }
-    private func selectInstallation(for workspace: Workspace.ID, installationID: Int?) {
-        var draft = drafts[workspace.rawValue] ?? .initial(workspace)
-        if draft.installationID != installationID {
-            draft.installationID = installationID
-            draft.repositoryIDs = []
-            draft.verificationRepositoryID = nil
-            drafts[workspace.rawValue] = draft
-        }
-        loadRepositories(for: workspace, installationID: installationID)
+        !selectedPolicy.isEmpty
     }
 
 
@@ -1991,19 +1872,28 @@ struct SetupView: View {
             do {
                 let discovery = try await authorizationCoordinator.beginAuthorization(browser: browser)
                 let installURL = await authorizationCoordinator.installationURL()
+                var loadedRepositories: [Int: [GitHubRepository]] = [:]
+                for installation in discovery.installations {
+                    try Task.checkCancellation()
+                    loadedRepositories[installation.id] = try await authorizationCoordinator.repositories(
+                        sessionID: discovery.sessionID,
+                        installationID: installation.id
+                    )
+                }
                 await MainActor.run {
                     guard authorizationGeneration == generation else { return }
                     account = discovery.account
                     installations = discovery.installations
                     githubInstallationURL = Self.validatedInstallationURL(installURL)
                     authorizationSessionID = discovery.sessionID
+                    repositoriesByInstallation = loadedRepositories
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
                     // Discovery creates no host credential; the attention
                     // banner stays until the affected grant actually commits.
-                    authorizationStatus = "Connected as @\(discovery.account.login). Assign repositories to each workspace, then review before applying."
+                    authorizationStatus = "Connected as @\(discovery.account.login). Choose repository access, then review before applying."
                     prefillIdentity(from: discovery.account)
                 }
             } catch {
@@ -2062,114 +1952,10 @@ struct SetupView: View {
         )
     }
 
-    private func invalidateRepositoryLoad() -> Bool {
-        guard activeRepositoryLoad != nil else { return false }
-        authorizationGeneration &+= 1
-        authorizationTask?.cancel()
-        activeRepositoryLoad = nil
-        repositoryLoadGeneration += 1
-        return true
-    }
-
-    private func loadRepositories(for workspace: Workspace.ID, installationID: Int?) {
-        let cancelledLoad = invalidateRepositoryLoad()
-        if cancelledLoad {
-            authorizationTask = nil
-            isAuthorizing = false
-            authorizationMayCancel = false
-            authorizationIssue = nil
-            authorizationStatus = "Select the repositories for each workspace."
-        }
-        guard let sessionID = authorizationSessionID,
-              let installationID else {
-            return
-        }
-        if uiTestGitHubScenario != nil {
-            repositoriesByInstallation[installationID] = Self.uiTestRepositories
-            isAuthorizing = false
-            authorizationMayCancel = false
-            authorizationTask = nil
-            authorizationStatus = "Select the repositories for each workspace."
-            return
-        }
-        guard let authorizationCoordinator else {
-            return
-        }
-        if repositoriesByInstallation[installationID] != nil {
-            if cancelledLoad {
-                authorizationIssue = nil
-                authorizationStatus = "Select the repositories for each workspace."
-            }
-            return
-        }
-        repositoryLoadGeneration += 1
-        let identity = RepositoryLoadIdentity(
-            generation: repositoryLoadGeneration,
-            workspace: workspace,
-            installationID: installationID,
-            sessionID: sessionID
-        )
-        activeRepositoryLoad = identity
-        isAuthorizing = true
-        authorizationMayCancel = true
-        authorizationIssue = nil
-        authorizationStatus = "Loading repositories allowed by the selected installation…"
-        authorizationTask = Task {
-            do {
-                let repositories = try await authorizationCoordinator.repositories(
-                    sessionID: sessionID,
-                    installationID: installationID
-                )
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard activeRepositoryLoad == identity,
-                          repositoryLoadGeneration == identity.generation else {
-                        return
-                    }
-                    activeRepositoryLoad = nil
-                    repositoriesByInstallation[installationID] = repositories
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
-                    authorizationStatus = "Select the repositories for each workspace."
-                }
-            } catch {
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard activeRepositoryLoad == identity,
-                          repositoryLoadGeneration == identity.generation else {
-                        return
-                    }
-                    activeRepositoryLoad = nil
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
-                    authorizationIssue = issue(for: error)
-                    authorizationStatus = ""
-                }
-            }
-        }
-    }
-
-    private func commitAssignments() {
-        let assignments: [GitHubWorkspaceAssignment] = validDrafts.compactMap { draft in
-            guard let installationID = draft.installationID,
-                  let verificationID = draft.verificationRepositoryID,
-                  let repositories = repositoriesByInstallation[installationID],
-                  let verification = repositories.first(where: { $0.id == verificationID }) else { return nil }
-            let selected = repositories.filter { draft.repositoryIDs.contains($0.id) }
-            return GitHubWorkspaceAssignment(
-                workspace: draft.workspace.rawValue,
-                owner: installations.first(where: { $0.id == installationID })?.account.login ?? verification.owner.login,
-                installationID: installationID,
-                repositoryIDs: selected.map(\.id),
-                repositoryNames: selected.map(\.fullName),
-                accessMode: draft.accessMode,
-                verificationRepository: verification.fullName
-            )
-        }
-        guard assignments.count == validDrafts.count else {
-            authorizationStatus = "Choose a selected verification repository for every assigned workspace."
+    private func commitPolicy() {
+        let policy = selectedPolicy
+        guard !policy.isEmpty else {
+            authorizationStatus = "Choose at least one repository for a workspace."
             return
         }
 
@@ -2185,16 +1971,37 @@ struct SetupView: View {
             authorizationTask = Task {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard !Task.isCancelled else { return }
-                let verifications = assignments.map {
-                    GitHubWorkspaceVerificationResult(
-                        workspace: $0.workspace,
-                        accessMode: $0.accessMode,
-                        verificationRepository: $0.verificationRepository,
+                let partitions = Dictionary(grouping: policy, by: { "\($0.workspace).\($0.installationID)" })
+                let verifications = partitions.values.flatMap { scope -> [GitHubWorkspaceVerificationResult] in
+                    guard let first = scope.first else { return [] }
+                    let readVerification = scope.sorted { $0.fullName.lowercased() < $1.fullName.lowercased() }[0]
+                    var results = [GitHubWorkspaceVerificationResult(
+                        workspace: first.workspace,
+                        installationID: first.installationID,
+                        role: .guest,
+                        accessMode: "read-only",
+                        verificationRepository: readVerification.fullName,
                         verified: true,
                         lifecycleRestored: true,
                         safetyResult: "Repository scope and workspace lifecycle verified.",
                         checkedAt: Date()
-                    )
+                    )]
+                    let writeScope = scope.filter { $0.mode == .readWrite }
+                        .sorted { $0.fullName.lowercased() < $1.fullName.lowercased() }
+                    if let writeVerification = writeScope.first {
+                        results.append(GitHubWorkspaceVerificationResult(
+                            workspace: first.workspace,
+                            installationID: first.installationID,
+                            role: .host,
+                            accessMode: "host-write",
+                            verificationRepository: writeVerification.fullName,
+                            verified: true,
+                            lifecycleRestored: true,
+                            safetyResult: "Repository scope and workspace lifecycle verified.",
+                            checkedAt: Date()
+                        ))
+                    }
+                    return results
                 }
                 await MainActor.run {
                     guard authorizationGeneration == generation else { return }
@@ -2212,14 +2019,14 @@ struct SetupView: View {
                     // reporting as skipped.
                     if Self.skipIssueResolved(
                         issueWorkspace: githubSkipIssueWorkspace,
-                        committedWorkspaces: assignments.map(\.workspace)
+                        committedWorkspaces: policy.map(\.workspace)
                     ) {
                         githubSkipIssue = nil
                         githubSkipIssueWorkspace = nil
                     }
                     if !disabledGitHubWorkspaces.isEmpty {
                         disabledGitHubWorkspaces.removeAll { workspace in
-                            assignments.contains { $0.workspace == workspace }
+                            policy.contains { $0.workspace == workspace }
                         }
                         if disabledGitHubWorkspaces.isEmpty {
                             githubSkipped = false
@@ -2227,13 +2034,13 @@ struct SetupView: View {
                     }
                     if Self.attentionResolved(
                         attentionWorkspace: githubAttentionWorkspace,
-                        committedWorkspaces: assignments.map(\.workspace)
+                        committedWorkspaces: policy.map(\.workspace)
                     ) {
                         githubAttentionWorkspace = nil
                     }
                     authorizationSessionID = nil
                     isReviewing = false
-                    authorizationStatus = "Applied \(assignments.count) scoped grant records. Verification results are retained below for final review."
+                    authorizationStatus = "Applied repository policy for \(Set(policy.map(\.workspace)).count) workspace(s)."
                 }
             }
             return
@@ -2241,15 +2048,15 @@ struct SetupView: View {
 
         guard let authorizationCoordinator,
               let sessionID = authorizationSessionID else {
-            authorizationStatus = "Connect GitHub before applying workspace assignments."
+            authorizationStatus = "Connect GitHub before applying repository access."
             isAuthorizing = false
             return
         }
         authorizationTask = Task {
             do {
-                let result = try await authorizationCoordinator.commitAssignmentsWithVerification(
+                let result = try await authorizationCoordinator.commitPolicyWithVerification(
                     sessionID: sessionID,
-                    assignments: assignments
+                    policy: policy
                 )
                 let refreshed = await authorizationCoordinator.metadata()
                 await MainActor.run {
@@ -2268,14 +2075,14 @@ struct SetupView: View {
                     // reporting as skipped.
                     if Self.skipIssueResolved(
                         issueWorkspace: githubSkipIssueWorkspace,
-                        committedWorkspaces: assignments.map(\.workspace)
+                        committedWorkspaces: policy.map(\.workspace)
                     ) {
                         githubSkipIssue = nil
                         githubSkipIssueWorkspace = nil
                     }
                     if !disabledGitHubWorkspaces.isEmpty {
                         disabledGitHubWorkspaces.removeAll { workspace in
-                            assignments.contains { $0.workspace == workspace }
+                            policy.contains { $0.workspace == workspace }
                         }
                         if disabledGitHubWorkspaces.isEmpty {
                             githubSkipped = false
@@ -2283,7 +2090,7 @@ struct SetupView: View {
                     }
                     if Self.attentionResolved(
                         attentionWorkspace: githubAttentionWorkspace,
-                        committedWorkspaces: assignments.map(\.workspace)
+                        committedWorkspaces: policy.map(\.workspace)
                     ) {
                         githubAttentionWorkspace = nil
                     }
@@ -2314,25 +2121,16 @@ struct SetupView: View {
             }
             return
         }
-        let wasRepositoryLoad = activeRepositoryLoad != nil
-        if wasRepositoryLoad {
-            _ = invalidateRepositoryLoad()
-        } else {
-            authorizationGeneration &+= 1
-            authorizationTask?.cancel()
-        }
+        authorizationGeneration &+= 1
+        authorizationTask?.cancel()
         authorizationTask = nil
         if isAuthorizing {
             authorizationIssue = AuthorizationIssue(
                 kind: .cancelled,
-                message: wasRepositoryLoad
-                    ? "Repository loading was cancelled. Existing access and saved owner/repository choices were preserved."
-                    : "The browser wait was cancelled. Existing access and saved owner/repository choices were preserved."
+                message: "GitHub connection was cancelled. Existing access and saved repository choices were preserved."
             )
         }
-        if wasRepositoryLoad {
-            authorizationStatus = "Repository loading cancelled. Choose an owner to try again."
-        }
+        authorizationStatus = "GitHub connection cancelled."
         isAuthorizing = false
         authorizationMayCancel = false
     }
@@ -2415,17 +2213,16 @@ struct SetupView: View {
             authorizationSessionID = discovery.sessionID
             authorizationStatus = "Resumed the cached @\(discovery.account.login) authorization. Review saved choices before applying."
             prefillIdentity(from: discovery.account)
-            let selectedInstallations = Set(drafts.values.compactMap(\.installationID))
-            for installationID in selectedInstallations {
+            for installation in discovery.installations {
                 do {
                     let repositories = try await authorizationCoordinator.repositories(
                         sessionID: discovery.sessionID,
-                        installationID: installationID
+                        installationID: installation.id
                     )
                     // Guard after the listing await: never publish a
                     // repository list post-close.
                     guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
-                    repositoriesByInstallation[installationID] = repositories
+                    repositoriesByInstallation[installation.id] = repositories
                 } catch {
                     guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
                     authorizationIssue = issue(for: error)
@@ -2746,7 +2543,6 @@ struct SetupView: View {
                     deviceAccount = account
                     deviceRepositoryCount = accessibleRepositoryCount
                     deviceAccessibleRepositories = accessibleRepositories
-                    loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
                     // A fresh sign-in does not restore the host-side scoped
                     // credential that MSW_GITHUB_RECONNECT_REQUIRED demands;
                     // the banner stays and derives the re-apply phase from the
@@ -2992,7 +2788,6 @@ struct SetupView: View {
             deviceAccessibleRepositories = accessibleRepositories
             deviceRefreshIssue = nil
             deviceReauthorizationRequired = false
-            loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
             if deviceAccount != nil {
                 deviceStatus = Self.deviceRepositorySignedInLine(
                     login: deviceAccount?.login ?? "",
@@ -3269,37 +3064,6 @@ struct SetupView: View {
         githubSkipTask?.cancel()
     }
 
-    /// Loads the persisted per-workspace allowlist and prunes repositories
-    /// that are no longer accessible to the App installation.
-    private func loadWorkspaceAllowlists(accessibleRepositories: [GitHubRepository]) {
-        let accessibleNames = Set(accessibleRepositories.map(\.fullName))
-        let store = WorkspaceGitHubAccessStore()
-        guard let stored = store.load() else {
-            workspaceAllowlists = [:]
-            return
-        }
-        let pruned = stored.pruned(toAccessibleNames: accessibleNames)
-        if pruned.repositoriesByWorkspace != stored.repositoriesByWorkspace {
-            try? store.save(pruned)
-        }
-        workspaceAllowlists = pruned.repositoriesByWorkspace.mapValues(Set.init)
-    }
-
-    /// Updates one workspace's allowlist and persists it.
-    private func setWorkspaceAllowlist(workspace: String, repository: String, allowed: Bool) {
-        var current = workspaceAllowlists[workspace] ?? []
-        if allowed {
-            current.insert(repository)
-        } else {
-            current.remove(repository)
-        }
-        workspaceAllowlists[workspace] = current
-        let access = WorkspaceGitHubAccess(
-            repositoriesByWorkspace: workspaceAllowlists.mapValues { Array($0).sorted() }
-        )
-        try? WorkspaceGitHubAccessStore().save(access)
-    }
-
     private func cancelDeviceFlow() {
         devicePollTask?.cancel()
         devicePollTask = nil
@@ -3497,7 +3261,7 @@ struct SetupView: View {
     private func githubIdentityDisclosure(_ account: GitHubAccount) -> String {
         let name = account.name?.isEmpty == false ? account.name! : "not disclosed"
         let email = account.email?.isEmpty == false ? account.email! : "not disclosed"
-        return "GitHub identity: @\(account.login) · name \(name) · public email \(email). Requested repository permissions are Metadata read + Contents read for guests; host Contents write is requested only when you choose Read + write."
+        return "GitHub identity: @\(account.login) · name \(name) · public email \(email). Guest grants include every selected repository; host write grants include only repositories marked Read & write."
     }
 
     private func issue(for error: Error) -> AuthorizationIssue {
@@ -3561,8 +3325,8 @@ struct SetupView: View {
 
     private func issueRecovery(_ kind: AuthorizationIssueKind) -> String {
         switch kind {
-        case .cancelled: return "Retry when ready; no cached assignment or existing credential was removed."
-        case .expired: return "Start a fresh browser authorization. Review the restored assignment choices again before applying."
+        case .cancelled: return "Retry when ready; no cached policy or existing credential was removed."
+        case .expired: return "Start a fresh browser authorization. Review the restored repository choices again before applying."
         case .denied: return "Review the requested identity and repository permissions, then retry only if you consent."
         case .unavailable: return "Check the network, GitHub App installation, and MSW Connect availability, then retry."
         case .failed: return "Retry once. If it repeats, leave setup open and use Settings or diagnostics; existing access remains unchanged."
@@ -3570,7 +3334,7 @@ struct SetupView: View {
     }
 
     private var githubAffectedScope: String {
-        let workspaces = validDrafts.map { $0.workspace.rawValue }
+        let workspaces = Array(Set(selectedPolicy.map(\.workspace))).sorted()
         return workspaces.isEmpty ? "GitHub setup for all workspaces" : workspaces.joined(separator: ", ")
     }
 
@@ -3588,8 +3352,11 @@ struct SetupView: View {
     }
 
     private func persistResumeState() {
+        let policy = selectedPolicy.isEmpty && drafts.values.contains(where: { !$0.repositoryModes.isEmpty })
+            ? retainedRepositoryPolicy
+            : selectedPolicy
         let resume = SetupResumeState(
-            drafts: drafts,
+            repositoryPolicy: policy,
             githubSkipped: githubSkipped,
             identityName: identityName,
             identityEmail: identityEmail,
@@ -3607,7 +3374,18 @@ struct SetupView: View {
     private func restoreResumeState() {
         guard let data = UserDefaults.standard.data(forKey: Self.resumeStateKey),
               let resume = try? JSONDecoder().decode(SetupResumeState.self, from: data) else { return }
-        drafts = resume.drafts
+        retainedRepositoryPolicy = resume.repositoryPolicy
+        drafts = Dictionary(uniqueKeysWithValues: Workspace.ID.allCases.map {
+            ($0.rawValue, WorkspaceRepositoryDraft.initial($0))
+        })
+        for entry in resume.repositoryPolicy {
+            guard let workspace = Workspace.ID(rawValue: entry.workspace) else { continue }
+            var draft = drafts[entry.workspace] ?? .initial(workspace)
+            guard draft.installationID == nil || draft.installationID == entry.installationID else { continue }
+            draft.installationID = entry.installationID
+            draft.repositoryModes[entry.repositoryID] = entry.mode
+            drafts[entry.workspace] = draft
+        }
         githubSkipped = resume.githubSkipped
         identityName = resume.identityName
         identityEmail = resume.identityEmail
@@ -3741,59 +3519,128 @@ struct SetupView: View {
 }
 
 
-/// Shared per-workspace repository allowlist editor, used by first-run setup
-/// and by Settings → GitHub after onboarding. Backed by the persisted
-/// `WorkspaceGitHubAccessStore`; enforcement lives in the host-mediated
-/// workspace operations.
-struct WorkspaceGitHubAccessEditor: View {
-    let repositories: [GitHubRepository]
-    let allowlists: [String: Set<String>]
-    let onToggle: (String, String, Bool) -> Void
-    @State private var expanded = Set(Workspace.ID.allCases.map(\.rawValue))
+/// The one repository-policy editor used by setup and reached from Settings.
+/// It is repository-first, defaults every new choice to Read-only, and never
+/// presents a mode until that repository is selected for the workspace.
+private struct RepositoryWorkspacePolicyEditor: View {
+    let installations: [GitHubInstallation]
+    let repositoriesByInstallation: [Int: [GitHubRepository]]
+    @Binding var drafts: [String: WorkspaceRepositoryDraft]
+    let disabled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Workspace access").font(.headline)
-            Text("Choose which of the selected repositories each workspace may use. This list is saved now; enforcement starts when workspace GitHub operations are connected. Adding or removing repositories happens on GitHub.")
+            Text("Repository access").font(.headline)
+            Text("Select a workspace, then choose Read-only or Read & write. Read access includes every selected repository; the host write grant includes only Read & write repositories.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
-                DisclosureGroup(isExpanded: Binding(
-                    get: { expanded.contains(workspace.rawValue) },
-                    set: { isExpanded in
-                        if isExpanded {
-                            expanded.insert(workspace.rawValue)
-                        } else {
-                            expanded.remove(workspace.rawValue)
-                        }
-                    }
-                )) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        let allowed = allowlists[workspace.rawValue] ?? []
-                        ForEach(repositories, id: \.id) { repository in
-                            Toggle(
-                                repository.fullName,
-                                isOn: Binding(
-                                    get: { allowed.contains(repository.fullName) },
-                                    set: { selected in
-                                        onToggle(workspace.rawValue, repository.fullName, selected)
+            Text("MSW currently carries one installation credential per workspace and role, so a workspace cannot mix owners in one policy.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            ForEach(installations.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }) { installation in
+                let repositories = (repositoriesByInstallation[installation.id] ?? [])
+                    .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
+                if !repositories.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(installation.displayName)
+                            .font(.caption.weight(.semibold))
+                        ForEach(repositories) { repository in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(repository.fullName).font(.callout)
+                                ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
+                                    let selected = isSelected(workspace, repository: repository, installation: installation)
+                                    HStack(spacing: 8) {
+                                        Toggle(workspace.rawValue, isOn: selectionBinding(
+                                            workspace,
+                                            repository: repository,
+                                            installation: installation
+                                        ))
+                                        .toggleStyle(.checkbox)
+                                        .disabled(disabled || selectionBlocked(workspace, installation: installation))
+                                        .accessibilityIdentifier("github.repository.\(repository.id).workspace.\(workspace.rawValue)")
+                                        if selected {
+                                            Picker("Access for \(workspace.rawValue) to \(repository.fullName)", selection: modeBinding(
+                                                workspace,
+                                                repository: repository,
+                                                installation: installation
+                                            )) {
+                                                ForEach(GitHubRepositoryAccessMode.allCases, id: \.rawValue) { mode in
+                                                    Text(mode.label).tag(mode)
+                                                }
+                                            }
+                                            .labelsHidden()
+                                            .pickerStyle(.menu)
+                                            .disabled(disabled)
+                                            .accessibilityIdentifier("github.repository.\(repository.id).workspace.\(workspace.rawValue).mode")
+                                        }
                                     }
-                                )
-                            )
-                            .toggleStyle(.checkbox)
-                            .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id)")
+                                }
+                            }
+                            .padding(.vertical, 3)
                         }
                     }
-                    .padding(.top, 4)
-                } label: {
-                    Text(workspace.rawValue)
-                        .font(.callout.weight(.medium))
+                    .padding(8)
+                    .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
                 }
-                .accessibilityIdentifier("github.workspace.\(workspace.rawValue).access")
             }
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
+    }
+
+    private func isSelected(
+        _ workspace: Workspace.ID,
+        repository: GitHubRepository,
+        installation: GitHubInstallation
+    ) -> Bool {
+        let draft = drafts[workspace.rawValue] ?? .initial(workspace)
+        return draft.installationID == installation.id && draft.repositoryModes[repository.id] != nil
+    }
+
+    private func selectionBlocked(_ workspace: Workspace.ID, installation: GitHubInstallation) -> Bool {
+        guard let selectedInstallation = drafts[workspace.rawValue]?.installationID else { return false }
+        return selectedInstallation != installation.id
+    }
+
+    private func selectionBinding(
+        _ workspace: Workspace.ID,
+        repository: GitHubRepository,
+        installation: GitHubInstallation
+    ) -> Binding<Bool> {
+        Binding(
+            get: { isSelected(workspace, repository: repository, installation: installation) },
+            set: { selected in
+                var draft = drafts[workspace.rawValue] ?? .initial(workspace)
+                if selected {
+                    guard draft.installationID == nil || draft.installationID == installation.id else { return }
+                    draft.installationID = installation.id
+                    draft.repositoryModes[repository.id] = .readOnly
+                } else if draft.installationID == installation.id {
+                    draft.repositoryModes.removeValue(forKey: repository.id)
+                    if draft.repositoryModes.isEmpty { draft.installationID = nil }
+                }
+                drafts[workspace.rawValue] = draft
+            }
+        )
+    }
+
+    private func modeBinding(
+        _ workspace: Workspace.ID,
+        repository: GitHubRepository,
+        installation: GitHubInstallation
+    ) -> Binding<GitHubRepositoryAccessMode> {
+        Binding(
+            get: {
+                guard isSelected(workspace, repository: repository, installation: installation) else { return .readOnly }
+                return drafts[workspace.rawValue]?.repositoryModes[repository.id] ?? .readOnly
+            },
+            set: { mode in
+                guard var draft = drafts[workspace.rawValue], draft.installationID == installation.id,
+                      draft.repositoryModes[repository.id] != nil else { return }
+                draft.repositoryModes[repository.id] = mode
+                drafts[workspace.rawValue] = draft
+            }
+        )
     }
 }

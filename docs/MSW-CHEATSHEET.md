@@ -42,7 +42,7 @@ msw identity "Ada Lovelace" ada@example.com
 
 ## GitHub permissions
 
-Connect GitHub in **MSW Monitor** → **Settings** → **GitHub**. Select the owner and repositories for each workspace, review the guest-read/host-write grants, then apply.
+Connect GitHub in **MSW Monitor** → **Settings** → **GitHub**. In the repository-first editor, select workspaces and choose **Read-only** or **Read & write** per repository, then review and apply.
 
 The legacy CLI token prompt was removed:
 

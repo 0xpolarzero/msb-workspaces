@@ -1,69 +1,65 @@
-# GitHub: direct connection through the MSW GitHub App
+# GitHub access in MSW Monitor
 
-GitHub access is managed by **MSW Monitor** through the MSW GitHub App
-(`https://github.com/apps/microsandbox-workspaces/installations/new`). The
-previous Connect-service/scoped-grant design was removed from onboarding. No
-personal access token, no client secret, and no GitHub App private key are ever
-needed or stored.
+GitHub is optional. MSW Monitor supports two connection capabilities and keeps
+their UI deliberately distinct.
 
-## How connecting works
+## Scoped workspace grants with MSW Connect
 
-1. In **MSW Monitor** (Settings → GitHub → Connect GitHub, or the first-run
-   setup window), choose **Connect GitHub**.
-2. GitHub opens in your default browser with a short code. Approve it.
-3. Choose your repositories on the App installation page (App-wide selection;
-   per-workspace routing is part of the pending host mediation).
-4. MSW Monitor stores the session in the **macOS Keychain**: the account
-   identity, an access token, and its refresh token.
-5. Signing in alone does not complete the GitHub step: MSW Monitor verifies
-   that the App is installed with selected repositories. Until then the step
-   shows "no repositories are selected yet" with **Choose repositories on
-   GitHub** and **Check again**, and setup can continue without GitHub.
-6. The access token expires after eight hours. While setup is open, the app
-   renews it with the refresh token. If the refresh token expires or is
-   revoked, GitHub approval is required again.
+When the build is configured for MSW Connect, **Connect GitHub** opens the
+hosted browser authorization flow. After GitHub returns, MSW Monitor lists the
+repositories exposed by each GitHub App installation and shows one compact,
+repository-first editor:
 
-## Security model
+- Select the workspaces that may read a repository.
+- Every new selection defaults to **Read-only**.
+- The mode menu appears only after a repository is selected and offers exactly
+  **Read-only** and **Read & write**.
+- A workspace can currently select repositories from one installation/owner at
+  a time. The MSW host protocol carries one credential per workspace and role,
+  so the UI blocks combinations that protocol cannot represent.
 
-- The session lives **host-side only**, in the macOS Keychain.
-- Workspaces never receive the token, and the token is **never bound into VM
-  traffic**. A single user token is not both read and write: reusing it in the
-  VM path would give a workspace write access.
-- Workspace GitHub operations are **host-mediated**: clone, fetch, and pull
-  run on the Mac (which holds the session) and deliver files into the
-  workspace; push runs on the Mac as an explicit `msw push`. The repository
-  selection made on GitHub constrains what the session can reach.
-- **Not yet implemented:** the host-mediated workspace operations and their
-  verification steps. Until they land, `msw push` and workspace
-  clone/fetch/pull do not consume this session, and the per-workspace
-  allowlist is saved but not yet enforced — the checkboxes are UI and
-  persistence only, not access control yet.
+Nothing changes until the policy is reviewed and applied. Each policy row
+carries the stable repository ID, full name, installation ID, owner ID/login,
+and access mode. Grant creation is partitioned by workspace and installation:
 
-## Setup behavior
+- the guest read grant contains every selected repository;
+- the host write grant contains only repositories marked **Read & write**;
+- each generated role uses the first repository in deterministic name/ID order
+  that is eligible for that role as its verification repository.
 
-The GitHub step is always present in setup (Readiness → GitHub → Identity →
-Review). It shows one of:
+MSW Connect returns short-lived installation credentials scoped to those exact
+repository sets. MSW Monitor rejects broader or mismatched responses, stores
+credentials in separate guest/host Keychain records, and persists only
+non-secret metadata. The guest capability is bound through MSW's verified
+workspace path; the host credential is used only for explicit host pushes.
 
-- **Connect GitHub** — the build has the GitHub App configured; clicking it
-  starts the device flow in the default browser.
-- **Connected as @login** — a session exists; the step offers **Choose
-  repositories on GitHub** and Continue.
-- **Signed in as @login, but repository status could not be refreshed.** —
-  a re-check failed. A genuinely retryable transport failure keeps **Check
-  again**; a consumed or expired session that cannot be refreshed instead
-  offers **Reconnect GitHub**, which starts a fresh device flow — the
-  reauthorization-required state has no retry path, and the previous
-  credential is discarded.
-- **GitHub connection isn't available yet** — the build has no App
-  configured; setup continues without GitHub.
+Applying policy is journaled and transactional. Replacement grant revocation,
+local credential rollback, quarantine, cancellation, lifecycle restoration,
+session renewal, and reauthorization remain fail-closed.
 
-The client ID and installation URL are build inputs (`MSW_GITHUB_CLIENT_ID`,
-`MSW_GITHUB_INSTALLATION_URL`). The client ID is public by GitHub's design and
-may be embedded; the private key must never be generated for this flow.
+## Direct GitHub device connection
 
-## Disconnect
+Some builds expose GitHub's device flow directly. It stores the user session in
+the macOS Keychain and uses GitHub's App installation page to choose the
+repositories visible to that session. The direct protocol does not mint the
+separate repository-scoped guest and host grants consumed by MSW.
 
-Not yet implemented in this build. Until a Disconnect action ships, revoke the
-authorization from your GitHub settings (Applications → Authorized OAuth Apps
-/ GitHub Apps) and delete the Keychain item
-`org.microsandbox.MSWMonitor.github-device-session`.
+For that reason, Setup and Settings do not show per-workspace or write controls
+for a direct connection. They show the connected account, repository-selection
+status, and an actionable **Reconnect GitHub** state when refresh can no longer
+continue safely. Repository selection remains on GitHub. This is connection
+metadata, not workspace authorization.
+
+## Recovery and disconnect
+
+Settings summarizes a connected account once and lists the effective scoped
+workspace grants without displaying credentials. **Edit repository access**
+reopens the same setup editor. Reconnect is used for expired, revoked, removed,
+or otherwise unrecoverable authorization. Removing a workspace grant or
+disconnecting a Connect account revokes remote grants before local cleanup;
+uncertain cleanup quarantines the affected roles.
+
+The direct-device client ID and installation URL are public build inputs
+(`MSW_GITHUB_CLIENT_ID`, `MSW_GITHUB_INSTALLATION_URL`). MSW Connect endpoint,
+client, installation URL, and scope-attestation key are separate release
+inputs. No GitHub App private key belongs in the desktop app.

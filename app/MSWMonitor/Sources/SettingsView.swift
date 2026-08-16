@@ -41,7 +41,6 @@ private struct WorkspaceGrantGroup: Identifiable, Equatable {
     let entries: [WorkspaceCredentialMetadata]
     let owner: String?
     let repositoryNames: [String]
-    let accessModes: [String]
     let verifiedAt: Date?
 
     var id: String { workspace }
@@ -90,7 +89,6 @@ struct SettingsView: View {
     @State private var destructiveAction: GitHubDestructiveAction?
     @State private var deviceAccount: GitHubAccount?
     @State private var deviceRepositories: [GitHubRepository] = []
-    @State private var deviceAllowlists: [String: Set<String>] = [:]
     @State private var deviceAccessLoaded = false
     @State private var deviceAccessIssue: String?
     @State private var deviceAccessTask: Task<Void, Never>?
@@ -128,7 +126,6 @@ struct SettingsView: View {
                     defaultBranch: "main"
                 )
             ])
-            _deviceAllowlists = State(initialValue: ["dev": ["acme/one"]])
             _deviceAccessLoaded = State(initialValue: true)
         }
     }
@@ -244,11 +241,23 @@ struct SettingsView: View {
     private var githubSettings: some View {
         Form {
             Section("Account") {
-                LabeledContent("Status", value: githubStatusText)
-                    .accessibilityIdentifier("settings.github.status")
                 if let connectedAccount {
-                    LabeledContent("Account", value: "@\(connectedAccount.login)")
+                    Label("Connected as @\(connectedAccount.login)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityLabel("Connected as @\(connectedAccount.login)")
+                        .accessibilityIdentifier("settings.github.status")
+                } else if let deviceAccount {
+                    Label("Connected as @\(deviceAccount.login)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityLabel("Connected as @\(deviceAccount.login)")
+                        .accessibilityIdentifier("settings.github.status")
+                } else {
+                    LabeledContent("Status", value: githubStatusText)
+                        .accessibilityIdentifier("settings.github.status")
                 }
+                Text("GitHub is optional. Reconnect only to add or change repository access.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 githubPrimaryAction
                 if let githubError {
                     recoveryMessage(githubError)
@@ -258,11 +267,8 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Workspace access") {
+            Section("Repository access") {
                 deviceWorkspaceAccessContent
-            }
-
-            Section("Workspace grants") {
                 if groupedMetadata.isEmpty {
                     ContentUnavailableView(
                         "No workspace grants",
@@ -371,9 +377,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var deviceWorkspaceAccessContent: some View {
-        if let deviceAccount {
-            LabeledContent("Account", value: "@\(deviceAccount.login)")
-                .accessibilityIdentifier("settings.github.account")
+        if deviceAccount != nil {
             if deviceRepositories.isEmpty {
                 if deviceAccessIssue != nil {
                     Text("Repository status could not be refreshed.")
@@ -385,12 +389,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                WorkspaceGitHubAccessEditor(
-                    repositories: deviceRepositories,
-                    allowlists: deviceAllowlists,
-                    onToggle: setDeviceWorkspaceAllowlist
-                )
-                .accessibilityIdentifier("settings.github.workspace-access")
+                Text("Repositories for this direct connection are managed by the GitHub App installation. Per-workspace and write grants require MSW Connect; Settings does not present controls it cannot enforce.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings.github.device-scope")
             }
             HStack {
                 if let url = githubInstallationURL {
@@ -416,20 +418,6 @@ struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("settings.github.refresh.issue")
         }
-    }
-
-    private func setDeviceWorkspaceAllowlist(workspace: String, repository: String, allowed: Bool) {
-        var current = deviceAllowlists[workspace] ?? []
-        if allowed {
-            current.insert(repository)
-        } else {
-            current.remove(repository)
-        }
-        deviceAllowlists[workspace] = current
-        let access = WorkspaceGitHubAccess(
-            repositoriesByWorkspace: deviceAllowlists.mapValues { Array($0).sorted() }
-        )
-        try? WorkspaceGitHubAccessStore().save(access)
     }
 
     /// Single-flight entry for Settings' device-access loads: the initial
@@ -514,24 +502,12 @@ struct SettingsView: View {
                     )
                     accessibleRepositories.append(contentsOf: repositories)
                 }
-                let accessibleNames = Set(accessibleRepositories.map(\.fullName))
-                let accessStore = WorkspaceGitHubAccessStore()
-                let stored = accessStore.load()
-                let pruned = stored?.pruned(toAccessibleNames: accessibleNames)
                 // Newest-wins: publish only if this invocation is still
                 // current AND no concurrent sign-in/rotation advanced the
                 // session generation past the epoch this operation produced —
                 // a fresh Setup sign-in during the listing must win over stale
                 // account/repository output.
                 guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
-                if let pruned {
-                    if pruned.repositoriesByWorkspace != stored?.repositoriesByWorkspace {
-                        try accessStore.save(pruned)
-                    }
-                    deviceAllowlists = pruned.repositoriesByWorkspace.mapValues(Set.init)
-                } else {
-                    deviceAllowlists = [:]
-                }
                 deviceAccount = session.account
                 deviceRepositories = accessibleRepositories
                 deviceAccessIssue = nil
@@ -564,12 +540,12 @@ struct SettingsView: View {
                 .disabled(isUpdatingGitHub)
                 .accessibilityIdentifier("settings.github.connect.button")
         case .sessionExpired:
-            Button("Sign in again", action: onConnect)
+            Button("Reconnect GitHub", action: onConnect)
                 .buttonStyle(.borderedProminent)
                 .disabled(isUpdatingGitHub)
                 .accessibilityIdentifier("settings.github.connect.button")
         case .connected:
-            Button("Review or add workspace access", action: onConnect)
+            Button("Edit repository access", action: onConnect)
                 .disabled(isUpdatingGitHub)
                 .accessibilityIdentifier("settings.github.connect.button")
         }
@@ -587,8 +563,6 @@ struct SettingsView: View {
             LabeledContent("Owner", value: group.owner ?? "Unavailable")
                 .font(.caption)
             LabeledContent("Repositories", value: repositorySummary(for: group))
-                .font(.caption)
-            LabeledContent("Access", value: group.accessModes.joined(separator: " + "))
                 .font(.caption)
             LabeledContent("Last verified", value: verificationAge(group.verifiedAt))
                 .font(.caption)
@@ -626,7 +600,6 @@ struct SettingsView: View {
                     entries: entries,
                     owner: entries.compactMap(\.owner).first,
                     repositoryNames: Array(Set(entries.flatMap { $0.repositoryNames })).sorted(),
-                    accessModes: Array(Set(entries.map(\.accessMode))).sorted(),
                     verifiedAt: entries.map(\.updatedAt).max()
                 )
             }
@@ -700,15 +673,15 @@ struct SettingsView: View {
 
     private func recoveryActionTitle(for group: WorkspaceGrantGroup) -> String {
         if group.entries.contains(where: { $0.recoveryState == .serviceUnavailable }) {
-            return "Retry access"
+            return "Reconnect"
         }
         if group.entries.contains(where: { $0.recoveryState == .installationRemoved }) {
-            return "Reinstall or reauthorize"
+            return "Reinstall or reconnect"
         }
         if group.entries.contains(where: \.needsRestart) {
             return "Open Setup to Review Restart"
         }
-        return "Reauthorize"
+        return "Reconnect"
     }
 
     private func verificationAge(_ date: Date?) -> String {
@@ -728,7 +701,11 @@ struct SettingsView: View {
     }
 
     private func repositorySummary(for group: WorkspaceGrantGroup) -> String {
-        group.repositoryNames.isEmpty ? "None recorded" : group.repositoryNames.joined(separator: ", ")
+        let writable = Set(group.entries.filter { $0.role == .host }.flatMap(\.repositoryNames))
+        let values = group.repositoryNames.map { repository in
+            "\(repository) — \(writable.contains(repository) ? GitHubRepositoryAccessMode.readWrite.label : GitHubRepositoryAccessMode.readOnly.label)"
+        }
+        return values.isEmpty ? "None recorded" : values.joined(separator: ", ")
     }
 
     private func refreshLoginItemStatus() {

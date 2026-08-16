@@ -3091,50 +3091,23 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testWorkspaceGitHubAccessStoreRoundTrip() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-access-\(UUID().uuidString)", isDirectory: true)
-        let fileURL = directory.appendingPathComponent("workspace-github-access.json")
-        let store = WorkspaceGitHubAccessStore(fileURL: fileURL)
-        XCTAssertNil(store.load())
-
-        let access = WorkspaceGitHubAccess(repositoriesByWorkspace: [
-            "dev": ["acme/one", "acme/two"],
-            "personal": ["acme/one"]
-        ])
-        try store.save(access)
-        let loaded = store.load()
-        XCTAssertEqual(loaded?.schemaVersion, 1)
-        XCTAssertEqual(loaded?.allowedRepositories(for: "dev"), ["acme/one", "acme/two"])
-        XCTAssertEqual(loaded?.allowedRepositories(for: "personal"), ["acme/one"])
-        XCTAssertEqual(loaded?.allowedRepositories(for: "playgrounds"), [])
-    }
-
-    func testWorkspaceGitHubAccessPruneIsDurableAndPreventsResurrection() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-access-prune-\(UUID().uuidString)", isDirectory: true)
-        let fileURL = directory.appendingPathComponent("workspace-github-access.json")
-        let store = WorkspaceGitHubAccessStore(fileURL: fileURL)
-
-        // dev keeps both repos; playgrounds loses its only repo.
-        try store.save(WorkspaceGitHubAccess(repositoriesByWorkspace: [
-            "dev": ["acme/one", "acme/two"],
-            "playgrounds": ["gone/repo"]
-        ]))
-
-        let stored = store.load()
-        let pruned = try XCTUnwrap(stored).pruned(toAccessibleNames: ["acme/one", "acme/two"])
-        try store.save(pruned)
-
-        let persisted = store.load()
-        XCTAssertEqual(persisted?.allowedRepositories(for: "dev"), ["acme/one", "acme/two"])
-        XCTAssertEqual(persisted?.allowedRepositories(for: "playgrounds"), [])
-
-        // The removed repo later becomes accessible again on GitHub; the old
-        // playgrounds approval must NOT silently reactivate.
-        let reactivated = try XCTUnwrap(persisted).pruned(toAccessibleNames: ["acme/one", "acme/two", "gone/repo"])
-        XCTAssertEqual(reactivated.allowedRepositories(for: "playgrounds"), [],
-                       "A re-added repository must not resurrect a pruned per-workspace approval.")
+    func testRepositoryPolicyCarriesStableIdentityAndDefaultsReadOnly() throws {
+        let policy = GitHubRepositoryPolicy(
+            workspace: "dev",
+            repositoryID: 101,
+            fullName: "acme/one",
+            installationID: 42,
+            ownerID: 7,
+            ownerLogin: "acme",
+            ownerType: "Organization"
+        )
+        let data = try JSONEncoder().encode(policy)
+        let decoded = try JSONDecoder().decode(GitHubRepositoryPolicy.self, from: data)
+        XCTAssertEqual(decoded, policy)
+        XCTAssertEqual(decoded.id, "dev.42.101")
+        XCTAssertEqual(decoded.mode, .readOnly)
+        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Read-only")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Read & write")
     }
 
     func testGitHubDeviceSessionExpiryHelpers() {
@@ -3369,19 +3342,20 @@ final class AppModelTests: XCTestCase {
             Data(#"{"error":{"code":"installation_removed","message":"installation removed"}}"#.utf8),
             status: 404
         )
-        let assignment = GitHubWorkspaceAssignment(
+        let policy = GitHubRepositoryPolicy(
             workspace: "dev",
-            owner: "acme",
+            repositoryID: repository.id,
+            fullName: repository.fullName,
             installationID: installation.id,
-            repositoryIDs: [repository.id],
-            repositoryNames: [repository.fullName],
-            verificationRepository: repository.fullName
+            ownerID: owner.id,
+            ownerLogin: owner.login,
+            ownerType: owner.type
         )
 
         do {
-            _ = try await coordinator.commitAssignments(
+            _ = try await coordinator.commitPolicy(
                 sessionID: discovery.sessionID,
-                assignments: [assignment]
+                policy: [policy]
             )
             XCTFail("A removed installation must require owner reauthorization.")
         } catch let error as GitHubAuthorizationError {
@@ -3389,6 +3363,54 @@ final class AppModelTests: XCTestCase {
         }
     }
 
+
+    func testRepositoryPolicyRejectsMultipleInstallationsForOneWorkspace() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-policy-partition-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let keychain = InMemoryConnectKeychain()
+        let transport = QueueConnectTransport()
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let connect = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-policy-partition-\(UUID().uuidString)"
+        )
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-policy-partition-broker-\(UUID().uuidString)"
+        )
+        let coordinator = GitHubAuthorizationCoordinator(broker: broker, connect: connect, now: clock.now)
+        let acme = GitHubInstallationAccount(login: "acme", id: 7, type: "Organization")
+        let other = GitHubInstallationAccount(login: "other", id: 8, type: "Organization")
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-service-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        await transport.enqueue(try testJSON(TestInstallationResponse(installations: [
+            GitHubInstallation(id: 42, account: acme, repositorySelection: "selected"),
+            GitHubInstallation(id: 43, account: other, repositorySelection: "selected")
+        ])))
+        let discovery = try await coordinator.beginAuthorization(browser: TestConnectBrowser())
+        let policy = [
+            GitHubRepositoryPolicy(workspace: "dev", repositoryID: 1, fullName: "acme/one", installationID: 42, ownerID: 7, ownerLogin: "acme", ownerType: "Organization"),
+            GitHubRepositoryPolicy(workspace: "dev", repositoryID: 2, fullName: "other/two", installationID: 43, ownerID: 8, ownerLogin: "other", ownerType: "Organization")
+        ]
+        do {
+            _ = try await coordinator.commitPolicy(sessionID: discovery.sessionID, policy: policy)
+            XCTFail("The single host credential slot cannot represent two installations.")
+        } catch let error as GitHubAuthorizationError {
+            XCTAssertEqual(error, .multipleInstallationsUnsupported("dev"))
+        }
+        let requests = await transport.requests()
+        XCTAssertEqual(requests.filter { $0.url?.path == "/v1/grants" }.count, 0)
+    }
 
     func testOneConnectSessionCommitsIndependentWorkspaceGrants() async throws {
         let temporary = FileManager.default.temporaryDirectory
@@ -3449,23 +3471,24 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(discovery.account.login, "octocat")
         XCTAssertEqual(discovery.installations, [installation])
 
-        let devAssignment = GitHubWorkspaceAssignment(
+        let devPolicy = GitHubRepositoryPolicy(
             workspace: "dev",
-            owner: "acme",
+            repositoryID: 7,
+            fullName: "acme/one",
             installationID: 42,
-            repositoryIDs: [7],
-            repositoryNames: ["acme/one"],
-            accessMode: "read-only",
-            verificationRepository: "acme/one"
+            ownerID: owner.id,
+            ownerLogin: owner.login,
+            ownerType: owner.type
         )
-        let personalAssignment = GitHubWorkspaceAssignment(
+        let personalPolicy = GitHubRepositoryPolicy(
             workspace: "personal",
-            owner: "acme",
+            repositoryID: 8,
+            fullName: "acme/two",
             installationID: 42,
-            repositoryIDs: [8],
-            repositoryNames: ["acme/two"],
-            accessMode: "read-write",
-            verificationRepository: "acme/two"
+            ownerID: owner.id,
+            ownerLogin: owner.login,
+            ownerType: owner.type,
+            mode: .readWrite
         )
 
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
@@ -3516,9 +3539,9 @@ final class AppModelTests: XCTestCase {
             generation: 1
         )))
 
-        let metadata = try await coordinator.commitAssignments(
+        let metadata = try await coordinator.commitPolicy(
             sessionID: discovery.sessionID,
-            assignments: [devAssignment, personalAssignment]
+            policy: [devPolicy, personalPolicy]
         )
         XCTAssertEqual(metadata.map(\.id), ["dev.guest", "personal.guest", "personal.host"])
         let personalMetadata = try await broker.metadata(for: "personal", role: .host)
@@ -3527,9 +3550,9 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(devBundle.credential.accessToken, "ghs_dev_token")
 
         do {
-            _ = try await coordinator.commitAssignments(
+            _ = try await coordinator.commitPolicy(
                 sessionID: discovery.sessionID,
-                assignments: [devAssignment]
+                policy: [devPolicy]
             )
             XCTFail("A committed authorization session must not be reusable.")
         } catch let error as GitHubAuthorizationError {
@@ -4426,15 +4449,18 @@ final class AppModelTests: XCTestCase {
         )
         XCTAssertEqual(scopedRepositories.map(\.fullName), ["acme/one", "acme/two"])
 
-        let assignment = GitHubWorkspaceAssignment(
-            workspace: "dev",
-            owner: "acme",
-            installationID: installation.id,
-            repositoryIDs: [7, 8],
-            repositoryNames: ["acme/one", "acme/two"],
-            accessMode: "read-write",
-            verificationRepository: "acme/two"
-        )
+        let policy = repositories.map {
+            GitHubRepositoryPolicy(
+                workspace: "dev",
+                repositoryID: $0.id,
+                fullName: $0.fullName,
+                installationID: installation.id,
+                ownerID: owner.id,
+                ownerLogin: owner.login,
+                ownerType: owner.type,
+                mode: $0.id == 8 ? .readWrite : .readOnly
+            )
+        }
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
         await transport.enqueue(try testJSON(MSWConnectGrant(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000071")!,
@@ -4446,7 +4472,7 @@ final class AppModelTests: XCTestCase {
             repositoryIDs: [7, 8],
             repositoryNames: ["acme/one", "acme/two"],
             accessMode: "read-only",
-            verificationRepository: "acme/two",
+            verificationRepository: "acme/one",
             accessToken: "ghs_verified_guest",
             accessExpiresAt: clock.value.addingTimeInterval(1800),
             generation: 1
@@ -4458,8 +4484,8 @@ final class AppModelTests: XCTestCase {
             accountLogin: "octocat",
             owner: "acme",
             installationID: installation.id,
-            repositoryIDs: [7, 8],
-            repositoryNames: ["acme/one", "acme/two"],
+            repositoryIDs: [8],
+            repositoryNames: ["acme/two"],
             accessMode: "host-write",
             verificationRepository: "acme/two",
             accessToken: "ghs_verified_host",
@@ -4467,17 +4493,21 @@ final class AppModelTests: XCTestCase {
             generation: 1
         )))
 
-        let commit = try await coordinator.commitAssignmentsWithVerification(
+        let commit = try await coordinator.commitPolicyWithVerification(
             sessionID: discovery.sessionID,
-            assignments: [assignment]
+            policy: policy
         )
         XCTAssertEqual(commit.metadata.map(\.id), ["dev.guest", "dev.host"])
-        let verification = try XCTUnwrap(commit.verifications.first)
-        XCTAssertEqual(verification.workspace, "dev")
-        XCTAssertEqual(verification.accessMode, "read-write")
-        XCTAssertEqual(verification.verificationRepository, "acme/two")
-        XCTAssertTrue(verification.verified)
-        XCTAssertTrue(verification.lifecycleRestored)
+        XCTAssertEqual(commit.verifications.count, 2)
+        let guestVerification = try XCTUnwrap(commit.verifications.first { $0.role == .guest })
+        XCTAssertEqual(guestVerification.workspace, "dev")
+        XCTAssertEqual(guestVerification.accessMode, "read-only")
+        XCTAssertEqual(guestVerification.verificationRepository, "acme/one")
+        XCTAssertTrue(guestVerification.verified)
+        XCTAssertTrue(guestVerification.lifecycleRestored)
+        let hostVerification = try XCTUnwrap(commit.verifications.first { $0.role == .host })
+        XCTAssertEqual(hostVerification.verificationRepository, "acme/two")
+        XCTAssertTrue(hostVerification.verified)
 
         let guestMetadata = try XCTUnwrap(commit.metadata.first(where: { $0.role == .guest }))
         XCTAssertEqual(guestMetadata.provider, "github-app-installation")
@@ -4488,7 +4518,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(guestMetadata.repositoryIDs, [7, 8])
         XCTAssertEqual(guestMetadata.repositoryNames, ["acme/one", "acme/two"])
         XCTAssertEqual(guestMetadata.accessMode, "read-only")
-        XCTAssertEqual(guestMetadata.verificationRepository, "acme/two")
+        XCTAssertEqual(guestMetadata.verificationRepository, "acme/one")
         XCTAssertEqual(guestMetadata.recoveryState, .ready)
         XCTAssertFalse(guestMetadata.quarantined)
         XCTAssertFalse(guestMetadata.needsRestart)
@@ -4496,6 +4526,8 @@ final class AppModelTests: XCTestCase {
         let hostMetadata = try XCTUnwrap(commit.metadata.first(where: { $0.role == .host }))
         XCTAssertEqual(hostMetadata.grantID?.uuidString, "00000000-0000-0000-0000-000000000072")
         XCTAssertEqual(hostMetadata.accessMode, "host-write")
+        XCTAssertEqual(hostMetadata.repositoryIDs, [8])
+        XCTAssertEqual(hostMetadata.repositoryNames, ["acme/two"])
         XCTAssertEqual(hostMetadata.recoveryState, .ready)
         XCTAssertFalse(hostMetadata.quarantined)
         XCTAssertFalse(hostMetadata.needsRestart)
@@ -4515,7 +4547,7 @@ final class AppModelTests: XCTestCase {
 
         let invocations = try String(contentsOf: invocationURL, encoding: .utf8)
         XCTAssertEqual(invocations.split(whereSeparator: { $0.isNewline }).count, 3)
-        XCTAssertTrue(invocations.contains("--workspace dev --repository acme/two --mode read-only"))
+        XCTAssertTrue(invocations.contains("--workspace dev --repository acme/one --mode read-only"))
         XCTAssertTrue(invocations.contains("--workspace dev --repository acme/two --mode host-write"))
 
         let transportRequests = await transport.requests()
@@ -4524,9 +4556,15 @@ final class AppModelTests: XCTestCase {
         for request in grantRequests {
             let body = try XCTUnwrap(request.httpBody)
             let sent = try JSONDecoder().decode(MSWConnectGrantAssignment.self, from: body)
-            XCTAssertEqual(sent.repositoryIDs, [7, 8])
-            XCTAssertEqual(sent.repositoryNames, ["acme/one", "acme/two"])
-            XCTAssertEqual(sent.verificationRepository, "acme/two")
+            if sent.role == .guest {
+                XCTAssertEqual(sent.repositoryIDs, [7, 8])
+                XCTAssertEqual(sent.repositoryNames, ["acme/one", "acme/two"])
+                XCTAssertEqual(sent.verificationRepository, "acme/one")
+            } else {
+                XCTAssertEqual(sent.repositoryIDs, [8])
+                XCTAssertEqual(sent.repositoryNames, ["acme/two"])
+                XCTAssertEqual(sent.verificationRepository, "acme/two")
+            }
             XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("access_token"))
         }
     }
@@ -4692,14 +4730,14 @@ final class AppModelTests: XCTestCase {
         )
         XCTAssertEqual(scopedRepositories.map(\.fullName), ["acme/one"])
 
-        let assignment = GitHubWorkspaceAssignment(
+        let policy = GitHubRepositoryPolicy(
             workspace: "dev",
-            owner: "acme",
+            repositoryID: 7,
+            fullName: "acme/one",
             installationID: installation.id,
-            repositoryIDs: [7],
-            repositoryNames: ["acme/one"],
-            accessMode: "read-only",
-            verificationRepository: "acme/one"
+            ownerID: owner.id,
+            ownerLogin: owner.login,
+            ownerType: owner.type
         )
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
         await transport.enqueue(try testJSON(MSWConnectGrant(
@@ -4725,9 +4763,9 @@ final class AppModelTests: XCTestCase {
         )))
 
         do {
-            _ = try await coordinator.commitAssignmentsWithVerification(
+            _ = try await coordinator.commitPolicyWithVerification(
                 sessionID: discovery.sessionID,
-                assignments: [assignment]
+                policy: [policy]
             )
             XCTFail("A failed MSW verification must not commit replacement access.")
         } catch let error as GitHubAuthorizationError {

@@ -174,15 +174,13 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 2))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
 
-        let assign = app.descendants(matching: .any)["setup.github.workspace.dev.assign"]
-        XCTAssertTrue(assign.waitForExistence(timeout: 2))
-        assign.click()
-        choosePicker("setup.github.workspace.dev.owner", option: "acme", in: app)
-
-        let repository = app.descendants(matching: .any)["setup.github.workspace.dev.repository.1001"]
+        let repository = app.descendants(matching: .any)["github.repository.1001.workspace.dev"]
         XCTAssertTrue(repository.waitForExistence(timeout: 2))
         repository.click()
-        choosePicker("setup.github.workspace.dev.verification", option: "acme/one", in: app)
+        let mode = app.descendants(matching: .any)["github.repository.1001.workspace.dev.mode"]
+        XCTAssertTrue(mode.waitForExistence(timeout: 2), "The mode selector appears only after selection.")
+        XCTAssertTrue(mode.label.contains("Read-only") || (mode.value as? String) == "Read-only")
+        choosePicker("github.repository.1001.workspace.dev.mode", option: "Read & write", in: app)
 
         let review = app.buttons["setup.github.review.button"]
         XCTAssertTrue(review.waitForExistence(timeout: 2))
@@ -200,7 +198,11 @@ final class MSWMonitorUITests: XCTestCase {
 
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.verifications"].waitForExistence(timeout: 2))
         XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.verification.dev"]
+            app.descendants(matching: .any)["setup.github.verification.dev.guest"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["setup.github.verification.dev.host"]
                 .waitForExistence(timeout: 2)
         )
         let githubContinue = app.buttons["Continue"]
@@ -313,15 +315,9 @@ final class MSWMonitorUITests: XCTestCase {
         // must survive the re-authorization until dev's grant commits.
         XCTAssertTrue(app.staticTexts["setup.github.attention"].exists)
 
-        let assign = app.descendants(matching: .any)["setup.github.workspace.dev.assign"]
-        XCTAssertTrue(assign.waitForExistence(timeout: 2))
-        assign.click()
-        choosePicker("setup.github.workspace.dev.owner", option: "acme", in: app)
-
-        let repository = app.descendants(matching: .any)["setup.github.workspace.dev.repository.1001"]
+        let repository = app.descendants(matching: .any)["github.repository.1001.workspace.dev"]
         XCTAssertTrue(repository.waitForExistence(timeout: 2))
         repository.click()
-        choosePicker("setup.github.workspace.dev.verification", option: "acme/one", in: app)
 
         let review = app.buttons["setup.github.review.button"]
         XCTAssertTrue(review.waitForExistence(timeout: 2))
@@ -338,7 +334,7 @@ final class MSWMonitorUITests: XCTestCase {
         apply.click()
 
         XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.verification.dev"]
+            app.descendants(matching: .any)["setup.github.verification.dev.guest"]
                 .waitForExistence(timeout: 2)
         )
         // Only the successful commit for the attention workspace clears it.
@@ -370,7 +366,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
         XCTAssertNotEqual(app.state, .notRunning)
     }
-    func testSettingsShowsWorkspaceAccessEditor() {
+    func testSettingsMakesDirectDeviceScopeTruthful() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -396,17 +392,11 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(githubTab.waitForExistence(timeout: 5))
         githubTab.click()
 
-        XCTAssertTrue(
-            settings.descendants(matching: .any)["settings.github.workspace-access"]
-                .waitForExistence(timeout: 5)
-        )
-        let account = settings.staticTexts["settings.github.account"]
+        XCTAssertTrue(settings.descendants(matching: .any)["settings.github.device-scope"].waitForExistence(timeout: 5))
+        let account = settings.descendants(matching: .any)["settings.github.status"]
         XCTAssertTrue(account.waitForExistence(timeout: 5))
-        XCTAssertEqual(account.value as? String, "@octocat")
-        let repositoryToggle = settings.checkBoxes["github.workspace.dev.access"]
-        XCTAssertTrue(repositoryToggle.waitForExistence(timeout: 5))
-        XCTAssertEqual(repositoryToggle.value as? Int, 1, "The dev workspace is seeded with acme/one.")
-        XCTAssertEqual(repositoryToggle.label, "acme/one")
+        XCTAssertTrue(settings.staticTexts["Connected as @octocat"].waitForExistence(timeout: 5))
+        XCTAssertFalse(settings.checkBoxes["github.workspace.dev.access"].exists)
     }
 
     func testGitHubAuthorizationCancelThenRetryUsesCurrentAttempt() {
@@ -554,9 +544,4 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(element.value as? String, text)
     }
 }
-
-
-
-
-
 
