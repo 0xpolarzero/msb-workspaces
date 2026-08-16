@@ -152,6 +152,14 @@ private struct RepositoryLoadIdentity: Equatable, Sendable {
     let sessionID: UUID
 }
 
+/// Single source of truth for the GitHub connection header so it can never
+/// contradict the connection section (device flow when configured).
+enum GitHubConnectionPresentation: Equatable {
+    case notConnected
+    case signedInAwaitingRepositories(account: GitHubAccount)
+    case refreshFailed(account: GitHubAccount)
+    case connected(account: GitHubAccount)
+}
 private enum SetupStep: String, CaseIterable, Identifiable {
     case readiness
     case github
@@ -251,6 +259,10 @@ struct SetupView: View {
     @State private var isConnectingDevice = false
     @State private var deviceStatus = ""
     @State private var deviceIssue: String?
+    @State private var deviceRefreshIssue: String?
+    @State private var deviceRefreshTask: Task<Void, Never>?
+    @State private var deviceRefreshGeneration = 0
+    @State private var deviceReauthorizationRequired = false
     @State private var devicePollTask: Task<Void, Never>?
     @State private var deviceSession: GitHubDeviceSession?
     @State private var deviceRepositoryCount = 0
@@ -370,6 +382,79 @@ struct SetupView: View {
         signedIn && repositoryCount > 0
     }
 
+    /// Maps a repository re-check failure to a user-facing, actionable message
+    /// so an auth/transport/decode error is never mistaken for a genuine empty
+    /// selection. Pure and static for direct unit testing.
+    static func deviceRefreshIssueMessage(for error: Error, action: String) -> String {
+        let detail = (error as? LocalizedError)?.errorDescription ?? "Unexpected error."
+        return "GitHub reported an error \(action): \(detail)"
+    }
+
+    /// The account label for the device section. A refresh failure takes
+    /// precedence over the zero-selection wording: while `refreshIssue` is
+    /// set the section must never claim nothing is selected, because the
+    /// re-check itself failed to establish that.
+    static func deviceAccountLabel(login: String, repositoryCount: Int, refreshIssue: String?) -> String {
+        if deviceAccessDecided(signedIn: true, repositoryCount: repositoryCount) {
+            return "Connected as @\(login)"
+        }
+        if refreshIssue != nil {
+            return "Signed in as @\(login), but repository status could not be refreshed."
+        }
+        return "Signed in as @\(login), but no repositories are selected yet."
+    }
+
+    /// The signed-in status line for the device section. Same precedence
+    /// rule as `deviceAccountLabel`: an active refresh failure replaces the
+    /// zero-selection wording instead of coexisting with it.
+    static func deviceRepositorySignedInLine(login: String, repositoryCount: Int, refreshIssue: String?) -> String {
+        if deviceAccessDecided(signedIn: true, repositoryCount: repositoryCount) {
+            return "Connected as @\(login). Repositories selected on GitHub are available."
+        }
+        if refreshIssue != nil {
+            return "Signed in as @\(login), but repository status could not be refreshed."
+        }
+        return "Signed in as @\(login), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
+    }
+
+    /// Pure derivation, unit-tested: which state the GitHub connection header
+    /// must present. A device account is authoritative whenever present
+    /// because it only exists on the device-flow path this build presents.
+    static func connectionPresentation(
+        account: GitHubAccount?,
+        deviceAccount: GitHubAccount?,
+        deviceRepositoryCount: Int,
+        deviceRefreshIssue: String? = nil
+    ) -> GitHubConnectionPresentation {
+        if let deviceAccount {
+            if deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount) {
+                return .connected(account: deviceAccount)
+            }
+            // Issue 2 owns the refresh-error input: while a re-check failed,
+            // the header must not claim nothing is selected — the re-check
+            // itself failed to establish that.
+            if deviceRefreshIssue != nil {
+                return .refreshFailed(account: deviceAccount)
+            }
+            return .signedInAwaitingRepositories(account: deviceAccount)
+        }
+        if let account {
+            return .connected(account: account)
+        }
+        return .notConnected
+    }
+
+    private var githubConnectionPresentation: GitHubConnectionPresentation {
+        // Device sessions only exist on the device-flow path this build
+        // presents, so its account is authoritative over any restored MSW
+        // Connect coordinator session.
+        Self.connectionPresentation(
+            account: account,
+            deviceAccount: deviceAccount,
+            deviceRepositoryCount: deviceRepositoryCount,
+            deviceRefreshIssue: deviceRefreshIssue
+        )
+    }
     private var githubDecisionMade: Bool {
         githubSkipped ||
             Self.deviceAccessDecided(signedIn: deviceAccount != nil, repositoryCount: deviceRepositoryCount) ||
@@ -715,7 +800,30 @@ struct SetupView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let account {
+            switch githubConnectionPresentation {
+            case .notConnected:
+                Label("GitHub is not connected", systemImage: "person.crop.circle.badge.questionmark")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.github.disconnected")
+                Text("GitHub is optional. You can connect it now or configure it later in Settings.")
+                    .font(.caption)
+            case .signedInAwaitingRepositories(let account):
+                Label("Signed in as @\(account.login), but no repositories are selected yet.", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("setup.github.account")
+                Text("GitHub identity is stored in the Mac Keychain. Pick repositories on GitHub, then check again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .refreshFailed(let account):
+                Label("Signed in as @\(account.login), but repository status could not be refreshed.", systemImage: "exclamationmark.octagon.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("setup.github.account")
+                Text(deviceReauthorizationRequired
+                    ? "Reconnect to GitHub to continue."
+                    : "Check the network connection and try checking again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .connected(let account):
                 Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .accessibilityIdentifier("setup.github.account")
@@ -901,15 +1009,17 @@ struct SetupView: View {
     private var deviceFlowSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let deviceAccount {
-                if Self.deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount) {
-                    Label("Connected as @\(deviceAccount.login)", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityIdentifier("setup.github.account")
-                } else {
-                    Label("Signed in as @\(deviceAccount.login), but no repositories are selected yet.", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .accessibilityIdentifier("setup.github.account")
-                }
+                let connected = Self.deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount)
+                Label(
+                    Self.deviceAccountLabel(
+                        login: deviceAccount.login,
+                        repositoryCount: deviceRepositoryCount,
+                        refreshIssue: deviceRefreshIssue
+                    ),
+                    systemImage: connected ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(connected ? Color.green : (deviceRefreshIssue != nil ? Color.red : Color.orange))
+                .accessibilityIdentifier("setup.github.account")
                 Text("Your credential is stored in the Mac Keychain. Workspaces never see it; GitHub access for workspaces is host-mediated.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -921,11 +1031,32 @@ struct SetupView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if deviceRepositoryCount == 0, let deviceSession {
+                if deviceRepositoryCount == 0, let deviceSession, !deviceReauthorizationRequired {
                     Button("Check again") {
-                        Task { await refreshDeviceRepositoryCount(accessToken: deviceSession.accessToken) }
+                        deviceRefreshTask?.cancel()
+                        deviceRefreshGeneration &+= 1
+                        let generation = deviceRefreshGeneration
+                        deviceRefreshTask = Task {
+                            await performDeviceRepositoryRefresh(accessToken: deviceSession.accessToken)
+                            if Self.refreshTaskIsCurrent(storedGeneration: deviceRefreshGeneration, taskGeneration: generation) {
+                                deviceRefreshTask = nil
+                            }
+                        }
                     }
                     .accessibilityIdentifier("setup.github.refresh.button")
+                }
+                if deviceReauthorizationRequired {
+                    // A consumed/poisoned generation has no retry path: the
+                    // only recovery is a fresh device-flow authorization.
+                    Button("Reconnect GitHub", action: reconnectDeviceAccount)
+                        .accessibilityIdentifier("setup.github.reconnect.button")
+                }
+                if let deviceRefreshIssue {
+                    Label(deviceRefreshIssue, systemImage: "exclamationmark.octagon.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("setup.github.refresh.issue")
                 }
                 if !deviceAccessibleRepositories.isEmpty {
                     workspaceAccessSection
@@ -1901,35 +2032,75 @@ struct SetupView: View {
     /// Restores the stored direct-GitHub session, rotating an expired access
     /// token with its refresh token when available.
     private func restoreDeviceSession() async {
-        guard deviceFlow != nil else { return }
+        guard let deviceFlow else { return }
         do {
-            let store = GitHubDeviceSessionStore()
-            guard var session = try store.load() else { return }
-            if session.isAccessExpired, let deviceFlow, session.canRefresh, let refreshToken = session.refreshToken {
-                let token = try await deviceFlow.refreshToken(clientID: session.clientID, refreshToken: refreshToken)
-                session = GitHubDeviceSession(
-                    schemaVersion: 1,
-                    clientID: session.clientID,
-                    account: session.account,
-                    accessToken: token.accessToken,
-                    refreshToken: token.refreshToken ?? session.refreshToken,
-                    accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-                    refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) } ?? session.refreshExpiresAt,
-                    obtainedAt: Date()
-                )
-                try store.save(session)
+            let outcome = try await GitHubDeviceSessionRefresher.shared.revalidatedSession(using: deviceFlow)
+            guard case .current(let session, _) = outcome else {
+                if case .superseded = outcome {
+                    // A concurrent replacement won the epoch; publish nothing.
+                    return
+                }
+                // Quarantine: the consumed generation could not be poisoned.
+                // Reauthorization-ONLY — surface the account so the header
+                // offers the reconnect control, but never a Check-again retry
+                // of the consumed pair.
+                deviceRefreshIssue = Self.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session")
+                deviceReauthorizationRequired = true
+                if let stored = try? GitHubDeviceSessionStore().load() {
+                    deviceAccount = stored.account
+                    prefillIdentity(from: stored.account)
+                }
+                return
             }
-            deviceSession = session
+            guard let session else { return }
             deviceAccount = session.account
             prefillIdentity(from: session.account)
+            if session.isAccessExpired {
+                // Expired and unrefreshable (or a consumed generation that was
+                // poisoned fail-closed): reauthorization-ONLY — no session, no
+                // Check again, no polling.
+                deviceRefreshIssue = "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub, then check again."
+                deviceReauthorizationRequired = true
+                return
+            }
+            deviceSession = session
             await refreshDeviceRepositoryCount(accessToken: session.accessToken)
-            deviceStatus = Self.deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount)
-                ? "Connected as @\(session.account.login). Repositories selected on GitHub are available."
-                : "Signed in as @\(session.account.login), but no repositories are selected yet."
+            deviceStatus = Self.deviceRepositorySignedInLine(
+                login: session.account.login,
+                repositoryCount: deviceRepositoryCount,
+                refreshIssue: deviceRefreshIssue
+            )
+        } catch is CancellationError {
+            // Startup restore was cancelled; leave state untouched.
         } catch {
-            // A stored session that cannot be restored is left untouched; the
-            // user can connect again.
+            // A genuinely retryable transport failure must not render as
+            // "not connected": publish the stored session and keep Check
+            // again available.
+            if let stored = try? GitHubDeviceSessionStore().load() {
+                deviceSession = stored
+                deviceAccount = stored.account
+                prefillIdentity(from: stored.account)
+                deviceRefreshIssue = Self.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session")
+                deviceStatus = Self.deviceRepositorySignedInLine(
+                    login: stored.account.login,
+                    repositoryCount: deviceRepositoryCount,
+                    refreshIssue: deviceRefreshIssue
+                )
+            }
+            // Without a stored session there is nothing to restore; the user
+            // can connect again.
         }
+    }
+
+    /// Starts reauthorization from the reauthorization-ONLY state: drop the
+    /// stale account so the account-nil branch renders the device-flow states
+    /// (code entry, progress, cancellation, failures) end to end;
+    /// finishDeviceFlow repopulates the account on success. The
+    /// reauthorization-required flag is cleared only by a successful new
+    /// session, never by the attempt itself.
+    private func reconnectDeviceAccount() {
+        deviceAccount = nil
+        startDeviceFlow()
     }
 
     private func startDeviceFlow() {
@@ -1937,6 +2108,7 @@ struct SetupView: View {
         cancelDeviceFlow()
         isConnectingDevice = true
         deviceIssue = nil
+        deviceRefreshIssue = nil
         deviceStatus = "Requesting a GitHub code…"
         devicePollTask = Task {
             do {
@@ -2011,7 +2183,7 @@ struct SetupView: View {
                     refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
                     obtainedAt: Date()
                 )
-                try GitHubDeviceSessionStore().save(session)
+                try await GitHubDeviceSessionRefresher.shared.replaceCurrentSession(with: session)
                 await MainActor.run {
                     deviceSession = session
                     deviceAccount = account
@@ -2019,15 +2191,25 @@ struct SetupView: View {
                     deviceAccessibleRepositories = accessibleRepositories
                     loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
                     githubAttentionWorkspace = nil
+                    deviceRefreshIssue = nil
+                    deviceReauthorizationRequired = false
                     isConnectingDevice = false
                     deviceAuthorization = nil
                     devicePollTask = nil
-                    deviceStatus = Self.deviceAccessDecided(signedIn: true, repositoryCount: accessibleRepositories.count)
-                        ? "Connected as @\(account.login). Repositories selected on GitHub are available."
-                        : "Signed in as @\(account.login), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
+                    deviceStatus = Self.deviceRepositorySignedInLine(
+                        login: account.login,
+                        repositoryCount: accessibleRepositories.count,
+                        refreshIssue: deviceRefreshIssue
+                    )
                     prefillIdentity(from: account)
                 }
+            } catch is CancellationError {
+                // A transport-reported cancellation does not set the
+                // task-cancel bit, so it must be caught explicitly: publish
+                // nothing (cancelDeviceFlow owns the cancelled state).
+                return
             } catch {
+
                 await MainActor.run {
                     isConnectingDevice = false
                     deviceAuthorization = nil
@@ -2039,28 +2221,161 @@ struct SetupView: View {
         }
     }
 
-    /// Re-checks GitHub for repositories actually accessible to the App.
-    private func refreshDeviceRepositoryCount(accessToken: String) async {
-        guard let deviceFlow else { return }
-        var accessibleRepositories: [GitHubRepository] = []
-        if let installations = try? await deviceFlow.installations(accessToken: accessToken) {
-            for installation in installations {
-                let repositories = (try? await deviceFlow.repositories(
-                    accessToken: accessToken,
-                    installationID: installation.id
-                )) ?? []
-                accessibleRepositories.append(contentsOf: repositories)
-            }
+    /// True while a repository re-check is running (manual button or poller);
+    /// Issue 1's poller uses this as an additional in-flight arbiter before
+    /// starting its own check.
+    var isDeviceRepositoryRefreshInFlight: Bool {
+        deviceRefreshTask != nil
+    }
+
+    /// Single-flight entry for repository re-checks: concurrent callers (the
+    /// poller, focus re-checks, startup restore, the manual "Check again")
+    /// coalesce onto the in-flight refresh. Session revalidation
+    /// (load → rotate → persist) is additionally serialized by the shared
+    /// `GitHubDeviceSessionRefresher` so a single-use refresh token is never
+    /// submitted twice. Keep this signature stable — Issue 1's poller calls it.
+    func refreshDeviceRepositoryCount(accessToken: String) async {
+        if let inFlight = deviceRefreshTask {
+            await inFlight.value
+            return
         }
-        deviceRepositoryCount = accessibleRepositories.count
-        deviceAccessibleRepositories = accessibleRepositories
-        loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
-        if deviceAccount != nil {
-            deviceStatus = Self.deviceAccessDecided(signedIn: true, repositoryCount: accessibleRepositories.count)
-                ? "Connected as @\(deviceAccount?.login ?? ""). Repositories selected on GitHub are available."
-                : "Signed in as @\(deviceAccount?.login ?? ""), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
+        deviceRefreshGeneration &+= 1
+        let generation = deviceRefreshGeneration
+        let task = Task { await performDeviceRepositoryRefresh(accessToken: accessToken) }
+        deviceRefreshTask = task
+        await task.value
+        if Self.refreshTaskIsCurrent(storedGeneration: deviceRefreshGeneration, taskGeneration: generation) {
+            deviceRefreshTask = nil
         }
     }
+
+    /// Pure identity check, unit-tested directly: a refresh task may clear
+    /// the stored handle only while it is still the current refresh. A
+    /// cancelled or replaced predecessor must never erase the successor's
+    /// handle, or teardown would lose the live task.
+    static func refreshTaskIsCurrent(storedGeneration: Int, taskGeneration: Int) -> Bool {
+        storedGeneration == taskGeneration
+    }
+
+    /// Applies the failure outcome of a re-check: records the issue and
+    /// replaces any zero-selection status with neutral failure wording, so
+    /// the UI never claims nothing is selected while the re-check itself
+    /// failed.
+    private func failDeviceRepositoryRefresh(with issue: String) {
+        deviceRefreshIssue = issue
+        if deviceAccount != nil {
+            deviceStatus = Self.deviceRepositorySignedInLine(
+                login: deviceAccount?.login ?? "",
+                repositoryCount: deviceRepositoryCount,
+                refreshIssue: issue
+            )
+        }
+    }
+
+
+    /// Re-checks GitHub for repositories actually accessible to the App. An
+    /// expired access token is rotated first through the shared refresher,
+    /// the (possibly rotated) session is published to state before any
+    /// fallible listing, and every failure surfaces as `deviceRefreshIssue`
+    /// instead of collapsing into a misleading "no repositories selected"
+    /// state. Returns `true` only when a result was actually published
+    /// (success or failure); `false` when the invocation was cancelled or
+    /// superseded and published nothing.
+    private func performDeviceRepositoryRefresh(accessToken: String, generation: Int) async -> Bool {
+        guard let deviceFlow else { return false }
+        let outcome: GitHubDeviceSessionRefreshOutcome
+        do {
+            outcome = try await GitHubDeviceSessionRefresher.shared.revalidatedSession(using: deviceFlow)
+        } catch is CancellationError {
+            return false
+        } catch {
+            await MainActor.run {
+                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session"))
+            }
+            return
+        }
+        guard case .current(let session, _) = outcome else {
+            if case .superseded = outcome {
+                // A concurrent replacement won the epoch; publish nothing.
+                return false
+            }
+            // Quarantine: the consumed generation could not be poisoned.
+            // Reauthorization-ONLY — no session, no Check again, no polling.
+            return await MainActor.run { () -> Bool in
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
+                deviceReauthorizationRequired = true
+                deviceSession = nil
+                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session"))
+                return true
+            }
+        }
+        if let session, session.isAccessExpired {
+            await MainActor.run {
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return }
+                // Expired and unrefreshable (or a poisoned consumed
+                // generation): reauthorization-ONLY — no session, no Check
+                // again, no polling.
+                deviceReauthorizationRequired = true
+                deviceSession = nil
+                failDeviceRepositoryRefresh(with: "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub, then check again.")
+            }
+            return
+        }
+        if let session {
+            // Publish the persisted (possibly rotated) session before the
+            // fallible listing: a failed listing must never leave memory
+            // holding a consumed pair while the Keychain holds the fresh one.
+            await MainActor.run { deviceSession = session }
+        }
+
+        let token = session?.accessToken ?? accessToken
+        let installations: [GitHubInstallation]
+        do {
+            installations = try await deviceFlow.installations(accessToken: token)
+        } catch is CancellationError {
+            return
+        } catch {
+            await MainActor.run {
+                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "listing installations"))
+            }
+            return
+        }
+        var accessibleRepositories: [GitHubRepository] = []
+        for installation in installations {
+            do {
+                let repositories = try await deviceFlow.repositories(
+                    accessToken: token,
+                    installationID: installation.id
+                )
+                accessibleRepositories.append(contentsOf: repositories)
+            } catch is CancellationError {
+                return
+            } catch {
+                await MainActor.run {
+                    failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(
+                        for: error,
+                        action: "listing repositories for installation \(installation.id)"
+                    ))
+                }
+                return
+            }
+        }
+        await MainActor.run {
+            deviceRepositoryCount = accessibleRepositories.count
+            deviceAccessibleRepositories = accessibleRepositories
+            deviceRefreshIssue = nil
+            deviceReauthorizationRequired = false
+            loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
+            if deviceAccount != nil {
+                deviceStatus = Self.deviceRepositorySignedInLine(
+                    login: deviceAccount?.login ?? "",
+                    repositoryCount: accessibleRepositories.count,
+                    refreshIssue: nil
+                )
+            }
+        }
+    }
+
 
     /// Loads the persisted per-workspace allowlist and prunes repositories
     /// that are no longer accessible to the App installation.
@@ -2096,6 +2411,7 @@ struct SetupView: View {
     private func cancelDeviceFlow() {
         devicePollTask?.cancel()
         devicePollTask = nil
+
         isConnectingDevice = false
         deviceAuthorization = nil
         deviceStatus = ""

@@ -1936,6 +1936,458 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(SetupView.deviceAccessDecided(signedIn: false, repositoryCount: 1))
     }
 
+    func testDeviceRefreshIssueMessageSurfacesFailureDistinctFromEmptySelection() {
+        let message = SetupView.deviceRefreshIssueMessage(
+            for: GitHubDeviceFlowError.transportUnavailable,
+            action: "listing installations"
+        )
+        XCTAssertTrue(message.hasPrefix("GitHub reported an error listing installations:"))
+        XCTAssertTrue(message.contains("GitHub could not be reached"),
+                      "The message must carry the actionable detail, not a bare zero.")
+        XCTAssertFalse(message.contains("no repositories are selected"),
+                       "A failure must not read like a genuine empty selection.")
+    }
+
+    func testRefreshIssueTakesPrecedenceOverZeroSelectionWording() {
+        let account = GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: nil)
+        let issue = SetupView.deviceRefreshIssueMessage(
+            for: GitHubDeviceFlowError.transportUnavailable,
+            action: "listing installations"
+        )
+        // An active refresh failure must never produce zero-selection wording.
+        let label = SetupView.deviceAccountLabel(login: account.login, repositoryCount: 0, refreshIssue: issue)
+        XCTAssertFalse(label.contains("no repositories are selected"))
+        XCTAssertTrue(label.contains("could not be refreshed"))
+        let status = SetupView.deviceRepositorySignedInLine(login: account.login, repositoryCount: 0, refreshIssue: issue)
+        XCTAssertFalse(status.contains("no repositories are selected"))
+        XCTAssertTrue(status.contains("could not be refreshed"))
+        // A genuine zero with no error keeps the existing wording exactly.
+        XCTAssertTrue(SetupView.deviceAccountLabel(login: account.login, repositoryCount: 0, refreshIssue: nil).contains("no repositories are selected"))
+        XCTAssertTrue(SetupView.deviceRepositorySignedInLine(login: account.login, repositoryCount: 0, refreshIssue: nil).contains("no repositories are selected"))
+        // A connected account is unaffected by a refresh error.
+        XCTAssertEqual(SetupView.deviceAccountLabel(login: account.login, repositoryCount: 2, refreshIssue: issue), "Connected as @octocat")
+        // The header presentation suppresses the awaiting-repositories state.
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: nil, deviceAccount: account, deviceRepositoryCount: 0, deviceRefreshIssue: issue),
+            .refreshFailed(account: account)
+        )
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: nil, deviceAccount: account, deviceRepositoryCount: 0, deviceRefreshIssue: nil),
+            .signedInAwaitingRepositories(account: account)
+        )
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: nil, deviceAccount: account, deviceRepositoryCount: 2, deviceRefreshIssue: issue),
+            .connected(account: account)
+        )
+    }
+
+    func testDeviceSessionRefresherSubmitsSingleUseRefreshTokenOnce() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let keychain = InMemoryConnectKeychain()
+        let store = GitHubDeviceSessionStore(keychain: keychain)
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        // Exactly one refresh-token submission is enqueued: a concurrent
+        // revalidation must coalesce onto the first and re-load the persisted
+        // rotated session instead of submitting the single-use token again.
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        async let first: GitHubDeviceSessionRefreshOutcome = refresher.revalidatedSession(using: flow)
+        async let second: GitHubDeviceSessionRefreshOutcome = refresher.revalidatedSession(using: flow)
+        let (a, b) = try await (first, second)
+        XCTAssertEqual(currentSession(of: a)?.accessToken, "ghu_fresh")
+        XCTAssertEqual(currentSession(of: b)?.accessToken, "ghu_fresh")
+        XCTAssertEqual(try store.load()?.accessToken, "ghu_fresh")
+    }
+
+    func testDeviceSessionRefresherPoisonsConsumedGenerationWhenSaveFails() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        // Save #1 (fixture) succeeds; save #2 (rotated session) fails; save #3
+        // (poison marker) succeeds — the consumed generation is poisoned
+        // fail-closed instead of being left retryable.
+        let store = GitHubDeviceSessionStore(keychain: WindowedFailingSaveKeychain(failingSaves: [2]))
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let session = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertTrue(session?.isAccessExpired ?? false, "A poisoned generation must read as expired.")
+        XCTAssertNil(session?.refreshToken, "The poison must strip the consumed refresh token.")
+        XCTAssertEqual(try store.load()?.refreshToken, nil, "The durable record must be poisoned too.")
+        // A subsequent call must not resubmit the single-use token (the queue
+        // is empty — any refresh attempt would throw).
+        let again = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertNil(again?.refreshToken)
+        XCTAssertTrue(again?.isAccessExpired ?? false)
+    }
+
+    func testDeviceSessionRefresherQuarantinesWhenPoisonAlsoFails() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        // Save #1 (fixture) succeeds; saves #2 (rotated) and #3 (poison) and
+        // the quarantine helper's best-effort poison (#4) all fail — the
+        // consumed OLD record stays durable, so only the in-memory tombstone
+        // can keep the state reauthorization-only.
+        let store = GitHubDeviceSessionStore(keychain: WindowedFailingSaveKeychain(failingSaves: [2, 3, 4]))
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let outcome = try await refresher.revalidatedSession(using: flow)
+        guard case .reauthorizationRequired(let generation) = outcome else {
+            XCTFail("A consumed generation that cannot be poisoned must fail closed into reauthorization.")
+            return
+        }
+        // The terminal outcome carries the post-operation epoch: a guard
+        // comparing against it must not self-suppress the operation's own
+        // quarantine result.
+        let currentGeneration = await refresher.currentSessionGeneration()
+        XCTAssertEqual(generation, currentGeneration)
+        // The in-memory tombstone must keep every later call reauthorization-
+        // only (no resubmission — the queue is empty, so any refresh attempt
+        // would throw), even though the consumed pair is still durable.
+        let again = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertTrue(again?.isAccessExpired ?? false, "The quarantined generation must stay reauthorization-only.")
+        XCTAssertEqual(again?.refreshToken, "ghr_refresh", "The durable record still holds the consumed pair; only the tombstone blocks resubmission.")
+        let message = SetupView.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session")
+        XCTAssertTrue(message.contains("Reconnect to GitHub to continue"), "The recovery guidance must name reauthorization.")
+    }
+
+    func testDeviceSessionRefresherTreatsInvalidGrantAsReauthorizationRequired() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        // Relaunch detection: GitHub rejects the (consumed) grant; the actor
+        // tombstones it and surfaces the session as reauthorization-required
+        // instead of resubmitting it.
+        await transport.enqueue(Data(#"{"error":"invalid_grant","error_description":"The refresh token is no longer valid."}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let session = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertTrue(session?.isAccessExpired ?? false)
+        // Tombstoned: a subsequent call must not resubmit (empty queue).
+        let again = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertTrue(again?.isAccessExpired ?? false)
+    }
+
+    func testDeviceSessionRefresherQuarantinesOnLoadFailureAfterConsumption() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        // Load #1 (initial session) succeeds; load #2 (generation guard after
+        // GitHub accepted the refresh) fails — the consumed pair must still be
+        // quarantined (tombstoned, reauthorization-only), never resubmittable.
+        let store = GitHubDeviceSessionStore(keychain: WindowedFailingLoadKeychain(failingLoads: [2]))
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let outcome = try await refresher.revalidatedSession(using: flow)
+        guard case .reauthorizationRequired = outcome else {
+            XCTFail("A post-consumption Keychain read failure must fail closed into reauthorization.")
+            return
+        }
+        // Tombstoned (and best-effort poisoned): the next call must not
+        // resubmit the single-use token (the queue is empty — any refresh
+        // attempt would throw).
+        let again = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertTrue(again?.isAccessExpired ?? false, "The quarantined generation must stay reauthorization-only.")
+    }
+
+    func testDeviceSessionRefresherTombstonesConsumedTokenAfterAcceptedRefresh() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        let session = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        )
+        try store.save(session)
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let rotated = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertEqual(rotated?.accessToken, "ghu_fresh")
+        // Simulate the rotated write being lost (e.g. a concurrent revert):
+        // the consumed pair is back in the store. The tombstone recorded at
+        // refresh-acceptance time must keep the next call from resubmitting
+        // the single-use token (the queue is empty — any refresh attempt
+        // would throw).
+        try store.save(session)
+        let again = currentSession(of: try await refresher.revalidatedSession(using: flow))
+        XCTAssertTrue(again?.isAccessExpired ?? false, "A tombstoned consumed pair must stay reauthorization-only.")
+        XCTAssertEqual(again?.refreshToken, "ghr_refresh")
+    }
+
+    func testDeviceSessionRefresherReturnsPostOperationGenerationForGuard() async throws {
+        let transport = QueueConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let outcome = try await refresher.revalidatedSession(using: flow)
+        guard case .current(let session, let generation) = outcome, let session else {
+            XCTFail("A rotation must produce a current outcome with the rotated session.")
+            return
+        }
+        XCTAssertEqual(session.accessToken, "ghu_fresh")
+        // The returned generation is the POST-operation epoch: a publication
+        // guard comparing against it (the Settings pattern) must NOT
+        // self-suppress the operation's own rotated result.
+        let currentGeneration = await refresher.currentSessionGeneration()
+        XCTAssertEqual(generation, currentGeneration)
+    }
+
+    func testDeviceSessionRefresherReplacementWinsOverQuarantineAfterLoadFailure() async throws {
+        let transport = GatedConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        // Load #1 (initial expired session) succeeds; the post-refresh
+        // generation load (#2) fails. A fresh sign-in lands during the
+        // refresh await, so quarantine reconciliation must yield to the
+        // replacement instead of surfacing reauthorization over it.
+        let keychain = WindowedFailingLoadKeychain(failingLoads: [2])
+        let store = GitHubDeviceSessionStore(keychain: keychain)
+        let expired = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        )
+        try store.save(expired)
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let replacement = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "monalisa", id: 2, name: "Mona Lisa", email: nil),
+            accessToken: "ghu_replacement",
+            refreshToken: "ghr_replacement",
+            accessExpiresAt: Date().addingTimeInterval(3600),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date()
+        )
+        async let outcome = refresher.revalidatedSession(using: flow)
+        // Deterministic interleaving: the barrier returns only after the
+        // refresh request has entered the transport (so the starting epoch
+        // and the initial load have both happened). Replace the session
+        // only then, and release the refresh response last.
+        await transport.waitUntilSendStarted()
+        try await refresher.replaceCurrentSession(with: replacement)
+        await transport.resumeSend()
+        let result = try await outcome
+        guard case .superseded = result else {
+            XCTFail("A replacement that won the epoch must supersede quarantine, not surface reauthorization.")
+            return
+        }
+        // The fresh replacement is preserved and wins; exactly two loads ran
+        // (the starting read plus the post-refresh generation guard that
+        // failed), so .superseded really came from the quarantine
+        // reconciliation rather than from skipping the guard read.
+        XCTAssertEqual(keychain.storedSession()?.accessToken, "ghu_replacement")
+        XCTAssertEqual(keychain.observedLoadCount, 2)
+    }
+
+    func testDeviceSessionRefresherInvalidGrantDoesNotPublishOverReplacement() async throws {
+        let transport = GatedConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        // Load #1 (initial expired session) succeeds; the injected load
+        // failure at #2 must remain UNCONSUMED. A fresh sign-in lands during
+        // the network await: correct starting-epoch handling returns
+        // .superseded BEFORE the invalid-grant fallback reload, so the
+        // stale expired session is never paired with the fresh epoch and the
+        // reload never runs over the replacement.
+        let keychain = WindowedFailingLoadKeychain(failingLoads: [2])
+        let store = GitHubDeviceSessionStore(keychain: keychain)
+        let expired = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        )
+        try store.save(expired)
+        await transport.enqueue(Data(#"{"error":"invalid_grant","error_description":"The refresh token is no longer valid."}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let replacement = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "monalisa", id: 2, name: "Mona Lisa", email: nil),
+            accessToken: "ghu_replacement",
+            refreshToken: "ghr_replacement",
+            accessExpiresAt: Date().addingTimeInterval(3600),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date()
+        )
+        async let outcome = refresher.revalidatedSession(using: flow)
+        // Deterministic interleaving: the barrier returns only after the
+        // refresh request has entered the transport (so the starting epoch
+        // and the initial load have both happened). Replace the session
+        // only then, and release the invalid-grant response last.
+        await transport.waitUntilSendStarted()
+        try await refresher.replaceCurrentSession(with: replacement)
+        await transport.resumeSend()
+        let result = try await outcome
+        guard case .superseded = result else {
+            XCTFail("invalidGrant must never pair a stale session with a fresh epoch.")
+            return
+        }
+        // The replacement is preserved untouched, and production performed
+        // exactly one load (the starting read): the invalid-grant branch
+        // returned .superseded BEFORE the fallback reload, so it neither
+        // paired the stale expired session with the fresh epoch nor
+        // reloaded/published over the replacement.
+        XCTAssertEqual(keychain.storedSession()?.accessToken, "ghu_replacement")
+        XCTAssertEqual(keychain.observedLoadCount, 1)
+    }
+
+    func testDeviceSessionRefresherReplaceCurrentSessionIsCancellationSafe() async throws {
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let session = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_new",
+            refreshToken: "ghr_new",
+            accessExpiresAt: Date().addingTimeInterval(3600),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date()
+        )
+        // Cancelled before the actor hop runs: the boundary re-check inside
+        // replaceCurrentSession must prevent the write.
+        let task = Task { try await refresher.replaceCurrentSession(with: session) }
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("A cancelled sign-in save must not write.")
+        } catch is CancellationError {
+            // expected: nothing published, nothing written
+        }
+        XCTAssertNil(try store.load(), "A cancelled call must not write the session record.")
+    }
+
+    func testConnectionPresentationNeverClaimsDisconnectedWhileSignedIn() {
+        let deviceAccount = GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com")
+        let coordinatorAccount = GitHubAccount(login: "monalisa", id: 2, name: "Mona Lisa", email: nil)
+        // A device-flow sign-in alone is shown as signed in, never as
+        // disconnected, even before any repositories are accessible.
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: nil, deviceAccount: deviceAccount, deviceRepositoryCount: 0),
+            .signedInAwaitingRepositories(account: deviceAccount)
+        )
+        // Once repositories are accessible the header says connected.
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: nil, deviceAccount: deviceAccount, deviceRepositoryCount: 2),
+            .connected(account: deviceAccount)
+        )
+        // The device flow is the presented connection path, so its account
+        // wins over a restored MSW Connect coordinator session.
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: coordinatorAccount, deviceAccount: deviceAccount, deviceRepositoryCount: 1),
+            .connected(account: deviceAccount)
+        )
+        // A coordinator-only session still renders as connected.
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: coordinatorAccount, deviceAccount: nil, deviceRepositoryCount: 0),
+            .connected(account: coordinatorAccount)
+        )
+        // No session at all is the only disconnected state.
+        XCTAssertEqual(
+            SetupView.connectionPresentation(account: nil, deviceAccount: nil, deviceRepositoryCount: 0),
+            .notConnected
+        )
+    }
     func testGitHubDeviceFlowInstallationWithZeroRepositoriesDecodesEmpty() async throws {
         // An installation can exist while granting access to zero repositories;
         // the repositories endpoint must surface that as an empty list so the
@@ -3730,6 +4182,113 @@ private final class InMemoryConnectKeychain: MSWConnectKeychainStoring, Credenti
     }
 }
 
+private func currentSession(of outcome: GitHubDeviceSessionRefreshOutcome) -> GitHubDeviceSession? {
+    guard case .current(let session, _) = outcome else { return nil }
+    return session
+}
+
+/// Keychain fixture with a configurable save-failure window: saves whose
+/// 1-based index is in `failingSaves` throw, all others persist. Exercises
+/// the fail-closed poison (rotated save fails, poison save succeeds) and the
+/// quarantine path (rotated and poison saves both fail).
+private final class WindowedFailingSaveKeychain: MSWConnectKeychainStoring, CredentialKeychainStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    private var saveCount = 0
+    private let failingSaves: Set<Int>
+
+    init(failingSaves: Set<Int>) {
+        self.failingSaves = failingSaves
+    }
+
+    func save(_ item: KeychainItem) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        saveCount += 1
+        if failingSaves.contains(saveCount) {
+            throw KeychainStoreError.unavailable(-1)
+        }
+        values["\(item.service)|\(item.account)"] = item.secret
+    }
+
+    func load(service: String, account: String) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = values["\(service)|\(account)"] else {
+            throw KeychainStoreError.itemNotFound
+        }
+        return value
+    }
+
+    func delete(service: String, account: String) throws {
+        lock.lock()
+        values.removeValue(forKey: "\(service)|\(account)")
+        lock.unlock()
+    }
+}
+
+/// Keychain fixture with a configurable load-failure window: loads whose
+/// 1-based index is in `failingLoads` throw, all others read normally.
+/// Exercises the fail-closed quarantine of a consumed generation when the
+/// post-refresh generation guard cannot even read the record.
+private final class WindowedFailingLoadKeychain: MSWConnectKeychainStoring, CredentialKeychainStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+    private var loadCount = 0
+    private let failingLoads: Set<Int>
+
+    init(failingLoads: Set<Int>) {
+        self.failingLoads = failingLoads
+    }
+
+    /// The number of `load` calls production made. Non-counting inspection:
+    /// a test asserting state must not consume an injected failure slot.
+    var observedLoadCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadCount
+    }
+
+    /// The stored session record, read without counting as a load and
+    /// without throwing — asserts what production actually persisted without
+    /// perturbing the injected failure window.
+    func storedSession() -> GitHubDeviceSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let data = values["\(GitHubDeviceSessionStore.service)|\(GitHubDeviceSessionStore.account)"],
+              let session = try? JSONDecoder().decode(GitHubDeviceSession.self, from: data),
+              session.schemaVersion == 1 else {
+            return nil
+        }
+        return session
+    }
+
+    func save(_ item: KeychainItem) throws {
+        lock.lock()
+        values["\(item.service)|\(item.account)"] = item.secret
+        lock.unlock()
+    }
+
+    func load(service: String, account: String) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        loadCount += 1
+        if failingLoads.contains(loadCount) {
+            throw KeychainStoreError.malformedItem
+        }
+        guard let value = values["\(service)|\(account)"] else {
+            throw KeychainStoreError.itemNotFound
+        }
+        return value
+    }
+
+    func delete(service: String, account: String) throws {
+        lock.lock()
+        values.removeValue(forKey: "\(service)|\(account)")
+        lock.unlock()
+    }
+}
+
 private actor QueueConnectTransport: MSWConnectHTTPTransport {
     private struct Response: Sendable {
         let data: Data
@@ -3758,6 +4317,72 @@ private actor QueueConnectTransport: MSWConnectHTTPTransport {
 
     func requests() -> [URLRequest] {
         recordedRequests
+    }
+}
+
+/// Transport whose `send` blocks until the test explicitly releases it, with
+/// a `waitUntilSendStarted()` barrier: a concurrent sign-in can determinis-
+/// tically land during the network await. Exercises the superseded-outcome
+/// reconciliation when a replacement wins the epoch mid-refresh without any
+/// sleep-based racing.
+private actor GatedConnectTransport: MSWConnectHTTPTransport {
+    private struct Response: Sendable {
+        let data: Data
+        let status: Int
+    }
+
+    private var responses: [Response] = []
+    private var sendEntered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var sendReleased = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func enqueue(_ data: Data, status: Int = 200) {
+        responses.append(Response(data: data, status: status))
+    }
+
+    /// Suspends until `send` has entered — which happens only after every
+    /// store load the production revalidation performs before the network
+    /// await. A replacement issued after this barrier deterministically
+    /// lands mid-refresh instead of racing the starting epoch/load.
+    func waitUntilSendStarted() async {
+        if sendEntered { return }
+        await withCheckedContinuation { continuation in
+            enteredWaiters.append(continuation)
+        }
+    }
+
+    /// Releases the entered `send` so it answers with the enqueued response.
+    func resumeSend() {
+        sendReleased = true
+        for continuation in releaseWaiters {
+            continuation.resume()
+        }
+        releaseWaiters.removeAll()
+    }
+
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        guard !responses.isEmpty else { throw MSWConnectError.transportUnavailable }
+        let response = responses.removeFirst()
+        if !sendEntered {
+            sendEntered = true
+            for continuation in enteredWaiters {
+                continuation.resume()
+            }
+            enteredWaiters.removeAll()
+        }
+        if !sendReleased {
+            await withCheckedContinuation { continuation in
+                releaseWaiters.append(continuation)
+            }
+        }
+        let httpResponse = HTTPURLResponse(
+            url: request.url!,
+            statusCode: response.status,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (response.data, httpResponse)
     }
 }
 

@@ -48,6 +48,12 @@ Review). It shows one of:
   starts the device flow in the default browser.
 - **Connected as @login** — a session exists; the step offers **Choose
   repositories on GitHub** and Continue.
+- **Signed in as @login, but repository status could not be refreshed.** —
+  a re-check failed. A genuinely retryable transport failure keeps **Check
+  again**; a consumed or expired session that cannot be refreshed instead
+  offers **Reconnect GitHub**, which starts a fresh device flow — the
+  reauthorization-required state has no retry path, and the previous
+  credential is discarded.
 - **GitHub connection isn't available yet** — the build has no App
   configured; setup continues without GitHub.
 

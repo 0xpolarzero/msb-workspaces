@@ -92,6 +92,9 @@ struct SettingsView: View {
     @State private var deviceRepositories: [GitHubRepository] = []
     @State private var deviceAllowlists: [String: Set<String>] = [:]
     @State private var deviceAccessLoaded = false
+    @State private var deviceAccessIssue: String?
+    @State private var deviceAccessTask: Task<Void, Never>?
+    @State private var deviceAccessGeneration = 0
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var enabledNotificationCategories: Set<MSWNotificationCategory> = []
     @State private var notificationMessage: String?
@@ -372,9 +375,15 @@ struct SettingsView: View {
             LabeledContent("Account", value: "@\(deviceAccount.login)")
                 .accessibilityIdentifier("settings.github.account")
             if deviceRepositories.isEmpty {
-                Text("No repositories are selected on GitHub yet. Open the App installation page, pick repositories, then check again.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if deviceAccessIssue != nil {
+                    Text("Repository status could not be refreshed.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("No repositories are selected on GitHub yet. Open the App installation page, pick repositories, then check again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 WorkspaceGitHubAccessEditor(
                     repositories: deviceRepositories,
@@ -398,6 +407,15 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        // The failure is rendered independently of account state so even a
+        // failed initial load (before any account is known) is observable.
+        if let deviceAccessIssue {
+            Label(deviceAccessIssue, systemImage: "exclamationmark.octagon.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("settings.github.refresh.issue")
+        }
     }
 
     private func setDeviceWorkspaceAllowlist(workspace: String, repository: String, allowed: Bool) {
@@ -414,56 +432,120 @@ struct SettingsView: View {
         try? WorkspaceGitHubAccessStore().save(access)
     }
 
+    /// Single-flight entry for Settings' device-access loads: the initial
+    /// `.task` and "Check again" coalesce onto one in-flight load, and a
+    /// generation guard keeps only the newest call from clearing the handle.
     private func loadDeviceAccess() async {
         if ProcessInfo.processInfo.arguments.contains("--ui-test-device-access") {
             return
         }
+        if let inFlight = deviceAccessTask {
+            await inFlight.value
+            return
+        }
+        deviceAccessGeneration &+= 1
+        let generation = deviceAccessGeneration
+        let task = Task { await performDeviceAccessLoad(generation: generation) }
+        deviceAccessTask = task
+        await task.value
+        if deviceAccessGeneration == generation {
+            deviceAccessTask = nil
+        }
+    }
+
+    /// Whether this Settings load invocation may still publish. A stale or
+    /// cancelled predecessor must never overwrite a newer result, and the
+    /// shared session generation catches a concurrent fresh sign-in or
+    /// rotation that the Settings-local generation cannot see.
+    private func deviceAccessLoadIsCurrent(generation: Int, sharedGeneration: Int) async -> Bool {
+        guard !Task.isCancelled, deviceAccessGeneration == generation else { return false }
+        return await GitHubDeviceSessionRefresher.shared.currentSessionGeneration() == sharedGeneration
+    }
+
+    private func performDeviceAccessLoad(generation: Int) async {
         guard let deviceFlow else { return }
+        // Pre-operation epoch: used only for the retryable-throw path, where
+        // this operation wrote nothing (the epoch is unchanged unless an
+        // external sign-in/rotation advanced it). Every other path guards on
+        // the epoch returned atomically by the revalidation itself.
+        let sharedGeneration = await GitHubDeviceSessionRefresher.shared.currentSessionGeneration()
+        let outcome: GitHubDeviceSessionRefreshOutcome
         do {
-            let store = GitHubDeviceSessionStore()
-            guard var session = try store.load() else {
+            outcome = try await GitHubDeviceSessionRefresher.shared.revalidatedSession(using: deviceFlow)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: sharedGeneration) else { return }
+            deviceAccessIssue = SetupView.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session")
+            deviceAccessLoaded = true
+            return
+        }
+        switch outcome {
+        case .superseded:
+            // A concurrent replacement won the epoch; publish nothing.
+            return
+        case .reauthorizationRequired(let outcomeGeneration):
+            // Quarantine: publish this terminal outcome only if no external
+            // sign-in/rotation advanced the epoch after the quarantine itself
+            // (which advanced it — that must not suppress its own result).
+            guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
+            deviceAccessIssue = SetupView.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session")
+            deviceAccessLoaded = true
+        case .current(let session, let outcomeGeneration):
+            guard let session else {
+                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
+                deviceAccessIssue = nil
                 deviceAccessLoaded = true
                 return
             }
-            if session.isAccessExpired, session.canRefresh, let refreshToken = session.refreshToken {
-                let token = try await deviceFlow.refreshToken(clientID: session.clientID, refreshToken: refreshToken)
-                session = GitHubDeviceSession(
-                    schemaVersion: 1,
-                    clientID: session.clientID,
-                    account: session.account,
-                    accessToken: token.accessToken,
-                    refreshToken: token.refreshToken ?? session.refreshToken,
-                    accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-                    refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) } ?? session.refreshExpiresAt,
-                    obtainedAt: Date()
-                )
-                try store.save(session)
+            if session.isAccessExpired {
+                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
+                deviceAccessIssue = "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub from the setup window, then check again."
+                deviceAccessLoaded = true
+                return
             }
-            var accessibleRepositories: [GitHubRepository] = []
-            let installations = try await deviceFlow.installations(accessToken: session.accessToken)
-            for installation in installations {
-                let repositories = try await deviceFlow.repositories(
-                    accessToken: session.accessToken,
-                    installationID: installation.id
-                )
-                accessibleRepositories.append(contentsOf: repositories)
-            }
-            let accessibleNames = Set(accessibleRepositories.map(\.fullName))
-            let accessStore = WorkspaceGitHubAccessStore()
-            if let stored = accessStore.load() {
-                let pruned = stored.pruned(toAccessibleNames: accessibleNames)
-                if pruned.repositoriesByWorkspace != stored.repositoriesByWorkspace {
-                    try accessStore.save(pruned)
+            do {
+                var accessibleRepositories: [GitHubRepository] = []
+                let installations = try await deviceFlow.installations(accessToken: session.accessToken)
+                for installation in installations {
+                    let repositories = try await deviceFlow.repositories(
+                        accessToken: session.accessToken,
+                        installationID: installation.id
+                    )
+                    accessibleRepositories.append(contentsOf: repositories)
                 }
-                deviceAllowlists = pruned.repositoriesByWorkspace.mapValues(Set.init)
-            } else {
-                deviceAllowlists = [:]
+                let accessibleNames = Set(accessibleRepositories.map(\.fullName))
+                let accessStore = WorkspaceGitHubAccessStore()
+                let stored = accessStore.load()
+                let pruned = stored?.pruned(toAccessibleNames: accessibleNames)
+                // Newest-wins: publish only if this invocation is still
+                // current AND no concurrent sign-in/rotation advanced the
+                // session generation past the epoch this operation produced —
+                // a fresh Setup sign-in during the listing must win over stale
+                // account/repository output.
+                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
+                if let pruned {
+                    if pruned.repositoriesByWorkspace != stored?.repositoriesByWorkspace {
+                        try accessStore.save(pruned)
+                    }
+                    deviceAllowlists = pruned.repositoriesByWorkspace.mapValues(Set.init)
+                } else {
+                    deviceAllowlists = [:]
+                }
+                deviceAccount = session.account
+                deviceRepositories = accessibleRepositories
+                deviceAccessIssue = nil
+                deviceAccessLoaded = true
+            } catch is CancellationError {
+                // A transport-reported cancellation does not set the
+                // task-cancel bit, so it must be caught explicitly: publish
+                // nothing.
+                return
+            } catch {
+                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
+                deviceAccessIssue = SetupView.deviceRefreshIssueMessage(for: error, action: "listing your repositories")
+                deviceAccessLoaded = true
             }
-            deviceAccount = session.account
-            deviceRepositories = accessibleRepositories
-            deviceAccessLoaded = true
-        } catch {
-            deviceAccessLoaded = true
         }
     }
 
