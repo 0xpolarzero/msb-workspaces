@@ -1985,6 +1985,47 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(SetupView.deviceAccessDecided(signedIn: false, repositoryCount: 1))
     }
 
+    func testAttentionReapplyRequiredNamesGrantReapplyAfterAccessibleRepositories() {
+        // No accessible repositories yet: the user has not completed the
+        // reconnect, so the banner keeps its plain attention message.
+        XCTAssertFalse(SetupView.attentionReapplyRequired(
+            attentionWorkspace: "dev",
+            accessibleRepositoryCount: 0
+        ), "A re-check with zero accessible repositories must not name a re-apply action yet.")
+        // Confirming accessible repositories does not restore the host-side
+        // scoped credential the reconnect error demands; the banner must name
+        // the remaining grant re-apply action instead of clearing.
+        XCTAssertTrue(SetupView.attentionReapplyRequired(
+            attentionWorkspace: "dev",
+            accessibleRepositoryCount: 1
+        ), "A successful re-check with accessible repositories must transition the banner to the re-apply action.")
+        XCTAssertTrue(SetupView.attentionReapplyRequired(
+            attentionWorkspace: "dev",
+            accessibleRepositoryCount: 3
+        ), "The transition applies to any positive accessible repository count.")
+        // Without an active attention banner there is nothing to transition.
+        XCTAssertFalse(SetupView.attentionReapplyRequired(
+            attentionWorkspace: nil,
+            accessibleRepositoryCount: 1
+        ), "No attention banner means no re-apply transition.")
+    }
+
+    func testAttentionResolvedRequiresTheAttentionWorkspaceToCommit() {
+        // No active banner: nothing to keep.
+        XCTAssertTrue(SetupView.attentionResolved(attentionWorkspace: nil, committedWorkspaces: []))
+        XCTAssertTrue(SetupView.attentionResolved(attentionWorkspace: nil, committedWorkspaces: ["dev"]))
+        // An authorization discovery or a commit of other workspaces does not
+        // resolve the attention workspace; it stays host-unreadable.
+        XCTAssertFalse(SetupView.attentionResolved(attentionWorkspace: "dev", committedWorkspaces: []),
+                       "Discovery creates no host credential and must not clear the banner.")
+        XCTAssertFalse(SetupView.attentionResolved(attentionWorkspace: "dev", committedWorkspaces: ["playgrounds"]),
+                       "Committing only other workspaces must not clear the banner for dev.")
+        // Only a successful commit that includes the attention workspace
+        // restores the host credential and clears the banner.
+        XCTAssertTrue(SetupView.attentionResolved(attentionWorkspace: "dev", committedWorkspaces: ["dev"]))
+        XCTAssertTrue(SetupView.attentionResolved(attentionWorkspace: "dev", committedWorkspaces: ["playgrounds", "dev"]))
+    }
+
     func testSkipIssueResolvedOnlyByCommittingTheAffectedWorkspace() {
         // A dependency-missing failure (no issue workspace) is never resolved
         // by any commit; only a successful skip retry clears it.
@@ -2002,6 +2043,19 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(SetupView.skipIssueResolved(issueWorkspace: "dev", committedWorkspaces: ["dev"]))
         XCTAssertTrue(SetupView.skipIssueResolved(issueWorkspace: "dev", committedWorkspaces: ["playgrounds", "dev"]))
     }
+
+    func testVerificationTaskIsCurrentOnlyClearsItsOwnHandle() {
+        // A successor replaced the verifier (the generation advanced); the
+        // cancelled predecessor must not publish state or clear the live
+        // successor's handle.
+        XCTAssertFalse(SetupView.verificationTaskIsCurrent(storedGeneration: 2, taskGeneration: 1),
+                       "A cancelled predecessor must not act on a successor's generation.")
+        // The stored verifier is still the current one: publishing and
+        // clearing the handle are safe.
+        XCTAssertTrue(SetupView.verificationTaskIsCurrent(storedGeneration: 2, taskGeneration: 2),
+                      "The current verifier may publish and clear its own handle.")
+    }
+
     func testDeviceRepositoryPollingActiveOnlyWhileUndecidedAndOnGitHubStep() {
         XCTAssertTrue(SetupView.deviceRepositoryPollingActive(
             signedIn: true, repositoryCount: 0, stepActive: true, skipped: false, alreadyDecided: false
@@ -2986,6 +3040,7 @@ final class AppModelTests: XCTestCase {
         }
         XCTAssertNil(try store.load(), "A cancelled call must not write the session record.")
     }
+
     func testConnectionPresentationNeverClaimsDisconnectedWhileSignedIn() {
         let deviceAccount = GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com")
         let coordinatorAccount = GitHubAccount(login: "monalisa", id: 2, name: "Mona Lisa", email: nil)

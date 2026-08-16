@@ -161,6 +161,7 @@ enum GitHubConnectionPresentation: Equatable {
     case refreshFailed(account: GitHubAccount)
     case connected(account: GitHubAccount)
 }
+
 private enum SetupStep: String, CaseIterable, Identifiable {
     case readiness
     case github
@@ -310,6 +311,8 @@ struct SetupView: View {
     @State private var deviceRefreshGeneration = 0
     @State private var deviceReauthorizationRequired = false
     @State private var devicePollTask: Task<Void, Never>?
+    @State private var deviceVerificationTask: Task<Void, Never>?
+    @State private var deviceVerificationGeneration = 0
     @State private var deviceSession: GitHubDeviceSession?
     @State private var deviceRepositoryCount = 0
     @State private var deviceRepositoryPollTask: Task<Void, Never>?
@@ -498,6 +501,28 @@ struct SetupView: View {
         signedIn && repositoryCount > 0
     }
 
+    /// Pure decision, unit-tested directly: the host's
+    /// `MSW_GITHUB_RECONNECT_REQUIRED` condition demands the workspace's
+    /// native-broker scoped credential, which the device flow never writes —
+    /// a re-check or fresh sign-in only proves repositories are accessible to
+    /// the GitHub App. So while the attention banner is active, confirming
+    /// accessible repositories must transition it to name the remaining grant
+    /// re-apply action instead of clearing it.
+    static func attentionReapplyRequired(attentionWorkspace: String?, accessibleRepositoryCount: Int) -> Bool {
+        attentionWorkspace != nil && accessibleRepositoryCount > 0
+    }
+
+    /// Pure decision, unit-tested directly: the attention banner clears only
+    /// once the attention workspace's scoped grant was actually committed.
+    /// An authorization discovery creates no host credential
+    /// (`GitHubAuthorizationCoordinator.beginAuthorization`), and committing
+    /// other workspaces leaves the attention workspace host-unreadable, so
+    /// neither may clear it.
+    static func attentionResolved(attentionWorkspace: String?, committedWorkspaces: [String]) -> Bool {
+        guard let attentionWorkspace else { return true }
+        return committedWorkspaces.contains(attentionWorkspace)
+    }
+
     /// Pure decision, unit-tested directly: a workspace-scoped skip failure is
     /// resolved only when a successful commit actually includes the affected
     /// workspace; committing unrelated workspaces must not reopen the gates
@@ -509,6 +534,41 @@ struct SetupView: View {
         guard let issueWorkspace else { return false }
         return committedWorkspaces.contains(issueWorkspace)
     }
+
+    /// Pure identity check, unit-tested directly: a device-flow verification
+    /// task may write the session, publish state, and clear the stored handle
+    /// only while it is still the current verifier. A cancelled predecessor
+    /// must never publish its stale result or erase a successor that replaced
+    /// it, or teardown would lose the live task's handle.
+    static func verificationTaskIsCurrent(storedGeneration: Int, taskGeneration: Int) -> Bool {
+        storedGeneration == taskGeneration
+    }
+
+    /// The attention banner's current phase, derived from observable state:
+    /// while the banner is active, confirming accessible repositories
+    /// (a re-check or fresh sign-in) proves only the device side — the
+    /// host-side scoped credential the reconnect error demands still needs a
+    /// grant re-apply, so the banner names that remaining action instead of
+    /// clearing or going stale.
+    private var githubAttentionReapplyRequired: Bool {
+        Self.attentionReapplyRequired(
+            attentionWorkspace: githubAttentionWorkspace,
+            accessibleRepositoryCount: deviceRepositoryCount
+        )
+    }
+
+    /// Whether a real re-apply control exists on the current path: the
+    /// browser authorization flow (`beginAuthorization` + assignment commit)
+    /// is the only proven host-side credential writer, and it requires the
+    /// MSW Connect coordinator to be configured (or the deterministic
+    /// UI-test fixture). When it is not, the banner must not name a re-apply
+    /// action the user cannot perform.
+    private var githubReapplyActionable: Bool {
+        if uiTestGitHubScenario == "unavailable" { return false }
+        return uiTestGitHubScenario != nil ||
+            (authorizationCoordinator != nil && authorizationCoordinator?.isConfigured == true)
+    }
+
     /// Maps a repository re-check failure to a user-facing, actionable message
     /// so an auth/transport/decode error is never mistaken for a genuine empty
     /// selection. Pure and static for direct unit testing.
@@ -543,6 +603,7 @@ struct SetupView: View {
         }
         return "Signed in as @\(login), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
     }
+
     /// Pure derivation, unit-tested: which state the GitHub connection header
     /// must present. A device account is authoritative whenever present
     /// because it only exists on the device-flow path this build presents.
@@ -581,6 +642,7 @@ struct SetupView: View {
             deviceRefreshIssue: deviceRefreshIssue
         )
     }
+
     private var githubDecisionMade: Bool {
         githubSkipped ||
             Self.deviceAccessDecided(signedIn: deviceAccount != nil, repositoryCount: deviceRepositoryCount) ||
@@ -1063,15 +1125,24 @@ struct SetupView: View {
             }
 
             if let workspace = githubAttentionWorkspace {
-                Label(
-                    githubAttentionReapplyRequired
-                        ? "GitHub access for \(workspace) needs attention. Re-apply GitHub access for \(workspace) to finish reconnecting."
-                        : "GitHub access for \(workspace) needs attention.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier("setup.github.attention")
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(
+                        githubAttentionReapplyRequired
+                            ? (githubReapplyActionable
+                                ? "GitHub access for \(workspace) needs attention. Re-apply GitHub access for \(workspace) to finish reconnecting."
+                                : "GitHub access for \(workspace) needs attention. Re-applying GitHub access is unavailable in this build — choose Continue without GitHub to disable it.")
+                            : "GitHub access for \(workspace) needs attention.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("setup.github.attention")
+                    if githubAttentionReapplyRequired, githubReapplyActionable {
+                        Button("Re-apply GitHub access for \(workspace)", action: beginAuthorization)
+                            .disabled(!canConnectGitHub || isAuthorizing)
+                            .accessibilityIdentifier("setup.github.reapply.button")
+                    }
+                }
             }
 
             if (authorizationCoordinator == nil && uiTestGitHubScenario == nil) ||
@@ -1903,7 +1974,8 @@ struct SetupView: View {
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
-                    githubAttentionWorkspace = nil
+                    // Discovery creates no host credential; the attention
+                    // banner stays until dev's grant actually commits.
                     authorizationStatus = discovery.installations.isEmpty
                         ? "Connected as @\(discovery.account.login), but no MSW App installation was found. Install the app, then connect GitHub again."
                         : "Connected as @\(discovery.account.login). Assign repositories to each workspace, then review before applying."
@@ -1929,7 +2001,8 @@ struct SetupView: View {
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
-                    githubAttentionWorkspace = nil
+                    // Discovery creates no host credential; the attention
+                    // banner stays until the affected grant actually commits.
                     authorizationStatus = "Connected as @\(discovery.account.login). Assign repositories to each workspace, then review before applying."
                     prefillIdentity(from: discovery.account)
                 }
@@ -2152,7 +2225,12 @@ struct SetupView: View {
                             githubSkipped = false
                         }
                     }
-                    githubAttentionWorkspace = nil
+                    if Self.attentionResolved(
+                        attentionWorkspace: githubAttentionWorkspace,
+                        committedWorkspaces: assignments.map(\.workspace)
+                    ) {
+                        githubAttentionWorkspace = nil
+                    }
                     authorizationSessionID = nil
                     isReviewing = false
                     authorizationStatus = "Applied \(assignments.count) scoped grant records. Verification results are retained below for final review."
@@ -2203,7 +2281,12 @@ struct SetupView: View {
                             githubSkipped = false
                         }
                     }
-                    githubAttentionWorkspace = nil
+                    if Self.attentionResolved(
+                        attentionWorkspace: githubAttentionWorkspace,
+                        committedWorkspaces: assignments.map(\.workspace)
+                    ) {
+                        githubAttentionWorkspace = nil
+                    }
                     authorizationSessionID = nil
                     isReviewing = false
                 }
@@ -2664,7 +2747,11 @@ struct SetupView: View {
                     deviceRepositoryCount = accessibleRepositoryCount
                     deviceAccessibleRepositories = accessibleRepositories
                     loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
-                    githubAttentionWorkspace = nil
+                    // A fresh sign-in does not restore the host-side scoped
+                    // credential that MSW_GITHUB_RECONNECT_REQUIRED demands;
+                    // the banner stays and derives the re-apply phase from the
+                    // accessible repository count.
+                    deviceVerificationTask = nil
                     deviceRefreshIssue = nil
                     deviceReauthorizationRequired = false
                     isConnectingDevice = false
@@ -2706,6 +2793,7 @@ struct SetupView: View {
                     isConnectingDevice = false
                     deviceAuthorization = nil
                     devicePollTask = nil
+                    deviceVerificationTask = nil
                     deviceStatus = ""
                     deviceIssue = "GitHub approved the code, but the account could not be verified: \(error.localizedDescription)"
                 }
@@ -2794,9 +2882,9 @@ struct SetupView: View {
     /// teardown cancels the stored task, so a stale or cancelled predecessor
     /// must never overwrite a newer result (a stale zero could otherwise
     /// reopen the GitHub decision after a positive one already closed it).
-    /// A cancelled invocation publishes nothing: the transport folds
-    /// cancellation into `transportUnavailable`, so the silent-drop guard is
-    /// what keeps cancellation from surfacing as a bogus failure.
+    /// A cancelled invocation publishes nothing: cancellation propagates as
+    /// `CancellationError` end to end, and the silent-drop guard also covers
+    /// the task-cancel bit for explicit cancellations.
     private func deviceRepositoryRefreshIsCurrent(generation: Int) -> Bool {
         !Task.isCancelled && Self.refreshTaskIsCurrent(
             storedGeneration: deviceRefreshGeneration,
@@ -2804,12 +2892,6 @@ struct SetupView: View {
         )
     }
 
-    /// Re-checks GitHub for repositories actually accessible to the App. An
-    /// expired access token is rotated first through the shared refresher,
-    /// the (possibly rotated) session is published to state before any
-    /// fallible listing, and every failure surfaces as `deviceRefreshIssue`
-    /// instead of collapsing into a misleading "no repositories selected"
-    /// state.
     /// Re-checks GitHub for repositories actually accessible to the App. An
     /// expired access token is rotated first through the shared refresher,
     /// the (possibly rotated) session is published to state before any
@@ -2825,17 +2907,6 @@ struct SetupView: View {
             outcome = try await deviceSessionRefresher.revalidatedSession(using: deviceFlow)
         } catch is CancellationError {
             return false
-        } catch let refreshError as GitHubDeviceSessionRefreshError {
-            return await MainActor.run { () -> Bool in
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                // Quarantine: the consumed generation could not be poisoned.
-                // Reauthorization-ONLY — no session, no Check again, no
-                // polling.
-                deviceReauthorizationRequired = true
-                deviceSession = nil
-                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: refreshError, action: "refreshing your GitHub session"))
-                return true
-            }
         } catch {
             return await MainActor.run { () -> Bool in
                 guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
@@ -2881,7 +2952,6 @@ struct SetupView: View {
             }
             if !sessionPublished { return false }
         }
-
         let token = session?.accessToken ?? accessToken
         let installations: [GitHubInstallation]
         do {

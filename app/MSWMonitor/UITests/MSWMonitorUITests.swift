@@ -309,6 +309,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 2))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
 
+        // Discovery alone creates no host credential; the attention banner
+        // must survive the re-authorization until dev's grant commits.
+        XCTAssertTrue(app.staticTexts["setup.github.attention"].exists)
+
         let assign = app.descendants(matching: .any)["setup.github.workspace.dev.assign"]
         XCTAssertTrue(assign.waitForExistence(timeout: 2))
         assign.click()
@@ -337,6 +341,8 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github.verification.dev"]
                 .waitForExistence(timeout: 2)
         )
+        // Only the successful commit for the attention workspace clears it.
+        XCTAssertFalse(app.staticTexts["setup.github.attention"].exists)
         let githubContinue = app.buttons["Continue"]
         XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
         XCTAssertTrue(waitUntilEnabled(githubContinue, timeout: 2))
