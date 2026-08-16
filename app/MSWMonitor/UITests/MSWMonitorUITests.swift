@@ -100,11 +100,11 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForExistence(timeout: 2)
         )
-        assertText(
-            "GitHub connection isn't available yet. Continue and connect later in Settings.",
-            identifier: "setup.github.unavailable",
-            in: app
-        )
+        // The canonical build embeds the public GitHub App, so the step
+        // offers the real direct login instead of the unavailable note.
+        let connect = app.buttons["setup.github.connect.button"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 2))
+        XCTAssertTrue(connect.isEnabled)
         let githubSkip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
         XCTAssertEqual(githubSkip.label, "Continue without GitHub")
@@ -364,6 +364,45 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
         XCTAssertNotEqual(app.state, .notRunning)
     }
+    func testSettingsShowsWorkspaceAccessEditor() {
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "build/MSWMonitor.app")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+
+        let app = XCUIApplication(url: appURL)
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+        }
+        // Deterministic fixture: no real Keychain session and no network.
+        app.launchArguments = ["--ui-test-setup", "--ui-test-device-access"]
+        app.launch()
+        XCTAssertTrue(app.windows["setup.window"].waitForExistence(timeout: 3))
+        app.menuBars.menuItems["Settings…"].click()
+        let settings = app.windows.matching(
+            NSPredicate(format: "identifier != %@", "setup.window")
+        ).firstMatch
+        XCTAssertTrue(settings.waitForExistence(timeout: 3))
+        let githubTab = settings.buttons["GitHub"]
+        XCTAssertTrue(githubTab.waitForExistence(timeout: 5))
+        githubTab.click()
+
+        XCTAssertTrue(
+            settings.descendants(matching: .any)["settings.github.workspace-access"]
+                .waitForExistence(timeout: 5)
+        )
+        let account = settings.staticTexts["settings.github.account"]
+        XCTAssertTrue(account.waitForExistence(timeout: 5))
+        XCTAssertEqual(account.value as? String, "@octocat")
+        let repositoryToggle = settings.checkBoxes["github.workspace.dev.access"]
+        XCTAssertTrue(repositoryToggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(repositoryToggle.value as? Int, 1, "The dev workspace is seeded with acme/one.")
+        XCTAssertEqual(repositoryToggle.label, "acme/one")
+    }
+
     func testGitHubAuthorizationCancelThenRetryUsesCurrentAttempt() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -509,5 +548,9 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(element.value as? String, text)
     }
 }
+
+
+
+
 
 

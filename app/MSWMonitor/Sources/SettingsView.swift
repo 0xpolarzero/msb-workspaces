@@ -70,6 +70,8 @@ private enum GitHubConnectionState {
 struct SettingsView: View {
     @Bindable private var navigation: SettingsNavigationState
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
+    let deviceFlow: GitHubDeviceFlow?
+    let githubInstallationURL: URL?
     let onConnect: () -> Void
     private let notificationCoordinator: NotificationCoordinator
 
@@ -86,6 +88,10 @@ struct SettingsView: View {
     @State private var githubError: String?
     @State private var isUpdatingGitHub = false
     @State private var destructiveAction: GitHubDestructiveAction?
+    @State private var deviceAccount: GitHubAccount?
+    @State private var deviceRepositories: [GitHubRepository] = []
+    @State private var deviceAllowlists: [String: Set<String>] = [:]
+    @State private var deviceAccessLoaded = false
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var enabledNotificationCategories: Set<MSWNotificationCategory> = []
     @State private var notificationMessage: String?
@@ -94,6 +100,8 @@ struct SettingsView: View {
     init(
         navigation: SettingsNavigationState,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
+        deviceFlow: GitHubDeviceFlow? = nil,
+        githubInstallationURL: URL? = nil,
         notificationCoordinator: NotificationCoordinator = .shared,
         onConnect: @escaping () -> Void = {
             NSApp.sendAction(#selector(AppDelegate.openGitHubSetup), to: nil, from: nil)
@@ -101,8 +109,25 @@ struct SettingsView: View {
     ) {
         self.navigation = navigation
         self.authorizationCoordinator = authorizationCoordinator
+        self.deviceFlow = deviceFlow
+        self.githubInstallationURL = githubInstallationURL
         self.notificationCoordinator = notificationCoordinator
         self.onConnect = onConnect
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-device-access") {
+            _deviceAccount = State(initialValue: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: nil))
+            _deviceRepositories = State(initialValue: [
+                GitHubRepository(
+                    id: 1001,
+                    fullName: "acme/one",
+                    name: "one",
+                    owner: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
+                    private: true,
+                    defaultBranch: "main"
+                )
+            ])
+            _deviceAllowlists = State(initialValue: ["dev": ["acme/one"]])
+            _deviceAccessLoaded = State(initialValue: true)
+        }
     }
 
     var body: some View {
@@ -138,6 +163,7 @@ struct SettingsView: View {
                 transaction.disablesAnimations = true
             }
         }
+        .task { await loadDeviceAccess() }
         .sheet(item: $destructiveAction) { action in
             GitHubImpactConfirmation(action: action) {
                 destructiveAction = nil
@@ -227,6 +253,10 @@ struct SettingsView: View {
                         Task { await loadGitHubState() }
                     }
                 }
+            }
+
+            Section("Workspace access") {
+                deviceWorkspaceAccessContent
             }
 
             Section("Workspace grants") {
@@ -334,6 +364,107 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    @ViewBuilder
+    private var deviceWorkspaceAccessContent: some View {
+        if let deviceAccount {
+            LabeledContent("Account", value: "@\(deviceAccount.login)")
+                .accessibilityIdentifier("settings.github.account")
+            if deviceRepositories.isEmpty {
+                Text("No repositories are selected on GitHub yet. Open the App installation page, pick repositories, then check again.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                WorkspaceGitHubAccessEditor(
+                    repositories: deviceRepositories,
+                    allowlists: deviceAllowlists,
+                    onToggle: setDeviceWorkspaceAllowlist
+                )
+                .accessibilityIdentifier("settings.github.workspace-access")
+            }
+            HStack {
+                if let url = githubInstallationURL {
+                    Button("Manage repositories on GitHub") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Button("Check again") {
+                    Task { await loadDeviceAccess() }
+                }
+            }
+        } else {
+            Text("Connect GitHub from the setup window or Settings → Connect to manage workspace access.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func setDeviceWorkspaceAllowlist(workspace: String, repository: String, allowed: Bool) {
+        var current = deviceAllowlists[workspace] ?? []
+        if allowed {
+            current.insert(repository)
+        } else {
+            current.remove(repository)
+        }
+        deviceAllowlists[workspace] = current
+        let access = WorkspaceGitHubAccess(
+            repositoriesByWorkspace: deviceAllowlists.mapValues { Array($0).sorted() }
+        )
+        try? WorkspaceGitHubAccessStore().save(access)
+    }
+
+    private func loadDeviceAccess() async {
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-device-access") {
+            return
+        }
+        guard let deviceFlow else { return }
+        do {
+            let store = GitHubDeviceSessionStore()
+            guard var session = try store.load() else {
+                deviceAccessLoaded = true
+                return
+            }
+            if session.isAccessExpired, session.canRefresh, let refreshToken = session.refreshToken {
+                let token = try await deviceFlow.refreshToken(clientID: session.clientID, refreshToken: refreshToken)
+                session = GitHubDeviceSession(
+                    schemaVersion: 1,
+                    clientID: session.clientID,
+                    account: session.account,
+                    accessToken: token.accessToken,
+                    refreshToken: token.refreshToken ?? session.refreshToken,
+                    accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
+                    refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) } ?? session.refreshExpiresAt,
+                    obtainedAt: Date()
+                )
+                try store.save(session)
+            }
+            var accessibleRepositories: [GitHubRepository] = []
+            let installations = try await deviceFlow.installations(accessToken: session.accessToken)
+            for installation in installations {
+                let repositories = try await deviceFlow.repositories(
+                    accessToken: session.accessToken,
+                    installationID: installation.id
+                )
+                accessibleRepositories.append(contentsOf: repositories)
+            }
+            let accessibleNames = Set(accessibleRepositories.map(\.fullName))
+            let accessStore = WorkspaceGitHubAccessStore()
+            if let stored = accessStore.load() {
+                let pruned = stored.pruned(toAccessibleNames: accessibleNames)
+                if pruned.repositoriesByWorkspace != stored.repositoriesByWorkspace {
+                    try accessStore.save(pruned)
+                }
+                deviceAllowlists = pruned.repositoriesByWorkspace.mapValues(Set.init)
+            } else {
+                deviceAllowlists = [:]
+            }
+            deviceAccount = session.account
+            deviceRepositories = accessibleRepositories
+            deviceAccessLoaded = true
+        } catch {
+            deviceAccessLoaded = true
+        }
     }
 
     @ViewBuilder

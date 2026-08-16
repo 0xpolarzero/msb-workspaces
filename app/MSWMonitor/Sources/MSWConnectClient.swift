@@ -1437,3 +1437,482 @@ private extension String {
         return lowercased == "localhost" || lowercased == "127.0.0.1" || lowercased == "::1"
     }
 }
+
+// MARK: - Direct GitHub device flow
+
+/// GitHub App device flow, used by onboarding to connect a GitHub account
+/// without any MSW backend: the app requests a device/user code pair, opens
+/// the verification page in the default browser, and polls until the user
+/// approves. No client secret is involved. Repositories are selected through
+/// GitHub's own App installation page, opened in the default browser.
+struct GitHubDeviceAuthorization: Sendable, Equatable {
+    let deviceCode: String
+    let userCode: String
+    let verificationURI: URL
+    let expiresIn: Int
+    let interval: Int
+}
+
+struct GitHubDeviceToken: Sendable, Equatable {
+    let accessToken: String
+    let refreshToken: String?
+    let expiresIn: Int?
+    let refreshExpiresIn: Int?
+    let scope: String
+}
+
+enum GitHubDeviceFlowError: Error, LocalizedError, Sendable, Equatable {
+    case invalidConfiguration
+    case transportUnavailable
+    case malformedResponse
+    case authorizationPending
+    case slowDown(Int)
+    case expired
+    case denied
+    case deviceFlowDisabled
+    case rateLimited
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration:
+            return "GitHub connection is not set up in this build. A GitHub App with device flow enabled is required."
+        case .transportUnavailable:
+            return "GitHub could not be reached. Check the network and try again."
+        case .malformedResponse:
+            return "GitHub returned an unexpected response."
+        case .authorizationPending:
+            return "Waiting for approval on GitHub."
+        case .slowDown(let interval):
+            return "GitHub asked to slow down; retrying in \(interval) seconds."
+        case .expired:
+            return "The GitHub approval code expired. Start again."
+        case .denied:
+            return "GitHub authorization was declined."
+        case .deviceFlowDisabled:
+            return "The configured GitHub App does not have device flow enabled."
+        case .rateLimited:
+            return "GitHub rate-limited the request. Try again later."
+        }
+    }
+}
+
+struct GitHubDeviceFlowConfiguration: Sendable, Equatable {
+    let clientID: String
+
+    init(clientID: String = "") {
+        self.clientID = clientID
+    }
+
+    var isConfigured: Bool {
+        !clientID.isEmpty && clientID.count <= 128 &&
+            clientID.unicodeScalars.allSatisfy {
+                CharacterSet.alphanumerics.contains($0) || "-_.".unicodeScalars.contains($0)
+            }
+    }
+}
+
+actor GitHubDeviceFlow {
+    static let deviceCodeEndpoint = URL(string: "https://github.com/login/device/code")!
+    static let accessTokenEndpoint = URL(string: "https://github.com/login/oauth/access_token")!
+    static let userEndpoint = URL(string: "https://api.github.com/user")!
+    static let installationsEndpoint = URL(string: "https://api.github.com/user/installations")!
+    static let verificationPage = URL(string: "https://github.com/login/device")!
+
+    let configuration: GitHubDeviceFlowConfiguration
+    private let transport: any MSWConnectHTTPTransport
+
+    init(
+        configuration: GitHubDeviceFlowConfiguration,
+        transport: any MSWConnectHTTPTransport = URLSessionMSWConnectTransport()
+    ) {
+        self.configuration = configuration
+        self.transport = transport
+    }
+
+    /// Requests a device/user code pair. For a GitHub App, the device flow
+    /// request carries no `scope`: the resulting user token is limited to the
+    /// intersection of the App's permissions and its installed repositories.
+    func requestDeviceCode() async throws -> GitHubDeviceAuthorization {
+        guard configuration.isConfigured else {
+            throw GitHubDeviceFlowError.invalidConfiguration
+        }
+        var request = URLRequest(url: Self.deviceCodeEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var body = URLComponents()
+        body.queryItems = [URLQueryItem(name: "client_id", value: configuration.clientID)]
+        request.httpBody = body.percentEncodedQuery?.data(using: .utf8)
+
+        let payload = try await sendForm(request)
+        guard let deviceCode = payload["device_code"], !deviceCode.isEmpty,
+              let userCode = payload["user_code"], !userCode.isEmpty,
+              let verification = payload["verification_uri"],
+              let verificationURI = URL(string: verification),
+              let expiresIn = payload["expires_in"].flatMap(Int.init),
+              let interval = payload["interval"].flatMap(Int.init),
+              expiresIn > 0, interval > 0 else {
+            throw GitHubDeviceFlowError.malformedResponse
+        }
+        return GitHubDeviceAuthorization(
+            deviceCode: deviceCode,
+            userCode: userCode,
+            verificationURI: verificationURI,
+            expiresIn: expiresIn,
+            interval: interval
+        )
+    }
+
+    /// Verification page URL with the user code pre-filled.
+    nonisolated static func verificationURL(for authorization: GitHubDeviceAuthorization) -> URL {
+        var components = URLComponents(url: verificationPage, resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "user_code", value: authorization.userCode)]
+        return components?.url ?? verificationPage
+    }
+
+    /// Polls the token endpoint once. Throws `.authorizationPending` /
+    /// `.slowDown(interval)` until the user approves; `.expired`/`.denied`/
+    /// `.deviceFlowDisabled`/`.rateLimited` are terminal.
+    func pollToken(clientID: String, deviceCode: String) async throws -> GitHubDeviceToken {
+        guard configuration.isConfigured else {
+            throw GitHubDeviceFlowError.invalidConfiguration
+        }
+        var body = URLComponents()
+        body.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "device_code", value: deviceCode),
+            URLQueryItem(name: "grant_type", value: "urn:ietf:params:oauth:grant-type:device_code")
+        ]
+        return try await tokenExchange(body: body)
+    }
+
+    /// Rotates an expiring device token with its refresh token. No secret is
+    /// needed for GitHub App user tokens.
+    func refreshToken(clientID: String, refreshToken: String) async throws -> GitHubDeviceToken {
+        guard configuration.isConfigured else {
+            throw GitHubDeviceFlowError.invalidConfiguration
+        }
+        var body = URLComponents()
+        body.queryItems = [
+            URLQueryItem(name: "client_id", value: clientID),
+            URLQueryItem(name: "refresh_token", value: refreshToken),
+            URLQueryItem(name: "grant_type", value: "refresh_token")
+        ]
+        return try await tokenExchange(body: body)
+    }
+
+    /// Fetches the authenticated account for a token. Never accepts a token
+    /// solely because the exchange succeeded.
+    func account(accessToken: String) async throws -> GitHubAccount {
+        var request = URLRequest(url: Self.userEndpoint)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await send(request)
+        guard response.statusCode == 200 else {
+            throw GitHubDeviceFlowError.transportUnavailable
+        }
+        // /user contains nulls, booleans, and nested objects; decode only the
+        // fields this app uses (unknown keys are ignored by Decodable).
+        struct UserPayload: Decodable {
+            let login: String
+            let id: Int
+            let name: String?
+            let email: String?
+        }
+        let payload: UserPayload
+        do {
+            payload = try Self.decoder.decode(UserPayload.self, from: data)
+        } catch {
+            throw GitHubDeviceFlowError.malformedResponse
+        }
+        guard !payload.login.isEmpty, payload.id > 0 else {
+            throw GitHubDeviceFlowError.malformedResponse
+        }
+        return GitHubAccount(
+            login: payload.login,
+            id: payload.id,
+            name: payload.name,
+            email: payload.email
+        )
+    }
+
+    /// The App installations the authenticated user can act on. The
+    /// repositories the user selected during installation are exposed per
+    /// installation through `repositories(accessToken:installationID:)`.
+    func installations(accessToken: String) async throws -> [GitHubInstallation] {
+        var request = URLRequest(url: Self.installationsEndpoint)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await send(request)
+        guard response.statusCode == 200 else {
+            throw GitHubDeviceFlowError.transportUnavailable
+        }
+        // GET /user/installations wraps the list: { total_count, installations }.
+        struct InstallationsResponse: Decodable {
+            let total_count: Int
+            let installations: [GitHubInstallation]
+        }
+        do {
+            return try Self.decoder.decode(InstallationsResponse.self, from: data).installations
+        } catch {
+            throw GitHubDeviceFlowError.malformedResponse
+        }
+    }
+
+    /// The repositories of one installation, as selected on GitHub's App
+    /// installation page.
+    func repositories(accessToken: String, installationID: Int) async throws -> [GitHubRepository] {
+        let url = Self.installationsEndpoint
+            .appendingPathComponent(String(installationID))
+            .appendingPathComponent("repositories")
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await send(request)
+        guard response.statusCode == 200 else {
+            throw GitHubDeviceFlowError.transportUnavailable
+        }
+        struct RepositoriesResponse: Decodable {
+            let repositories: [GitHubRepository]
+        }
+        do {
+            return try Self.decoder.decode(RepositoriesResponse.self, from: data).repositories
+        } catch {
+            throw GitHubDeviceFlowError.malformedResponse
+        }
+    }
+
+    private func tokenExchange(body: URLComponents) async throws -> GitHubDeviceToken {
+        var request = URLRequest(url: Self.accessTokenEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body.percentEncodedQuery?.data(using: .utf8)
+
+        let payload = try await sendForm(request)
+        if let errorCode = payload["error"] {
+            switch errorCode {
+            case "authorization_pending":
+                throw GitHubDeviceFlowError.authorizationPending
+            case "slow_down":
+                throw GitHubDeviceFlowError.slowDown(payload["interval"].flatMap(Int.init) ?? 5)
+            case "expired_token":
+                throw GitHubDeviceFlowError.expired
+            case "access_denied":
+                throw GitHubDeviceFlowError.denied
+            case "device_flow_disabled":
+                throw GitHubDeviceFlowError.deviceFlowDisabled
+            case "rate_limited":
+                throw GitHubDeviceFlowError.rateLimited
+            default:
+                throw GitHubDeviceFlowError.malformedResponse
+            }
+        }
+        guard let accessToken = payload["access_token"], !accessToken.isEmpty else {
+            throw GitHubDeviceFlowError.malformedResponse
+        }
+        return GitHubDeviceToken(
+            accessToken: accessToken,
+            refreshToken: payload["refresh_token"].flatMap { $0.isEmpty ? nil : $0 },
+            expiresIn: payload["expires_in"].flatMap(Int.init),
+            refreshExpiresIn: payload["refresh_token_expires_in"].flatMap(Int.init),
+            scope: payload["scope"] ?? ""
+        )
+    }
+
+    /// Wraps the transport so every transport-level failure surfaces as the
+    /// device flow's own error instead of a foreign error type.
+    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await transport.send(request)
+        } catch {
+            throw GitHubDeviceFlowError.transportUnavailable
+        }
+    }
+
+    private func sendForm(_ request: URLRequest) async throws -> [String: String] {
+        let (data, response) = try await send(request)
+        guard response.statusCode == 200 else {
+            throw Self.error(for: response.statusCode, data: data)
+        }
+        let payload = try Self.decoder.decode([String: JSONAny].self, from: data)
+        var result: [String: String] = [:]
+        for (key, value) in payload {
+            result[key] = value.stringValue ?? value.intValue.map(String.init) ?? ""
+        }
+        return result
+    }
+
+    private static func error(for status: Int, data: Data) -> GitHubDeviceFlowError {
+        if let payload = try? decoder.decode([String: String].self, from: data),
+           payload["error"] == "device_flow_disabled" {
+            return .deviceFlowDisabled
+        }
+        switch status {
+        case 404:
+            return .deviceFlowDisabled
+        case 429:
+            return .rateLimited
+        default:
+            return .transportUnavailable
+        }
+    }
+
+    private static let decoder = JSONDecoder()
+}
+
+private enum JSONAny: Decodable {
+    case string(String)
+    case int(Int)
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode(Int.self) {
+            self = .int(value)
+        } else {
+            throw DecodingError.typeMismatch(
+                JSONAny.self,
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "not a string or int")
+            )
+        }
+    }
+
+    var stringValue: String? {
+        if case .string(let value) = self { return value }
+        return nil
+    }
+
+    var intValue: Int? {
+        if case .int(let value) = self { return value }
+        return nil
+    }
+}
+
+// MARK: - Direct GitHub session storage
+
+/// One Keychain record holds the complete device-flow session: the GitHub App
+/// user token, its optional refresh token, expiry, and the verified account.
+struct GitHubDeviceSession: Codable, Sendable, Equatable {
+    let schemaVersion: Int
+    let clientID: String
+    let account: GitHubAccount
+    let accessToken: String
+    let refreshToken: String?
+    let accessExpiresAt: Date?
+    let refreshExpiresAt: Date?
+    let obtainedAt: Date
+
+    var isAccessExpired: Bool {
+        accessExpiresAt.map { $0 <= Date() } ?? false
+    }
+
+    var canRefresh: Bool {
+        guard let refreshToken, let refreshExpiresAt else { return false }
+        return !refreshToken.isEmpty && refreshExpiresAt > Date()
+    }
+}
+
+struct GitHubDeviceSessionStore {
+    static let service = "org.microsandbox.MSWMonitor.github-device-session"
+    static let account = "session"
+
+    private let keychain: any CredentialKeychainStoring
+
+    init(keychain: any CredentialKeychainStoring = KeychainStore()) {
+        self.keychain = keychain
+    }
+
+    func load() throws -> GitHubDeviceSession? {
+        let data: Data
+        do {
+            data = try keychain.load(service: Self.service, account: Self.account)
+        } catch KeychainStoreError.itemNotFound {
+            return nil
+        }
+        guard let session = try? JSONDecoder().decode(GitHubDeviceSession.self, from: data),
+              session.schemaVersion == 1,
+              session.accessToken.count <= 4096,
+              !session.accessToken.isEmpty else {
+            return nil
+        }
+        return session
+    }
+
+    func save(_ session: GitHubDeviceSession) throws {
+        let data = try JSONEncoder().encode(session)
+        try keychain.save(KeychainItem(service: Self.service, account: Self.account, secret: data))
+    }
+
+    func clear() throws {
+        try keychain.delete(service: Self.service, account: Self.account)
+    }
+}
+
+// MARK: - Per-workspace GitHub access allowlist
+
+/// Per-workspace partition of the repositories the GitHub App installation
+/// grants. Non-secret metadata: the session itself remains Keychain-only.
+/// Enforcement lives in the host-mediated workspace operations, which must
+/// refuse any repository absent from its workspace's allowlist.
+struct WorkspaceGitHubAccess: Codable, Sendable, Equatable {
+    var schemaVersion: Int
+    var repositoriesByWorkspace: [String: [String]]
+
+    static let currentSchemaVersion = 1
+
+    init(repositoriesByWorkspace: [String: [String]]) {
+        schemaVersion = Self.currentSchemaVersion
+        self.repositoriesByWorkspace = repositoriesByWorkspace
+    }
+
+    func allowedRepositories(for workspace: String) -> Set<String> {
+        Set(repositoriesByWorkspace[workspace] ?? [])
+    }
+
+    /// Returns a copy limited to the repositories currently accessible on
+    /// GitHub. Persisting the pruned copy is what makes removal durable: a
+    /// repository that disappears is forgotten, so re-adding it later cannot
+    /// silently resurrect an old per-workspace approval.
+    func pruned(toAccessibleNames names: Set<String>) -> WorkspaceGitHubAccess {
+        WorkspaceGitHubAccess(repositoriesByWorkspace: repositoriesByWorkspace.mapValues {
+            Array(Set($0).intersection(names)).sorted()
+        })
+    }
+}
+
+struct WorkspaceGitHubAccessStore {
+    private let fileURL: URL
+
+    init(fileURL: URL? = nil) {
+        self.fileURL = fileURL ?? Self.defaultURL()
+    }
+
+    static func defaultURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        return base
+            .appendingPathComponent("MSW Monitor", isDirectory: true)
+            .appendingPathComponent("workspace-github-access.json")
+    }
+
+    func load() -> WorkspaceGitHubAccess? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let access = try? JSONDecoder().decode(WorkspaceGitHubAccess.self, from: data),
+              access.schemaVersion == WorkspaceGitHubAccess.currentSchemaVersion else {
+            return nil
+        }
+        return access
+    }
+
+    func save(_ access: WorkspaceGitHubAccess) throws {
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder().encode(access)
+        try data.write(to: fileURL, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    }
+}

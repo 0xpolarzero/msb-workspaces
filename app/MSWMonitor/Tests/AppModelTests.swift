@@ -1810,7 +1810,217 @@ final class AppModelTests: XCTestCase {
         }
         XCTFail("Timed out waiting for the browser wait to install.")
     }
+    func testGitHubDeviceFlowRequestsCodeAndPollsToken() async throws {
+        let transport = QueueConnectTransport()
+        await transport.enqueue(Data(#"{"device_code":"device-123","user_code":"WDJB-MJHT","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#.utf8))
+        let client = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
 
+        let authorization = try await client.requestDeviceCode()
+        XCTAssertEqual(authorization.deviceCode, "device-123")
+        XCTAssertEqual(authorization.userCode, "WDJB-MJHT")
+        XCTAssertEqual(authorization.expiresIn, 900)
+        XCTAssertEqual(authorization.interval, 5)
+        let verification = GitHubDeviceFlow.verificationURL(for: authorization)
+        XCTAssertTrue(verification.absoluteString.contains("user_code=WDJB-MJHT"))
+
+        await transport.enqueue(Data(#"{"access_token":"ghu_device_access","refresh_token":"ghr_device_refresh","expires_in":28800,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        let token = try await client.pollToken(clientID: "Iv1.testclient", deviceCode: "device-123")
+        XCTAssertEqual(token.accessToken, "ghu_device_access")
+        XCTAssertEqual(token.refreshToken, "ghr_device_refresh")
+        XCTAssertEqual(token.expiresIn, 28800)
+    }
+
+    func testGitHubDeviceFlowMapsTerminalErrors() async throws {
+        let cases: [(String, String, GitHubDeviceFlowError)] = [
+            ("authorization_pending", #"{"error":"authorization_pending"}"#, .authorizationPending),
+            ("slow_down", #"{"error":"slow_down","interval":"10"}"#, .slowDown(10)),
+            ("expired", #"{"error":"expired_token"}"#, .expired),
+            ("denied", #"{"error":"access_denied"}"#, .denied),
+            ("disabled", #"{"error":"device_flow_disabled"}"#, .deviceFlowDisabled),
+            ("rate_limited", #"{"error":"rate_limited"}"#, .rateLimited)
+        ]
+        for (name, payload, expected) in cases {
+            let transport = QueueConnectTransport()
+            await transport.enqueue(Data(payload.utf8))
+            let client = GitHubDeviceFlow(
+                configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+                transport: transport
+            )
+            do {
+                _ = try await client.pollToken(clientID: "Iv1.testclient", deviceCode: "device")
+                XCTFail("\(name) must fail")
+            } catch let error as GitHubDeviceFlowError {
+                XCTAssertEqual(error, expected, "case \(name)")
+            }
+        }
+    }
+
+    func testGitHubDeviceFlowRejectsUnknownClientAndTransportFailure() async throws {
+        let unknown = QueueConnectTransport()
+        await unknown.enqueue(Data(#"{"error":"Not Found"}"#.utf8), status: 404)
+        let unknownClient = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: unknown
+        )
+        do {
+            _ = try await unknownClient.requestDeviceCode()
+            XCTFail("An unknown client must fail.")
+        } catch let error as GitHubDeviceFlowError {
+            XCTAssertEqual(error, .deviceFlowDisabled)
+        }
+
+        let offline = QueueConnectTransport() // empty queue: send throws
+        let offlineClient = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: offline
+        )
+        do {
+            _ = try await offlineClient.requestDeviceCode()
+            XCTFail("A transport failure must fail.")
+        } catch let error as GitHubDeviceFlowError {
+            XCTAssertEqual(error, .transportUnavailable)
+        }
+    }
+
+    func testGitHubDeviceFlowFetchesAccountInstallationsAndRepositories() async throws {
+        let transport = QueueConnectTransport()
+        let client = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+
+        await transport.enqueue(Data(#"{"login":"octocat","id":1,"name":"Octo Cat","email":"octo@example.com"}"#.utf8))
+        let account = try await client.account(accessToken: "ghu_token")
+        XCTAssertEqual(account.login, "octocat")
+        XCTAssertEqual(account.id, 1)
+
+        await transport.enqueue(Data(#"{"total_count":1,"installations":[{"id":42,"account":{"login":"acme","id":7,"type":"Organization"},"repository_selection":"selected"}]}"#.utf8))
+        let installations = try await client.installations(accessToken: "ghu_token")
+        XCTAssertEqual(installations.count, 1)
+        XCTAssertEqual(installations.first?.id, 42)
+
+        await transport.enqueue(Data(#"{"repositories":[{"id":1001,"full_name":"acme/one","name":"one","owner":{"login":"acme","id":7,"type":"Organization"},"private":true,"default_branch":"main"}]}"#.utf8))
+        let repositories = try await client.repositories(accessToken: "ghu_token", installationID: 42)
+        XCTAssertEqual(repositories.map(\.fullName), ["acme/one"])
+    }
+
+    func testGitHubDeviceSessionStoreRoundTripAndClear() throws {
+        let keychain = InMemoryConnectKeychain()
+        let store = GitHubDeviceSessionStore(keychain: keychain)
+        XCTAssertNil(try store.load())
+
+        let session = GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_access",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date().addingTimeInterval(3600),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date()
+        )
+        try store.save(session)
+        XCTAssertEqual(try store.load(), session)
+
+        try store.clear()
+        XCTAssertNil(try store.load())
+    }
+
+    func testDeviceAccessDecisionRequiresAccessibleRepository() {
+        XCTAssertFalse(SetupView.deviceAccessDecided(signedIn: true, repositoryCount: 0),
+                       "A sign-in with zero accessible repositories grants nothing.")
+        XCTAssertTrue(SetupView.deviceAccessDecided(signedIn: true, repositoryCount: 1))
+        XCTAssertFalse(SetupView.deviceAccessDecided(signedIn: false, repositoryCount: 1))
+    }
+
+    func testGitHubDeviceFlowInstallationWithZeroRepositoriesDecodesEmpty() async throws {
+        // An installation can exist while granting access to zero repositories;
+        // the repositories endpoint must surface that as an empty list so the
+        // decision gate stays closed.
+        let transport = QueueConnectTransport()
+        await transport.enqueue(Data(#"{"repositories":[]}"#.utf8))
+        let client = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let repositories = try await client.repositories(accessToken: "ghu_token", installationID: 7)
+        XCTAssertTrue(repositories.isEmpty)
+        XCTAssertFalse(
+            SetupView.deviceAccessDecided(signedIn: true, repositoryCount: repositories.count),
+            "An installation with zero repositories must not decide the GitHub step."
+        )
+    }
+
+    func testWorkspaceGitHubAccessStoreRoundTrip() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-access-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("workspace-github-access.json")
+        let store = WorkspaceGitHubAccessStore(fileURL: fileURL)
+        XCTAssertNil(store.load())
+
+        let access = WorkspaceGitHubAccess(repositoriesByWorkspace: [
+            "dev": ["acme/one", "acme/two"],
+            "personal": ["acme/one"]
+        ])
+        try store.save(access)
+        let loaded = store.load()
+        XCTAssertEqual(loaded?.schemaVersion, 1)
+        XCTAssertEqual(loaded?.allowedRepositories(for: "dev"), ["acme/one", "acme/two"])
+        XCTAssertEqual(loaded?.allowedRepositories(for: "personal"), ["acme/one"])
+        XCTAssertEqual(loaded?.allowedRepositories(for: "playgrounds"), [])
+    }
+
+    func testWorkspaceGitHubAccessPruneIsDurableAndPreventsResurrection() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-access-prune-\(UUID().uuidString)", isDirectory: true)
+        let fileURL = directory.appendingPathComponent("workspace-github-access.json")
+        let store = WorkspaceGitHubAccessStore(fileURL: fileURL)
+
+        // dev keeps both repos; playgrounds loses its only repo.
+        try store.save(WorkspaceGitHubAccess(repositoriesByWorkspace: [
+            "dev": ["acme/one", "acme/two"],
+            "playgrounds": ["gone/repo"]
+        ]))
+
+        let stored = store.load()
+        let pruned = try XCTUnwrap(stored).pruned(toAccessibleNames: ["acme/one", "acme/two"])
+        try store.save(pruned)
+
+        let persisted = store.load()
+        XCTAssertEqual(persisted?.allowedRepositories(for: "dev"), ["acme/one", "acme/two"])
+        XCTAssertEqual(persisted?.allowedRepositories(for: "playgrounds"), [])
+
+        // The removed repo later becomes accessible again on GitHub; the old
+        // playgrounds approval must NOT silently reactivate.
+        let reactivated = try XCTUnwrap(persisted).pruned(toAccessibleNames: ["acme/one", "acme/two", "gone/repo"])
+        XCTAssertEqual(reactivated.allowedRepositories(for: "playgrounds"), [],
+                       "A re-added repository must not resurrect a pruned per-workspace approval.")
+    }
+
+    func testGitHubDeviceSessionExpiryHelpers() {
+        let future = Date().addingTimeInterval(3600)
+        let past = Date().addingTimeInterval(-3600)
+        let active = GitHubDeviceSession(
+            schemaVersion: 1, clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            accessToken: "ghu_access", refreshToken: "ghr_refresh",
+            accessExpiresAt: future, refreshExpiresAt: future, obtainedAt: Date()
+        )
+        XCTAssertFalse(active.isAccessExpired)
+        XCTAssertTrue(active.canRefresh)
+
+        let expired = GitHubDeviceSession(
+            schemaVersion: 1, clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            accessToken: "ghu_access", refreshToken: nil,
+            accessExpiresAt: past, refreshExpiresAt: future, obtainedAt: Date()
+        )
+        XCTAssertTrue(expired.isAccessExpired)
+        XCTAssertFalse(expired.canRefresh)
+    }
 
     func testReviewCompletionRequiresLoadedGitHubContextEvenWithPersistedCompletedChoices() {
         // Review and Done must stay closed until the GitHub context loads.

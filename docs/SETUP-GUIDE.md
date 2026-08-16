@@ -60,11 +60,11 @@ msw identity "Your Full Name" work@example.com dev
 
 ## 3. Connect GitHub
 
-GitHub authorization is completed in **MSW Monitor**, not in the CLI. Open **Settings** → **GitHub** → **Connect GitHub** (the first-run setup window exposes the same action). The authorization page opens in your default browser; builds without a configured Connect endpoint show the connection as unavailable instead of offering a page that cannot connect. After authorizing, select the GitHub owner and repositories, and review the guest-read/host-write assignments before applying them.
+GitHub authorization is completed in **MSW Monitor**, not in the CLI. Open **Settings** → **GitHub** → **Connect GitHub** (the first-run setup window exposes the same action). GitHub opens in your default browser with a short code; approve it, pick your repositories on the App installation page, and the credential stays in the Mac Keychain.
 
-If the connected account has no installed MSW GitHub App, the setup window offers **Install MSW App in GitHub** when the signed build has a verified installation URL configured. Approve the app for the intended owner, then return to MSW Monitor and connect GitHub again. Builds without that release-supplied URL show a safe unavailable-link message instead of opening an arbitrary address; ask the release administrator for the approved installation action.
+If the connected account has not installed the MSW GitHub App yet, the GitHub step offers **Choose repositories on GitHub**, which opens the App installation page (`https://github.com/apps/microsandbox-workspaces/installations/new`). Approve the App for the intended account, then return to MSW Monitor.
 
-The Connect service issues short-lived grants scoped to the selected owner, repositories, and workspace. Repeat the flow for `dev`, `playgrounds`, and `personal` when their repository scopes differ. The legacy `msw github setup` token prompt was removed; invoking it only reports the migration path.
+The session is host-held only: workspaces never receive the token. Host-mediated workspace operations (`msw push`, clone/fetch/pull executed by the Mac) are being implemented; until they ship, these commands do not consume this session.
 
 ## 4. Enter a workspace from Ghostty
 
@@ -213,7 +213,7 @@ git commit -m "Implement example"
 git pull --ff-only
 ```
 
-The VM can fetch and pull private repositories selected in its read token. Direct guest pushes are rejected by GitHub.
+The VM has no GitHub credential of its own. Host-mediated clone, fetch, and pull are being implemented; until they ship, private repositories are fetched by the Mac.
 
 Push explicitly from a Mac terminal:
 
@@ -344,5 +344,5 @@ Useful repair/rebuild modes:
 - Within one workspace, agents can access all repositories, processes, guest credentials, and Docker resources in that workspace.
 - No host directory, host Docker socket, or host SSH agent is shared by this setup.
 - The public network profile permits internet access but blocks direct host/private-network access.
-- A guest-read grant cannot push to GitHub, but unrestricted internet still permits source-code exfiltration to unrelated services.
+- The GitHub session is host-held and is never bound into VM traffic; workspace GitHub operations are host-mediated, so a workspace cannot mutate repositories directly. Unrestricted internet still permits source-code exfiltration to unrelated services.
 - Prefer ARM64 or multi-architecture container images for native M4 performance.

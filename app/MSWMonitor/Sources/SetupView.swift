@@ -8,6 +8,8 @@ final class SetupWindowController {
     init(
         coordinator: (any MSWBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
+        deviceFlow: GitHubDeviceFlow? = nil,
+        githubInstallationURL: URL? = nil,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void = {},
         uiTestMode: Bool = false,
@@ -25,6 +27,8 @@ final class SetupWindowController {
             rootView: SetupView(
                 coordinator: coordinator,
                 authorizationCoordinator: authorization,
+                deviceFlow: deviceFlow,
+                deviceInstallationURL: githubInstallationURL,
                 openSettings: openSettings,
                 closeSetup: closeSetup,
                 uiTestMode: uiTestMode,
@@ -187,6 +191,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 struct SetupView: View {
     let coordinator: (any MSWBootstrapCoordinating)?
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
+    let deviceFlow: GitHubDeviceFlow?
+    let deviceInstallationURL: URL?
     let openSettings: (SettingsSection) -> Void
     let closeSetup: () -> Void
     let uiTestMode: Bool
@@ -240,7 +246,16 @@ struct SetupView: View {
     @State private var activeStep: SetupStep = .readiness
     @State private var githubContextLoaded = false
     @State private var githubAttentionWorkspace: String?
-
+    @State private var deviceAccount: GitHubAccount?
+    @State private var deviceAuthorization: GitHubDeviceAuthorization?
+    @State private var isConnectingDevice = false
+    @State private var deviceStatus = ""
+    @State private var deviceIssue: String?
+    @State private var devicePollTask: Task<Void, Never>?
+    @State private var deviceSession: GitHubDeviceSession?
+    @State private var deviceRepositoryCount = 0
+    @State private var deviceAccessibleRepositories: [GitHubRepository] = []
+    @State private var workspaceAllowlists: [String: Set<String>] = [:]
 
     private static let resumeStateKey = "setup.resume.nonsecret.v1"
 
@@ -278,6 +293,7 @@ struct SetupView: View {
                 loadPreflight()
                 await loadExistingMetadata()
                 await restoreCachedAuthorization()
+                await restoreDeviceSession()
                 githubContextLoaded = true
             }
         }
@@ -337,7 +353,6 @@ struct SetupView: View {
         !checks.isEmpty && blockingChecks.isEmpty
     }
 
-
     private var canFinishWithoutGitHub: Bool {
         systemReady && state.phase == .complete
     }
@@ -346,9 +361,22 @@ struct SetupView: View {
         [.preflight, .toolchain, .hostIntegration, .workspaces, .github, .identity, .complete]
     }
 
-    private var githubDecisionMade: Bool {
-        githubSkipped || !existingMetadata.isEmpty || !verificationResults.isEmpty
+    /// Pure decision, unit-tested directly: a device-flow sign-in alone is not
+    /// enough — GitHub must confirm at least one repository is actually
+    /// accessible to the App (an installation with zero accessible
+    /// repositories grants nothing). Skipping, or existing grant metadata,
+    /// still decides it explicitly.
+    static func deviceAccessDecided(signedIn: Bool, repositoryCount: Int) -> Bool {
+        signedIn && repositoryCount > 0
     }
+
+    private var githubDecisionMade: Bool {
+        githubSkipped ||
+            Self.deviceAccessDecided(signedIn: deviceAccount != nil, repositoryCount: deviceRepositoryCount) ||
+            !existingMetadata.isEmpty ||
+            !verificationResults.isEmpty
+    }
+
 
 
     private var identityDecisionMade: Bool {
@@ -727,6 +755,8 @@ struct SetupView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canConnectGitHub || isAuthorizing)
                     .accessibilityIdentifier("setup.github.connect.button")
+            } else if deviceFlow != nil {
+                deviceFlowSection
             } else if !(authorizationCoordinator?.isConfigured ?? false) {
                 Text("GitHub connection isn't available yet. Continue and connect later in Settings.")
                     .foregroundStyle(.secondary)
@@ -866,6 +896,89 @@ struct SetupView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github-boundary")
+    }
+
+    private var deviceFlowSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let deviceAccount {
+                if Self.deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount) {
+                    Label("Connected as @\(deviceAccount.login)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier("setup.github.account")
+                } else {
+                    Label("Signed in as @\(deviceAccount.login), but no repositories are selected yet.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("setup.github.account")
+                }
+                Text("Your credential is stored in the Mac Keychain. Workspaces never see it; GitHub access for workspaces is host-mediated.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if Self.validatedInstallationURL(deviceInstallationURL) != nil {
+                    Button("Choose repositories on GitHub", action: openDeviceInstallation)
+                        .accessibilityIdentifier("setup.github.pick.button")
+                } else {
+                    Text("Repositories are chosen on GitHub's App installation page. This build has no installation link configured.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if deviceRepositoryCount == 0, let deviceSession {
+                    Button("Check again") {
+                        Task { await refreshDeviceRepositoryCount(accessToken: deviceSession.accessToken) }
+                    }
+                    .accessibilityIdentifier("setup.github.refresh.button")
+                }
+                if !deviceAccessibleRepositories.isEmpty {
+                    workspaceAccessSection
+                }
+            } else if isConnectingDevice {
+                if let authorization = deviceAuthorization {
+                    Text("Enter this code on GitHub: \(authorization.userCode)")
+                        .font(.body.weight(.semibold))
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("setup.github.device-code")
+                    Text("GitHub opened in your default browser. Approve the code there, then wait.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(deviceStatus).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel wait", action: cancelDeviceFlow)
+                        .accessibilityIdentifier("setup.github.cancel.button")
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("setup.github.progress")
+            } else {
+                Text("Connect GitHub opens GitHub in your default browser: approve the code there and pick your repositories on the App installation page. The credential stays in the Mac Keychain.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Connect GitHub", action: startDeviceFlow)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("setup.github.connect.button")
+                if let deviceIssue {
+                    Text(deviceIssue)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("setup.github.issue")
+                }
+            }
+            if !deviceStatus.isEmpty && !isConnectingDevice {
+                Text(deviceStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.github.status")
+            }
+        }
+    }
+
+    private var workspaceAccessSection: some View {
+        WorkspaceGitHubAccessEditor(
+            repositories: deviceAccessibleRepositories,
+            allowlists: workspaceAllowlists,
+            onToggle: setWorkspaceAllowlist
+        )
+        .accessibilityIdentifier("setup.github.workspace-access")
     }
 
     private func assignmentCard(for workspace: Workspace.ID) -> some View {
@@ -1785,6 +1898,215 @@ struct SetupView: View {
         }
     }
 
+    /// Restores the stored direct-GitHub session, rotating an expired access
+    /// token with its refresh token when available.
+    private func restoreDeviceSession() async {
+        guard deviceFlow != nil else { return }
+        do {
+            let store = GitHubDeviceSessionStore()
+            guard var session = try store.load() else { return }
+            if session.isAccessExpired, let deviceFlow, session.canRefresh, let refreshToken = session.refreshToken {
+                let token = try await deviceFlow.refreshToken(clientID: session.clientID, refreshToken: refreshToken)
+                session = GitHubDeviceSession(
+                    schemaVersion: 1,
+                    clientID: session.clientID,
+                    account: session.account,
+                    accessToken: token.accessToken,
+                    refreshToken: token.refreshToken ?? session.refreshToken,
+                    accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
+                    refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) } ?? session.refreshExpiresAt,
+                    obtainedAt: Date()
+                )
+                try store.save(session)
+            }
+            deviceSession = session
+            deviceAccount = session.account
+            prefillIdentity(from: session.account)
+            await refreshDeviceRepositoryCount(accessToken: session.accessToken)
+            deviceStatus = Self.deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount)
+                ? "Connected as @\(session.account.login). Repositories selected on GitHub are available."
+                : "Signed in as @\(session.account.login), but no repositories are selected yet."
+        } catch {
+            // A stored session that cannot be restored is left untouched; the
+            // user can connect again.
+        }
+    }
+
+    private func startDeviceFlow() {
+        guard let deviceFlow else { return }
+        cancelDeviceFlow()
+        isConnectingDevice = true
+        deviceIssue = nil
+        deviceStatus = "Requesting a GitHub code…"
+        devicePollTask = Task {
+            do {
+                let authorization = try await deviceFlow.requestDeviceCode()
+                await MainActor.run {
+                    deviceAuthorization = authorization
+                    deviceStatus = "Enter the code on GitHub, then approve."
+                    _ = NSWorkspace.shared.open(GitHubDeviceFlow.verificationURL(for: authorization))
+                }
+                var interval = authorization.interval
+                let deadline = Date().addingTimeInterval(TimeInterval(authorization.expiresIn))
+                while true {
+                    try await Task.sleep(for: .seconds(interval))
+                    if Date() >= deadline {
+                        throw GitHubDeviceFlowError.expired
+                    }
+                    do {
+                        let token = try await deviceFlow.pollToken(
+                            clientID: deviceFlow.configuration.clientID,
+                            deviceCode: authorization.deviceCode
+                        )
+                        await MainActor.run {
+                            finishDeviceFlow(token: token)
+                        }
+                        return
+                    } catch GitHubDeviceFlowError.authorizationPending {
+                        continue
+                    } catch GitHubDeviceFlowError.slowDown(let slowed) {
+                        interval = slowed
+                    }
+                }
+            } catch is CancellationError {
+                // Cancelled by the user; state already reset by cancelDeviceFlow.
+            } catch {
+                await MainActor.run {
+                    isConnectingDevice = false
+                    deviceAuthorization = nil
+                    deviceStatus = ""
+                    deviceIssue = (error as? LocalizedError)?.errorDescription
+                        ?? "GitHub connection failed. Try again."
+                    devicePollTask = nil
+                }
+            }
+        }
+    }
+
+    private func finishDeviceFlow(token: GitHubDeviceToken) {
+        guard let deviceFlow else { return }
+        Task {
+            do {
+                let account = try await deviceFlow.account(accessToken: token.accessToken)
+                // A sign-in alone grants nothing: verify that at least one
+                // repository is actually accessible to the App before
+                // counting the GitHub step as decided.
+                let installations = try await deviceFlow.installations(accessToken: token.accessToken)
+                var accessibleRepositories: [GitHubRepository] = []
+                for installation in installations {
+                    let repositories = try await deviceFlow.repositories(
+                        accessToken: token.accessToken,
+                        installationID: installation.id
+                    )
+                    accessibleRepositories.append(contentsOf: repositories)
+                }
+                let accessibleRepositoryCount = accessibleRepositories.count
+                let session = GitHubDeviceSession(
+                    schemaVersion: 1,
+                    clientID: deviceFlow.configuration.clientID,
+                    account: account,
+                    accessToken: token.accessToken,
+                    refreshToken: token.refreshToken,
+                    accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
+                    refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
+                    obtainedAt: Date()
+                )
+                try GitHubDeviceSessionStore().save(session)
+                await MainActor.run {
+                    deviceSession = session
+                    deviceAccount = account
+                    deviceRepositoryCount = accessibleRepositoryCount
+                    deviceAccessibleRepositories = accessibleRepositories
+                    loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
+                    githubAttentionWorkspace = nil
+                    isConnectingDevice = false
+                    deviceAuthorization = nil
+                    devicePollTask = nil
+                    deviceStatus = Self.deviceAccessDecided(signedIn: true, repositoryCount: accessibleRepositories.count)
+                        ? "Connected as @\(account.login). Repositories selected on GitHub are available."
+                        : "Signed in as @\(account.login), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
+                    prefillIdentity(from: account)
+                }
+            } catch {
+                await MainActor.run {
+                    isConnectingDevice = false
+                    deviceAuthorization = nil
+                    devicePollTask = nil
+                    deviceStatus = ""
+                    deviceIssue = "GitHub approved the code, but the account could not be verified: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Re-checks GitHub for repositories actually accessible to the App.
+    private func refreshDeviceRepositoryCount(accessToken: String) async {
+        guard let deviceFlow else { return }
+        var accessibleRepositories: [GitHubRepository] = []
+        if let installations = try? await deviceFlow.installations(accessToken: accessToken) {
+            for installation in installations {
+                let repositories = (try? await deviceFlow.repositories(
+                    accessToken: accessToken,
+                    installationID: installation.id
+                )) ?? []
+                accessibleRepositories.append(contentsOf: repositories)
+            }
+        }
+        deviceRepositoryCount = accessibleRepositories.count
+        deviceAccessibleRepositories = accessibleRepositories
+        loadWorkspaceAllowlists(accessibleRepositories: accessibleRepositories)
+        if deviceAccount != nil {
+            deviceStatus = Self.deviceAccessDecided(signedIn: true, repositoryCount: accessibleRepositories.count)
+                ? "Connected as @\(deviceAccount?.login ?? ""). Repositories selected on GitHub are available."
+                : "Signed in as @\(deviceAccount?.login ?? ""), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
+        }
+    }
+
+    /// Loads the persisted per-workspace allowlist and prunes repositories
+    /// that are no longer accessible to the App installation.
+    private func loadWorkspaceAllowlists(accessibleRepositories: [GitHubRepository]) {
+        let accessibleNames = Set(accessibleRepositories.map(\.fullName))
+        let store = WorkspaceGitHubAccessStore()
+        guard let stored = store.load() else {
+            workspaceAllowlists = [:]
+            return
+        }
+        let pruned = stored.pruned(toAccessibleNames: accessibleNames)
+        if pruned.repositoriesByWorkspace != stored.repositoriesByWorkspace {
+            try? store.save(pruned)
+        }
+        workspaceAllowlists = pruned.repositoriesByWorkspace.mapValues(Set.init)
+    }
+
+    /// Updates one workspace's allowlist and persists it.
+    private func setWorkspaceAllowlist(workspace: String, repository: String, allowed: Bool) {
+        var current = workspaceAllowlists[workspace] ?? []
+        if allowed {
+            current.insert(repository)
+        } else {
+            current.remove(repository)
+        }
+        workspaceAllowlists[workspace] = current
+        let access = WorkspaceGitHubAccess(
+            repositoriesByWorkspace: workspaceAllowlists.mapValues { Array($0).sorted() }
+        )
+        try? WorkspaceGitHubAccessStore().save(access)
+    }
+
+    private func cancelDeviceFlow() {
+        devicePollTask?.cancel()
+        devicePollTask = nil
+        isConnectingDevice = false
+        deviceAuthorization = nil
+        deviceStatus = ""
+        deviceIssue = "GitHub connection was cancelled. Nothing was stored."
+    }
+
+    private func openDeviceInstallation() {
+        guard let url = Self.validatedInstallationURL(deviceInstallationURL) else { return }
+        _ = NSWorkspace.shared.open(url)
+    }
+
     private func loadPreflight() {
         guard let coordinator else { return }
         isChecking = true
@@ -1907,6 +2229,7 @@ struct SetupView: View {
 
     private var githubReviewSummary: String {
         if githubSkipped { return "Not connected — you can connect later in Settings." }
+        if let deviceAccount { return "Connected as @\(deviceAccount.login). Repositories are chosen on GitHub." }
         if !verificationResults.isEmpty {
             return verificationResults.map {
                 "\($0.workspace): \($0.verified && $0.lifecycleRestored ? "verified" : "needs attention") for \($0.verificationRepository)"
@@ -2181,5 +2504,63 @@ struct SetupView: View {
         case .needsAction: return .orange
         case .unavailable: return .red
         }
+    }
+}
+
+
+/// Shared per-workspace repository allowlist editor, used by first-run setup
+/// and by Settings → GitHub after onboarding. Backed by the persisted
+/// `WorkspaceGitHubAccessStore`; enforcement lives in the host-mediated
+/// workspace operations.
+struct WorkspaceGitHubAccessEditor: View {
+    let repositories: [GitHubRepository]
+    let allowlists: [String: Set<String>]
+    let onToggle: (String, String, Bool) -> Void
+    @State private var expanded = Set(Workspace.ID.allCases.map(\.rawValue))
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Workspace access").font(.headline)
+            Text("Choose which of the selected repositories each workspace may use. This list is saved now; enforcement starts when workspace GitHub operations are connected. Adding or removing repositories happens on GitHub.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
+                DisclosureGroup(isExpanded: Binding(
+                    get: { expanded.contains(workspace.rawValue) },
+                    set: { isExpanded in
+                        if isExpanded {
+                            expanded.insert(workspace.rawValue)
+                        } else {
+                            expanded.remove(workspace.rawValue)
+                        }
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        let allowed = allowlists[workspace.rawValue] ?? []
+                        ForEach(repositories, id: \.id) { repository in
+                            Toggle(
+                                repository.fullName,
+                                isOn: Binding(
+                                    get: { allowed.contains(repository.fullName) },
+                                    set: { selected in
+                                        onToggle(workspace.rawValue, repository.fullName, selected)
+                                    }
+                                )
+                            )
+                            .toggleStyle(.checkbox)
+                            .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id)")
+                        }
+                    }
+                    .padding(.top, 4)
+                } label: {
+                    Text(workspace.rawValue)
+                        .font(.callout.weight(.medium))
+                }
+                .accessibilityIdentifier("github.workspace.\(workspace.rawValue).access")
+            }
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .contain)
     }
 }

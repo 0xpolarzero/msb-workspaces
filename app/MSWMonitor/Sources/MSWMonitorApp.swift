@@ -11,7 +11,9 @@ struct MSWMonitorApp: App {
         Settings {
             SettingsView(
                 navigation: appDelegate.settingsNavigation,
-                authorizationCoordinator: appDelegate.authorizationCoordinator
+                authorizationCoordinator: appDelegate.authorizationCoordinator,
+                deviceFlow: appDelegate.deviceFlow,
+                githubInstallationURL: appDelegate.githubInstallationURL
             )
         }
     }
@@ -27,6 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let client: MSWClient
     let settingsNavigation = SettingsNavigationState()
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
+    let deviceFlow: GitHubDeviceFlow?
+    let githubInstallationURL: URL?
     override init() {
         let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,6 +78,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.authorizationCoordinator = broker.map {
             GitHubAuthorizationCoordinator(broker: $0, connect: connect, mswClient: mswClient)
         }
+        let configuredGitHubClientID = (Bundle.main.object(forInfoDictionaryKey: "MSWGitHubClientID") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let githubClientID = configuredGitHubClientID.flatMap { $0.isEmpty ? nil : $0 } ?? ""
+        self.deviceFlow = GitHubDeviceFlowConfiguration(clientID: githubClientID).isConfigured
+            ? GitHubDeviceFlow(configuration: GitHubDeviceFlowConfiguration(clientID: githubClientID))
+            : nil
+        let configuredGitHubInstallationURL = (Bundle.main.object(forInfoDictionaryKey: "MSWGitHubInstallationURL") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.githubInstallationURL = configuredGitHubInstallationURL
+            .flatMap { $0.isEmpty ? nil : URL(string: $0) }
         super.init()
     }
     /// Routes `msw://` callback URLs from the default browser to the pending
@@ -187,6 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model: model,
             bootstrapCoordinator: bootstrap,
             authorizationCoordinator: authorizationCoordinator,
+            deviceFlow: deviceFlow,
+            githubInstallationURL: githubInstallationURL,
             settingsNavigation: settingsNavigation,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,
             retryStartupRecovery: retryStartupRecovery

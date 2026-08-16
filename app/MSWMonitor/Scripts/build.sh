@@ -42,7 +42,12 @@ fi
 if [[ -n "${MSW_CONNECT_INSTALLATION_URL:-}" ]]; then
   connectSettings+=("MSW_CONNECT_INSTALLATION_URL=${MSW_CONNECT_INSTALLATION_URL}")
 fi
-
+if [[ -n "${MSW_GITHUB_CLIENT_ID:-}" ]]; then
+  connectSettings+=("MSW_GITHUB_CLIENT_ID=${MSW_GITHUB_CLIENT_ID}")
+fi
+if [[ -n "${MSW_GITHUB_INSTALLATION_URL:-}" ]]; then
+  connectSettings+=("MSW_GITHUB_INSTALLATION_URL=${MSW_GITHUB_INSTALLATION_URL}")
+fi
 
 xcodebuild \
   -project "$APP_DIR/MSWMonitor.xcodeproj" \
