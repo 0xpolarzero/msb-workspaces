@@ -269,6 +269,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     private let sourceSetup: any MSWSourceSetupControlling
     private let hostRepairVerifier: any MSWHostRepairVerifying
     private let hostRepairAuthorization: any MSWHostRepairAuthorizing
+    private let freeDiskBytes: @Sendable () -> Int64?
     private var running = false
     init(
         client: MSWClient,
@@ -278,7 +279,12 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         hostService: any MSWHostServiceControlling,
         sourceSetup: (any MSWSourceSetupControlling)? = nil,
         hostRepairVerifier: (any MSWHostRepairVerifying)? = nil,
-        hostRepairAuthorization: (any MSWHostRepairAuthorizing)? = nil
+        hostRepairAuthorization: (any MSWHostRepairAuthorizing)? = nil,
+        freeDiskBytes: @escaping @Sendable () -> Int64? = {
+            let attributes = try? FileManager.default
+                .attributesOfFileSystem(forPath: NSHomeDirectory())
+            return (attributes?[.systemFreeSize] as? NSNumber)?.int64Value
+        }
     ) {
         self.client = client
         self.runner = runner
@@ -288,6 +294,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         self.sourceSetup = sourceSetup ?? MSWSourceSetupService(runner: runner)
         self.hostRepairVerifier = hostRepairVerifier ?? MSWHostRepairVerifier(runner: runner)
         self.hostRepairAuthorization = hostRepairAuthorization ?? MSWHostRepairAuthorization(runner: runner)
+        self.freeDiskBytes = freeDiskBytes
     }
 
     func state() async -> MSWBootstrapState { await stateStore.load() }
@@ -320,7 +327,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             detail: architecture.map { "Detected \($0.trimmingCharacters(in: .whitespacesAndNewlines))." } ?? "Architecture could not be detected.",
             remediation: isArm64 ? nil : "MSW Monitor requires an arm64 Mac."
         ))
-        let freeBytes = (try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemFreeSize] as? NSNumber)?.int64Value
+        let freeBytes = freeDiskBytes()
         let diskPass = (freeBytes ?? 0) >= 20 * 1_024 * 1_024 * 1_024
         checks.append(MSWPreflightCheck(
             id: "disk-space",

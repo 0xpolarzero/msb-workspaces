@@ -41,10 +41,6 @@
     <string>$(MSW_CONNECT_CLIENT_ID)</string>
     <key>MSWConnectInstallationURL</key>
     <string>$(MSW_CONNECT_INSTALLATION_URL)</string>
-    <key>MSWGitHubClientID</key>
-    <string>$(MSW_GITHUB_CLIENT_ID)</string>
-    <key>MSWGitHubInstallationURL</key>
-    <string>$(MSW_GITHUB_INSTALLATION_URL)</string>
     <key>MSWConnectScopeAttestationPublicKey</key>
     <string>$(MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY)</string>
     <key>NSHighResolutionCapable</key>

@@ -8,7 +8,6 @@ final class SetupWindowController {
     init(
         coordinator: (any MSWBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
-        deviceFlow: GitHubDeviceFlow? = nil,
         githubInstallationURL: URL? = nil,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void = {},
@@ -27,8 +26,6 @@ final class SetupWindowController {
             rootView: SetupView(
                 coordinator: coordinator,
                 authorizationCoordinator: authorization,
-                deviceFlow: deviceFlow,
-                deviceInstallationURL: githubInstallationURL,
                 openSettings: openSettings,
                 closeSetup: closeSetup,
                 uiTestMode: uiTestMode,
@@ -75,7 +72,8 @@ private struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
 }
 
 private struct SetupResumeState: Codable {
-    var repositoryPolicy: [GitHubRepositoryPolicy]
+    var repositoryPolicy: [GitHubWorkspacePolicy]
+    var repositoryPolicyApplied: Bool
     var githubSkipped: Bool
     var identityName: String
     var identityEmail: String
@@ -140,12 +138,9 @@ private struct AuthorizationIssue: Identifiable {
     let message: String
     var id: String { kind.rawValue }
 }
-/// Single source of truth for the GitHub connection header so it can never
-/// contradict the connection section (device flow when configured).
+/// Single source of truth for the GitHub connection summary.
 enum GitHubConnectionPresentation: Equatable {
     case notConnected
-    case signedInAwaitingRepositories(account: GitHubAccount)
-    case refreshFailed(account: GitHubAccount)
     case connected(account: GitHubAccount)
 }
 
@@ -185,18 +180,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
     }
 }
 
-/// Authoritative setup-window/device-flow lifecycle barrier, separate from
-/// the task generations (`deviceRefreshGeneration`,
-/// `deviceVerificationGeneration`, `deviceRepositoryPollGeneration`).
-/// Teardown that makes the setup surface invalid — window `willClose`,
-/// `.onDisappear`, and explicit device-flow cancellation — bumps the
-/// generation; restore/verification continuations captured it before their
-/// first await and must re-check it after every await that could create a
-/// refresh, assign UI state, publish a timestamp/status, or restart polling.
-/// A reference type so the generation is shared across SwiftUI struct copies
-/// (and observable by the barrier ordering tests).
 @MainActor
-final class DeviceSetupLifecycleGate {
+final class SetupLifecycleGate {
     private(set) var generation = 0
 
     /// Invalidates every previously captured lifecycle: the setup surface is
@@ -214,8 +199,6 @@ final class DeviceSetupLifecycleGate {
 struct SetupView: View {
     let coordinator: (any MSWBootstrapCoordinating)?
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    let deviceFlow: GitHubDeviceFlow?
-    let deviceInstallationURL: URL?
     let openSettings: (SettingsSection) -> Void
     let closeSetup: () -> Void
     let uiTestMode: Bool
@@ -224,19 +207,7 @@ struct SetupView: View {
     let uiTestBootstrapReconnect: Bool
     let startupRecoveryBlockedReason: String?
     let retryStartupRecovery: () -> Void
-    /// Authoritative UI barrier for this setup window/device flow (see
-    /// `DeviceSetupLifecycleGate`). Teardown paths bump it; restore and
-    /// verification continuations capture it before their first await and
-    /// guard their publications against it.
-    let setupLifecycle: DeviceSetupLifecycleGate
-    /// Session revalidation seam: production uses the process-wide shared
-    /// refresher; the barrier ordering tests inject a store-backed instance
-    /// so revalidation can be driven deterministically.
-    let deviceSessionRefresher: GitHubDeviceSessionRefresher
-    /// Opens GitHub's device verification page in the browser. Injectable so
-    /// the deterministic device-flow barrier tests never launch a real
-    /// browser (same convention as `MSWConnectBrowser(opener:)`).
-    let openDeviceVerificationPage: (URL) -> Bool
+    let setupLifecycle: SetupLifecycleGate
     @State private var checks: [MSWPreflightCheck] = []
     @State private var state = MSWBootstrapState.initial
     @State private var isRunning = false
@@ -255,7 +226,9 @@ struct SetupView: View {
     @State private var drafts = Dictionary(uniqueKeysWithValues: Workspace.ID.allCases.map {
         ($0.rawValue, WorkspaceRepositoryDraft.initial($0))
     })
-    @State private var retainedRepositoryPolicy: [GitHubRepositoryPolicy] = []
+    @State private var editedGitHubWorkspaces: Set<String> = []
+    @State private var repositoryPolicyApplied = false
+    @State private var retainedRepositoryPolicy: [GitHubWorkspacePolicy] = []
     @State private var existingMetadata: [WorkspaceCredentialMetadata] = []
     @State private var authorizationSessionID: UUID?
     @State private var authorizationStatus = ""
@@ -287,36 +260,11 @@ struct SetupView: View {
     @State private var activeStep: SetupStep = .readiness
     @State private var githubContextLoaded = false
     @State private var githubAttentionWorkspace: String?
-    @State private var deviceAccount: GitHubAccount?
-    @State private var deviceAuthorization: GitHubDeviceAuthorization?
-    @State private var isConnectingDevice = false
-    @State private var deviceStatus = ""
-    @State private var deviceIssue: String?
-    @State private var deviceRefreshIssue: String?
-    @State private var deviceRefreshTask: Task<Bool, Never>?
-    @State private var deviceRefreshGeneration = 0
-    @State private var deviceReauthorizationRequired = false
-    @State private var devicePollTask: Task<Void, Never>?
-    @State private var deviceVerificationTask: Task<Void, Never>?
-    @State private var deviceVerificationGeneration = 0
-    @State private var deviceSession: GitHubDeviceSession?
-    @State private var deviceRepositoryCount = 0
-    @State private var deviceRepositoryPollTask: Task<Void, Never>?
-    @State private var deviceRepositoryPollGeneration = 0
-    @State private var deviceRepositoryCheckInFlight = false
-    @State private var lastDeviceRepositoryCheckAt: Date?
-    @State private var deviceAccessibleRepositories: [GitHubRepository] = []
 
-    /// Memberwise init re-declared because a struct containing property
-    /// wrappers drops defaulted stored properties from the synthesized
-    /// memberwise init: `setupLifecycle` and `deviceSessionRefresher` are the
-    /// deterministic seams the barrier ordering tests inject (production uses
-    /// the defaults — a fresh gate and the process-wide shared refresher).
+    /// Explicit initializer keeps the setup dependencies visible at call sites.
     init(
         coordinator: (any MSWBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator?,
-        deviceFlow: GitHubDeviceFlow?,
-        deviceInstallationURL: URL?,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void,
         uiTestMode: Bool,
@@ -325,14 +273,10 @@ struct SetupView: View {
         uiTestBootstrapReconnect: Bool,
         startupRecoveryBlockedReason: String?,
         retryStartupRecovery: @escaping () -> Void,
-        setupLifecycle: DeviceSetupLifecycleGate = DeviceSetupLifecycleGate(),
-        deviceSessionRefresher: GitHubDeviceSessionRefresher = .shared,
-        openDeviceVerificationPage: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
+        setupLifecycle: SetupLifecycleGate = SetupLifecycleGate()
     ) {
         self.coordinator = coordinator
         self.authorizationCoordinator = authorizationCoordinator
-        self.deviceFlow = deviceFlow
-        self.deviceInstallationURL = deviceInstallationURL
         self.openSettings = openSettings
         self.closeSetup = closeSetup
         self.uiTestMode = uiTestMode
@@ -342,11 +286,9 @@ struct SetupView: View {
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.retryStartupRecovery = retryStartupRecovery
         self.setupLifecycle = setupLifecycle
-        self.deviceSessionRefresher = deviceSessionRefresher
-        self.openDeviceVerificationPage = openDeviceVerificationPage
     }
 
-    private static let resumeStateKey = "setup.repository-policy.v2"
+    private static let resumeStateKey = "setup.repository-policy.v4"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -382,39 +324,15 @@ struct SetupView: View {
             }
         }
         .onDisappear {
-            // The setup surface is gone: bump the authoritative lifecycle so
-            // no in-flight restore/verification continuation can create a
-            // refresh, publish state, stamp the schedule, or restart polling.
-            // The poll and verification tasks are cancelled as well, so a
-            // late device-code token or verification stops immediately.
-            setupLifecycle.invalidate()
-            pauseAuthorization()
-            stopDeviceRepositoryPolling()
-            deviceRefreshTask?.cancel()
-            deviceRefreshTask = nil
-            devicePollTask?.cancel()
-            devicePollTask = nil
-            deviceVerificationTask?.cancel()
-            deviceVerificationTask = nil
-            githubSkipTask?.cancel()
-        }
-        .onChange(of: activeStep) { _, newStep in
-            if newStep == .github {
-                startDeviceRepositoryPollingIfNeeded()
-            } else {
-                stopDeviceRepositoryPolling()
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
-            handleDeviceWindowBecameKey(notification)
+            invalidateSetupLifecycle()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
-            handleDeviceWindowWillClose(notification)
-        }
-        .onChange(of: githubDecisionMade) { _, decided in
-            if decided { stopDeviceRepositoryPolling() }
+            handleSetupWindowWillClose(notification)
         }
         .onChange(of: drafts) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: editedGitHubWorkspaces) { _, _ in
             if !uiTestMode { persistResumeState() }
         }
         .onChange(of: githubSkipped) { _, _ in
@@ -443,6 +361,20 @@ struct SetupView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.root")
+    }
+
+    private func invalidateSetupLifecycle() {
+        setupLifecycle.invalidate()
+        pauseAuthorization()
+        githubSkipTask?.cancel()
+    }
+
+    private func handleSetupWindowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.identifier == NSUserInterfaceItemIdentifier("setup.window") else {
+            return
+        }
+        invalidateSetupLifecycle()
     }
 
     private var blockingChecks: [MSWPreflightCheck] {
@@ -477,25 +409,6 @@ struct SetupView: View {
         [.preflight, .toolchain, .hostIntegration, .workspaces, .github, .identity, .complete]
     }
 
-    /// Pure decision, unit-tested directly: a device-flow sign-in alone is not
-    /// enough — GitHub must confirm at least one repository is actually
-    /// accessible to the App (an installation with zero accessible
-    /// repositories grants nothing). Skipping, or existing grant metadata,
-    /// still decides it explicitly.
-    static func deviceAccessDecided(signedIn: Bool, repositoryCount: Int) -> Bool {
-        signedIn && repositoryCount > 0
-    }
-
-    /// Pure decision, unit-tested directly: the host's
-    /// `MSW_GITHUB_RECONNECT_REQUIRED` condition demands the workspace's
-    /// native-broker scoped credential, which the device flow never writes —
-    /// a re-check or fresh sign-in only proves repositories are accessible to
-    /// the GitHub App. So while the attention banner is active, confirming
-    /// accessible repositories must transition it to name the remaining grant
-    /// re-apply action instead of clearing it.
-    static func attentionReapplyRequired(attentionWorkspace: String?, accessibleRepositoryCount: Int) -> Bool {
-        attentionWorkspace != nil && accessibleRepositoryCount > 0
-    }
 
     /// Pure decision, unit-tested directly: the attention banner clears only
     /// once the attention workspace's scoped grant was actually committed.
@@ -520,27 +433,7 @@ struct SetupView: View {
         return committedWorkspaces.contains(issueWorkspace)
     }
 
-    /// Pure identity check, unit-tested directly: a device-flow verification
-    /// task may write the session, publish state, and clear the stored handle
-    /// only while it is still the current verifier. A cancelled predecessor
-    /// must never publish its stale result or erase a successor that replaced
-    /// it, or teardown would lose the live task's handle.
-    static func verificationTaskIsCurrent(storedGeneration: Int, taskGeneration: Int) -> Bool {
-        storedGeneration == taskGeneration
-    }
 
-    /// The attention banner's current phase, derived from observable state:
-    /// while the banner is active, confirming accessible repositories
-    /// (a re-check or fresh sign-in) proves only the device side — the
-    /// host-side scoped credential the reconnect error demands still needs a
-    /// grant re-apply, so the banner names that remaining action instead of
-    /// clearing or going stale.
-    private var githubAttentionReapplyRequired: Bool {
-        Self.attentionReapplyRequired(
-            attentionWorkspace: githubAttentionWorkspace,
-            accessibleRepositoryCount: deviceRepositoryCount
-        )
-    }
 
     /// Whether a real re-apply control exists on the current path: the
     /// browser authorization flow (`beginAuthorization` + policy commit)
@@ -554,83 +447,14 @@ struct SetupView: View {
             (authorizationCoordinator != nil && authorizationCoordinator?.isConfigured == true)
     }
 
-    /// Maps a repository re-check failure to a user-facing, actionable message
-    /// so an auth/transport/decode error is never mistaken for a genuine empty
-    /// selection. Pure and static for direct unit testing.
-    static func deviceRefreshIssueMessage(for error: Error, action: String) -> String {
-        let detail = (error as? LocalizedError)?.errorDescription ?? "Unexpected error."
-        return "GitHub reported an error \(action): \(detail)"
-    }
-
-    /// The account label for the device section. A refresh failure takes
-    /// precedence over the zero-selection wording: while `refreshIssue` is
-    /// set the section must never claim nothing is selected, because the
-    /// re-check itself failed to establish that.
-    static func deviceAccountLabel(login: String, repositoryCount: Int, refreshIssue: String?) -> String {
-        if deviceAccessDecided(signedIn: true, repositoryCount: repositoryCount) {
-            return "Connected as @\(login)"
-        }
-        if refreshIssue != nil {
-            return "Signed in as @\(login), but repository status could not be refreshed."
-        }
-        return "Signed in as @\(login), but no repositories are selected yet."
-    }
-
-    /// The signed-in status line for the device section. Same precedence
-    /// rule as `deviceAccountLabel`: an active refresh failure replaces the
-    /// zero-selection wording instead of coexisting with it.
-    static func deviceRepositorySignedInLine(login: String, repositoryCount: Int, refreshIssue: String?) -> String {
-        if deviceAccessDecided(signedIn: true, repositoryCount: repositoryCount) {
-            return "Connected as @\(login). Repositories selected on GitHub are available."
-        }
-        if refreshIssue != nil {
-            return "Signed in as @\(login), but repository status could not be refreshed."
-        }
-        return "Signed in as @\(login), but no repositories are selected yet. Install the MSW App and pick repositories, or continue without GitHub."
-    }
-
-    /// Pure derivation, unit-tested: which state the GitHub connection header
-    /// must present. A device account is authoritative whenever present
-    /// because it only exists on the device-flow path this build presents.
-    static func connectionPresentation(
-        account: GitHubAccount?,
-        deviceAccount: GitHubAccount?,
-        deviceRepositoryCount: Int,
-        deviceRefreshIssue: String? = nil
-    ) -> GitHubConnectionPresentation {
-        if let deviceAccount {
-            if deviceAccessDecided(signedIn: true, repositoryCount: deviceRepositoryCount) {
-                return .connected(account: deviceAccount)
-            }
-            // Issue 2 owns the refresh-error input: while a re-check failed,
-            // the header must not claim nothing is selected — the re-check
-            // itself failed to establish that.
-            if deviceRefreshIssue != nil {
-                return .refreshFailed(account: deviceAccount)
-            }
-            return .signedInAwaitingRepositories(account: deviceAccount)
-        }
-        if let account {
-            return .connected(account: account)
-        }
-        return .notConnected
-    }
 
     private var githubConnectionPresentation: GitHubConnectionPresentation {
-        // Device sessions only exist on the device-flow path this build
-        // presents, so its account is authoritative over any restored MSW
-        // Connect coordinator session.
-        Self.connectionPresentation(
-            account: account,
-            deviceAccount: deviceAccount,
-            deviceRepositoryCount: deviceRepositoryCount,
-            deviceRefreshIssue: deviceRefreshIssue
-        )
+        account.map(GitHubConnectionPresentation.connected) ?? .notConnected
     }
 
     private var githubDecisionMade: Bool {
         githubSkipped ||
-            Self.deviceAccessDecided(signedIn: deviceAccount != nil, repositoryCount: deviceRepositoryCount) ||
+            repositoryPolicyApplied ||
             !existingMetadata.isEmpty ||
             !verificationResults.isEmpty
     }
@@ -725,7 +549,7 @@ struct SetupView: View {
             Label("Authorization recovery blocked", systemImage: "exclamationmark.octagon.fill")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.red)
-            Text("MSW Monitor did not expose workspace credentials because an interrupted GitHub authorization transaction could not be reconciled safely.")
+            Text("GitHub access could not be recovered after an interrupted update.")
                 .font(.callout)
             Text(reason)
                 .font(.caption)
@@ -868,7 +692,7 @@ struct SetupView: View {
                     await MainActor.run {
                         isSkippingGitHub = false
                         githubSkipTask = nil
-                        githubSkipIssue = "GitHub access for \(affectedWorkspace) cannot be disabled because the credential service is unavailable in this build. Reconnect GitHub instead."
+                        githubSkipIssue = "GitHub access for \(affectedWorkspace) could not be updated. Existing access remains unchanged; reconnect GitHub instead."
                         githubSkipIssueWorkspace = nil
                     }
                     return
@@ -1069,7 +893,7 @@ struct SetupView: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("GitHub access").font(.title3.weight(.semibold))
-                Text("Optional — connect, review, and apply per workspace")
+                Text("Optional")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1081,56 +905,38 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.github.disconnected")
                 Text("GitHub is optional. You can connect it now or configure it later in Settings.")
                     .font(.caption)
-            case .signedInAwaitingRepositories(let account):
-                Label("Signed in as @\(account.login), but no repositories are selected yet.", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("setup.github.account")
-                Text("GitHub identity is stored in the Mac Keychain. Pick repositories on GitHub, then check again.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            case .refreshFailed(let account):
-                Label("Signed in as @\(account.login), but repository status could not be refreshed.", systemImage: "exclamationmark.octagon.fill")
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier("setup.github.account")
-                Text(deviceReauthorizationRequired
-                    ? "Reconnect to GitHub to continue."
-                    : "Check the network connection and try checking again.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             case .connected(let account):
-                Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityIdentifier("setup.github.account")
-                if deviceAccount != nil {
-                    Text("Repository selection is managed on GitHub. This direct connection does not mint the scoped workspace grants required for per-workspace or write controls.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(githubIdentityDisclosure(account))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Choose repository access by workspace. Nothing is changed until you review and apply.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier("setup.github.account")
+                    if Self.validatedInstallationURL(githubInstallationURL) != nil {
+                        Button("Manage repositories on GitHub", action: openGitHubInstallation)
+                            .accessibilityIdentifier("setup.github.manage-repositories.button")
+                    }
                 }
+                Text("Choose repository access for each workspace.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
             }
 
             if let workspace = githubAttentionWorkspace {
                 VStack(alignment: .leading, spacing: 6) {
                     Label(
-                        githubAttentionReapplyRequired
-                            ? (githubReapplyActionable
-                                ? "GitHub access for \(workspace) needs attention. Re-apply GitHub access for \(workspace) to finish reconnecting."
-                                : "GitHub access for \(workspace) needs attention. Re-applying GitHub access is unavailable in this build — choose Continue without GitHub to disable it.")
-                            : "GitHub access for \(workspace) needs attention.",
+                        "Existing \(workspace) access needs reconnecting.",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .font(.callout)
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("setup.github.attention")
-                    if githubAttentionReapplyRequired, githubReapplyActionable {
-                        Button("Re-apply GitHub access for \(workspace)", action: beginAuthorization)
+                    if githubReapplyActionable {
+                        Button("Manage \(workspace) access", action: beginAuthorization)
                             .disabled(!canConnectGitHub || isAuthorizing)
+                            .accessibilityIdentifier("setup.github.reapply.button")
+                    } else {
+                        Button("Manage \(workspace) access") { openSettings(.github) }
+                            .disabled(isAuthorizing)
                             .accessibilityIdentifier("setup.github.reapply.button")
                     }
                 }
@@ -1139,8 +945,8 @@ struct SetupView: View {
             if (authorizationCoordinator == nil && uiTestGitHubScenario == nil) ||
                 uiTestGitHubScenario == "unavailable" {
                 Text(uiTestGitHubScenario == "unavailable"
-                    ? "GitHub connection is unavailable. The existing access and saved choices remain unchanged; retry after MSW Connect is available."
-                    : "GitHub connection is unavailable in this build. You can continue without it and configure it later from Settings.")
+                    ? "GitHub could not be reached. Existing access and saved choices remain unchanged; try again later."
+                    : "GitHub access is not ready yet. You can continue without GitHub and connect later in Settings.")
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("setup.github.unavailable")
             } else if uiTestGitHubScenario != nil {
@@ -1148,10 +954,8 @@ struct SetupView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!canConnectGitHub || isAuthorizing)
                     .accessibilityIdentifier("setup.github.connect.button")
-            } else if deviceFlow != nil {
-                deviceFlowSection
             } else if !(authorizationCoordinator?.isConfigured ?? false) {
-                Text("GitHub connection isn't available yet. Continue and connect later in Settings.")
+                Text("GitHub access is not ready yet. Continue and connect later in Settings.")
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("setup.github.unavailable")
             } else {
@@ -1192,18 +996,14 @@ struct SetupView: View {
             if account != nil {
                 if installations.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("MSW App is not installed for an owner yet.", systemImage: "exclamationmark.triangle.fill")
+                        Label("No repositories are available yet.", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text("Install the MSW App for the GitHub owner that should provide repositories, then connect GitHub again.")
+                        Text("Manage repositories on GitHub, then connect GitHub again.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if Self.validatedInstallationURL(githubInstallationURL) != nil {
-                            Button("Install MSW App in GitHub", action: openGitHubInstallation)
+                            Button("Manage repositories on GitHub", action: openGitHubInstallation)
                                 .accessibilityIdentifier("setup.github.install.button")
-                        } else {
-                            Text("This build has no verified GitHub App installation link. Ask your release administrator for the approved installation URL.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                     }
                     .padding(10)
@@ -1240,8 +1040,8 @@ struct SetupView: View {
                         .font(.callout.weight(.semibold))
                     LabeledContent("Cause", value: authorizationIssue.message)
                     LabeledContent("Affected", value: githubAffectedScope)
-                    LabeledContent("Last verified", value: githubVerificationAge)
-                    LabeledContent("Blocked", value: "Applying reviewed GitHub workspace grants")
+                    LabeledContent("Last checked", value: githubVerificationAge)
+                    LabeledContent("Blocked", value: "Repository access")
                     Text(issueRecovery(authorizationIssue.kind)).font(.caption).foregroundStyle(.secondary)
                     Button("Retry GitHub authorization", action: beginAuthorization)
                         .disabled(!canConnectGitHub || isAuthorizing)
@@ -1304,114 +1104,15 @@ struct SetupView: View {
         .accessibilityIdentifier("setup.github-boundary")
     }
 
-    private var deviceFlowSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if deviceAccount != nil {
-                Text("Your credential is stored in the Mac Keychain. Workspaces never see it; GitHub access for workspaces is host-mediated.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if Self.validatedInstallationURL(deviceInstallationURL) != nil {
-                    Button("Choose repositories on GitHub", action: openDeviceInstallation)
-                        .accessibilityIdentifier("setup.github.pick.button")
-                } else {
-                    Text("Repositories are chosen on GitHub's App installation page. This build has no installation link configured.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if deviceRepositoryCount == 0, let deviceSession, !deviceReauthorizationRequired {
-                    Button("Check again") {
-                        // Tracked wrapper over the single-flight entry: the
-                        // guarded entry owns the refresh task, so a manual
-                        // press coalesces with any in-flight re-check instead
-                        // of bypassing it. Recording the completion time keeps
-                        // the poller's wait satisfied by this check too — but
-                        // only when the check actually completed and
-                        // published, so a cancelled attempt never throttles
-                        // later real checks.
-                        Task {
-                            let completed = await refreshDeviceRepositoryCount(accessToken: deviceSession.accessToken)
-                            if completed { lastDeviceRepositoryCheckAt = Date() }
-                        }
-                    }
-                    .accessibilityIdentifier("setup.github.refresh.button")
-                }
-                if deviceReauthorizationRequired {
-                    // A consumed/poisoned generation has no retry path: the
-                    // only recovery is a fresh device-flow authorization.
-                    Button("Reconnect GitHub", action: reconnectDeviceAccount)
-                        .accessibilityIdentifier("setup.github.reconnect.button")
-                }
-                if let deviceRefreshIssue {
-                    Label(deviceRefreshIssue, systemImage: "exclamationmark.octagon.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("setup.github.refresh.issue")
-                }
-                if deviceRepositoryPollTask != nil, deviceRefreshIssue == nil {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Waiting for repository selection on GitHub…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("setup.github.waiting")
-                }
-                if !deviceAccessibleRepositories.isEmpty {
-                    Text("Repository selection for this connection is controlled by the GitHub App installation. Per-workspace and write grants require MSW Connect, so this direct connection does not offer those controls.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("setup.github.device-scope")
-                }
-            } else if isConnectingDevice {
-                if let authorization = deviceAuthorization {
-                    Text("Enter this code on GitHub: \(authorization.userCode)")
-                        .font(.body.weight(.semibold))
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("setup.github.device-code")
-                    Text("GitHub opened in your default browser. Approve the code there, then wait.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(deviceStatus).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Cancel wait", action: cancelDeviceFlow)
-                        .accessibilityIdentifier("setup.github.cancel.button")
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("setup.github.progress")
-            } else {
-                Text("Connect GitHub opens GitHub in your default browser: approve the code there and pick your repositories on the App installation page. The credential stays in the Mac Keychain.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Connect GitHub") { _ = startDeviceFlow() }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier("setup.github.connect.button")
-                if let deviceIssue {
-                    Text(deviceIssue)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .accessibilityIdentifier("setup.github.issue")
-                }
-            }
-            if !deviceStatus.isEmpty && !isConnectingDevice {
-                Text(deviceStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("setup.github.status")
-            }
-        }
-    }
 
     private var repositoryPolicyEditor: some View {
         RepositoryWorkspacePolicyEditor(
             installations: installations,
             repositoriesByInstallation: repositoriesByInstallation,
             drafts: $drafts,
-            disabled: isAuthorizing
+            editedWorkspaces: $editedGitHubWorkspaces,
+            disabled: isAuthorizing,
+            onEdit: { repositoryPolicyApplied = false }
         )
         .accessibilityIdentifier("setup.github.repository-policy")
     }
@@ -1419,7 +1120,7 @@ struct SetupView: View {
     private var reviewCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Review and apply").font(.headline)
-            Text("Review each repository-to-workspace choice. Verification repositories are selected deterministically from each role-eligible scope. Unconfigured workspaces remain unchanged.")
+            Text("Review each repository-to-workspace choice. Your access is checked before it is applied.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
@@ -1432,12 +1133,19 @@ struct SetupView: View {
     }
 
     private func reviewLine(for workspace: Workspace.ID) -> some View {
-        let selected = selectedPolicy.filter { $0.workspace == workspace.rawValue }
-        guard let first = selected.first,
-              let installation = installations.first(where: { $0.id == first.installationID }) else {
+        let workspacePolicy = workspacePolicy.first { $0.workspace == workspace.rawValue }
+        let selected = workspacePolicy?.repositories ?? []
+        if workspacePolicy != nil, selected.isEmpty {
+            return AnyView(
+                Text("\(workspace.rawValue): Existing access will be removed")
+                    .font(.caption)
+                    .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
+            )
+        }
+        guard !selected.isEmpty else {
             let hasExistingAccess = existingMetadata.contains { $0.workspace == workspace.rawValue }
             return AnyView(
-                Text("\(workspace.rawValue): \(hasExistingAccess ? "Existing access remains unchanged" : "Not configured — no grant will be created")")
+                Text("\(workspace.rawValue): \(hasExistingAccess ? "Existing access remains unchanged" : "Not configured")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
@@ -1445,7 +1153,7 @@ struct SetupView: View {
         }
         let access = selected.map { "\($0.fullName) — \($0.mode.label)" }.joined(separator: ", ")
         return AnyView(
-            Text("\(workspace.rawValue): \(installation.displayName) · \(access)")
+            Text("\(workspace.rawValue): \(access)")
                 .font(.caption)
                 .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
         )
@@ -1453,26 +1161,27 @@ struct SetupView: View {
 
     private var verificationResultsCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Retained verification results").font(.headline)
+            Text("Repository access").font(.headline)
             ForEach(verificationResults) { result in
                 VStack(alignment: .leading, spacing: 3) {
                     Label(
-                        "\(result.workspace): \(result.verified && result.lifecycleRestored ? "Verified" : "Needs recovery")",
+                        "\(result.workspace): \(result.verified && result.lifecycleRestored ? "Ready" : "Needs reconnecting")",
                         systemImage: result.verified && result.lifecycleRestored
                             ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
                     )
                     .foregroundStyle(result.verified && result.lifecycleRestored ? .green : .orange)
-                    Text("\(result.role == .host ? GitHubRepositoryAccessMode.readWrite.label : GitHubRepositoryAccessMode.readOnly.label) · \(result.verificationRepository)")
+                    Text(result.role == .host
+                        ? GitHubRepositoryAccessMode.readWrite.label
+                        : GitHubRepositoryAccessMode.readOnly.label)
                         .font(.caption)
-                    Text(result.safetyResult).font(.caption).foregroundStyle(.secondary)
                     Text("Checked \(result.checkedAt.formatted(date: .abbreviated, time: .standard))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     if !result.verified || !result.lifecycleRestored {
-                        Text("Blocked: GitHub repository access for \(result.workspace) until verification and lifecycle restoration succeed.")
+                        Text("Existing \(result.workspace) access needs reconnecting.")
                             .font(.caption)
                             .foregroundStyle(.orange)
-                        Button("Reauthorize \(result.workspace)", action: beginAuthorization)
+                        Button("Manage \(result.workspace) access", action: beginAuthorization)
                             .disabled(!canConnectGitHub || isAuthorizing)
                     }
                 }
@@ -1749,9 +1458,18 @@ struct SetupView: View {
         .fixedSize()
     }
 
-    private var selectedPolicy: [GitHubRepositoryPolicy] {
-        let policy = drafts.values.flatMap { policyEntries(for: $0) }
-        return policy.sorted { $0.id < $1.id }
+
+    /// Only workspaces the user edited are replaced. An edited workspace with
+    /// no entries deliberately removes all of its existing repository access.
+    private var workspacePolicy: [GitHubWorkspacePolicy] {
+        Workspace.ID.allCases.compactMap { workspace in
+            guard editedGitHubWorkspaces.contains(workspace.rawValue) else { return nil }
+            let draft = drafts[workspace.rawValue] ?? .initial(workspace)
+            return GitHubWorkspacePolicy(
+                workspace: workspace.rawValue,
+                repositories: policyEntries(for: draft)
+            )
+        }
     }
 
     private func policyEntries(for draft: WorkspaceRepositoryDraft) -> [GitHubRepositoryPolicy] {
@@ -1796,7 +1514,7 @@ struct SetupView: View {
     }
 
     private var hasValidAssignments: Bool {
-        !selectedPolicy.isEmpty
+        !workspacePolicy.isEmpty
     }
 
 
@@ -1804,7 +1522,7 @@ struct SetupView: View {
         if uiTestGitHubScenario == "unavailable" {
             authorizationIssue = AuthorizationIssue(
                 kind: .unavailable,
-                message: "The deterministic test service is unavailable. Existing access and saved choices remain unchanged."
+                message: "GitHub could not be reached. Existing access and saved choices remain unchanged; try again later."
             )
             authorizationStatus = ""
             return
@@ -1812,7 +1530,7 @@ struct SetupView: View {
         if uiTestGitHubScenario == nil, authorizationCoordinator == nil {
             authorizationIssue = AuthorizationIssue(
                 kind: .unavailable,
-                message: "GitHub authorization is unavailable in this build."
+                message: "GitHub access is not ready yet. Continue without GitHub, or try again later."
             )
             return
         }
@@ -1851,15 +1569,14 @@ struct SetupView: View {
                     if let installation = discovery.installations.first {
                         repositoriesByInstallation[installation.id] = Self.uiTestRepositories
                     }
+                    prefillRepositoryPolicyDrafts()
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
-                    // Discovery creates no host credential; the attention
-                    // banner stays until dev's grant actually commits.
                     authorizationStatus = discovery.installations.isEmpty
-                        ? "Connected as @\(discovery.account.login), but no MSW App installation was found. Install the app, then connect GitHub again."
-                        : "Connected as @\(discovery.account.login). Assign repositories to each workspace, then review before applying."
+                        ? "No MSW App installation was found. Install the app, then connect GitHub again."
+                        : "Choose repository access, then review before applying."
                     prefillIdentity(from: discovery.account)
                 }
             }
@@ -1887,13 +1604,12 @@ struct SetupView: View {
                     githubInstallationURL = Self.validatedInstallationURL(installURL)
                     authorizationSessionID = discovery.sessionID
                     repositoriesByInstallation = loadedRepositories
+                    prefillRepositoryPolicyDrafts()
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
-                    // Discovery creates no host credential; the attention
-                    // banner stays until the affected grant actually commits.
-                    authorizationStatus = "Connected as @\(discovery.account.login). Choose repository access, then review before applying."
+                    authorizationStatus = "Choose repository access, then review before applying."
                     prefillIdentity(from: discovery.account)
                 }
             } catch {
@@ -1953,18 +1669,19 @@ struct SetupView: View {
     }
 
     private func commitPolicy() {
-        let policy = selectedPolicy
-        guard !policy.isEmpty else {
-            authorizationStatus = "Choose at least one repository for a workspace."
+        let workspacePolicies = workspacePolicy
+        guard !workspacePolicies.isEmpty else {
+            authorizationStatus = "Choose a workspace to update."
             return
         }
+        let policy = workspacePolicies.flatMap { $0.repositories }
 
         authorizationGeneration &+= 1
         let generation = authorizationGeneration
         isAuthorizing = true
         authorizationMayCancel = false
         authorizationIssue = nil
-        authorizationStatus = "Creating reviewed grants, binding guest/host access, and verifying repository boundaries…"
+        authorizationStatus = "Applying repository access…"
         authorizationTask?.cancel()
 
         if uiTestGitHubScenario != nil {
@@ -2019,14 +1736,14 @@ struct SetupView: View {
                     // reporting as skipped.
                     if Self.skipIssueResolved(
                         issueWorkspace: githubSkipIssueWorkspace,
-                        committedWorkspaces: policy.map(\.workspace)
+                        committedWorkspaces: workspacePolicies.map(\.workspace)
                     ) {
                         githubSkipIssue = nil
                         githubSkipIssueWorkspace = nil
                     }
                     if !disabledGitHubWorkspaces.isEmpty {
                         disabledGitHubWorkspaces.removeAll { workspace in
-                            policy.contains { $0.workspace == workspace }
+                            workspacePolicies.contains { $0.workspace == workspace }
                         }
                         if disabledGitHubWorkspaces.isEmpty {
                             githubSkipped = false
@@ -2034,13 +1751,14 @@ struct SetupView: View {
                     }
                     if Self.attentionResolved(
                         attentionWorkspace: githubAttentionWorkspace,
-                        committedWorkspaces: policy.map(\.workspace)
+                        committedWorkspaces: workspacePolicies.map(\.workspace)
                     ) {
                         githubAttentionWorkspace = nil
                     }
+                    repositoryPolicyApplied = true
                     authorizationSessionID = nil
                     isReviewing = false
-                    authorizationStatus = "Applied repository policy for \(Set(policy.map(\.workspace)).count) workspace(s)."
+                    authorizationStatus = "Applied repository access for \(workspacePolicies.count) workspace(s)."
                 }
             }
             return
@@ -2056,7 +1774,7 @@ struct SetupView: View {
             do {
                 let result = try await authorizationCoordinator.commitPolicyWithVerification(
                     sessionID: sessionID,
-                    policy: policy
+                    policy: workspacePolicies
                 )
                 let refreshed = await authorizationCoordinator.metadata()
                 await MainActor.run {
@@ -2075,14 +1793,14 @@ struct SetupView: View {
                     // reporting as skipped.
                     if Self.skipIssueResolved(
                         issueWorkspace: githubSkipIssueWorkspace,
-                        committedWorkspaces: policy.map(\.workspace)
+                        committedWorkspaces: workspacePolicies.map(\.workspace)
                     ) {
                         githubSkipIssue = nil
                         githubSkipIssueWorkspace = nil
                     }
                     if !disabledGitHubWorkspaces.isEmpty {
                         disabledGitHubWorkspaces.removeAll { workspace in
-                            policy.contains { $0.workspace == workspace }
+                            workspacePolicies.contains { $0.workspace == workspace }
                         }
                         if disabledGitHubWorkspaces.isEmpty {
                             githubSkipped = false
@@ -2090,10 +1808,11 @@ struct SetupView: View {
                     }
                     if Self.attentionResolved(
                         attentionWorkspace: githubAttentionWorkspace,
-                        committedWorkspaces: policy.map(\.workspace)
+                        committedWorkspaces: workspacePolicies.map(\.workspace)
                     ) {
                         githubAttentionWorkspace = nil
                     }
+                    repositoryPolicyApplied = true
                     authorizationSessionID = nil
                     isReviewing = false
                 }
@@ -2237,14 +1956,8 @@ struct SetupView: View {
     }
 
     /// The startup GitHub-context chain, driven by the outermost `.task` and
-    /// testable directly: captures the setup-window/device-flow lifecycle at
-    /// the OUTERMOST entry — before any startup await — and re-checks it
-    /// after every await. A close that lands while `loadExistingMetadata`,
-    /// `restoreCachedAuthorization`, or the restore itself is pending bumps
-    /// the stored generation; the guards below then return silently: the
-    /// restore is never invoked, no status/context is published, and nothing
-    /// polls. Returns whether the startup completed (and may publish
-    /// `githubContextLoaded`).
+    /// Loads persisted setup and the cached Connect session before enabling
+    /// review. Every awaited publication is guarded against setup teardown.
     @discardableResult
     func loadGitHubStartupContext() async -> Bool {
         let startupLifecycle = setupLifecycle.generation
@@ -2254,843 +1967,10 @@ struct SetupView: View {
         guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
         await restoreCachedAuthorization(startupLifecycle: startupLifecycle)
         guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
-        await restoreDeviceSession(startupLifecycle: startupLifecycle)
-        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
         githubContextLoaded = true
         return true
     }
 
-    /// Restores the stored direct-GitHub session, rotating an expired access
-    /// token with its refresh token when available. The setup-window/device-
-    /// flow lifecycle token is captured by the OUTERMOST `.task` entry and
-    /// passed in (never re-read here): teardown (willClose, onDisappear,
-    /// cancelDeviceFlow) bumps the stored generation, so a close that lands
-    /// while revalidation is pending — or after a child re-check completed
-    /// true but before this continuation — is a terminal no-op. The shared
-    /// actor may still finish its Keychain work (credential integrity is
-    /// preserved), but nothing revives UI or poll state. Internal so the
-    /// barrier ordering tests can drive it deterministically.
-    func restoreDeviceSession(startupLifecycle: Int) async {
-        guard let deviceFlow else { return }
-        let lifecycleGeneration = startupLifecycle
-        do {
-            let outcome = try await deviceSessionRefresher.revalidatedSession(using: deviceFlow)
-            // Guard A: never assign UI state from a restore whose setup
-            // surface was torn down while revalidation was pending.
-            guard setupLifecycle.isCurrent(lifecycleGeneration) else { return }
-            guard case .current(let session, _) = outcome else {
-                if case .superseded = outcome {
-                    // A concurrent replacement won the epoch; publish nothing.
-                    return
-                }
-                // Quarantine: the consumed generation could not be poisoned.
-                // Reauthorization-ONLY — surface the account so the header
-                // offers the reconnect control, but never a Check-again retry
-                // of the consumed pair.
-                deviceRefreshIssue = Self.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session")
-                deviceReauthorizationRequired = true
-                if let stored = try? GitHubDeviceSessionStore().load() {
-                    deviceAccount = stored.account
-                    prefillIdentity(from: stored.account)
-                }
-                return
-            }
-            guard let session else { return }
-            deviceAccount = session.account
-            prefillIdentity(from: session.account)
-            if session.isAccessExpired {
-                // Expired and unrefreshable (or a consumed generation that was
-                // poisoned fail-closed): reauthorization-ONLY — no session, no
-                // Check again, no polling.
-                deviceRefreshIssue = "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub, then check again."
-                deviceReauthorizationRequired = true
-                return
-            }
-            deviceSession = session
-            // Guard point 1: never create a NEW refresh task after teardown —
-            // `refreshDeviceRepositoryCount` would create it even though the
-            // earlier cancellation could only reach a nil/current handle.
-            guard setupLifecycle.isCurrent(lifecycleGeneration) else { return }
-            let completed = await refreshDeviceRepositoryCount(accessToken: session.accessToken)
-            // Guard point 2: after the child returns, still no status, stamp,
-            // or poll restart — the child may have completed true (its cancel
-            // raced a finished publish) with the close landing in this
-            // continuation's scheduling gap. `publishDeviceRepositoryRestoreResult`
-            // is the same guarded continuation the ordering test drives.
-            publishDeviceRepositoryRestoreResult(
-                lifecycleGeneration: lifecycleGeneration,
-                completed: completed
-            )
-        } catch is CancellationError {
-            // Startup restore was cancelled; leave state untouched.
-        } catch {
-            // A genuinely retryable transport failure must not render as
-            // "not connected": publish the stored session and keep Check
-            // again available — but never after teardown.
-            guard setupLifecycle.isCurrent(lifecycleGeneration) else { return }
-            if let stored = try? GitHubDeviceSessionStore().load() {
-                deviceSession = stored
-                deviceAccount = stored.account
-                prefillIdentity(from: stored.account)
-                deviceRefreshIssue = Self.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session")
-                deviceStatus = Self.deviceRepositorySignedInLine(
-                    login: stored.account.login,
-                    repositoryCount: deviceRepositoryCount,
-                    refreshIssue: deviceRefreshIssue
-                )
-            }
-            // Without a stored session there is nothing to restore; the user
-            // can connect again.
-        }
-    }
-
-    /// Guarded stamp/status/poll publication of the restore continuation,
-    /// shared with the barrier ordering test: both the captured setup
-    /// lifecycle AND a completed re-check are required. A stale lifecycle
-    /// (close during revalidation or during the child re-check) is a terminal
-    /// no-op — nothing is stamped, published, or restarted. Returns whether
-    /// the continuation published, which is how the ordering test observes
-    /// the decision deterministically.
-    @discardableResult
-    func publishDeviceRepositoryRestoreResult(lifecycleGeneration: Int, completed: Bool) -> Bool {
-        guard setupLifecycle.isCurrent(lifecycleGeneration),
-              Self.shouldContinueSetupAfterRecheck(completed: completed) else {
-            return false
-        }
-        lastDeviceRepositoryCheckAt = Date()
-        startDeviceRepositoryPollingIfNeeded()
-        deviceStatus = Self.deviceRepositorySignedInLine(
-            login: deviceAccount?.login ?? "",
-            repositoryCount: deviceRepositoryCount,
-            refreshIssue: deviceRefreshIssue
-        )
-        return true
-    }
-
-    /// Starts reauthorization from the reauthorization-ONLY state: drop the
-    /// stale account so the account-nil branch renders the device-flow states
-    /// (code entry, progress, cancellation, failures) end to end;
-    /// finishDeviceFlow repopulates the account on success. The
-    /// reauthorization-required flag is cleared only by a successful new
-    /// session, never by the attempt itself.
-    private func reconnectDeviceAccount() {
-        deviceAccount = nil
-        startDeviceFlow()
-    }
-
-    /// Begins a new device flow, returning the poll task so the barrier tests
-    /// can AWAIT its terminal completion (a task's completion implies the
-    /// carried `finishDeviceFlow` invocation has fully run — a deterministic
-    /// barrier, never a sleep). Internal so the device-flow barrier tests can
-    /// drive it deterministically.
-    @discardableResult
-    func startDeviceFlow() -> Task<Void, Never>? {
-        guard let deviceFlow else { return nil }
-        cancelDeviceFlow()
-        // Authoritative token for THIS flow: captured after the reset (which
-        // bumped the lifecycle), so the exact epoch the poll and verification
-        // continuations must still match after their awaits. The token is
-        // carried through the poll task into finishDeviceFlow — never re-read
-        // after the poll returns — so a token that arrives after teardown
-        // (which bumps the stored generation and cancels the poll) can only
-        // be stale.
-        let flowLifecycle = setupLifecycle.generation
-        isConnectingDevice = true
-        deviceIssue = nil
-        deviceRefreshIssue = nil
-        deviceStatus = "Requesting a GitHub code…"
-        let pollTask = Task {
-            do {
-                let authorization = try await deviceFlow.requestDeviceCode()
-                await MainActor.run {
-                    // Code/progress publication: terminal after teardown.
-                    guard !Task.isCancelled, setupLifecycle.isCurrent(flowLifecycle) else { return }
-                    deviceAuthorization = authorization
-                    deviceStatus = "Enter the code on GitHub, then approve."
-                    _ = openDeviceVerificationPage(GitHubDeviceFlow.verificationURL(for: authorization))
-                }
-                var interval = authorization.interval
-                let deadline = Date().addingTimeInterval(TimeInterval(authorization.expiresIn))
-                while true {
-                    try await Task.sleep(for: .seconds(interval))
-                    if Date() >= deadline {
-                        throw GitHubDeviceFlowError.expired
-                    }
-                    do {
-                        let token = try await deviceFlow.pollToken(
-                            clientID: deviceFlow.configuration.clientID,
-                            deviceCode: authorization.deviceCode
-                        )
-                        await MainActor.run {
-                            _ = finishDeviceFlow(token: token, lifecycleGeneration: flowLifecycle)
-                        }
-                        return
-                    } catch GitHubDeviceFlowError.authorizationPending {
-                        continue
-                    } catch GitHubDeviceFlowError.slowDown(let slowed) {
-                        interval = slowed
-                    }
-                }
-            } catch is CancellationError {
-                // Cancelled by the user; state already reset by cancelDeviceFlow.
-            } catch {
-                await MainActor.run {
-                    // Error publication: terminal after teardown.
-                    guard !Task.isCancelled, setupLifecycle.isCurrent(flowLifecycle) else { return }
-                    isConnectingDevice = false
-                    deviceAuthorization = nil
-                    deviceStatus = ""
-                    deviceIssue = (error as? LocalizedError)?.errorDescription
-                        ?? "GitHub connection failed. Try again."
-                    devicePollTask = nil
-                }
-            }
-        }
-        devicePollTask = pollTask
-        return pollTask
-    }
-
-    /// Handles a device-code token that the poll obtained. Returns whether
-    /// the token was ACCEPTED (a verification was started): a stale carried
-    /// lifecycle token is rejected AT ENTRY — before `deviceVerificationTask`
-    /// is cancelled, `deviceVerificationGeneration` is bumped, or any status
-    /// changes — so a late old-flow token can never cancel or replace a newer
-    /// flow's verification. Internal so the barrier tests can invoke the
-    /// finish entry synchronously and observe the rejection.
-    @discardableResult
-    func finishDeviceFlow(token: GitHubDeviceToken, lifecycleGeneration: Int) -> Bool {
-        guard let deviceFlow else { return false }
-        // A stale carried token (this flow was torn down or superseded while
-        // the token was in flight) is terminal AT ENTRY — BEFORE any shared
-        // verification state is touched. A late old-flow token must neither
-        // cancel the newer valid verification nor bump its generation: the
-        // verification identity guard is captured AFTER this check, so the
-        // newer flow's generation is untouched and its publication proceeds.
-        guard setupLifecycle.isCurrent(lifecycleGeneration) else { return false }
-        deviceVerificationTask?.cancel()
-        deviceVerificationGeneration &+= 1
-        let generation = deviceVerificationGeneration
-        // The lifecycle token was captured at startDeviceFlow (after the
-        // reset) and carried through the poll: it is NEVER re-read here, so a
-        // token that arrives after teardown (which bumps the stored
-        // generation and cancels the poll/verification tasks) can only be
-        // stale, and every publication below — including the verification's
-        // very first await — requires it to still be current. A stale
-        // verification emits no fetches, no Keychain write, and no UI.
-        deviceVerificationTask = Task {
-            // Fail closed BEFORE any verification network work: a late token
-            // must not start account/installation fetches, a session write,
-            // or any publication.
-            guard Self.deviceVerificationMayPublish(
-                taskCancelled: Task.isCancelled,
-                storedGeneration: deviceVerificationGeneration,
-                taskGeneration: generation,
-                storedLifecycle: setupLifecycle.generation,
-                capturedLifecycle: lifecycleGeneration
-            ) else { return }
-            do {
-                let account = try await deviceFlow.account(accessToken: token.accessToken)
-                // A sign-in alone grants nothing: verify that at least one
-                // repository is actually accessible to the App before
-                // counting the GitHub step as decided.
-                let installations = try await deviceFlow.installations(accessToken: token.accessToken)
-                var accessibleRepositories: [GitHubRepository] = []
-                for installation in installations {
-                    let repositories = try await deviceFlow.repositories(
-                        accessToken: token.accessToken,
-                        installationID: installation.id
-                    )
-                    accessibleRepositories.append(contentsOf: repositories)
-                }
-                let accessibleRepositoryCount = accessibleRepositories.count
-                let session = GitHubDeviceSession(
-                    schemaVersion: 1,
-                    clientID: deviceFlow.configuration.clientID,
-                    account: account,
-                    accessToken: token.accessToken,
-                    refreshToken: token.refreshToken,
-                    accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-                    refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-                    obtainedAt: Date()
-                )
-                // Cancelled invocations publish nothing: a cancelled
-                // predecessor must neither write the session nor clear a
-                // successor's handle.
-                guard Self.deviceVerificationMayPublish(
-                    taskCancelled: Task.isCancelled,
-                    storedGeneration: deviceVerificationGeneration,
-                    taskGeneration: generation,
-                    storedLifecycle: setupLifecycle.generation,
-                    capturedLifecycle: lifecycleGeneration
-                ) else { return }
-                // Credential integrity: the Keychain write may still finish
-                // after a close; the publication guards below keep the UI
-                // unrevived.
-                try await deviceSessionRefresher.replaceCurrentSession(with: session)
-                await MainActor.run {
-                    // Cancellation and teardown are terminal for the
-                    // publish/stamp/poll block: a stale sign-in publication
-                    // or polling restart must never revive state the teardown
-                    // owns.
-                    guard Self.deviceVerificationMayPublish(
-                        taskCancelled: Task.isCancelled,
-                        storedGeneration: deviceVerificationGeneration,
-                        taskGeneration: generation,
-                        storedLifecycle: setupLifecycle.generation,
-                        capturedLifecycle: lifecycleGeneration
-                    ) else { return }
-                    deviceSession = session
-                    deviceAccount = account
-                    deviceRepositoryCount = accessibleRepositoryCount
-                    deviceAccessibleRepositories = accessibleRepositories
-                    // A fresh sign-in does not restore the host-side scoped
-                    // credential that MSW_GITHUB_RECONNECT_REQUIRED demands;
-                    // the banner stays and derives the re-apply phase from the
-                    // accessible repository count.
-                    deviceVerificationTask = nil
-                    deviceRefreshIssue = nil
-                    deviceReauthorizationRequired = false
-                    isConnectingDevice = false
-                    deviceAuthorization = nil
-                    devicePollTask = nil
-                    lastDeviceRepositoryCheckAt = Date()
-                    startDeviceRepositoryPollingIfNeeded()
-                    deviceStatus = Self.deviceRepositorySignedInLine(
-                        login: account.login,
-                        repositoryCount: accessibleRepositories.count,
-                        refreshIssue: deviceRefreshIssue
-                    )
-                    prefillIdentity(from: account)
-                }
-            } catch is CancellationError {
-                // A transport-reported cancellation does not set the
-                // task-cancel bit, so it must be caught explicitly: publish
-                // nothing (cancelDeviceFlow owns the cancelled state).
-                return
-            } catch {
-                // Cancelled invocations publish nothing: the generation guard
-                // keeps a cancelled predecessor from overwriting the explicit
-                // cancellation state set by cancelDeviceFlow.
-                guard Self.deviceVerificationMayPublish(
-                    taskCancelled: Task.isCancelled,
-                    storedGeneration: deviceVerificationGeneration,
-                    taskGeneration: generation,
-                    storedLifecycle: setupLifecycle.generation,
-                    capturedLifecycle: lifecycleGeneration
-                ) else { return }
-                await MainActor.run {
-                    guard Self.deviceVerificationMayPublish(
-                        taskCancelled: Task.isCancelled,
-                        storedGeneration: deviceVerificationGeneration,
-                        taskGeneration: generation,
-                        storedLifecycle: setupLifecycle.generation,
-                        capturedLifecycle: lifecycleGeneration
-                    ) else { return }
-                    isConnectingDevice = false
-                    deviceAuthorization = nil
-                    devicePollTask = nil
-                    deviceVerificationTask = nil
-                    deviceStatus = ""
-                    deviceIssue = "GitHub approved the code, but the account could not be verified: \(error.localizedDescription)"
-                }
-            }
-        }
-        return true
-    }
-
-    /// Pure publication guard, unit-tested directly: a device-flow
-    /// verification may publish only while its task is not cancelled, it is
-    /// still the current verification, AND the setup-window/device-flow
-    /// lifecycle it captured before its first await is still current. Window
-    /// close, disappear, or explicit flow cancellation during verification is
-    /// terminal for the publish/stamp/poll block — the verification identity
-    /// guard alone cannot observe teardown.
-    static func deviceVerificationMayPublish(
-        taskCancelled: Bool,
-        storedGeneration: Int,
-        taskGeneration: Int,
-        storedLifecycle: Int,
-        capturedLifecycle: Int
-    ) -> Bool {
-        !taskCancelled &&
-            verificationTaskIsCurrent(storedGeneration: storedGeneration, taskGeneration: taskGeneration) &&
-            storedLifecycle == capturedLifecycle
-    }
-
-    /// True while a repository re-check is running (manual button or poller);
-    /// Issue 1's poller uses this as an additional in-flight arbiter before
-    /// starting its own check.
-    var isDeviceRepositoryRefreshInFlight: Bool {
-        deviceRefreshTask != nil
-    }
-
-    /// Single-flight entry for repository re-checks: concurrent callers (the
-    /// poller, focus re-checks, startup restore, the manual "Check again")
-    /// coalesce onto the in-flight refresh. Session revalidation
-    /// (load → rotate → persist) is additionally serialized by the shared
-    /// `GitHubDeviceSessionRefresher` so a single-use refresh token is never
-    /// submitted twice. Returns `true` when the re-check completed and
-    /// published a result (success or failure); `false` when it was cancelled
-    /// or superseded and published nothing — callers stamp the schedule
-    /// timestamp only on completed outcomes so a cancelled attempt (window
-    /// teardown) never throttles a later real check.
-    @discardableResult
-    func refreshDeviceRepositoryCount(accessToken: String) async -> Bool {
-        if let inFlight = deviceRefreshTask {
-            return await inFlight.value
-        }
-        deviceRefreshGeneration &+= 1
-        let generation = deviceRefreshGeneration
-        let task = Task { await performDeviceRepositoryRefresh(accessToken: accessToken, generation: generation) }
-        deviceRefreshTask = task
-        let completed = await task.value
-        if Self.refreshTaskIsCurrent(storedGeneration: deviceRefreshGeneration, taskGeneration: generation) {
-            deviceRefreshTask = nil
-        }
-        return completed
-    }
-
-    /// Pure identity check, unit-tested directly: a refresh task may clear
-    /// the stored handle only while it is still the current refresh. A
-    /// cancelled or replaced predecessor must never erase the successor's
-    /// handle, or teardown would lose the live task.
-    static func refreshTaskIsCurrent(storedGeneration: Int, taskGeneration: Int) -> Bool {
-        storedGeneration == taskGeneration
-    }
-
-    /// Applies the failure outcome of a re-check: records the issue and
-    /// replaces any zero-selection status with neutral failure wording, so
-    /// the UI never claims nothing is selected while the re-check itself
-    /// failed.
-    private func failDeviceRepositoryRefresh(with issue: String) {
-        deviceRefreshIssue = issue
-        if deviceAccount != nil {
-            deviceStatus = Self.deviceRepositorySignedInLine(
-                login: deviceAccount?.login ?? "",
-                repositoryCount: deviceRepositoryCount,
-                refreshIssue: issue
-            )
-        }
-    }
-
-    /// Whether this refresh invocation may still publish its result. The
-    /// single-flight entry bumps the generation for every new invocation and
-    /// teardown cancels the stored task, so a stale or cancelled predecessor
-    /// must never overwrite a newer result (a stale zero could otherwise
-    /// reopen the GitHub decision after a positive one already closed it).
-    /// A cancelled invocation publishes nothing: cancellation propagates as
-    /// `CancellationError` end to end, and the silent-drop guard also covers
-    /// the task-cancel bit for explicit cancellations.
-    private func deviceRepositoryRefreshIsCurrent(generation: Int) -> Bool {
-        !Task.isCancelled && Self.refreshTaskIsCurrent(
-            storedGeneration: deviceRefreshGeneration,
-            taskGeneration: generation
-        )
-    }
-
-    /// Re-checks GitHub for repositories actually accessible to the App. An
-    /// expired access token is rotated first through the shared refresher,
-    /// the (possibly rotated) session is published to state before any
-    /// fallible listing, and every failure surfaces as `deviceRefreshIssue`
-    /// instead of collapsing into a misleading "no repositories selected"
-    /// state. Returns `true` only when a result was actually published
-    /// (success or failure); `false` when the invocation was cancelled or
-    /// superseded and published nothing.
-    private func performDeviceRepositoryRefresh(accessToken: String, generation: Int) async -> Bool {
-        guard let deviceFlow else { return false }
-        let outcome: GitHubDeviceSessionRefreshOutcome
-        do {
-            outcome = try await deviceSessionRefresher.revalidatedSession(using: deviceFlow)
-        } catch is CancellationError {
-            return false
-        } catch {
-            return await MainActor.run { () -> Bool in
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session"))
-                return true
-            }
-        }
-        guard case .current(let session, _) = outcome else {
-            if case .superseded = outcome {
-                // A concurrent replacement won the epoch; publish nothing.
-                return false
-            }
-            // Quarantine: the consumed generation could not be poisoned.
-            // Reauthorization-ONLY — no session, no Check again, no polling.
-            return await MainActor.run { () -> Bool in
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                deviceReauthorizationRequired = true
-                deviceSession = nil
-                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session"))
-                return true
-            }
-        }
-        if let session, session.isAccessExpired {
-            return await MainActor.run { () -> Bool in
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                // Expired and unrefreshable (or a poisoned consumed
-                // generation): reauthorization-ONLY — no session, no Check
-                // again, no polling.
-                deviceReauthorizationRequired = true
-                deviceSession = nil
-                failDeviceRepositoryRefresh(with: "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub, then check again.")
-                return true
-            }
-        }
-        if let session {
-            // Publish the persisted (possibly rotated) session before the
-            // fallible listing: a failed listing must never leave memory
-            // holding a consumed pair while the Keychain holds the fresh one.
-            let sessionPublished = await MainActor.run { () -> Bool in
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                deviceSession = session
-                return true
-            }
-            if !sessionPublished { return false }
-        }
-        let token = session?.accessToken ?? accessToken
-        let installations: [GitHubInstallation]
-        do {
-            installations = try await deviceFlow.installations(accessToken: token)
-        } catch is CancellationError {
-            return false
-        } catch {
-            return await MainActor.run { () -> Bool in
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "listing installations"))
-                return true
-            }
-        }
-        var accessibleRepositories: [GitHubRepository] = []
-        for installation in installations {
-            do {
-                let repositories = try await deviceFlow.repositories(
-                    accessToken: token,
-                    installationID: installation.id
-                )
-                accessibleRepositories.append(contentsOf: repositories)
-            } catch is CancellationError {
-                return false
-            } catch {
-                return await MainActor.run { () -> Bool in
-                    guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-                    failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(
-                        for: error,
-                        action: "listing repositories for installation \(installation.id)"
-                    ))
-                    return true
-                }
-            }
-        }
-        return await MainActor.run { () -> Bool in
-            guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
-            deviceRepositoryCount = accessibleRepositories.count
-            deviceAccessibleRepositories = accessibleRepositories
-            deviceRefreshIssue = nil
-            deviceReauthorizationRequired = false
-            if deviceAccount != nil {
-                deviceStatus = Self.deviceRepositorySignedInLine(
-                    login: deviceAccount?.login ?? "",
-                    repositoryCount: accessibleRepositories.count,
-                    refreshIssue: nil
-                )
-            }
-            return true
-        }
-    }
-
-    /// Automatic re-check polling while the GitHub decision is still
-    /// undecided: after the device-flow sign-in, repository selection happens
-    /// on GitHub's App installation page, so the app re-checks every few
-    /// seconds instead of waiting for a manual "Check again" press.
-    private static let deviceRepositoryPollInterval: TimeInterval = 8
-
-    /// Minimum gap between focus-triggered re-checks; the automatic interval
-    /// never goes below this.
-    private static let deviceRepositoryMinRecheckInterval: TimeInterval = 5
-
-    /// Pure decision, unit-tested directly: automatic re-check polling runs
-    /// only while the full GitHub decision gate is still undecided — the
-    /// device-flow sign-in exists, zero accessible repositories, existing
-    /// grant metadata and retained verification results are both empty, the
-    /// GitHub step is the active step, and GitHub has not been skipped.
-    static func deviceRepositoryPollingActive(
-        signedIn: Bool,
-        repositoryCount: Int,
-        stepActive: Bool,
-        skipped: Bool,
-        alreadyDecided: Bool
-    ) -> Bool {
-        signedIn && repositoryCount == 0 && stepActive && !skipped && !alreadyDecided
-    }
-
-    /// Pure identity check, unit-tested directly: a poll task may clear the
-    /// stored handle only while it is still the current poller. A cancelled
-    /// predecessor must never erase the successor that replaced it, or
-    /// teardown would lose the live task's handle (leaking the poll and its
-    /// waiting UI).
-    static func pollingTaskIsCurrent(storedGeneration: Int, taskGeneration: Int) -> Bool {
-        storedGeneration == taskGeneration
-    }
-
-    /// Pure decision, unit-tested directly: a focus-regain may trigger an
-    /// immediate re-check only when the last check is older than the minimum
-    /// interval, so rapid focus churn cannot hammer the API.
-    static func shouldRecheckNow(lastCheckAt: Date?, now: Date, minimumInterval: TimeInterval) -> Bool {
-        guard let lastCheckAt else { return true }
-        return now.timeIntervalSince(lastCheckAt) >= minimumInterval
-    }
-
-    /// Pure derivation, unit-tested directly: when the poller may next run a
-    /// re-check. The deadline is measured from the last COMPLETED re-check of
-    /// any source (manual button included), so a check that finishes during
-    /// the poller's wait satisfies it and the next check follows a full
-    /// interval later instead of firing immediately. The deadline is capped
-    /// at `now + interval`: a stamp in the future (corrupted clock) yields
-    /// the normal cadence from now instead of an unbounded wait.
-    static func nextRepositoryCheckDate(lastCheckAt: Date?, now: Date, interval: TimeInterval) -> Date {
-        guard let lastCheckAt else { return .distantPast }
-        return min(lastCheckAt.addingTimeInterval(interval), now.addingTimeInterval(interval))
-    }
-
-    /// Pure decision, unit-tested directly: whether a re-check is due at
-    /// `now`, given the last completed re-check of any source. The poller
-    /// re-evaluates this after every wake, so a check that completed during
-    /// the wait (manual button or startup restore) extends the wait instead
-    /// of the poller refreshing early. A clock rollback — `now` regressed
-    /// below the stamp — is treated as due so the poller re-checks and
-    /// re-stamps instead of parking indefinitely.
-    static func repositoryCheckIsDue(lastCheckAt: Date?, now: Date, interval: TimeInterval) -> Bool {
-        guard let lastCheckAt else { return true }
-        if now < lastCheckAt { return true }
-        return now >= nextRepositoryCheckDate(lastCheckAt: lastCheckAt, now: now, interval: interval)
-    }
-
-    /// Pure decision, unit-tested directly: a `false` re-check outcome
-    /// (cancelled, superseded, no completed publication) is a terminal no-op
-    /// for the surrounding flow — teardown owns the state and must not be
-    /// revived by a status publication or a polling restart. `true` allows
-    /// the flow to stamp the schedule and continue.
-    static func shouldContinueSetupAfterRecheck(completed: Bool) -> Bool {
-        completed
-    }
-
-    /// Terminal decision for one poller cycle, shared with the ordering test:
-    /// a `false` re-check outcome — `.superseded`, a transport-reported
-    /// CancellationError that never set the poll task's cancel bit, or a
-    /// teardown — ends THIS poller with no schedule stamp and no retry on the
-    /// next wake. `true` stamps the schedule and lets the loop re-evaluate
-    /// its other exit gates. Returns whether the poller may continue.
-    @discardableResult
-    func continueDeviceRepositoryPolling(completed: Bool) -> Bool {
-        guard Self.shouldContinueSetupAfterRecheck(completed: completed) else { return false }
-        lastDeviceRepositoryCheckAt = Date()
-        return true
-    }
-
-    /// Whether the GitHub step is already decided by state outside the
-    /// device-flow sign-in itself (existing grant metadata or retained
-    /// verification results). Those disjuncts of `githubDecisionMade` do not
-    /// come from re-checks, so polling must not start or continue under them.
-    private var deviceRepositoryDecisionAlreadyMade: Bool {
-        !existingMetadata.isEmpty || !verificationResults.isEmpty
-    }
-
-    /// Starts the automatic re-check poll, cancelling any previous task so
-    /// there is exactly one at a time: an immediate re-check, then one every
-    /// 8 seconds while the GitHub decision is still undecided. The loop stops
-    /// itself as soon as the decision gate closes (repositories detected,
-    /// GitHub skipped, existing access present, step left, or the device
-    /// session is gone). When `checkImmediately` is set (focus regain), the
-    /// first re-check bypasses the poller's due gate — the focus handler has
-    /// already applied the 5 s throttle, so a coherent policy is one check
-    /// now, then the normal cadence.
-    private func startDeviceRepositoryPollingIfNeeded(checkImmediately: Bool = false) {
-        guard Self.deviceRepositoryPollingActive(
-            signedIn: deviceAccount != nil,
-            repositoryCount: deviceRepositoryCount,
-            stepActive: activeStep == .github,
-            skipped: githubSkipped,
-            alreadyDecided: deviceRepositoryDecisionAlreadyMade
-        ), deviceSession != nil else {
-            return
-        }
-        deviceRepositoryPollGeneration &+= 1
-        let generation = deviceRepositoryPollGeneration
-        deviceRepositoryPollTask?.cancel()
-        deviceRepositoryPollTask = Task {
-            defer {
-                // Only the task that is still the stored poller clears the
-                // handle; a cancelled predecessor must never erase a
-                // successor that replaced it, or teardown would lose the
-                // live task (identity guard, unit-tested).
-                if Self.pollingTaskIsCurrent(
-                    storedGeneration: deviceRepositoryPollGeneration,
-                    taskGeneration: generation
-                ) {
-                    deviceRepositoryPollTask = nil
-                }
-            }
-            var skipFirstWait = checkImmediately
-            while !Task.isCancelled {
-                if skipFirstWait {
-                    // Focus-triggered restart: re-check right away (the
-                    // focus handler already satisfied the 5 s throttle).
-                    skipFirstWait = false
-                } else {
-                    // The poll interval is measured from the last COMPLETED
-                    // re-check of any source (this poller, the manual button,
-                    // or the startup restore). The deadline is RE-EVALUATED
-                    // after every wake — capped at now + interval, with a
-                    // clock rollback treated as due — so a check that
-                    // completes during the sleep moves the deadline and the
-                    // poller keeps waiting instead of refreshing early.
-                    while !Task.isCancelled, !Self.repositoryCheckIsDue(
-                        lastCheckAt: lastDeviceRepositoryCheckAt,
-                        now: Date(),
-                        interval: Self.deviceRepositoryPollInterval
-                    ) {
-                        // Sleep only the remaining wait, capped at 2 s slices,
-                        // so the deadline is re-evaluated promptly and hit
-                        // exactly (never a full 2 s past it).
-                        let remaining = Self.nextRepositoryCheckDate(
-                            lastCheckAt: lastDeviceRepositoryCheckAt,
-                            now: Date(),
-                            interval: Self.deviceRepositoryPollInterval
-                        ).timeIntervalSince(Date())
-                        try? await Task.sleep(for: .seconds(min(max(remaining, 0), 2)))
-                    }
-                }
-                guard !Task.isCancelled else { return }
-                guard Self.deviceRepositoryPollingActive(
-                    signedIn: deviceAccount != nil,
-                    repositoryCount: deviceRepositoryCount,
-                    stepActive: activeStep == .github,
-                    skipped: githubSkipped,
-                    alreadyDecided: deviceRepositoryDecisionAlreadyMade
-                ), let accessToken = deviceSession?.accessToken else {
-                    return
-                }
-                // Poller-level in-flight arbiter: never start a re-check
-                // while one is still running (a focus-triggered restart's
-                // predecessor may still be unwinding; the guarded refresh
-                // entry also coalesces with the manual button).
-                if deviceRepositoryCheckInFlight {
-                    try? await Task.sleep(for: .seconds(2))
-                    continue
-                }
-                // The token is re-read from the live session on every pass so
-                // a rotation performed by refreshDeviceRepositoryCount is
-                // picked up. The timestamp advances only when the re-check
-                // completed and published (a cancelled attempt must not
-                // throttle later real checks).
-                deviceRepositoryCheckInFlight = true
-                let completed = await refreshDeviceRepositoryCount(accessToken: accessToken)
-                deviceRepositoryCheckInFlight = false
-                // A false outcome is terminal for THIS poller: the re-check
-                // was cancelled or superseded (a `.superseded` epoch, a
-                // transport-reported CancellationError that never set the
-                // task-cancel bit, or a teardown) with the poll task itself
-                // still live. Continuing the loop would re-check on the next
-                // due wake and restart the very refresh cadence the terminal
-                // outcome was meant to end — no stamp, no retry. The manual
-                // and restore flows keep their own terminal handling.
-                guard continueDeviceRepositoryPolling(completed: completed) else { return }
-                guard !Task.isCancelled else { return }
-                if githubDecisionMade { return }
-            }
-        }
-    }
-
-    private func stopDeviceRepositoryPolling() {
-        deviceRepositoryPollTask?.cancel()
-        deviceRepositoryPollTask = nil
-    }
-
-    /// The common case for a focus regain is the user returning from the
-    /// browser after choosing repositories on GitHub: re-check immediately,
-    /// subject to a 5 second minimum gap so rapid focus churn cannot hammer
-    /// the API. The focus throttle is the one coherent gate: once it passes,
-    /// the restarted poller's first re-check bypasses its separate 8 s due
-    /// gate (`checkImmediately`), so the documented immediate re-check
-    /// actually happens. Restarting cancels the previous task, keeping
-    /// exactly one polling task alive.
-    private func handleDeviceWindowBecameKey(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window.identifier == NSUserInterfaceItemIdentifier("setup.window") else {
-            return
-        }
-        guard Self.deviceRepositoryPollingActive(
-            signedIn: deviceAccount != nil,
-            repositoryCount: deviceRepositoryCount,
-            stepActive: activeStep == .github,
-            skipped: githubSkipped,
-            alreadyDecided: deviceRepositoryDecisionAlreadyMade
-        ), Self.shouldRecheckNow(
-            lastCheckAt: lastDeviceRepositoryCheckAt,
-            now: Date(),
-            minimumInterval: Self.deviceRepositoryMinRecheckInterval
-        ) else {
-            return
-        }
-        startDeviceRepositoryPollingIfNeeded(checkImmediately: true)
-    }
-
-    /// Ends the polling scope when the setup window closes (the view may not
-    /// disappear when the window is merely hidden). The skip task is cancelled
-    /// here as well so a grant-disable that is still awaiting the network is
-    /// not left running past the window's lifetime; the disable itself runs on
-    /// the coordinator actor and completes (revocation is idempotent), while
-    /// any post-await navigation is discarded with the window. The lifecycle
-    /// bump is the authoritative barrier: a restore/verification continuation
-    /// that captured the generation before its first await can no longer
-    /// create a refresh, publish, stamp, or restart polling — even when its
-    /// child task is not (or no longer) cancellable. The device-code poll and
-    /// verification tasks are cancelled so a late token or verification stops
-    /// immediately.
-    private func handleDeviceWindowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window.identifier == NSUserInterfaceItemIdentifier("setup.window") else {
-            return
-        }
-        setupLifecycle.invalidate()
-        stopDeviceRepositoryPolling()
-        deviceRefreshTask?.cancel()
-        deviceRefreshTask = nil
-        devicePollTask?.cancel()
-        devicePollTask = nil
-        deviceVerificationTask?.cancel()
-        deviceVerificationTask = nil
-        githubSkipTask?.cancel()
-    }
-
-    private func cancelDeviceFlow() {
-        devicePollTask?.cancel()
-        devicePollTask = nil
-        deviceRefreshTask?.cancel()
-        deviceRefreshTask = nil
-        deviceVerificationTask?.cancel()
-        deviceVerificationTask = nil
-        // Invalidate any in-flight verification so its completion blocks
-        // publish nothing (they check the generation identity guard).
-        deviceVerificationGeneration &+= 1
-        // Explicit device-flow cancellation/reset also bumps the authoritative
-        // setup lifecycle: a restore/verification continuation that captured
-        // it before its first await can no longer create a refresh, publish
-        // state, stamp the schedule, or restart polling. The generation is the
-        // barrier, not merely cancelling the existing child tasks.
-        setupLifecycle.invalidate()
-        stopDeviceRepositoryPolling()
-        isConnectingDevice = false
-        deviceAuthorization = nil
-        deviceStatus = ""
-        deviceIssue = "GitHub connection was cancelled. Nothing was stored."
-    }
-
-    private func openDeviceInstallation() {
-        guard let url = Self.validatedInstallationURL(deviceInstallationURL) else { return }
-        _ = NSWorkspace.shared.open(url)
-    }
 
     private func loadPreflight() {
         guard let coordinator else { return }
@@ -3224,7 +2104,6 @@ struct SetupView: View {
             }
             return "Not connected — you can connect later in Settings."
         }
-        if let deviceAccount { return "Connected as @\(deviceAccount.login). Repositories are chosen on GitHub." }
         if !verificationResults.isEmpty {
             return verificationResults.map {
                 "\($0.workspace): \($0.verified && $0.lifecycleRestored ? "verified" : "needs attention") for \($0.verificationRepository)"
@@ -3258,11 +2137,6 @@ struct SetupView: View {
         }
     }
 
-    private func githubIdentityDisclosure(_ account: GitHubAccount) -> String {
-        let name = account.name?.isEmpty == false ? account.name! : "not disclosed"
-        let email = account.email?.isEmpty == false ? account.email! : "not disclosed"
-        return "GitHub identity: @\(account.login) · name \(name) · public email \(email). Guest grants include every selected repository; host write grants include only repositories marked Read & write."
-    }
 
     private func issue(for error: Error) -> AuthorizationIssue {
         if let authorizationError = error as? GitHubAuthorizationError {
@@ -3325,17 +2199,17 @@ struct SetupView: View {
 
     private func issueRecovery(_ kind: AuthorizationIssueKind) -> String {
         switch kind {
-        case .cancelled: return "Retry when ready; no cached policy or existing credential was removed."
-        case .expired: return "Start a fresh browser authorization. Review the restored repository choices again before applying."
-        case .denied: return "Review the requested identity and repository permissions, then retry only if you consent."
-        case .unavailable: return "Check the network, GitHub App installation, and MSW Connect availability, then retry."
-        case .failed: return "Retry once. If it repeats, leave setup open and use Settings or diagnostics; existing access remains unchanged."
+        case .cancelled: return "Retry when ready; existing access stayed unchanged."
+        case .expired: return "Connect GitHub again, then review repository access."
+        case .denied: return "Review your repository choices, then try again."
+        case .unavailable: return "Check your connection and try again."
+        case .failed: return "Try again. Existing access remains unchanged."
         }
     }
 
     private var githubAffectedScope: String {
-        let workspaces = Array(Set(selectedPolicy.map(\.workspace))).sorted()
-        return workspaces.isEmpty ? "GitHub setup for all workspaces" : workspaces.joined(separator: ", ")
+        let workspaces = workspacePolicy.map(\.workspace).sorted()
+        return workspaces.isEmpty ? "GitHub setup" : workspaces.joined(separator: ", ")
     }
 
     private var githubVerificationAge: String {
@@ -3351,12 +2225,78 @@ struct SetupView: View {
         return "\(seconds / 86_400) days ago"
     }
 
+    /// Reconstructs the editor's current choices from enforced grant metadata
+    /// only after the matching installation repository list is available.
+    /// Anything that cannot be proved against that list stays out of the
+    /// editor and is surfaced for reconnect rather than silently dropped.
+    private func prefillRepositoryPolicyDrafts() {
+        guard retainedRepositoryPolicy.isEmpty else { return }
+
+        for workspace in Workspace.ID.allCases {
+            guard !editedGitHubWorkspaces.contains(workspace.rawValue),
+                  var draft = drafts[workspace.rawValue],
+                  draft.repositoryModes.isEmpty else {
+                continue
+            }
+            let entries = existingMetadata.filter { $0.workspace == workspace.rawValue }
+            guard let guest = entries.first(where: { $0.role == .guest }),
+                  let installationID = guest.installationID,
+                  let installation = installations.first(where: { $0.id == installationID }),
+                  let owner = guest.owner,
+                  owner.caseInsensitiveCompare(installation.account.login) == .orderedSame,
+                  let availableRepositories = repositoriesByInstallation[installationID],
+                  guest.repositoryIDs.count == guest.repositoryNames.count,
+                  guest.repositoryIDs.count == Set(guest.repositoryIDs).count else {
+                if !entries.isEmpty { presentUnavailableExistingRepositoryPolicy() }
+                continue
+            }
+
+            let guestRepositoryIDs = Set(guest.repositoryIDs)
+            let hostEntries = entries.filter { $0.role == .host }
+            guard hostEntries.allSatisfy({
+                $0.installationID == installationID &&
+                    Set($0.repositoryIDs).isSubset(of: guestRepositoryIDs)
+            }) else {
+                presentUnavailableExistingRepositoryPolicy()
+                continue
+            }
+
+            let byID = Dictionary(uniqueKeysWithValues: availableRepositories.map { ($0.id, $0) })
+            var modes: [Int: GitHubRepositoryAccessMode] = [:]
+            var isCurrent = true
+            for (repositoryID, repositoryName) in zip(guest.repositoryIDs, guest.repositoryNames) {
+                guard let repository = byID[repositoryID],
+                      repository.fullName.caseInsensitiveCompare(repositoryName) == .orderedSame else {
+                    isCurrent = false
+                    break
+                }
+                modes[repositoryID] = hostEntries.contains {
+                    $0.repositoryIDs.contains(repositoryID)
+                } ? .readWrite : .readOnly
+            }
+            guard isCurrent else {
+                presentUnavailableExistingRepositoryPolicy()
+                continue
+            }
+
+            draft.installationID = installationID
+            draft.repositoryModes = modes
+            drafts[workspace.rawValue] = draft
+        }
+    }
+
+    private func presentUnavailableExistingRepositoryPolicy() {
+        guard authorizationIssue == nil else { return }
+        authorizationIssue = AuthorizationIssue(
+            kind: .unavailable,
+            message: "Some existing repository access needs reconnecting. Manage repositories on GitHub, then review access."
+        )
+    }
+
     private func persistResumeState() {
-        let policy = selectedPolicy.isEmpty && drafts.values.contains(where: { !$0.repositoryModes.isEmpty })
-            ? retainedRepositoryPolicy
-            : selectedPolicy
         let resume = SetupResumeState(
-            repositoryPolicy: policy,
+            repositoryPolicy: workspacePolicy,
+            repositoryPolicyApplied: repositoryPolicyApplied,
             githubSkipped: githubSkipped,
             identityName: identityName,
             identityEmail: identityEmail,
@@ -3378,13 +2318,18 @@ struct SetupView: View {
         drafts = Dictionary(uniqueKeysWithValues: Workspace.ID.allCases.map {
             ($0.rawValue, WorkspaceRepositoryDraft.initial($0))
         })
-        for entry in resume.repositoryPolicy {
-            guard let workspace = Workspace.ID(rawValue: entry.workspace) else { continue }
-            var draft = drafts[entry.workspace] ?? .initial(workspace)
-            guard draft.installationID == nil || draft.installationID == entry.installationID else { continue }
-            draft.installationID = entry.installationID
-            draft.repositoryModes[entry.repositoryID] = entry.mode
-            drafts[entry.workspace] = draft
+        editedGitHubWorkspaces = Set(resume.repositoryPolicy.map(\.workspace))
+        repositoryPolicyApplied = resume.repositoryPolicyApplied
+        for policy in resume.repositoryPolicy {
+            guard let workspace = Workspace.ID(rawValue: policy.workspace) else { continue }
+            let installationIDs = Set(policy.repositories.map(\.installationID))
+            guard installationIDs.count <= 1 else { continue }
+            var draft = drafts[policy.workspace] ?? .initial(workspace)
+            draft.installationID = installationIDs.first
+            draft.repositoryModes = Dictionary(
+                uniqueKeysWithValues: policy.repositories.map { ($0.repositoryID, $0.mode) }
+            )
+            drafts[policy.workspace] = draft
         }
         githubSkipped = resume.githubSkipped
         identityName = resume.identityName
@@ -3519,74 +2464,112 @@ struct SetupView: View {
 }
 
 
-/// The one repository-policy editor used by setup and reached from Settings.
-/// It is repository-first, defaults every new choice to Read-only, and never
-/// presents a mode until that repository is selected for the workspace.
+/// The one compact repository-policy editor used by setup and reached from
+/// Settings. A checkbox assigns a repository to one workspace; a selected
+/// repository starts Read-only and exposes its segmented access control.
 private struct RepositoryWorkspacePolicyEditor: View {
     let installations: [GitHubInstallation]
     let repositoriesByInstallation: [Int: [GitHubRepository]]
     @Binding var drafts: [String: WorkspaceRepositoryDraft]
+    @Binding var editedWorkspaces: Set<String>
     let disabled: Bool
+    let onEdit: () -> Void
+
+    private var sortedInstallations: [GitHubInstallation] {
+        installations.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Repository access").font(.headline)
-            Text("Select a workspace, then choose Read-only or Read & write. Read access includes every selected repository; the host write grant includes only Read & write repositories.")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Workspace access").font(.headline)
+            if sortedInstallations.count > 1 {
+                Text("Each workspace can use repositories from one GitHub owner at a time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
+                workspaceSection(workspace)
+            }
+            Text("Read & write lets MSW push changes. Your workspace never receives a write credential.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("MSW currently carries one installation credential per workspace and role, so a workspace cannot mix owners in one policy.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            ForEach(installations.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }) { installation in
-                let repositories = (repositoriesByInstallation[installation.id] ?? [])
-                    .sorted { $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending }
-                if !repositories.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(installation.displayName)
-                            .font(.caption.weight(.semibold))
-                        ForEach(repositories) { repository in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(repository.fullName).font(.callout)
-                                ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
-                                    let selected = isSelected(workspace, repository: repository, installation: installation)
-                                    HStack(spacing: 8) {
-                                        Toggle(workspace.rawValue, isOn: selectionBinding(
-                                            workspace,
-                                            repository: repository,
-                                            installation: installation
-                                        ))
-                                        .toggleStyle(.checkbox)
-                                        .disabled(disabled || selectionBlocked(workspace, installation: installation))
-                                        .accessibilityIdentifier("github.repository.\(repository.id).workspace.\(workspace.rawValue)")
-                                        if selected {
-                                            Picker("Access for \(workspace.rawValue) to \(repository.fullName)", selection: modeBinding(
-                                                workspace,
-                                                repository: repository,
-                                                installation: installation
-                                            )) {
-                                                ForEach(GitHubRepositoryAccessMode.allCases, id: \.rawValue) { mode in
-                                                    Text(mode.label).tag(mode)
-                                                }
-                                            }
-                                            .labelsHidden()
-                                            .pickerStyle(.menu)
-                                            .disabled(disabled)
-                                            .accessibilityIdentifier("github.repository.\(repository.id).workspace.\(workspace.rawValue).mode")
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(.vertical, 3)
-                        }
-                    }
-                    .padding(8)
-                    .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-                }
-            }
         }
         .padding(10)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func workspaceSection(_ workspace: Workspace.ID) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(workspace.rawValue)
+                .font(.callout.weight(.semibold))
+            ForEach(sortedInstallations) { installation in
+                let repositories = (repositoriesByInstallation[installation.id] ?? [])
+                    .sorted {
+                        $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending
+                    }
+                if !repositories.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if sortedInstallations.count > 1 {
+                            Text(installation.displayName)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(repositories) { repository in
+                            repositoryRow(
+                                workspace,
+                                repository: repository,
+                                installation: installation
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    @ViewBuilder
+    private func repositoryRow(
+        _ workspace: Workspace.ID,
+        repository: GitHubRepository,
+        installation: GitHubInstallation
+    ) -> some View {
+        let selected = isSelected(workspace, repository: repository, installation: installation)
+        HStack(spacing: 8) {
+            Toggle(repository.fullName, isOn: selectionBinding(
+                workspace,
+                repository: repository,
+                installation: installation
+            ))
+            .toggleStyle(.checkbox)
+            .disabled(disabled || selectionBlocked(workspace, installation: installation))
+            .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id)")
+            Spacer(minLength: 8)
+            if selected {
+                Picker(
+                    "Access for \(repository.fullName)",
+                    selection: modeBinding(
+                        workspace,
+                        repository: repository,
+                        installation: installation
+                    )
+                ) {
+                    ForEach(GitHubRepositoryAccessMode.allCases, id: \.rawValue) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 220)
+                .disabled(disabled)
+                .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).mode")
+            }
+        }
     }
 
     private func isSelected(
@@ -3621,6 +2604,8 @@ private struct RepositoryWorkspacePolicyEditor: View {
                     if draft.repositoryModes.isEmpty { draft.installationID = nil }
                 }
                 drafts[workspace.rawValue] = draft
+                editedWorkspaces.insert(workspace.rawValue)
+                onEdit()
             }
         )
     }
@@ -3640,6 +2625,8 @@ private struct RepositoryWorkspacePolicyEditor: View {
                       draft.repositoryModes[repository.id] != nil else { return }
                 draft.repositoryModes[repository.id] = mode
                 drafts[workspace.rawValue] = draft
+                editedWorkspaces.insert(workspace.rawValue)
+                onEdit()
             }
         )
     }

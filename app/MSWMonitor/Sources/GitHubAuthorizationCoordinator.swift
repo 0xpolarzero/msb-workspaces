@@ -48,6 +48,20 @@ struct GitHubRepositoryPolicy: Codable, Sendable, Equatable, Identifiable {
         self.mode = mode
     }
 }
+/// Complete desired state for one workspace. An empty repository list is
+/// meaningful: it removes that workspace's existing GitHub access.
+struct GitHubWorkspacePolicy: Codable, Sendable, Equatable, Identifiable {
+    let workspace: String
+    let repositories: [GitHubRepositoryPolicy]
+
+    var id: String { workspace }
+
+    init(workspace: String, repositories: [GitHubRepositoryPolicy]) {
+        self.workspace = workspace
+        self.repositories = repositories
+    }
+}
+
 
 private struct GitHubGrantPartition: Sendable, Equatable {
     let workspace: String
@@ -59,7 +73,7 @@ private struct GitHubGrantPartition: Sendable, Equatable {
 
     var readRepositories: [GitHubRepositoryPolicy] { repositories }
     var writeRepositories: [GitHubRepositoryPolicy] { repositories.filter { $0.mode == .readWrite } }
-    var accessMode: String { writeRepositories.isEmpty ? "read-only" : "read-write" }
+
 }
 
 struct GitHubAuthorizationDiscovery: Sendable, Equatable {
@@ -110,18 +124,18 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidSelection:
-            return "The GitHub repository policy is invalid."
+            return "Your repository choices need review."
         case .invalidAppConfiguration:
-            return "GitHub connection is not configured for this build. A deployed MSW Connect service and registered app client are required; no browser page was opened."
-        case .guestAuthorizationRequired: return "Authorize guest read access before enabling host write access."
-        case .authorizationSessionExpired: return "The MSW Connect authorization selection expired. Start Connect GitHub again."
-        case .ownerNotInstalled: return "The selected GitHub owner has not installed the MSW App."
-        case .repositoryNotAllowed: return "One or more selected repositories are outside the GitHub App installation scope."
-        case .accountLookupFailed: return "GitHub authorization succeeded, but the account could not be verified."
-        case .credentialCommitFailed: return "GitHub authorization could not be committed to the credential broker."
-        case .serviceUnavailable: return "MSW Connect is unavailable. The existing workspace access was left unchanged."
-        case .scopeMismatch: return "The authorization service returned broader access than requested. The grant was rejected."
-        case .revocationFailed: return "The service could not prove that the requested GitHub grant was revoked."
+            return "GitHub access is not ready yet. Continue without GitHub, or try again later."
+        case .guestAuthorizationRequired: return "Choose Read-only access before enabling Read & write."
+        case .authorizationSessionExpired: return "Your GitHub sign-in expired. Connect GitHub again."
+        case .ownerNotInstalled: return "The selected repositories are not available yet. Manage repositories on GitHub, then reconnect."
+        case .repositoryNotAllowed: return "One or more selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
+        case .accountLookupFailed: return "We could not confirm your GitHub account. Try again."
+        case .credentialCommitFailed: return "We could not apply repository access. Existing access stayed unchanged."
+        case .serviceUnavailable: return "GitHub could not be reached. Existing workspace access stayed unchanged."
+        case .scopeMismatch: return "GitHub returned access that did not match your choices. Existing access stayed unchanged."
+        case .revocationFailed: return "We could not finish updating GitHub access. Existing access needs reconnecting."
         case .authorizationCancelled:
             return "GitHub authorization was cancelled. Your existing access and saved setup choices were left unchanged."
         case .authorizationDenied(let reason):
@@ -130,13 +144,13 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
         case .authorizationFailed:
             return "GitHub authorization failed unexpectedly. Your existing access and saved setup choices were left unchanged."
         case .verificationUnavailable(let workspace):
-            return "Verification is unavailable for \(workspace). No new access was committed; retry after the MSW runtime is available."
+            return "GitHub access for \(workspace) could not be checked. Existing access stayed unchanged."
         case .verificationFailed(let workspace):
-            return "GitHub access for \(workspace) could not be verified. The new grant was not committed."
+            return "GitHub access for \(workspace) could not be checked. Existing access stayed unchanged."
         case .lifecycleRestoreFailed(let workspace):
-            return "GitHub access for \(workspace) verified, but its previous VM lifecycle could not be restored. Review the workspace before retrying."
+            return "GitHub access for \(workspace) needs reconnecting."
         case .multipleInstallationsUnsupported(let workspace):
-            return "GitHub access for \(workspace) can use repositories from one installation at a time because the MSW host credential protocol carries one credential per workspace and role."
+            return "Each workspace can use repositories from one GitHub owner at a time. Review \(workspace) access."
         }
     }
 }
@@ -327,7 +341,7 @@ actor GitHubAuthorizationCoordinator {
     }
     func commitPolicy(
         sessionID: UUID,
-        policy: [GitHubRepositoryPolicy]
+        policy: [GitHubWorkspacePolicy]
     ) async throws -> [WorkspaceCredentialMetadata] {
         try await commitPolicy(
             sessionID: sessionID,
@@ -338,7 +352,7 @@ actor GitHubAuthorizationCoordinator {
 
     func commitPolicyWithVerification(
         sessionID: UUID,
-        policy: [GitHubRepositoryPolicy]
+        policy: [GitHubWorkspacePolicy]
     ) async throws -> GitHubAuthorizationCommitResult {
         try await commitPolicy(
             sessionID: sessionID,
@@ -349,7 +363,7 @@ actor GitHubAuthorizationCoordinator {
 
     private func commitPolicy(
         sessionID: UUID,
-        policy: [GitHubRepositoryPolicy],
+        policy: [GitHubWorkspacePolicy],
         requireVerification: Bool
     ) async throws -> GitHubAuthorizationCommitResult {
         removeExpiredSessions()
@@ -358,12 +372,14 @@ actor GitHubAuthorizationCoordinator {
         guard let authorization = pending[sessionID] else {
             throw GitHubAuthorizationError.authorizationSessionExpired
         }
+        let repositories = policy.flatMap { $0.repositories }
         guard !policy.isEmpty,
+              Set(policy.map(\.workspace)).count == policy.count,
               policy.allSatisfy(Self.isValidPolicy),
-              Set(policy.map(\.id)).count == policy.count else {
+              Set(repositories.map(\.id)).count == repositories.count else {
             throw GitHubAuthorizationError.invalidSelection
         }
-        let partitions = try Self.partition(policy)
+        let partitions = try Self.partition(repositories)
         let discoveredInstallations = Dictionary(uniqueKeysWithValues: authorization.discovery.installations.map { ($0.id, $0) })
         guard partitions.allSatisfy({
             guard let installation = discoveredInstallations[$0.installationID] else { return false }
@@ -373,8 +389,9 @@ actor GitHubAuthorizationCoordinator {
             throw GitHubAuthorizationError.ownerNotInstalled
         }
 
+        let affectedWorkspaces = Set(policy.map(\.workspace))
         let existingEntries = (await broker.allMetadata()).filter { entry in
-            partitions.contains { $0.workspace == entry.workspace }
+            affectedWorkspaces.contains(entry.workspace)
         }
         var previous: [String: PreviousCredential] = [:]
         for entry in existingEntries {
@@ -405,7 +422,7 @@ actor GitHubAuthorizationCoordinator {
                     }
             )).sorted(),
             newGrantIDs: [],
-            oldGrantIDs: Array(Set(existingEntries.compactMap(\.grantID))),
+            oldGrantIDs: Array(Set(existingEntries.compactMap(\.grantID))).sorted { $0.uuidString < $1.uuidString },
             phase: .prepared,
             updatedAt: now()
         )
@@ -418,11 +435,11 @@ actor GitHubAuthorizationCoordinator {
             // credentials. A failed partition therefore cannot leave a
             // partially committed workspace set behind.
             for partition in partitions {
-                let repositories = try await repositories(
+                let availableRepositories = try await self.repositories(
                     sessionID: sessionID,
                     installationID: partition.installationID
                 )
-                let allowed = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0) })
+                let allowed = Dictionary(uniqueKeysWithValues: availableRepositories.map { ($0.id, $0) })
                 guard partition.repositories.allSatisfy({ selected in
                     guard let repository = allowed[selected.repositoryID] else { return false }
                     return repository.id == selected.repositoryID &&
@@ -1335,6 +1352,13 @@ actor GitHubAuthorizationCoordinator {
             try? removeJournal()
         }
     }
+    private static func isValidPolicy(_ policy: GitHubWorkspacePolicy) -> Bool {
+        WorkspaceID.isValid(policy.workspace) &&
+            policy.repositories.allSatisfy {
+                $0.workspace == policy.workspace && isValidPolicy($0)
+            }
+    }
+
     private static func isValidPolicy(_ policy: GitHubRepositoryPolicy) -> Bool {
         WorkspaceID.isValid(policy.workspace) &&
             policy.repositoryID > 0 &&

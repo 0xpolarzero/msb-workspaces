@@ -69,6 +69,12 @@ struct MSWConnectConfiguration: Sendable, Equatable {
         }
     }
 
+    /// Repository access is offered only when the release supplies a trusted
+    /// signing key and therefore requires token-bound scope attestations.
+    var hasTrustedScopeAttestation: Bool {
+        requiresScopeAttestation && Self.isValidScopeAttestationKey(scopeAttestationPublicKey)
+    }
+
 
     func validate() throws {
         guard Self.isSafeClientID(clientID),
@@ -143,52 +149,38 @@ enum MSWConnectError: Error, LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidConfiguration:
-            return "GitHub connection is not configured in this build. A deployed MSW Connect service and registered app client are required; no browser page was opened."
-        case .invalidCallback:
-            return "MSW Connect returned an invalid authorization callback."
-        case .callbackStateMismatch:
-            return "MSW Connect authorization state did not match this request. Start again."
+            return "GitHub access is not ready yet. Continue without GitHub, or try again later."
+        case .invalidCallback, .callbackStateMismatch, .callbackReplayed:
+            return "GitHub connection could not be completed. Try again."
         case .callbackExpired:
-            return "The MSW Connect authorization request expired. Start again."
-        case .callbackReplayed:
-            return "The MSW Connect authorization callback was already used. Start again."
+            return "The GitHub connection expired. Try again."
         case .authorizationDenied(let reason):
             return reason.map { "GitHub authorization was denied: \($0)" } ?? "GitHub authorization was denied."
         case .cancelled:
             return "GitHub authorization was cancelled."
-        case .transportUnavailable:
-            return "MSW Connect is unavailable. Check the network and try again."
-        case .httpStatus(let status):
-            return "MSW Connect returned HTTP status \(status)."
+        case .transportUnavailable, .httpStatus:
+            return "GitHub could not be reached. Check your connection and try again."
         case .malformedResponse:
-            return "MSW Connect returned an unexpected authorization response."
+            return "GitHub returned an unexpected response. Try again."
         case .sessionExpired:
-            return "The MSW Connect session expired. Connect GitHub again."
+            return "Your GitHub sign-in expired. Connect GitHub again."
         case .sessionCleanupFailed:
-            return "The MSW Connect session ended, but local session cleanup could not be verified."
-        case .grantNotFound:
-            return "The MSW Connect workspace grant no longer exists. Reauthorize this workspace."
-        case .grantRevoked:
-            return "The MSW Connect workspace grant was revoked. Reauthorize this workspace."
-        case .scopeMismatch:
-            return "MSW Connect returned a grant broader than the requested workspace access. The grant was rejected."
-        case .scopeAttestationMissing:
-            return "MSW Connect did not provide a signed repository scope for this grant."
-        case .scopeAttestationInvalid:
-            return "MSW Connect returned an invalid repository-scope attestation."
-        case .accountBoundaryViolation:
-            return "The selected GitHub owner or repository is outside the connected account."
-        case .repositoryNotAllowed:
-            return "The selected repository is not allowed by the GitHub App installation."
+            return "GitHub access needs reconnecting."
+        case .grantNotFound, .grantRevoked:
+            return "Existing GitHub access needs reconnecting."
+        case .scopeMismatch, .scopeAttestationMissing, .scopeAttestationInvalid:
+            return "GitHub returned access that did not match your choices. Existing access stayed unchanged."
+        case .accountBoundaryViolation, .repositoryNotAllowed:
+            return "One or more selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
         case .installationUnavailable, .installationRemoved:
-            return "The selected GitHub App installation is no longer available. Reauthorize this workspace."
+            return "The selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
         case .rateLimited(let retryAfter):
             if let retryAfter {
-                return "MSW Connect rate-limited the request. Try again in \(retryAfter) seconds."
+                return "GitHub is busy. Try again in \(retryAfter) seconds."
             }
-            return "MSW Connect rate-limited the request. Try again later."
-        case .serviceValidation(let message):
-            return message
+            return "GitHub is busy. Try again later."
+        case .serviceValidation:
+            return "GitHub access could not be completed. Try again."
         }
     }
 }
@@ -540,6 +532,7 @@ struct MSWConnectGrant: Codable, Sendable, Equatable, Identifiable {
     let scopeDigest: String?
     let scopeSignature: String?
     let scopeKeyID: String?
+    let credentialDigest: String?
 
     enum CodingKeys: String, CodingKey {
         case id = "grant_id"
@@ -556,6 +549,7 @@ struct MSWConnectGrant: Codable, Sendable, Equatable, Identifiable {
         case scopeDigest = "scope_digest"
         case scopeSignature = "scope_signature"
         case scopeKeyID = "scope_key_id"
+        case credentialDigest = "credential_digest"
     }
 
     init(
@@ -575,7 +569,8 @@ struct MSWConnectGrant: Codable, Sendable, Equatable, Identifiable {
         issuedAt: Date? = nil,
         scopeDigest: String? = nil,
         scopeSignature: String? = nil,
-        scopeKeyID: String? = nil
+        scopeKeyID: String? = nil,
+        credentialDigest: String? = nil
     ) {
         self.id = id
         self.workspace = workspace
@@ -594,6 +589,7 @@ struct MSWConnectGrant: Codable, Sendable, Equatable, Identifiable {
         self.scopeDigest = scopeDigest
         self.scopeSignature = scopeSignature
         self.scopeKeyID = scopeKeyID
+        self.credentialDigest = credentialDigest
     }
 
     var credential: ScopedInstallationCredential {
@@ -938,25 +934,34 @@ actor MSWConnectClient {
         }
         let hasAttestationFields = grant.scopeDigest != nil ||
             grant.scopeSignature != nil ||
-            grant.scopeKeyID != nil
+            grant.scopeKeyID != nil ||
+            grant.credentialDigest != nil
         guard configuration.requiresScopeAttestation || hasAttestationFields else { return }
         guard let digest = grant.scopeDigest,
-              digest == expectedDigest,
               let signatureValue = grant.scopeSignature,
               let keyID = grant.scopeKeyID,
-              Self.isSafeGitHubIdentifier(keyID),
-              let signature = Data(base64Encoded: signatureValue),
-              let publicKeyData = configuration.scopeAttestationPublicKey,
-              let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData),
-              publicKey.isValidSignature(signature, for: Data(digest.utf8)) else {
+              let credentialDigest = grant.credentialDigest else {
             throw configuration.requiresScopeAttestation
                 ? MSWConnectError.scopeAttestationMissing
                 : MSWConnectError.scopeAttestationInvalid
         }
-        guard let issuedAt = grant.issuedAt,
+        guard digest == expectedDigest,
+              Self.isSafeGitHubIdentifier(keyID),
+              Self.isValidCredentialDigest(credentialDigest),
+              credentialDigest == Self.tokenDigest(grant.accessToken),
+              let issuedAt = grant.issuedAt,
               grant.accessExpiresAt > issuedAt,
               grant.accessExpiresAt <= issuedAt.addingTimeInterval(2 * 60 * 60),
-              issuedAt <= now() else {
+              issuedAt <= now(),
+              let signedPayload = Self.scopeAttestationPayload(
+                grant: grant,
+                scopeDigest: digest,
+                credentialDigest: credentialDigest
+              ),
+              let signature = Data(base64Encoded: signatureValue),
+              let publicKeyData = configuration.scopeAttestationPublicKey,
+              let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData),
+              publicKey.isValidSignature(signature, for: signedPayload) else {
             throw MSWConnectError.scopeAttestationInvalid
         }
     }
@@ -1281,9 +1286,21 @@ actor MSWConnectClient {
         let verificationRepository: String
     }
 
+    /// The service signs this canonical payload, binding the reviewed scope to
+    /// the exact opaque installation credential and grant it issued.
+    private struct TokenBoundScopeAttestationPayload: Encodable {
+        let schemaVersion: Int
+        let grantID: String
+        let scopeDigest: String
+        let credentialDigest: String
+        let accessExpiresAtMilliseconds: Int64
+        let generation: Int
+        let issuedAtMilliseconds: Int64
+    }
+
     private static let canonicalScopeEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return encoder
     }()
 
@@ -1347,6 +1364,40 @@ actor MSWConnectClient {
                 grant.accessExpiresAt <= issuedAt.addingTimeInterval(2 * 60 * 60)
         }
         return grant.accessExpiresAt <= now.addingTimeInterval(2 * 60 * 60)
+    }
+
+    private static func tokenDigest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isValidCredentialDigest(_ value: String) -> Bool {
+        value.count == 64 &&
+            value == value.lowercased() &&
+            value.unicodeScalars.allSatisfy {
+                CharacterSet(charactersIn: "0123456789abcdef").contains($0)
+            }
+    }
+
+    private static func scopeAttestationPayload(
+        grant: MSWConnectGrant,
+        scopeDigest: String,
+        credentialDigest: String
+    ) -> Data? {
+        guard let issuedAt = grant.issuedAt else { return nil }
+        let payload = TokenBoundScopeAttestationPayload(
+            schemaVersion: 1,
+            grantID: grant.id.uuidString.lowercased(),
+            scopeDigest: scopeDigest,
+            credentialDigest: credentialDigest,
+            accessExpiresAtMilliseconds: unixMilliseconds(grant.accessExpiresAt),
+            generation: grant.generation,
+            issuedAtMilliseconds: unixMilliseconds(issuedAt)
+        )
+        return try? canonicalScopeEncoder.encode(payload)
+    }
+
+    private static func unixMilliseconds(_ value: Date) -> Int64 {
+        Int64((value.timeIntervalSince1970 * 1_000).rounded(.towardZero))
     }
 
     private static func isSafeEndpointPath(_ value: String) -> Bool {
@@ -1437,658 +1488,5 @@ private extension String {
     var isLoopback: Bool {
         let lowercased = lowercased()
         return lowercased == "localhost" || lowercased == "127.0.0.1" || lowercased == "::1"
-    }
-}
-
-// MARK: - Direct GitHub device flow
-
-/// GitHub App device flow, used by onboarding to connect a GitHub account
-/// without any MSW backend: the app requests a device/user code pair, opens
-/// the verification page in the default browser, and polls until the user
-/// approves. No client secret is involved. Repositories are selected through
-/// GitHub's own App installation page, opened in the default browser.
-struct GitHubDeviceAuthorization: Sendable, Equatable {
-    let deviceCode: String
-    let userCode: String
-    let verificationURI: URL
-    let expiresIn: Int
-    let interval: Int
-}
-
-struct GitHubDeviceToken: Sendable, Equatable {
-    let accessToken: String
-    let refreshToken: String?
-    let expiresIn: Int?
-    let refreshExpiresIn: Int?
-    let scope: String
-}
-
-enum GitHubDeviceFlowError: Error, LocalizedError, Sendable, Equatable {
-    case invalidConfiguration
-    case transportUnavailable
-    case malformedResponse
-    case authorizationPending
-    case slowDown(Int)
-    case expired
-    case denied
-    case deviceFlowDisabled
-    case rateLimited
-    case invalidGrant
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidConfiguration:
-            return "GitHub connection is not set up in this build. A GitHub App with device flow enabled is required."
-        case .transportUnavailable:
-            return "GitHub could not be reached. Check the network and try again."
-        case .malformedResponse:
-            return "GitHub returned an unexpected response."
-        case .authorizationPending:
-            return "Waiting for approval on GitHub."
-        case .slowDown(let interval):
-            return "GitHub asked to slow down; retrying in \(interval) seconds."
-        case .expired:
-            return "The GitHub approval code expired. Start again."
-        case .denied:
-            return "GitHub authorization was declined."
-        case .deviceFlowDisabled:
-            return "The configured GitHub App does not have device flow enabled."
-        case .rateLimited:
-            return "GitHub rate-limited the request. Try again later."
-        case .invalidGrant:
-            return "The GitHub session is no longer valid. Reconnect to GitHub to continue."
-        }
-    }
-}
-
-struct GitHubDeviceFlowConfiguration: Sendable, Equatable {
-    let clientID: String
-
-    init(clientID: String = "") {
-        self.clientID = clientID
-    }
-
-    var isConfigured: Bool {
-        !clientID.isEmpty && clientID.count <= 128 &&
-            clientID.unicodeScalars.allSatisfy {
-                CharacterSet.alphanumerics.contains($0) || "-_.".unicodeScalars.contains($0)
-            }
-    }
-}
-
-actor GitHubDeviceFlow {
-    static let deviceCodeEndpoint = URL(string: "https://github.com/login/device/code")!
-    static let accessTokenEndpoint = URL(string: "https://github.com/login/oauth/access_token")!
-    static let userEndpoint = URL(string: "https://api.github.com/user")!
-    static let installationsEndpoint = URL(string: "https://api.github.com/user/installations")!
-    static let verificationPage = URL(string: "https://github.com/login/device")!
-
-    let configuration: GitHubDeviceFlowConfiguration
-    private let transport: any MSWConnectHTTPTransport
-
-    init(
-        configuration: GitHubDeviceFlowConfiguration,
-        transport: any MSWConnectHTTPTransport = URLSessionMSWConnectTransport()
-    ) {
-        self.configuration = configuration
-        self.transport = transport
-    }
-
-    /// Requests a device/user code pair. For a GitHub App, the device flow
-    /// request carries no `scope`: the resulting user token is limited to the
-    /// intersection of the App's permissions and its installed repositories.
-    func requestDeviceCode() async throws -> GitHubDeviceAuthorization {
-        guard configuration.isConfigured else {
-            throw GitHubDeviceFlowError.invalidConfiguration
-        }
-        var request = URLRequest(url: Self.deviceCodeEndpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        var body = URLComponents()
-        body.queryItems = [URLQueryItem(name: "client_id", value: configuration.clientID)]
-        request.httpBody = body.percentEncodedQuery?.data(using: .utf8)
-
-        let payload = try await sendForm(request)
-        guard let deviceCode = payload["device_code"], !deviceCode.isEmpty,
-              let userCode = payload["user_code"], !userCode.isEmpty,
-              let verification = payload["verification_uri"],
-              let verificationURI = URL(string: verification),
-              let expiresIn = payload["expires_in"].flatMap(Int.init),
-              let interval = payload["interval"].flatMap(Int.init),
-              expiresIn > 0, interval > 0 else {
-            throw GitHubDeviceFlowError.malformedResponse
-        }
-        return GitHubDeviceAuthorization(
-            deviceCode: deviceCode,
-            userCode: userCode,
-            verificationURI: verificationURI,
-            expiresIn: expiresIn,
-            interval: interval
-        )
-    }
-
-    /// Verification page URL with the user code pre-filled.
-    nonisolated static func verificationURL(for authorization: GitHubDeviceAuthorization) -> URL {
-        var components = URLComponents(url: verificationPage, resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: "user_code", value: authorization.userCode)]
-        return components?.url ?? verificationPage
-    }
-
-    /// Polls the token endpoint once. Throws `.authorizationPending` /
-    /// `.slowDown(interval)` until the user approves; `.expired`/`.denied`/
-    /// `.deviceFlowDisabled`/`.rateLimited` are terminal.
-    func pollToken(clientID: String, deviceCode: String) async throws -> GitHubDeviceToken {
-        guard configuration.isConfigured else {
-            throw GitHubDeviceFlowError.invalidConfiguration
-        }
-        var body = URLComponents()
-        body.queryItems = [
-            URLQueryItem(name: "client_id", value: clientID),
-            URLQueryItem(name: "device_code", value: deviceCode),
-            URLQueryItem(name: "grant_type", value: "urn:ietf:params:oauth:grant-type:device_code")
-        ]
-        return try await tokenExchange(body: body)
-    }
-
-    /// Rotates an expiring device token with its refresh token. No secret is
-    /// needed for GitHub App user tokens.
-    func refreshToken(clientID: String, refreshToken: String) async throws -> GitHubDeviceToken {
-        guard configuration.isConfigured else {
-            throw GitHubDeviceFlowError.invalidConfiguration
-        }
-        var body = URLComponents()
-        body.queryItems = [
-            URLQueryItem(name: "client_id", value: clientID),
-            URLQueryItem(name: "refresh_token", value: refreshToken),
-            URLQueryItem(name: "grant_type", value: "refresh_token")
-        ]
-        return try await tokenExchange(body: body)
-    }
-
-    /// Fetches the authenticated account for a token. Never accepts a token
-    /// solely because the exchange succeeded.
-    func account(accessToken: String) async throws -> GitHubAccount {
-        var request = URLRequest(url: Self.userEndpoint)
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await send(request)
-        guard response.statusCode == 200 else {
-            throw GitHubDeviceFlowError.transportUnavailable
-        }
-        // /user contains nulls, booleans, and nested objects; decode only the
-        // fields this app uses (unknown keys are ignored by Decodable).
-        struct UserPayload: Decodable {
-            let login: String
-            let id: Int
-            let name: String?
-            let email: String?
-        }
-        let payload: UserPayload
-        do {
-            payload = try Self.decoder.decode(UserPayload.self, from: data)
-        } catch {
-            throw GitHubDeviceFlowError.malformedResponse
-        }
-        guard !payload.login.isEmpty, payload.id > 0 else {
-            throw GitHubDeviceFlowError.malformedResponse
-        }
-        return GitHubAccount(
-            login: payload.login,
-            id: payload.id,
-            name: payload.name,
-            email: payload.email
-        )
-    }
-
-    /// The App installations the authenticated user can act on. The
-    /// repositories the user selected during installation are exposed per
-    /// installation through `repositories(accessToken:installationID:)`.
-    func installations(accessToken: String) async throws -> [GitHubInstallation] {
-        var request = URLRequest(url: Self.installationsEndpoint)
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await send(request)
-        guard response.statusCode == 200 else {
-            throw GitHubDeviceFlowError.transportUnavailable
-        }
-        // GET /user/installations wraps the list: { total_count, installations }.
-        struct InstallationsResponse: Decodable {
-            let total_count: Int
-            let installations: [GitHubInstallation]
-        }
-        do {
-            return try Self.decoder.decode(InstallationsResponse.self, from: data).installations
-        } catch {
-            throw GitHubDeviceFlowError.malformedResponse
-        }
-    }
-
-    /// The repositories of one installation, as selected on GitHub's App
-    /// installation page.
-    func repositories(accessToken: String, installationID: Int) async throws -> [GitHubRepository] {
-        let url = Self.installationsEndpoint
-            .appendingPathComponent(String(installationID))
-            .appendingPathComponent("repositories")
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await send(request)
-        guard response.statusCode == 200 else {
-            throw GitHubDeviceFlowError.transportUnavailable
-        }
-        struct RepositoriesResponse: Decodable {
-            let repositories: [GitHubRepository]
-        }
-        do {
-            return try Self.decoder.decode(RepositoriesResponse.self, from: data).repositories
-        } catch {
-            throw GitHubDeviceFlowError.malformedResponse
-        }
-    }
-
-    private func tokenExchange(body: URLComponents) async throws -> GitHubDeviceToken {
-        var request = URLRequest(url: Self.accessTokenEndpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = body.percentEncodedQuery?.data(using: .utf8)
-
-        let payload = try await sendForm(request)
-        if let errorCode = payload["error"] {
-            switch errorCode {
-            case "authorization_pending":
-                throw GitHubDeviceFlowError.authorizationPending
-            case "slow_down":
-                throw GitHubDeviceFlowError.slowDown(payload["interval"].flatMap(Int.init) ?? 5)
-            case "expired_token":
-                throw GitHubDeviceFlowError.expired
-            case "access_denied":
-                throw GitHubDeviceFlowError.denied
-            case "device_flow_disabled":
-                throw GitHubDeviceFlowError.deviceFlowDisabled
-            case "rate_limited":
-                throw GitHubDeviceFlowError.rateLimited
-            case "invalid_grant", "bad_refresh_token":
-                // A consumed or expired refresh token (e.g. after a refresh
-                // whose rotated session was never persisted): the grant is
-                // dead — reauthorization, not retry.
-                throw GitHubDeviceFlowError.invalidGrant
-            default:
-                throw GitHubDeviceFlowError.malformedResponse
-            }
-        }
-        guard let accessToken = payload["access_token"], !accessToken.isEmpty else {
-            throw GitHubDeviceFlowError.malformedResponse
-        }
-        return GitHubDeviceToken(
-            accessToken: accessToken,
-            refreshToken: payload["refresh_token"].flatMap { $0.isEmpty ? nil : $0 },
-            expiresIn: payload["expires_in"].flatMap(Int.init),
-            refreshExpiresIn: payload["refresh_token_expires_in"].flatMap(Int.init),
-            scope: payload["scope"] ?? ""
-        )
-    }
-
-    /// Wraps the transport so every transport-level failure surfaces as the
-    /// device flow's own error instead of a foreign error type. Cancellation
-    /// propagates untouched: a cancelled caller must never publish a stale
-    /// result dressed up as a transport error.
-    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        do {
-            return try await transport.send(request)
-        } catch MSWConnectError.cancelled {
-            throw CancellationError()
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw GitHubDeviceFlowError.transportUnavailable
-        }
-    }
-
-    private func sendForm(_ request: URLRequest) async throws -> [String: String] {
-        let (data, response) = try await send(request)
-        guard response.statusCode == 200 else {
-            throw Self.error(for: response.statusCode, data: data)
-        }
-        let payload = try Self.decoder.decode([String: JSONAny].self, from: data)
-        var result: [String: String] = [:]
-        for (key, value) in payload {
-            result[key] = value.stringValue ?? value.intValue.map(String.init) ?? ""
-        }
-        return result
-    }
-
-    private static func error(for status: Int, data: Data) -> GitHubDeviceFlowError {
-        if let payload = try? decoder.decode([String: String].self, from: data),
-           payload["error"] == "device_flow_disabled" {
-            return .deviceFlowDisabled
-        }
-        switch status {
-        case 404:
-            return .deviceFlowDisabled
-        case 429:
-            return .rateLimited
-        default:
-            return .transportUnavailable
-        }
-    }
-
-    private static let decoder = JSONDecoder()
-}
-
-private enum JSONAny: Decodable {
-    case string(String)
-    case int(Int)
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .int(value)
-        } else {
-            throw DecodingError.typeMismatch(
-                JSONAny.self,
-                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "not a string or int")
-            )
-        }
-    }
-
-    var stringValue: String? {
-        if case .string(let value) = self { return value }
-        return nil
-    }
-
-    var intValue: Int? {
-        if case .int(let value) = self { return value }
-        return nil
-    }
-}
-
-// MARK: - Direct GitHub session storage
-
-/// One Keychain record holds the complete device-flow session: the GitHub App
-/// user token, its optional refresh token, expiry, and the verified account.
-struct GitHubDeviceSession: Codable, Sendable, Equatable {
-    let schemaVersion: Int
-    let clientID: String
-    let account: GitHubAccount
-    let accessToken: String
-    let refreshToken: String?
-    let accessExpiresAt: Date?
-    let refreshExpiresAt: Date?
-    let obtainedAt: Date
-
-    var isAccessExpired: Bool {
-        accessExpiresAt.map { $0 <= Date() } ?? false
-    }
-
-    var canRefresh: Bool {
-        guard let refreshToken, let refreshExpiresAt else { return false }
-        return !refreshToken.isEmpty && refreshExpiresAt > Date()
-    }
-}
-
-struct GitHubDeviceSessionStore: Sendable {
-    static let service = "org.microsandbox.MSWMonitor.github-device-session"
-    static let account = "session"
-
-    private let keychain: any CredentialKeychainStoring
-
-    init(keychain: any CredentialKeychainStoring = KeychainStore()) {
-        self.keychain = keychain
-    }
-
-    func load() throws -> GitHubDeviceSession? {
-        let data: Data
-        do {
-            data = try keychain.load(service: Self.service, account: Self.account)
-        } catch KeychainStoreError.itemNotFound {
-            return nil
-        }
-        guard let session = try? JSONDecoder().decode(GitHubDeviceSession.self, from: data),
-              session.schemaVersion == 1,
-              session.accessToken.count <= 4096,
-              !session.accessToken.isEmpty else {
-            return nil
-        }
-        return session
-    }
-
-    func save(_ session: GitHubDeviceSession) throws {
-        let data = try JSONEncoder().encode(session)
-        try keychain.save(KeychainItem(service: Self.service, account: Self.account, secret: data))
-    }
-
-    func clear() throws {
-        try keychain.delete(service: Self.service, account: Self.account)
-    }
-}
-
-/// Thrown when GitHub accepted a device-session refresh but neither the
-/// rotated session nor a poisoned (credential-stripped) marker could be
-/// persisted. The consumed generation is quarantined: the only recovery is
-/// explicit reauthorization — never a retry of the consumed pair.
-enum GitHubDeviceSessionRefreshError: Error, LocalizedError, Sendable {
-    case keychainSaveFailed
-
-    var errorDescription: String? {
-        "GitHub issued a refreshed session, but it could not be saved to the Keychain. Reconnect to GitHub to continue."
-    }
-}
-
-/// Atomic outcome of a device-session revalidation, captured inside the actor
-/// so the session and the post-operation store generation can never be
-/// observed separately. Callers guard every later publication against the
-/// generation THIS operation produced — a pre-operation epoch would be
-/// invalidated by the operation's own rotation/poison and self-suppress the
-/// result.
-enum GitHubDeviceSessionRefreshOutcome: Sendable, Equatable {
-    /// The current session (nil when none is stored) and the store
-    /// generation captured after this operation. An expired-but-unrefreshable
-    /// session is returned here; callers decide whether it requires
-    /// reauthorization.
-    case current(session: GitHubDeviceSession?, generation: Int)
-    /// The stored grant was consumed and could not be poisoned (quarantine):
-    /// explicit reauthorization is the only recovery. Carries the
-    /// post-operation generation so callers can still publish this terminal
-    /// outcome when it remains current — not suppress it merely because this
-    /// operation advanced the epoch itself.
-    case reauthorizationRequired(generation: Int)
-    /// A concurrent replacement advanced the session epoch while this
-    /// operation was in flight: the replacement wins and this invocation must
-    /// publish nothing (never reauthorization over a fresh session).
-    case superseded
-}
-
-/// Serializes every device-session write in the process (revalidation for
-/// setup re-checks, Settings' "Check again", startup restore, and fresh
-/// sign-in saves): a single-use refresh token is submitted to GitHub at most
-/// once, load→compare→persist is atomic against sign-in writes, and a
-/// consumed generation is poisoned fail-closed so it can never be retried.
-actor GitHubDeviceSessionRefresher {
-    /// Shared instance: single-flight protection must span Setup and
-    /// Settings, which share the app's Keychain record.
-    static let shared = GitHubDeviceSessionRefresher()
-
-    private let store: GitHubDeviceSessionStore
-    private var inFlight: Task<GitHubDeviceSessionRefreshOutcome, Error>?
-    /// Monotonic generation of the stored session: incremented on every
-    /// durable write (fresh sign-in save, successful rotation, poison,
-    /// quarantine). Callers suppress publications whose captured generation
-    /// is stale — a concurrent fresh sign-in/rotation must win over stale
-    /// expiry/error/repository output.
-    private var sessionGeneration = 0
-    /// In-memory tombstone of consumed refresh tokens (process lifetime). Set
-    /// when GitHub accepted a refresh but neither the rotated session nor a
-    /// poisoned marker could be persisted, or when GitHub reports the grant
-    /// invalid: a later in-process call must never resubmit a single-use
-    /// token — reauthorization is the only recovery.
-    private var consumedRefreshTokens: Set<String> = []
-
-    init(store: GitHubDeviceSessionStore = GitHubDeviceSessionStore()) {
-        self.store = store
-    }
-
-    /// Loads the stored session, rotating an expired access token exactly
-    /// once across all concurrent callers, and returns the atomic outcome:
-    /// the session that is now current (persisted) plus the post-operation
-    /// store generation. Retryable transport failures still throw; terminal
-    /// reauthorization states are returned.
-    func revalidatedSession(using flow: GitHubDeviceFlow) async throws -> GitHubDeviceSessionRefreshOutcome {
-        if let inFlight {
-            return try await inFlight.value
-        }
-        let task = Task { try await self.performRevalidation(using: flow) }
-        inFlight = task
-        defer { inFlight = nil }
-        return try await task.value
-    }
-
-    /// Persists a brand-new session (fresh sign-in). Serialized with
-    /// `revalidatedSession` so the generation guard's load→compare→persist
-    /// cannot race a sign-in that replaces the same record. The caller's
-    /// cancellation is re-checked at the actor boundary: a pre-hop guard can
-    /// be invalidated while the hop is queued, so a cancelled sign-in must
-    /// never write.
-    func replaceCurrentSession(with session: GitHubDeviceSession) throws {
-        try Task.checkCancellation()
-        try store.save(session)
-        sessionGeneration &+= 1
-    }
-
-    /// The current session generation. A caller that captured an earlier
-    /// generation before its awaits can detect a concurrent sign-in/rotation
-    /// and suppress stale publication.
-    func currentSessionGeneration() -> Int {
-        sessionGeneration
-    }
-
-    /// Fail-closed quarantine for a refresh GitHub already accepted: the
-    /// stored refresh token is consumed, so any further Keychain failure must
-    /// not leave it resubmittable. Tombstones the credential in memory. If a
-    /// concurrent replacement advanced the session epoch past the operation's
-    /// starting epoch, the replacement wins — return `.superseded` so callers
-    /// publish nothing over the fresh session. Otherwise a durable poison
-    /// write against the still-current generation bumps the epoch and the
-    /// terminal reauthorization outcome is returned.
-    private func quarantineConsumedGeneration(refreshToken: String, session: GitHubDeviceSession, startingGeneration: Int) -> GitHubDeviceSessionRefreshOutcome {
-        consumedRefreshTokens.insert(refreshToken)
-        guard sessionGeneration == startingGeneration else {
-            // A fresh sign-in/replacement advanced the epoch while we were
-            // refreshing: it wins. Never surface reauthorization over it and
-            // never bump the replacement epoch.
-            return .superseded
-        }
-        if let current = try? store.load(), current == session {
-            try? store.save(Self.poisonedSession(from: session))
-        }
-        sessionGeneration &+= 1
-        return .reauthorizationRequired(generation: sessionGeneration)
-    }
-
-    private static func poisonedSession(from session: GitHubDeviceSession) -> GitHubDeviceSession {
-        GitHubDeviceSession(
-            schemaVersion: session.schemaVersion,
-            clientID: session.clientID,
-            account: session.account,
-            accessToken: session.accessToken,
-            refreshToken: nil,
-            accessExpiresAt: .distantPast,
-            refreshExpiresAt: nil,
-            obtainedAt: session.obtainedAt
-        )
-    }
-
-    private func performRevalidation(using flow: GitHubDeviceFlow) async throws -> GitHubDeviceSessionRefreshOutcome {
-        // The operation's starting epoch: a concurrent replacement during the
-        // network await advances the actor epoch; quarantine reconciliation
-        // must not supersede it.
-        let startingGeneration = sessionGeneration
-        guard let session = try store.load() else {
-            return .current(session: nil, generation: sessionGeneration)
-        }
-        guard session.isAccessExpired else {
-            return .current(session: session, generation: sessionGeneration)
-        }
-        guard session.canRefresh, let refreshToken = session.refreshToken else {
-            return .current(session: session, generation: sessionGeneration)
-        }
-        if consumedRefreshTokens.contains(refreshToken) {
-            // Already known to be consumed (poison failed / invalid grant):
-            // never resubmit — reauthorization is the only recovery.
-            return .current(session: session, generation: sessionGeneration)
-        }
-        let token: GitHubDeviceToken
-        do {
-            token = try await flow.refreshToken(clientID: session.clientID, refreshToken: refreshToken)
-        } catch GitHubDeviceFlowError.invalidGrant {
-            // Relaunch detection: GitHub rejected the grant (e.g. a consumed
-            // token whose rotated session was never persisted). Tombstone it
-            // in memory, then re-read the record: a fresh sign-in saved
-            // during the network await must win over the stale expired one.
-            consumedRefreshTokens.insert(refreshToken)
-            guard sessionGeneration == startingGeneration else {
-                // A replacement won the epoch during the network await: never
-                // pair the stale expired session with the fresh epoch.
-                return .superseded
-            }
-            return .current(session: (try? store.load()) ?? session, generation: sessionGeneration)
-        }
-        // GitHub accepted the refresh: the stored refresh token is CONSUMED.
-        // Tombstone it immediately, before any cancellation-sensitive point,
-        // and make the compare/persist-or-quarantine transaction below
-        // NON-CANCELLABLE — cancellation may suppress later UI publication,
-        // never the store write (a cancelled accept must still fail closed).
-        consumedRefreshTokens.insert(refreshToken)
-        let rotated = GitHubDeviceSession(
-            schemaVersion: 1,
-            clientID: session.clientID,
-            account: session.account,
-            accessToken: token.accessToken,
-            refreshToken: token.refreshToken ?? session.refreshToken,
-            accessExpiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
-            refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) } ?? session.refreshExpiresAt,
-            obtainedAt: Date()
-        )
-        // Generation guard: persist only if the record still holds the exact
-        // session we rotated from; a fresh sign-in must win over us. Publish
-        // the observed fresh generation instead of re-loading it.
-        let current: GitHubDeviceSession?
-        do {
-            current = try store.load()
-        } catch {
-            return quarantineConsumedGeneration(refreshToken: refreshToken, session: session, startingGeneration: startingGeneration)
-        }
-        guard current == session else {
-            return .current(session: current, generation: sessionGeneration)
-        }
-        do {
-            try store.save(rotated)
-            sessionGeneration &+= 1
-            return .current(session: rotated, generation: sessionGeneration)
-        } catch {
-            // The rotated save failed. Fail closed: strip the refresh
-            // credential (poison) so the single-use token can never be
-            // resubmitted; if even that write fails, quarantine.
-            let latest: GitHubDeviceSession?
-            do {
-                latest = try store.load()
-            } catch {
-                return quarantineConsumedGeneration(refreshToken: refreshToken, session: session, startingGeneration: startingGeneration)
-            }
-            guard latest == session else {
-                return .current(session: latest, generation: sessionGeneration)
-            }
-            do {
-                let poisoned = Self.poisonedSession(from: session)
-                try store.save(poisoned)
-                sessionGeneration &+= 1
-                return .current(session: poisoned, generation: sessionGeneration)
-            } catch {
-                return quarantineConsumedGeneration(refreshToken: refreshToken, session: session, startingGeneration: startingGeneration)
-            }
-        }
     }
 }

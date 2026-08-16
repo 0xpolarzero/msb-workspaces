@@ -39,9 +39,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 private struct WorkspaceGrantGroup: Identifiable, Equatable {
     let workspace: String
     let entries: [WorkspaceCredentialMetadata]
-    let owner: String?
     let repositoryNames: [String]
-    let verifiedAt: Date?
 
     var id: String { workspace }
 }
@@ -69,8 +67,6 @@ private enum GitHubConnectionState {
 struct SettingsView: View {
     @Bindable private var navigation: SettingsNavigationState
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    let deviceFlow: GitHubDeviceFlow?
-    let githubInstallationURL: URL?
     let onConnect: () -> Void
     private let notificationCoordinator: NotificationCoordinator
 
@@ -87,12 +83,6 @@ struct SettingsView: View {
     @State private var githubError: String?
     @State private var isUpdatingGitHub = false
     @State private var destructiveAction: GitHubDestructiveAction?
-    @State private var deviceAccount: GitHubAccount?
-    @State private var deviceRepositories: [GitHubRepository] = []
-    @State private var deviceAccessLoaded = false
-    @State private var deviceAccessIssue: String?
-    @State private var deviceAccessTask: Task<Void, Never>?
-    @State private var deviceAccessGeneration = 0
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var enabledNotificationCategories: Set<MSWNotificationCategory> = []
     @State private var notificationMessage: String?
@@ -101,8 +91,6 @@ struct SettingsView: View {
     init(
         navigation: SettingsNavigationState,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
-        deviceFlow: GitHubDeviceFlow? = nil,
-        githubInstallationURL: URL? = nil,
         notificationCoordinator: NotificationCoordinator = .shared,
         onConnect: @escaping () -> Void = {
             NSApp.sendAction(#selector(AppDelegate.openGitHubSetup), to: nil, from: nil)
@@ -110,24 +98,8 @@ struct SettingsView: View {
     ) {
         self.navigation = navigation
         self.authorizationCoordinator = authorizationCoordinator
-        self.deviceFlow = deviceFlow
-        self.githubInstallationURL = githubInstallationURL
         self.notificationCoordinator = notificationCoordinator
         self.onConnect = onConnect
-        if ProcessInfo.processInfo.arguments.contains("--ui-test-device-access") {
-            _deviceAccount = State(initialValue: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: nil))
-            _deviceRepositories = State(initialValue: [
-                GitHubRepository(
-                    id: 1001,
-                    fullName: "acme/one",
-                    name: "one",
-                    owner: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
-                    private: true,
-                    defaultBranch: "main"
-                )
-            ])
-            _deviceAccessLoaded = State(initialValue: true)
-        }
     }
 
     var body: some View {
@@ -163,7 +135,6 @@ struct SettingsView: View {
                 transaction.disablesAnimations = true
             }
         }
-        .task { await loadDeviceAccess() }
         .sheet(item: $destructiveAction) { action in
             GitHubImpactConfirmation(action: action) {
                 destructiveAction = nil
@@ -246,11 +217,6 @@ struct SettingsView: View {
                         .foregroundStyle(.green)
                         .accessibilityLabel("Connected as @\(connectedAccount.login)")
                         .accessibilityIdentifier("settings.github.status")
-                } else if let deviceAccount {
-                    Label("Connected as @\(deviceAccount.login)", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Connected as @\(deviceAccount.login)")
-                        .accessibilityIdentifier("settings.github.status")
                 } else {
                     LabeledContent("Status", value: githubStatusText)
                         .accessibilityIdentifier("settings.github.status")
@@ -259,6 +225,10 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 githubPrimaryAction
+                Button("Disconnect GitHub…", role: .destructive) {
+                    destructiveAction = .disconnect(groupedMetadata, connectedAccount)
+                }
+                .disabled((metadata.isEmpty && connectedAccount == nil) || isUpdatingGitHub)
                 if let githubError {
                     recoveryMessage(githubError)
                     Button("Retry GitHub status") {
@@ -268,28 +238,17 @@ struct SettingsView: View {
             }
 
             Section("Repository access") {
-                deviceWorkspaceAccessContent
                 if groupedMetadata.isEmpty {
                     ContentUnavailableView(
-                        "No workspace grants",
+                        "No workspace access",
                         systemImage: "lock.shield",
-                        description: Text("Sign in to GitHub, then review repository access for each workspace.")
+                        description: Text("Connect GitHub, then review repository access for each workspace.")
                     )
                 } else {
                     ForEach(groupedMetadata) { group in
                         workspaceGrantRow(group)
                     }
                 }
-            }
-
-            Section("Credential safety") {
-                Text("Tokens, private keys, authorization codes, and service sessions are never displayed or copied here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Disconnect GitHub…", role: .destructive) {
-                    destructiveAction = .disconnect(groupedMetadata, connectedAccount)
-                }
-                .disabled((metadata.isEmpty && connectedAccount == nil) || isUpdatingGitHub)
             }
         }
         .formStyle(.grouped)
@@ -375,155 +334,6 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    @ViewBuilder
-    private var deviceWorkspaceAccessContent: some View {
-        if deviceAccount != nil {
-            if deviceRepositories.isEmpty {
-                if deviceAccessIssue != nil {
-                    Text("Repository status could not be refreshed.")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                } else {
-                    Text("No repositories are selected on GitHub yet. Open the App installation page, pick repositories, then check again.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("Repositories for this direct connection are managed by the GitHub App installation. Per-workspace and write grants require MSW Connect; Settings does not present controls it cannot enforce.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("settings.github.device-scope")
-            }
-            HStack {
-                if let url = githubInstallationURL {
-                    Button("Manage repositories on GitHub") {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-                Button("Check again") {
-                    Task { await loadDeviceAccess() }
-                }
-            }
-        } else {
-            Text("Connect GitHub from the setup window or Settings → Connect to manage workspace access.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        // The failure is rendered independently of account state so even a
-        // failed initial load (before any account is known) is observable.
-        if let deviceAccessIssue {
-            Label(deviceAccessIssue, systemImage: "exclamationmark.octagon.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("settings.github.refresh.issue")
-        }
-    }
-
-    /// Single-flight entry for Settings' device-access loads: the initial
-    /// `.task` and "Check again" coalesce onto one in-flight load, and a
-    /// generation guard keeps only the newest call from clearing the handle.
-    private func loadDeviceAccess() async {
-        if ProcessInfo.processInfo.arguments.contains("--ui-test-device-access") {
-            return
-        }
-        if let inFlight = deviceAccessTask {
-            await inFlight.value
-            return
-        }
-        deviceAccessGeneration &+= 1
-        let generation = deviceAccessGeneration
-        let task = Task { await performDeviceAccessLoad(generation: generation) }
-        deviceAccessTask = task
-        await task.value
-        if deviceAccessGeneration == generation {
-            deviceAccessTask = nil
-        }
-    }
-
-    /// Whether this Settings load invocation may still publish. A stale or
-    /// cancelled predecessor must never overwrite a newer result, and the
-    /// shared session generation catches a concurrent fresh sign-in or
-    /// rotation that the Settings-local generation cannot see.
-    private func deviceAccessLoadIsCurrent(generation: Int, sharedGeneration: Int) async -> Bool {
-        guard !Task.isCancelled, deviceAccessGeneration == generation else { return false }
-        return await GitHubDeviceSessionRefresher.shared.currentSessionGeneration() == sharedGeneration
-    }
-
-    private func performDeviceAccessLoad(generation: Int) async {
-        guard let deviceFlow else { return }
-        // Pre-operation epoch: used only for the retryable-throw path, where
-        // this operation wrote nothing (the epoch is unchanged unless an
-        // external sign-in/rotation advanced it). Every other path guards on
-        // the epoch returned atomically by the revalidation itself.
-        let sharedGeneration = await GitHubDeviceSessionRefresher.shared.currentSessionGeneration()
-        let outcome: GitHubDeviceSessionRefreshOutcome
-        do {
-            outcome = try await GitHubDeviceSessionRefresher.shared.revalidatedSession(using: deviceFlow)
-        } catch is CancellationError {
-            return
-        } catch {
-            guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: sharedGeneration) else { return }
-            deviceAccessIssue = SetupView.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session")
-            deviceAccessLoaded = true
-            return
-        }
-        switch outcome {
-        case .superseded:
-            // A concurrent replacement won the epoch; publish nothing.
-            return
-        case .reauthorizationRequired(let outcomeGeneration):
-            // Quarantine: publish this terminal outcome only if no external
-            // sign-in/rotation advanced the epoch after the quarantine itself
-            // (which advanced it — that must not suppress its own result).
-            guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
-            deviceAccessIssue = SetupView.deviceRefreshIssueMessage(for: GitHubDeviceSessionRefreshError.keychainSaveFailed, action: "refreshing your GitHub session")
-            deviceAccessLoaded = true
-        case .current(let session, let outcomeGeneration):
-            guard let session else {
-                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
-                deviceAccessIssue = nil
-                deviceAccessLoaded = true
-                return
-            }
-            if session.isAccessExpired {
-                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
-                deviceAccessIssue = "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub from the setup window, then check again."
-                deviceAccessLoaded = true
-                return
-            }
-            do {
-                var accessibleRepositories: [GitHubRepository] = []
-                let installations = try await deviceFlow.installations(accessToken: session.accessToken)
-                for installation in installations {
-                    let repositories = try await deviceFlow.repositories(
-                        accessToken: session.accessToken,
-                        installationID: installation.id
-                    )
-                    accessibleRepositories.append(contentsOf: repositories)
-                }
-                // Newest-wins: publish only if this invocation is still
-                // current AND no concurrent sign-in/rotation advanced the
-                // session generation past the epoch this operation produced —
-                // a fresh Setup sign-in during the listing must win over stale
-                // account/repository output.
-                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
-                deviceAccount = session.account
-                deviceRepositories = accessibleRepositories
-                deviceAccessIssue = nil
-                deviceAccessLoaded = true
-            } catch is CancellationError {
-                // A transport-reported cancellation does not set the
-                // task-cancel bit, so it must be caught explicitly: publish
-                // nothing.
-                return
-            } catch {
-                guard await deviceAccessLoadIsCurrent(generation: generation, sharedGeneration: outcomeGeneration) else { return }
-                deviceAccessIssue = SetupView.deviceRefreshIssueMessage(for: error, action: "listing your repositories")
-                deviceAccessLoaded = true
-            }
-        }
-    }
 
     @ViewBuilder
     private var githubPrimaryAction: some View {
@@ -531,9 +341,10 @@ struct SettingsView: View {
         case .loading:
             ProgressView("Loading GitHub status…")
         case .unavailable:
-            Button("Retry GitHub status") {
-                Task { await loadGitHubState() }
-            }
+            Button("Reconnect GitHub", action: onConnect)
+                .buttonStyle(.borderedProminent)
+                .disabled(isUpdatingGitHub)
+                .accessibilityIdentifier("settings.github.connect.button")
         case .signedOut:
             Button("Sign in to GitHub", action: onConnect)
                 .buttonStyle(.borderedProminent)
@@ -560,20 +371,16 @@ struct SettingsView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(credentialStatusColor(for: group))
             }
-            LabeledContent("Owner", value: group.owner ?? "Unavailable")
-                .font(.caption)
             LabeledContent("Repositories", value: repositorySummary(for: group))
                 .font(.caption)
-            LabeledContent("Last verified", value: verificationAge(group.verifiedAt))
-                .font(.caption)
             if needsRetry(group) {
-                Text("Blocked: GitHub-backed repository access and host pushes for \(group.workspace).")
+                Text("Existing \(group.workspace) access needs reconnecting.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
             HStack {
                 if needsRetry(group) {
-                    Button(recoveryActionTitle(for: group), action: onConnect)
+                    Button("Manage \(group.workspace) access", action: onConnect)
                         .disabled(isUpdatingGitHub)
                 }
                 Button("Remove \(group.workspace) access…", role: .destructive) {
@@ -598,9 +405,7 @@ struct SettingsView: View {
                 WorkspaceGrantGroup(
                     workspace: workspace,
                     entries: entries,
-                    owner: entries.compactMap(\.owner).first,
-                    repositoryNames: Array(Set(entries.flatMap { $0.repositoryNames })).sorted(),
-                    verifiedAt: entries.map(\.updatedAt).max()
+                    repositoryNames: Array(Set(entries.flatMap { $0.repositoryNames })).sorted()
                 )
             }
             .sorted { $0.workspace < $1.workspace }
@@ -620,18 +425,18 @@ struct SettingsView: View {
         case .enabled: return "Enabled"
         case .requiresApproval: return "Denied until approved in System Settings"
         case .notRegistered: return "Disabled"
-        case .notFound: return "Unavailable in this build"
-        @unknown default: return "Unavailable — retry the status check"
+        case .notFound: return "Not available — retry the status check"
+        @unknown default: return "Not available — retry the status check"
         }
     }
 
     private var githubStatusText: String {
         switch githubConnectionState {
         case .loading: return "Loading…"
-        case .unavailable: return "Unavailable — retry"
+        case .unavailable: return "GitHub needs reconnecting — retry"
         case .signedOut: return "Signed out"
-        case .sessionExpired: return "Sign-in expired — workspace grants need review"
-        case .connected: return "Connected · \(groupedMetadata.count) workspace grant\(groupedMetadata.count == 1 ? "" : "s")"
+        case .sessionExpired: return "Sign-in expired — repository access needs review"
+        case .connected: return "Connected · \(groupedMetadata.count) workspace\(groupedMetadata.count == 1 ? "" : "s")"
         }
     }
 
@@ -647,18 +452,7 @@ struct SettingsView: View {
     }
 
     private func credentialStatus(for group: WorkspaceGrantGroup) -> String {
-        let states = Set(group.entries.map(\.recoveryState))
-        if group.entries.contains(where: \.quarantined) || states.contains(.quarantined) {
-            return "Quarantined — reauthorize"
-        }
-        if states.contains(.expired) { return "Expired — reauthorize" }
-        if states.contains(.revoked) { return "Denied or revoked — reauthorize" }
-        if states.contains(.installationRemoved) { return "GitHub App unavailable — reinstall" }
-        if states.contains(.serviceUnavailable) { return "Service unavailable — retry" }
-        if states.contains(.needsAuthorization) { return "Authorization required" }
-        if states.contains(.migrationRequired) { return "Update required" }
-        if group.entries.contains(where: \.needsRestart) { return "Ready after workspace restart" }
-        return "Ready"
+        needsRetry(group) ? "Needs reconnecting" : "Ready"
     }
 
     private func credentialStatusColor(for group: WorkspaceGrantGroup) -> Color {
@@ -671,34 +465,6 @@ struct SettingsView: View {
         }
     }
 
-    private func recoveryActionTitle(for group: WorkspaceGrantGroup) -> String {
-        if group.entries.contains(where: { $0.recoveryState == .serviceUnavailable }) {
-            return "Reconnect"
-        }
-        if group.entries.contains(where: { $0.recoveryState == .installationRemoved }) {
-            return "Reinstall or reconnect"
-        }
-        if group.entries.contains(where: \.needsRestart) {
-            return "Open Setup to Review Restart"
-        }
-        return "Reconnect"
-    }
-
-    private func verificationAge(_ date: Date?) -> String {
-        guard let date else { return "Never verified" }
-        let seconds = max(0, Int(Date().timeIntervalSince(date)))
-        let age: String
-        if seconds < 60 {
-            age = "\(seconds) seconds ago"
-        } else if seconds < 3_600 {
-            age = "\(seconds / 60) minutes ago"
-        } else if seconds < 86_400 {
-            age = "\(seconds / 3_600) hours ago"
-        } else {
-            age = "\(seconds / 86_400) days ago"
-        }
-        return "\(age) · \(date.formatted(date: .abbreviated, time: .shortened))"
-    }
 
     private func repositorySummary(for group: WorkspaceGrantGroup) -> String {
         let writable = Set(group.entries.filter { $0.role == .host }.flatMap(\.repositoryNames))
@@ -848,11 +614,10 @@ private struct GitHubImpactConfirmation: View {
             Text(introduction)
             impactList
 
-            GroupBox("Credential impact") {
+            GroupBox("Access impact") {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("• VM-held secrets and local Keychain records for the affected grants are removed.")
-                    Text("• MSW Connect is asked to revoke the corresponding service grants.")
-                    Text("• If remote revocation cannot be proven, access is quarantined and remains visible for retry.")
+                    Text("• GitHub access is removed for the affected workspace.")
+                    Text("• If removal cannot be verified, access remains visible for retry.")
                     Text("• Workspace files and repositories are not deleted. Access can be restored later by reauthorizing and reviewing scope again.")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -886,7 +651,7 @@ private struct GitHubImpactConfirmation: View {
     private var introduction: String {
         switch action {
         case .remove:
-            return "Review this workspace-specific revocation before any credential changes are made."
+            return "Review this workspace-specific access change before it is applied."
         case .disconnect(_, let account):
             return account.map { "This removes every listed workspace grant associated with @\($0.login)." }
                 ?? "This removes every listed workspace grant associated with the current account."
@@ -913,7 +678,6 @@ private struct GitHubImpactConfirmation: View {
     private func grantImpact(_ group: WorkspaceGrantGroup) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(group.workspace).font(.body.weight(.semibold))
-            Text("Owner: \(group.owner ?? "Unavailable")")
             Text("Repositories: \(group.repositoryNames.isEmpty ? "None recorded" : group.repositoryNames.joined(separator: ", "))")
         }
         .font(.caption)

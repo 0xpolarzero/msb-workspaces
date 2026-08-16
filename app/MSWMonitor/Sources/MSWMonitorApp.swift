@@ -12,8 +12,6 @@ struct MSWMonitorApp: App {
             SettingsView(
                 navigation: appDelegate.settingsNavigation,
                 authorizationCoordinator: appDelegate.authorizationCoordinator,
-                deviceFlow: appDelegate.deviceFlow,
-                githubInstallationURL: appDelegate.githubInstallationURL
             )
         }
     }
@@ -29,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let client: MSWClient
     let settingsNavigation = SettingsNavigationState()
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    let deviceFlow: GitHubDeviceFlow?
     let githubInstallationURL: URL?
     override init() {
         let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
@@ -62,9 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let connect = MSWConnectClient(configuration: connectConfiguration)
         let runner = MSWCommandRunner()
         let broker = try? CredentialBroker()
-        let refresher = broker.map {
+        let scopeEnforcementConfigured = connectConfiguration.hasTrustedScopeAttestation
+        let refresher = scopeEnforcementConfigured ? broker.map {
             TokenRefreshCoordinator(broker: $0, connect: connect)
-        }
+        } : nil
         self.runner = runner
         self.credentialBroker = broker
         self.connect = connect
@@ -75,19 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tokenRefreshCoordinator: refresher
         )
         self.client = mswClient
-        self.authorizationCoordinator = broker.map {
+        self.authorizationCoordinator = scopeEnforcementConfigured ? broker.map {
             GitHubAuthorizationCoordinator(broker: $0, connect: connect, mswClient: mswClient)
-        }
-        let configuredGitHubClientID = (Bundle.main.object(forInfoDictionaryKey: "MSWGitHubClientID") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let githubClientID = configuredGitHubClientID.flatMap { $0.isEmpty ? nil : $0 } ?? ""
-        self.deviceFlow = GitHubDeviceFlowConfiguration(clientID: githubClientID).isConfigured
-            ? GitHubDeviceFlow(configuration: GitHubDeviceFlowConfiguration(clientID: githubClientID))
-            : nil
-        let configuredGitHubInstallationURL = (Bundle.main.object(forInfoDictionaryKey: "MSWGitHubInstallationURL") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        self.githubInstallationURL = configuredGitHubInstallationURL
-            .flatMap { $0.isEmpty ? nil : URL(string: $0) }
+        } : nil
+        self.githubInstallationURL = installationURL
         super.init()
     }
     /// Routes `msw://` callback URLs from the default browser to the pending
@@ -128,15 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func recoverAndInstall() async {
         let recoveryResult: Result<Void, Error>
-        if let authorizationCoordinator {
-            do {
+        do {
+            try LegacyDirectGitHubCredentialRetirement.remove()
+            if let authorizationCoordinator {
                 try await authorizationCoordinator.recoverPendingAuthorization()
-                recoveryResult = .success(())
-            } catch {
-                recoveryResult = .failure(error)
             }
-        } else {
             recoveryResult = .success(())
+        } catch {
+            recoveryResult = .failure(error)
         }
 
         switch recoveryResult {
@@ -201,7 +189,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model: model,
             bootstrapCoordinator: bootstrap,
             authorizationCoordinator: authorizationCoordinator,
-            deviceFlow: deviceFlow,
             githubInstallationURL: githubInstallationURL,
             settingsNavigation: settingsNavigation,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,

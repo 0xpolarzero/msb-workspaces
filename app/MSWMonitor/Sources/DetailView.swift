@@ -1015,20 +1015,18 @@ private struct GitHubWorkspaceRow: View {
                     Label("Restart required", systemImage: "arrow.clockwise.circle").foregroundStyle(.orange)
                 }
             }
-            Text("\(item.provider) • \(item.accessMode) • \(item.configured ? "configured" : "unconfigured")")
-                .font(.caption).foregroundStyle(.secondary)
-            if item.provider == "legacy-pat" {
-                Text("Legacy PAT detected. Complete GitHub App authorization to migrate this workspace.")
-                    .font(.caption2).foregroundStyle(.orange)
-            }
-            if let repository = item.verificationRepository {
-                Text("Verification repository: \(repository)").font(.caption2).foregroundStyle(.secondary)
+            if item.quarantined || !item.configured {
+                Text("Repository access needs reconnecting.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else if item.needsRestart {
+                Text("Repository access is updating.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
-                Text("No verification repository reported.").font(.caption2).foregroundStyle(.orange)
-            }
-            if let expiry = item.accessExpiresAt {
-                Text("Access expires \(expiry.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption2).foregroundStyle(.secondary)
+                Text("Repository access ready.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)

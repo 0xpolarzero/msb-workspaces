@@ -91,4 +91,30 @@ protocol CredentialKeychainStoring: Sendable {
 }
 
 extension KeychainStore: CredentialKeychainStoring {}
+
+
+/// One-way startup cleanup for a credential that earlier builds issued
+/// directly. The secret is never read, decoded, or migrated: it is deleted
+/// before credential-backed UI becomes available.
+enum LegacyDirectGitHubCredentialRetirement {
+    static let service = "org.microsandbox.MSWMonitor.github-device-session"
+    static let account = "session"
+
+    static func remove(using keychain: any CredentialKeychainStoring = KeychainStore()) throws {
+        do {
+            try keychain.delete(service: service, account: account)
+        } catch {
+            throw LegacyDirectGitHubCredentialRetirementError.removalUnconfirmed
+        }
+    }
+}
+
+enum LegacyDirectGitHubCredentialRetirementError: Error, LocalizedError, Sendable, Equatable {
+    case removalUnconfirmed
+
+    var errorDescription: String? {
+        "GitHub access could not be secured. Restart MSW Monitor and try again."
+    }
+}
+
 extension KeychainStore: MSWConnectKeychainStoring {}

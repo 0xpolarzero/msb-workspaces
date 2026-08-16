@@ -9,7 +9,6 @@ final class StatusBarController {
 
     private let bootstrapCoordinator: (any MSWBootstrapCoordinating)?
     private let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    private let deviceFlow: GitHubDeviceFlow?
     private let githubInstallationURL: URL?
     private let settingsNavigation: SettingsNavigationState
     private let startupRecoveryBlockedReason: String?
@@ -21,7 +20,6 @@ final class StatusBarController {
         model: AppModel,
         bootstrapCoordinator: (any MSWBootstrapCoordinating)? = nil,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
-        deviceFlow: GitHubDeviceFlow? = nil,
         githubInstallationURL: URL? = nil,
         settingsNavigation: SettingsNavigationState = SettingsNavigationState(),
         startupRecoveryBlockedReason: String? = nil,
@@ -30,7 +28,6 @@ final class StatusBarController {
         self.model = model
         self.bootstrapCoordinator = bootstrapCoordinator
         self.authorizationCoordinator = authorizationCoordinator
-        self.deviceFlow = deviceFlow
         self.githubInstallationURL = githubInstallationURL
         self.settingsNavigation = settingsNavigation
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
@@ -138,7 +135,6 @@ final class StatusBarController {
             setupWindowController = SetupWindowController(
                 coordinator: bootstrapCoordinator,
                 authorizationCoordinator: authorizationCoordinator,
-                deviceFlow: deviceFlow,
                 githubInstallationURL: githubInstallationURL,
                 openSettings: { [weak self] section in self?.showSettings(section: section) },
                 closeSetup: { [weak self] in self?.setupWindowController?.close() },

@@ -100,11 +100,18 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForExistence(timeout: 2)
         )
-        // The canonical build embeds the public GitHub App, so the step
-        // offers the real direct login instead of the unavailable note.
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertTrue(connect.isEnabled)
+        // An unconfigured fixture stays optional and provides the compact
+        // continue path; repository controls appear only after MSW Connect
+        // completes authorization.
+        XCTAssertTrue(
+            app.descendants(matching: .any)["setup.github.unavailable"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.buttons["setup.github.connect.button"].exists)
+        XCTAssertFalse(
+            app.descendants(matching: .any)["github.workspace.dev.repository.1001.mode"].exists,
+            "Untrusted Connect configuration must not expose per-repository write controls."
+        )
         let githubSkip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
         XCTAssertEqual(githubSkip.label, "Continue without GitHub")
@@ -144,7 +151,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertNotEqual(app.state, .notRunning)
     }
 
-    func testGitHubAuthorizationSuccessAssignsAndVerifiesRepository() {
+    func testGitHubAuthorizationAppliesAndVerifiesRepositoryAccess() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -174,13 +181,20 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 2))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
 
-        let repository = app.descendants(matching: .any)["github.repository.1001.workspace.dev"]
+        let repository = app.descendants(matching: .any)["github.workspace.dev.repository.1001"]
         XCTAssertTrue(repository.waitForExistence(timeout: 2))
         repository.click()
-        let mode = app.descendants(matching: .any)["github.repository.1001.workspace.dev.mode"]
+        let mode = app.descendants(matching: .any)["github.workspace.dev.repository.1001.mode"]
         XCTAssertTrue(mode.waitForExistence(timeout: 2), "The mode selector appears only after selection.")
-        XCTAssertTrue(mode.label.contains("Read-only") || (mode.value as? String) == "Read-only")
-        choosePicker("github.repository.1001.workspace.dev.mode", option: "Read & write", in: app)
+        let readOnlyMode = mode.radioButtons["Read-only"]
+        let writeMode = mode.radioButtons["Read & write"]
+        XCTAssertTrue(readOnlyMode.exists)
+        XCTAssertTrue(writeMode.waitForExistence(timeout: 2))
+        writeMode.click()
+        XCTAssertFalse(app.checkBoxes["Assign"].exists)
+        XCTAssertFalse(app.staticTexts["Owner installation"].exists)
+        XCTAssertFalse(app.staticTexts["Verification repository"].exists)
+        XCTAssertFalse(app.staticTexts["Access mode"].exists)
 
         let review = app.buttons["setup.github.review.button"]
         XCTAssertTrue(review.waitForExistence(timeout: 2))
@@ -254,7 +268,7 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3)
         )
         assertText(
-            "Connected as @octocat, but no MSW App installation was found. Install the app, then connect GitHub again.",
+            "No MSW App installation was found. Install the app, then connect GitHub again.",
             identifier: "setup.github.status",
             in: app
         )
@@ -297,7 +311,7 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 3)
         )
         assertText(
-            "GitHub access for dev needs attention.",
+            "Existing dev access needs reconnecting.",
             identifier: "setup.github.attention",
             in: app
         )
@@ -315,7 +329,7 @@ final class MSWMonitorUITests: XCTestCase {
         // must survive the re-authorization until dev's grant commits.
         XCTAssertTrue(app.staticTexts["setup.github.attention"].exists)
 
-        let repository = app.descendants(matching: .any)["github.repository.1001.workspace.dev"]
+        let repository = app.descendants(matching: .any)["github.workspace.dev.repository.1001"]
         XCTAssertTrue(repository.waitForExistence(timeout: 2))
         repository.click()
 
@@ -365,38 +379,6 @@ final class MSWMonitorUITests: XCTestCase {
         done.click()
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
         XCTAssertNotEqual(app.state, .notRunning)
-    }
-    func testSettingsMakesDirectDeviceScopeTruthful() {
-        let appURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appending(path: "build/MSWMonitor.app")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
-
-        let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
-        // Deterministic fixture: no real Keychain session and no network.
-        app.launchArguments = ["--ui-test-setup", "--ui-test-device-access"]
-        app.launch()
-        XCTAssertTrue(app.windows["setup.window"].waitForExistence(timeout: 3))
-        app.menuBars.menuItems["Settings…"].click()
-        let settings = app.windows.matching(
-            NSPredicate(format: "identifier != %@", "setup.window")
-        ).firstMatch
-        XCTAssertTrue(settings.waitForExistence(timeout: 3))
-        let githubTab = settings.buttons["GitHub"]
-        XCTAssertTrue(githubTab.waitForExistence(timeout: 5))
-        githubTab.click()
-
-        XCTAssertTrue(settings.descendants(matching: .any)["settings.github.device-scope"].waitForExistence(timeout: 5))
-        let account = settings.descendants(matching: .any)["settings.github.status"]
-        XCTAssertTrue(account.waitForExistence(timeout: 5))
-        XCTAssertTrue(settings.staticTexts["Connected as @octocat"].waitForExistence(timeout: 5))
-        XCTAssertFalse(settings.checkBoxes["github.workspace.dev.access"].exists)
     }
 
     func testGitHubAuthorizationCancelThenRetryUsesCurrentAttempt() {
@@ -468,7 +450,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         app.buttons["setup.primary-action"].click()
         assertText(
-            "GitHub connection is unavailable. The existing access and saved choices remain unchanged; retry after MSW Connect is available.",
+            "GitHub could not be reached. Existing access and saved choices remain unchanged; try again later.",
             identifier: "setup.github.unavailable",
             in: app
         )
@@ -505,18 +487,6 @@ final class MSWMonitorUITests: XCTestCase {
         assertText("Your choices are ready to apply.", identifier: "setup.final-review.summary", in: app)
     }
 
-    private func choosePicker(
-        _ identifier: String,
-        option: String,
-        in app: XCUIApplication
-    ) {
-        let picker = app.descendants(matching: .any)[identifier]
-        XCTAssertTrue(picker.waitForExistence(timeout: 2), "Missing \(identifier)")
-        picker.click()
-        let menuItem = app.menuItems[option]
-        XCTAssertTrue(menuItem.waitForExistence(timeout: 2), "Missing picker option \(option)")
-        menuItem.click()
-    }
 
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(
