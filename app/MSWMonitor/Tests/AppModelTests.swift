@@ -1810,6 +1810,55 @@ final class AppModelTests: XCTestCase {
         }
         XCTFail("Timed out waiting for the browser wait to install.")
     }
+
+    /// Deterministic poll for async conditions (actor state): waits up to the
+    /// timeout, failing the test with `description` if the condition never
+    /// holds. Unlike `waitUntil`, the condition can `await` actor state.
+    @MainActor
+    private static func waitForCondition(
+        _ description: String,
+        timeout: TimeInterval = 5,
+        condition: () async -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for \(description).")
+    }
+
+    /// Minimal SetupView for the device-flow barrier tests: optional
+    /// coordinator/authorization/device flow/refresher. The reference-typed
+    /// `setupLifecycle`, `deviceSessionRefresher`, and the injected
+    /// verification-page opener are shared across struct copies, so the test's
+    /// copy drives the same gate, store-backed revalidation, and flow the
+    /// production surface uses.
+    @MainActor
+    private func makeDeviceSetupView(
+        coordinator: (any MSWBootstrapCoordinating)? = nil,
+        authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
+        deviceFlow: GitHubDeviceFlow? = nil,
+        deviceSessionRefresher: GitHubDeviceSessionRefresher = .shared,
+        openDeviceVerificationPage: @escaping (URL) -> Bool = { _ in true }
+    ) -> SetupView {
+        SetupView(
+            coordinator: coordinator,
+            authorizationCoordinator: authorizationCoordinator,
+            deviceFlow: deviceFlow,
+            deviceInstallationURL: nil,
+            openSettings: { _ in },
+            closeSetup: {},
+            uiTestMode: false,
+            uiTestStartsInReview: false,
+            uiTestGitHubScenario: nil,
+            uiTestBootstrapReconnect: false,
+            startupRecoveryBlockedReason: nil,
+            retryStartupRecovery: {},
+            deviceSessionRefresher: deviceSessionRefresher,
+            openDeviceVerificationPage: openDeviceVerificationPage
+        )
+    }
     func testGitHubDeviceFlowRequestsCodeAndPollsToken() async throws {
         let transport = QueueConnectTransport()
         await transport.enqueue(Data(#"{"device_code":"device-123","user_code":"WDJB-MJHT","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}"#.utf8))
@@ -1934,6 +1983,570 @@ final class AppModelTests: XCTestCase {
                        "A sign-in with zero accessible repositories grants nothing.")
         XCTAssertTrue(SetupView.deviceAccessDecided(signedIn: true, repositoryCount: 1))
         XCTAssertFalse(SetupView.deviceAccessDecided(signedIn: false, repositoryCount: 1))
+    }
+
+    func testDeviceRepositoryPollingActiveOnlyWhileUndecidedAndOnGitHubStep() {
+        XCTAssertTrue(SetupView.deviceRepositoryPollingActive(
+            signedIn: true, repositoryCount: 0, stepActive: true, skipped: false, alreadyDecided: false
+        ), "A signed-in session with zero accessible repositories on the GitHub step must poll.")
+        XCTAssertFalse(SetupView.deviceRepositoryPollingActive(
+            signedIn: true, repositoryCount: 1, stepActive: true, skipped: false, alreadyDecided: false
+        ), "Polling must stop once repositories are detected.")
+        XCTAssertFalse(SetupView.deviceRepositoryPollingActive(
+            signedIn: true, repositoryCount: 0, stepActive: false, skipped: false, alreadyDecided: false
+        ), "Polling must not run while the GitHub step is not active.")
+        XCTAssertFalse(SetupView.deviceRepositoryPollingActive(
+            signedIn: true, repositoryCount: 0, stepActive: true, skipped: true, alreadyDecided: false
+        ), "Polling must not run once GitHub is skipped.")
+        XCTAssertFalse(SetupView.deviceRepositoryPollingActive(
+            signedIn: false, repositoryCount: 0, stepActive: true, skipped: false, alreadyDecided: false
+        ), "Polling must not run without a device sign-in.")
+        XCTAssertFalse(SetupView.deviceRepositoryPollingActive(
+            signedIn: true, repositoryCount: 0, stepActive: true, skipped: false, alreadyDecided: true
+        ), "Polling must not run when existing metadata or retained verifications already decide the step.")
+    }
+
+    func testPollingTaskIsCurrentOnlyClearsItsOwnHandle() {
+        // A successor replaced the poller (the generation advanced); the
+        // stale predecessor must not erase the live successor's handle.
+        XCTAssertFalse(SetupView.pollingTaskIsCurrent(storedGeneration: 2, taskGeneration: 1),
+                       "A cancelled predecessor must not clear a successor's handle.")
+        // The stored poller is still the current one: clearing is safe.
+        XCTAssertTrue(SetupView.pollingTaskIsCurrent(storedGeneration: 2, taskGeneration: 2),
+                      "The current poller may clear its own handle.")
+    }
+
+    func testShouldRecheckNowThrottlesFocusRestarts() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertTrue(SetupView.shouldRecheckNow(lastCheckAt: nil, now: now, minimumInterval: 5),
+                      "No prior check means an immediate re-check is allowed.")
+        XCTAssertTrue(SetupView.shouldRecheckNow(
+            lastCheckAt: now.addingTimeInterval(-6), now: now, minimumInterval: 5
+        ), "A check older than the minimum gap allows an immediate re-check.")
+        XCTAssertFalse(SetupView.shouldRecheckNow(
+            lastCheckAt: now.addingTimeInterval(-1), now: now, minimumInterval: 5
+        ), "A recent check must throttle a focus-triggered re-check.")
+    }
+
+    func testNextRepositoryCheckDateTracksLastCompletedCheckFromAnySource() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        // No check yet: the deadline is in the distant past, so the poller
+        // runs its first check immediately.
+        XCTAssertLessThanOrEqual(
+            SetupView.nextRepositoryCheckDate(lastCheckAt: nil, now: now, interval: 8).timeIntervalSince(now),
+            0,
+            "With no prior check the poller must not wait."
+        )
+        // The deadline is a full interval after the last completed re-check,
+        // whether that check came from the poller or the manual button, so a
+        // manual check that finishes during the poller's wait satisfies it.
+        XCTAssertEqual(
+            SetupView.nextRepositoryCheckDate(lastCheckAt: now, now: now, interval: 8).timeIntervalSince(now),
+            8,
+            "The next check must be a full interval after the last completed check."
+        )
+        // A check that completed mid-wait (3 s ago) pushes the next check to
+        // a full interval after it (5 s from now).
+        XCTAssertEqual(
+            SetupView.nextRepositoryCheckDate(lastCheckAt: now.addingTimeInterval(-3), now: now, interval: 8).timeIntervalSince(now),
+            5,
+            "A check that completed mid-wait pushes the next check a full interval after it."
+        )
+        // A stamp in the future (corrupted clock) is capped to the normal
+        // cadence from now: the poller waits one interval instead of parking.
+        XCTAssertEqual(
+            SetupView.nextRepositoryCheckDate(lastCheckAt: now.addingTimeInterval(100), now: now, interval: 8).timeIntervalSince(now),
+            8,
+            "A future stamp must yield the normal cadence from now, never an unbounded wait."
+        )
+    }
+
+    func testRepositoryCheckIsDueReevaluatedAfterMidWaitCompletion() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        // The poller checked at t0: mid-wait (t0+5) the next check is not due.
+        XCTAssertFalse(SetupView.repositoryCheckIsDue(
+            lastCheckAt: now, now: now.addingTimeInterval(5), interval: 8
+        ), "Mid-wait the check is not due yet.")
+        // A manual (or restore) check completed at t0+5 moves the deadline to
+        // t0+13; at the ORIGINAL wake time t0+8 the poller must keep waiting
+        // (wake-recompute ordering: no refresh until the moved deadline).
+        XCTAssertFalse(SetupView.repositoryCheckIsDue(
+            lastCheckAt: now.addingTimeInterval(5), now: now.addingTimeInterval(8), interval: 8
+        ), "A check completed during the wait pushes the deadline; at the old wake time it is not due.")
+        XCTAssertTrue(SetupView.repositoryCheckIsDue(
+            lastCheckAt: now.addingTimeInterval(5), now: now.addingTimeInterval(13), interval: 8
+        ), "The moved deadline makes the check due a full interval after the mid-wait completion.")
+        // A startup restore that stamped the timestamp must not be duplicated
+        // by an immediate first poll.
+        XCTAssertFalse(SetupView.repositoryCheckIsDue(
+            lastCheckAt: now, now: now.addingTimeInterval(1), interval: 8
+        ), "A just-stamped restore check must not be followed by an immediate poll.")
+        XCTAssertTrue(SetupView.repositoryCheckIsDue(
+            lastCheckAt: nil, now: now, interval: 8
+        ), "With no completed check the first poll is due immediately.")
+        // Clock rollback: `now` regressed below the stamp — due, so the
+        // poller re-checks and re-stamps instead of parking indefinitely.
+        XCTAssertTrue(SetupView.repositoryCheckIsDue(
+            lastCheckAt: now, now: now.addingTimeInterval(-3_600), interval: 8
+        ), "A clock rollback must be treated as due so the poller cannot park.")
+        // A stamp in the future (corrupted clock) must not park the poller
+        // either: it is due, and the re-check re-stamps a sane timestamp.
+        XCTAssertTrue(SetupView.repositoryCheckIsDue(
+            lastCheckAt: now.addingTimeInterval(100), now: now, interval: 8
+        ), "A future stamp must not park the poller; it is due and re-stamps.")
+    }
+
+    func testFalseRecheckOutcomeIsTerminalNoOp() {
+        XCTAssertTrue(SetupView.shouldContinueSetupAfterRecheck(completed: true),
+                      "A completed re-check may publish status, stamp the schedule, and continue.")
+        XCTAssertFalse(SetupView.shouldContinueSetupAfterRecheck(completed: false),
+                       "A cancelled/superseded re-check must be a terminal no-op: no status publication, no polling restart, no timestamp stamp.")
+    }
+
+    func testDeviceSetupLifecycleIsCurrentOnlyWhileUntouched() {
+        let gate = DeviceSetupLifecycleGate()
+        let captured = gate.generation
+        XCTAssertTrue(gate.isCurrent(captured),
+                      "An untouched lifecycle accepts the generation captured before the first await.")
+        gate.invalidate()
+        XCTAssertFalse(gate.isCurrent(captured),
+                       "Teardown (willClose, onDisappear, cancelDeviceFlow) must invalidate every previously captured lifecycle.")
+        XCTAssertTrue(gate.isCurrent(gate.generation),
+                      "A fresh capture after teardown is current again; the barrier is per-capture, not a permanent lock.")
+    }
+
+    /// Deterministic ordering test for guard point 1 of the restore barrier:
+    /// the window closes while revalidation is pending (the gated rotation
+    /// request is in flight and the restore continuation has not resumed).
+    /// The captured lifecycle is stale by the time revalidation returns, so
+    /// the restore must NOT create a new repository refresh — and the shared
+    /// actor's Keychain work still completes, preserving credential
+    /// integrity. The control phase proves the same setup DOES create the
+    /// refresh when no close lands.
+    func testCloseDuringRevalidationPreventsRefreshCreationAndPublication() async throws {
+        let transport = GatedConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        try store.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        // Rotation response, then a zero-repository installations response
+        // (for the control phase's refresh child).
+        await transport.enqueue(Data(#"{"access_token":"ghu_fresh","refresh_token":"ghr_fresh2","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        await transport.enqueue(Data(#"{"total_count":0,"installations":[]}"#.utf8))
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let view = makeDeviceSetupView(deviceFlow: flow, deviceSessionRefresher: refresher)
+
+        // Close while revalidation is pending: the rotation request is in
+        // flight (the send is gated), the restore is suspended at its first
+        // await. The lifecycle bump is the authoritative barrier — the same
+        // primitive every teardown path (willClose, onDisappear,
+        // cancelDeviceFlow) invokes. The restore carries the token the
+        // OUTERMOST startup entry captured, so it can never recapture a
+        // post-close generation as current.
+        let startupToken = view.setupLifecycle.generation
+        let restoreTask = Task { await view.restoreDeviceSession(startupLifecycle: startupToken) }
+        await transport.waitUntilSendStarted()
+        view.setupLifecycle.invalidate()
+        await transport.resumeSend()
+        await restoreTask.value
+
+        // Credential integrity preserved: the shared actor finished its
+        // Keychain work even though the window closed mid-flight.
+        XCTAssertEqual(try store.load()?.accessToken, "ghu_fresh",
+                       "The close may let the actor finish the rotation; the durable session must be the fresh one.")
+        // No new repository refresh creation: the only request consumed is
+        // the rotation itself — an installations request would mean the
+        // restore created a refresh task after teardown.
+        let requestsAfterClose = await transport.requests()
+        XCTAssertEqual(requestsAfterClose.count, 1,
+                       "A close during revalidation must prevent the restore from creating a NEW refresh task.")
+
+        // Control: the same setup without a close does create the repository
+        // refresh (installations request), proving the barrier — not the
+        // setup — blocked it. The store now holds a current session, so the
+        // control restore skips rotation and goes straight to the refresh.
+        let controlToken = view.setupLifecycle.generation
+        let controlTask = Task { await view.restoreDeviceSession(startupLifecycle: controlToken) }
+        try await Self.waitForCondition("the control restore to create its repository refresh") {
+            await transport.requests().count == 2
+        }
+        await transport.resumeSend()
+        await controlTask.value
+        let requestsAfterControl = await transport.requests()
+        XCTAssertEqual(requestsAfterControl.count, 2,
+                       "Without a close the restore creates its repository refresh.")
+    }
+
+    /// Deterministic ordering test for guard point 2 of the restore barrier:
+    /// the child re-check completed TRUE (its cancel raced a finished
+    /// publish), and the close lands before the restore continuation runs.
+    /// The captured lifecycle is stale, so the continuation must not stamp
+    /// the schedule, publish status, or restart polling — the generation is
+    /// the barrier, not cancelling an already-finished child task. The
+    /// control cases pin the exact production decision.
+    func testCloseAfterRefreshCompletedBlocksRestorePublication() {
+        let view = makeDeviceSetupView()
+        let gate = view.setupLifecycle
+        let captured = gate.generation
+        // The child completed true; the close lands in the continuation gap.
+        gate.invalidate()
+        XCTAssertFalse(
+            view.publishDeviceRepositoryRestoreResult(lifecycleGeneration: captured, completed: true),
+            "A close after the child completed must block status/stamp/poll publication.")
+        // Control: a current lifecycle publishes (stamp, poll restart, status).
+        XCTAssertTrue(
+            view.publishDeviceRepositoryRestoreResult(lifecycleGeneration: gate.generation, completed: true),
+            "A current lifecycle publishes the restore result.")
+        // A false outcome is terminal regardless of the lifecycle.
+        XCTAssertFalse(
+            view.publishDeviceRepositoryRestoreResult(lifecycleGeneration: gate.generation, completed: false),
+            "A cancelled/superseded re-check is terminal even with a current lifecycle.")
+    }
+
+    /// Deterministic ordering test for the device-flow barrier: the window
+    /// closes while the device-code POLL is awaiting the token (every send is
+    /// step-gated). The flow token was captured at `startDeviceFlow` (after
+    /// the reset) and carried through the poll; the token delivered after the
+    /// close can only be stale, so the late verification emits NO account/
+    /// installation fetches, NO Keychain write, and NO UI. The control phase
+    /// proves the same flow DOES verify and persist when no close lands.
+    func testCloseDuringDeviceCodePollPreventsLateFlowPublication() async throws {
+        let transport = StepGatedConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let view = makeDeviceSetupView(
+            deviceFlow: flow,
+            deviceSessionRefresher: refresher,
+            openDeviceVerificationPage: { _ in true }
+        )
+
+        // Close phase: device code, then a token GitHub delivers AFTER the
+        // window closes (the poll-token request is held in flight).
+        await transport.enqueue(Data(#"{"device_code":"device-123","user_code":"WDJB-MJHT","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}"#.utf8))
+        await transport.enqueue(Data(#"{"access_token":"ghu_late","refresh_token":"ghr_late","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+
+        guard let pollTask = view.startDeviceFlow() else {
+            XCTFail("The flow must return its poll task handle.")
+            return
+        }
+        await transport.waitUntilSendStarted(nth: 1)   // device-code request
+        await transport.resumeSend(nth: 1)
+        await transport.waitUntilSendStarted(nth: 2)   // poll-token request in flight
+        view.setupLifecycle.invalidate()               // willClose/onDisappear/cancel bump
+        await transport.resumeSend(nth: 2)             // the token arrives after close
+        // Terminal completion barrier: the poll task finishes only AFTER its
+        // carried finishDeviceFlow invocation has fully run (and rejected the
+        // stale token at entry). With the fix no verification task, fetch, or
+        // write can exist afterwards — the assertions below are final, not a
+        // timed absence.
+        await pollTask.value
+        XCTAssertNil(try store.load(),
+                     "A token arriving after close must not be verified or written.")
+        let lateRequests = await transport.requests()
+        XCTAssertEqual(lateRequests.count, 2,
+                       "A late token must not start verification network work (account/installations).")
+
+        // Control: a fresh flow WITHOUT the close verifies and persists.
+        await transport.enqueue(Data(#"{"device_code":"device-456","user_code":"AAAA-BBBB","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}"#.utf8))
+        await transport.enqueue(Data(#"{"access_token":"ghu_ok","refresh_token":"ghr_ok","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        await transport.enqueue(Data(#"{"login":"octocat","id":1,"name":"Octo Cat","email":"octo@example.com"}"#.utf8))
+        await transport.enqueue(Data(#"{"total_count":0,"installations":[]}"#.utf8))
+        view.startDeviceFlow()
+        for nth in [3, 4, 5, 6] {
+            await transport.waitUntilSendStarted(nth: nth)
+            await transport.resumeSend(nth: nth)
+        }
+        try await Self.waitForCondition("the control verification to persist the session") {
+            (try? store.load()) != nil
+        }
+        let controlSession = try store.load()
+        XCTAssertEqual(controlSession?.accessToken, "ghu_ok",
+                       "Without a close the flow verifies and persists.")
+        let controlRequests = await transport.requests()
+        XCTAssertEqual(controlRequests.count, 6,
+                       "The control flow completes its verification fetches.")
+    }
+
+    /// Deterministic ordering test for the startup chain: the window closes
+    /// during an EARLIER startup await (`restoreCachedAuthorization`, which is
+    /// held in flight on `connect.installations()`), before the device-session
+    /// restore is ever invoked. The token captured at the outermost `.task`
+    /// entry is stale, so the chain returns silently: NO restore rotation, NO
+    /// repository refresh, NO githubContextLoaded publication, NO polling.
+    func testCloseDuringEarlierStartupAwaitPreventsRestoreAndContextPublication() async throws {
+        // Connect client with a step-gated transport; seed a session so
+        // restoreCachedAuthorization reaches its network installations call.
+        let connectTransport = StepGatedConnectTransport()
+        let connectKeychain = InMemoryConnectKeychain()
+        let sessionService = "test-startup-connect-\(UUID().uuidString)"
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let connect = MSWConnectClient(
+            configuration: testConnectConfiguration(),
+            transport: connectTransport,
+            keychain: connectKeychain,
+            now: clock.now,
+            sessionService: sessionService
+        )
+        let start = try await connect.startAuthorization()
+        await connectTransport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-service-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        let seedTask = Task {
+            try await connect.completeAuthorization(
+                callbackURL: testCallbackURL(
+                    configuration: testConnectConfiguration(),
+                    state: start.state,
+                    code: "one-time-code"
+                )
+            )
+        }
+        await connectTransport.waitUntilSendStarted(nth: 1)
+        await connectTransport.resumeSend(nth: 1)
+        _ = try await seedTask.value
+
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-startup-chain-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let broker = try CredentialBroker(
+            keychain: InMemoryConnectKeychain(),
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-startup-connect-broker-\(UUID().uuidString)"
+        )
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            now: clock.now,
+            journalURL: temporary.appendingPathComponent("authorization-journal.json")
+        )
+
+        // Device flow with its own transport; the close phase must leave it
+        // completely untouched (the restore is never invoked).
+        let deviceTransport = GatedConnectTransport()
+        let deviceFlow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: deviceTransport
+        )
+        let deviceStore = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        try deviceStore.save(GitHubDeviceSession(
+            schemaVersion: 1,
+            clientID: "Iv1.testclient",
+            account: GitHubAccount(login: "octocat", id: 1, name: "Octo Cat", email: "octo@example.com"),
+            accessToken: "ghu_expired",
+            refreshToken: "ghr_refresh",
+            accessExpiresAt: Date(timeIntervalSinceNow: -60),
+            refreshExpiresAt: Date().addingTimeInterval(15_897_600),
+            obtainedAt: Date(timeIntervalSinceNow: -3600)
+        ))
+        let refresher = GitHubDeviceSessionRefresher(store: deviceStore)
+        let view = makeDeviceSetupView(
+            authorizationCoordinator: coordinator,
+            deviceFlow: deviceFlow,
+            deviceSessionRefresher: refresher
+        )
+
+        // The startup chain captures the token at its OUTERMOST entry and is
+        // held inside restoreCachedAuthorization (connect.installations()).
+        let startupToken = view.setupLifecycle.generation
+        await connectTransport.enqueue(Data(#"{"installations":[]}"#.utf8))
+        let chainTask = Task { await view.loadGitHubStartupContext() }
+        await connectTransport.waitUntilSendStarted(nth: 2)   // installations in flight
+        view.setupLifecycle.invalidate()                      // willClose/onDisappear/cancel bump
+        await connectTransport.resumeSend(nth: 2)
+        let completed = await chainTask.value
+
+        XCTAssertFalse(completed,
+                       "A closed startup chain must not publish githubContextLoaded.")
+        let deviceRequests = await deviceTransport.requests()
+        XCTAssertEqual(deviceRequests.count, 0,
+                       "A close during an earlier startup await must prevent the restore from being invoked at all — no rotation, no refresh, no polling.")
+
+        // Helper-level: the same stale token must suppress every helper
+        // publication, not merely the restore — a close during the helper's
+        // own awaits must not publish metadata/account/installations/status.
+        let staleMetadata = await view.loadExistingMetadata(startupLifecycle: startupToken)
+        XCTAssertNil(staleMetadata,
+                     "A closed startup must not publish existing metadata.")
+        // restoreCachedAuthorization's resume finishes (credential integrity
+        // work completes), but its publications are suppressed.
+        await connectTransport.enqueue(Data(#"{"installations":[]}"#.utf8))
+        let staleRestoreTask = Task {
+            await view.restoreCachedAuthorization(startupLifecycle: startupToken)
+        }
+        await connectTransport.waitUntilSendStarted(nth: 3)
+        await connectTransport.resumeSend(nth: 3)
+        let staleDiscovery = await staleRestoreTask.value
+        XCTAssertNil(staleDiscovery,
+                     "A closed startup must not publish account/installations/status from the cached authorization.")
+
+        // Control: a fresh live token publishes (the metadata read returns
+        // non-nil), proving the suppression above is the barrier, not the
+        // setup.
+        let liveToken = view.setupLifecycle.generation
+        let liveMetadata = await view.loadExistingMetadata(startupLifecycle: liveToken)
+        XCTAssertNotNil(liveMetadata,
+                        "A current startup publishes existing metadata.")
+    }
+
+    /// Deterministic ordering test for flow supersession: flow A's token
+    /// arrives AFTER flow B has started and its verification is in flight.
+    /// `finishDeviceFlow(A)` must reject the stale carried token AT ENTRY —
+    /// before cancelling `deviceVerificationTask` or bumping
+    /// `deviceVerificationGeneration` — so A neither cancels B's live
+    /// verification nor replaces its generation, and B still verifies and
+    /// persists.
+    func testLateTokenFromSupersededFlowDoesNotCancelNewerVerification() async throws {
+        let transport = StepGatedConnectTransport()
+        let flow = GitHubDeviceFlow(
+            configuration: GitHubDeviceFlowConfiguration(clientID: "Iv1.testclient"),
+            transport: transport
+        )
+        let store = GitHubDeviceSessionStore(keychain: InMemoryConnectKeychain())
+        let refresher = GitHubDeviceSessionRefresher(store: store)
+        let view = makeDeviceSetupView(
+            deviceFlow: flow,
+            deviceSessionRefresher: refresher,
+            openDeviceVerificationPage: { _ in true }
+        )
+
+        await transport.enqueue(Data(#"{"device_code":"device-A","user_code":"AAAA-AAAA","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}"#.utf8))
+        await transport.enqueue(Data(#"{"access_token":"ghu_late_a","refresh_token":"ghr_late_a","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        await transport.enqueue(Data(#"{"device_code":"device-B","user_code":"BBBB-BBBB","verification_uri":"https://github.com/login/device","expires_in":900,"interval":1}"#.utf8))
+        await transport.enqueue(Data(#"{"access_token":"ghu_b","refresh_token":"ghr_b","expires_in":3600,"refresh_token_expires_in":15897600,"scope":""}"#.utf8))
+        await transport.enqueue(Data(#"{"login":"octocat","id":1,"name":"Octo Cat","email":"octo@example.com"}"#.utf8))
+        await transport.enqueue(Data(#"{"total_count":0,"installations":[]}"#.utf8))
+
+        // Flow A: device code requested; its poll-token request is held in
+        // flight (the token has not arrived yet). Capture A's carried flow
+        // token (the generation its startDeviceFlow captured after the reset).
+        guard let pollA = view.startDeviceFlow() else {
+            XCTFail("The flow must return its poll task handle.")
+            return
+        }
+        let flowAToken = view.setupLifecycle.generation
+        await transport.waitUntilSendStarted(nth: 1)
+        await transport.resumeSend(nth: 1)
+        await transport.waitUntilSendStarted(nth: 2)
+
+        // Flow B starts (reset/reconnect): cancels A's poll, captures a new
+        // flow token. B's device code is delivered, B's poll token arrives,
+        // and B's verification is now in flight (fetching the account).
+        _ = view.startDeviceFlow()
+        await transport.waitUntilSendStarted(nth: 3)
+        await transport.resumeSend(nth: 3)
+        await transport.waitUntilSendStarted(nth: 4)
+        await transport.resumeSend(nth: 4)
+        await transport.waitUntilSendStarted(nth: 5)
+
+        // A's late token arrives NOW, released EXACTLY as send #2 while B's
+        // verification remains gated on its own sends. Awaiting A's poll
+        // task is the terminal barrier: it completes only after A's carried
+        // finishDeviceFlow has fully run — the stale-token entry guard
+        // deterministically executes BEFORE B's responses are released, so
+        // the bug (A cancelling B's task / bumping B's generation at entry)
+        // cannot hide behind scheduler ordering.
+        await transport.resumeSend(nth: 2)   // deliver A's late token
+        await pollA.value
+
+        // The entry-guard rejection is additionally observable directly:
+        // invoking the finish entry synchronously with A's stale carried
+        // token must be refused BEFORE any shared verification state is
+        // touched (B's task and generation stay intact).
+        let lateToken = GitHubDeviceToken(
+            accessToken: "ghu_late_a",
+            refreshToken: "ghr_late_a",
+            expiresIn: 3600,
+            refreshExpiresIn: 15_897_600,
+            scope: ""
+        )
+        let accepted = view.finishDeviceFlow(token: lateToken, lifecycleGeneration: flowAToken)
+        XCTAssertFalse(accepted,
+                       "A stale flow token must be rejected at finish entry — before any verification state is touched.")
+
+        await transport.resumeSend(nth: 5)   // B's account response
+        await transport.waitUntilSendStarted(nth: 6)   // B's installations request
+        await transport.resumeSend(nth: 6)   // B's installations response
+        try await Self.waitForCondition("flow B's verification to persist") {
+            (try? store.load()) != nil
+        }
+        let persisted = try store.load()
+        XCTAssertEqual(persisted?.accessToken, "ghu_b",
+                       "A late token from a superseded flow must not cancel or replace the newer flow's verification.")
+        // Observed request ordinals: A's device code + poll token, then B's
+        // device code + poll token, then B's verification fetches — and NOTHING
+        // from A's late token (no extra account/installations requests).
+        let requests = await transport.requests()
+        XCTAssertEqual(requests.count, 6,
+                       "Flow A's late token must not start its own verification network work.")
+        XCTAssertEqual(requests.map(\.url?.path), [
+            "/login/device/code",
+            "/login/oauth/access_token",
+            "/login/device/code",
+            "/login/oauth/access_token",
+            "/user",
+            "/user/installations",
+        ], "The flows must proceed in exact ordinal order.")
+    }
+
+    func testDeviceVerificationMayPublishRequiresCurrentLifecycle() {
+        XCTAssertTrue(SetupView.deviceVerificationMayPublish(
+            taskCancelled: false,
+            storedGeneration: 2,
+            taskGeneration: 2,
+            storedLifecycle: 3,
+            capturedLifecycle: 3
+        ), "The current verification with a current lifecycle may publish.")
+        // A window close / disappear / flow cancellation during verification
+        // bumps the stored lifecycle: publication is blocked even though the
+        // verification identity is still current.
+        XCTAssertFalse(SetupView.deviceVerificationMayPublish(
+            taskCancelled: false,
+            storedGeneration: 2,
+            taskGeneration: 2,
+            storedLifecycle: 4,
+            capturedLifecycle: 3
+        ), "A stale lifecycle must block verification publication even when the verification identity is current.")
+        // Task cancellation and a superseded verification remain terminal.
+        XCTAssertFalse(SetupView.deviceVerificationMayPublish(
+            taskCancelled: true,
+            storedGeneration: 2,
+            taskGeneration: 2,
+            storedLifecycle: 3,
+            capturedLifecycle: 3
+        ), "A cancelled verification must not publish.")
+        XCTAssertFalse(SetupView.deviceVerificationMayPublish(
+            taskCancelled: false,
+            storedGeneration: 3,
+            taskGeneration: 2,
+            storedLifecycle: 3,
+            capturedLifecycle: 3
+        ), "A superseded verification must not publish.")
+    }
+
+    func testFalseRefreshOutcomeEndsPollerWithoutStampOrRetry() {
+        let view = makeDeviceSetupView()
+        XCTAssertFalse(view.continueDeviceRepositoryPolling(completed: false),
+                       "A cancelled/superseded re-check must end THIS poller: no schedule stamp, no retry on the next wake.")
+        XCTAssertTrue(view.continueDeviceRepositoryPolling(completed: true),
+                      "A completed re-check stamps the schedule and lets the poller continue.")
     }
 
     func testDeviceRefreshIssueMessageSurfacesFailureDistinctFromEmptySelection() {
@@ -4332,6 +4945,7 @@ private actor GatedConnectTransport: MSWConnectHTTPTransport {
     }
 
     private var responses: [Response] = []
+    private var recordedRequests: [URLRequest] = []
     private var sendEntered = false
     private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
     private var sendReleased = false
@@ -4339,6 +4953,13 @@ private actor GatedConnectTransport: MSWConnectHTTPTransport {
 
     func enqueue(_ data: Data, status: Int = 200) {
         responses.append(Response(data: data, status: status))
+    }
+
+    /// The requests consumed so far; the lifecycle-barrier ordering test uses
+    /// the count to observe whether a repository refresh was created after a
+    /// close invalidated the setup surface.
+    func requests() -> [URLRequest] {
+        recordedRequests
     }
 
     /// Suspends until `send` has entered — which happens only after every
@@ -4362,6 +4983,7 @@ private actor GatedConnectTransport: MSWConnectHTTPTransport {
     }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        recordedRequests.append(request)
         guard !responses.isEmpty else { throw MSWConnectError.transportUnavailable }
         let response = responses.removeFirst()
         if !sendEntered {
@@ -4374,6 +4996,85 @@ private actor GatedConnectTransport: MSWConnectHTTPTransport {
         if !sendReleased {
             await withCheckedContinuation { continuation in
                 releaseWaiters.append(continuation)
+            }
+        }
+        let httpResponse = HTTPURLResponse(
+            url: request.url!,
+            statusCode: response.status,
+            httpVersion: nil,
+            headerFields: nil
+        )!
+        return (response.data, httpResponse)
+    }
+}
+
+/// Transport whose EVERY `send` blocks until the test explicitly releases it,
+/// in FIFO order, with a per-send entry barrier (`waitUntilSendStarted(nth:)`):
+/// the device-flow barrier tests hold the poll-token request in flight while
+/// the setup surface closes (or a newer flow starts), then deliver the token —
+/// deterministically proving a late token emits no UI state and never cancels
+/// or replaces a newer flow's verification. Unlike `GatedConnectTransport`
+/// (which gates only its first send), every send is gated so multi-request
+/// flows (device code → poll token → verification) are fully deterministic.
+private actor StepGatedConnectTransport: MSWConnectHTTPTransport {
+    private struct Response: Sendable {
+        let data: Data
+        let status: Int
+    }
+
+    private var responses: [Response] = []
+    private var recordedRequests: [URLRequest] = []
+    private var enteredCount = 0
+    private var enteredWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var releasedCount = 0
+    private var releaseWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    func enqueue(_ data: Data, status: Int = 200) {
+        responses.append(Response(data: data, status: status))
+    }
+
+    /// The requests consumed so far, in FIFO order.
+    func requests() -> [URLRequest] {
+        recordedRequests
+    }
+
+    /// Suspends until the `n`-th send (1-based) has entered, i.e. the request
+    /// is in flight and blocked awaiting its release.
+    func waitUntilSendStarted(nth: Int) async {
+        if enteredCount >= nth { return }
+        await withCheckedContinuation { continuation in
+            enteredWaiters[nth, default: []].append(continuation)
+        }
+    }
+
+    /// Releases EXACTLY the `n`-th entered send so it answers with its
+    /// enqueued response. Releases are keyed by send ordinal: an overlapping
+    /// send (e.g. a superseded flow's poll-token request held next to a newer
+    /// flow's verification request) stays blocked until its OWN release, so
+    /// one release can never wake multiple sends.
+    func resumeSend(nth: Int) {
+        releasedCount = max(releasedCount, nth)
+        if let waiters = releaseWaiters.removeValue(forKey: nth) {
+            for continuation in waiters {
+                continuation.resume()
+            }
+        }
+    }
+
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        recordedRequests.append(request)
+        guard !responses.isEmpty else { throw MSWConnectError.transportUnavailable }
+        let response = responses.removeFirst()
+        enteredCount += 1
+        for (nth, waiters) in enteredWaiters where nth == enteredCount {
+            for continuation in waiters {
+                continuation.resume()
+            }
+            enteredWaiters.removeValue(forKey: nth)
+        }
+        if releasedCount < enteredCount {
+            await withCheckedContinuation { continuation in
+                releaseWaiters[enteredCount, default: []].append(continuation)
             }
         }
         let httpResponse = HTTPURLResponse(

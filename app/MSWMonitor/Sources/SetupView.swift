@@ -196,6 +196,32 @@ private enum SetupStep: String, CaseIterable, Identifiable {
     }
 }
 
+/// Authoritative setup-window/device-flow lifecycle barrier, separate from
+/// the task generations (`deviceRefreshGeneration`,
+/// `deviceVerificationGeneration`, `deviceRepositoryPollGeneration`).
+/// Teardown that makes the setup surface invalid — window `willClose`,
+/// `.onDisappear`, and explicit device-flow cancellation — bumps the
+/// generation; restore/verification continuations captured it before their
+/// first await and must re-check it after every await that could create a
+/// refresh, assign UI state, publish a timestamp/status, or restart polling.
+/// A reference type so the generation is shared across SwiftUI struct copies
+/// (and observable by the barrier ordering tests).
+@MainActor
+final class DeviceSetupLifecycleGate {
+    private(set) var generation = 0
+
+    /// Invalidates every previously captured lifecycle: the setup surface is
+    /// gone, so no in-flight restore/verification continuation may publish.
+    func invalidate() {
+        generation &+= 1
+    }
+
+    /// Whether a generation captured before the first await is still current.
+    func isCurrent(_ captured: Int) -> Bool {
+        generation == captured
+    }
+}
+
 struct SetupView: View {
     let coordinator: (any MSWBootstrapCoordinating)?
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
@@ -209,6 +235,19 @@ struct SetupView: View {
     let uiTestBootstrapReconnect: Bool
     let startupRecoveryBlockedReason: String?
     let retryStartupRecovery: () -> Void
+    /// Authoritative UI barrier for this setup window/device flow (see
+    /// `DeviceSetupLifecycleGate`). Teardown paths bump it; restore and
+    /// verification continuations capture it before their first await and
+    /// guard their publications against it.
+    let setupLifecycle: DeviceSetupLifecycleGate
+    /// Session revalidation seam: production uses the process-wide shared
+    /// refresher; the barrier ordering tests inject a store-backed instance
+    /// so revalidation can be driven deterministically.
+    let deviceSessionRefresher: GitHubDeviceSessionRefresher
+    /// Opens GitHub's device verification page in the browser. Injectable so
+    /// the deterministic device-flow barrier tests never launch a real
+    /// browser (same convention as `MSWConnectBrowser(opener:)`).
+    let openDeviceVerificationPage: (URL) -> Bool
     @State private var checks: [MSWPreflightCheck] = []
     @State private var state = MSWBootstrapState.initial
     @State private var isRunning = false
@@ -260,14 +299,57 @@ struct SetupView: View {
     @State private var deviceStatus = ""
     @State private var deviceIssue: String?
     @State private var deviceRefreshIssue: String?
-    @State private var deviceRefreshTask: Task<Void, Never>?
+    @State private var deviceRefreshTask: Task<Bool, Never>?
     @State private var deviceRefreshGeneration = 0
     @State private var deviceReauthorizationRequired = false
     @State private var devicePollTask: Task<Void, Never>?
     @State private var deviceSession: GitHubDeviceSession?
     @State private var deviceRepositoryCount = 0
+    @State private var deviceRepositoryPollTask: Task<Void, Never>?
+    @State private var deviceRepositoryPollGeneration = 0
+    @State private var deviceRepositoryCheckInFlight = false
+    @State private var lastDeviceRepositoryCheckAt: Date?
     @State private var deviceAccessibleRepositories: [GitHubRepository] = []
     @State private var workspaceAllowlists: [String: Set<String>] = [:]
+
+    /// Memberwise init re-declared because a struct containing property
+    /// wrappers drops defaulted stored properties from the synthesized
+    /// memberwise init: `setupLifecycle` and `deviceSessionRefresher` are the
+    /// deterministic seams the barrier ordering tests inject (production uses
+    /// the defaults — a fresh gate and the process-wide shared refresher).
+    init(
+        coordinator: (any MSWBootstrapCoordinating)?,
+        authorizationCoordinator: GitHubAuthorizationCoordinator?,
+        deviceFlow: GitHubDeviceFlow?,
+        deviceInstallationURL: URL?,
+        openSettings: @escaping (SettingsSection) -> Void,
+        closeSetup: @escaping () -> Void,
+        uiTestMode: Bool,
+        uiTestStartsInReview: Bool,
+        uiTestGitHubScenario: String?,
+        uiTestBootstrapReconnect: Bool,
+        startupRecoveryBlockedReason: String?,
+        retryStartupRecovery: @escaping () -> Void,
+        setupLifecycle: DeviceSetupLifecycleGate = DeviceSetupLifecycleGate(),
+        deviceSessionRefresher: GitHubDeviceSessionRefresher = .shared,
+        openDeviceVerificationPage: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    ) {
+        self.coordinator = coordinator
+        self.authorizationCoordinator = authorizationCoordinator
+        self.deviceFlow = deviceFlow
+        self.deviceInstallationURL = deviceInstallationURL
+        self.openSettings = openSettings
+        self.closeSetup = closeSetup
+        self.uiTestMode = uiTestMode
+        self.uiTestStartsInReview = uiTestStartsInReview
+        self.uiTestGitHubScenario = uiTestGitHubScenario
+        self.uiTestBootstrapReconnect = uiTestBootstrapReconnect
+        self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
+        self.retryStartupRecovery = retryStartupRecovery
+        self.setupLifecycle = setupLifecycle
+        self.deviceSessionRefresher = deviceSessionRefresher
+        self.openDeviceVerificationPage = openDeviceVerificationPage
+    }
 
     private static let resumeStateKey = "setup.resume.nonsecret.v1"
 
@@ -301,15 +383,42 @@ struct SetupView: View {
             if uiTestMode {
                 loadUITestState()
             } else {
-                restoreResumeState()
-                loadPreflight()
-                await loadExistingMetadata()
-                await restoreCachedAuthorization()
-                await restoreDeviceSession()
-                githubContextLoaded = true
+                await loadGitHubStartupContext()
             }
         }
-        .onDisappear { pauseAuthorization() }
+        .onDisappear {
+            // The setup surface is gone: bump the authoritative lifecycle so
+            // no in-flight restore/verification continuation can create a
+            // refresh, publish state, stamp the schedule, or restart polling.
+            // The poll and verification tasks are cancelled as well, so a
+            // late device-code token or verification stops immediately.
+            setupLifecycle.invalidate()
+            pauseAuthorization()
+            stopDeviceRepositoryPolling()
+            deviceRefreshTask?.cancel()
+            deviceRefreshTask = nil
+            devicePollTask?.cancel()
+            devicePollTask = nil
+            deviceVerificationTask?.cancel()
+            deviceVerificationTask = nil
+            githubSkipTask?.cancel()
+        }
+        .onChange(of: activeStep) { _, newStep in
+            if newStep == .github {
+                startDeviceRepositoryPollingIfNeeded()
+            } else {
+                stopDeviceRepositoryPolling()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
+            handleDeviceWindowBecameKey(notification)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
+            handleDeviceWindowWillClose(notification)
+        }
+        .onChange(of: githubDecisionMade) { _, decided in
+            if decided { stopDeviceRepositoryPolling() }
+        }
         .onChange(of: drafts) { _, _ in
             if !uiTestMode { persistResumeState() }
         }
@@ -1028,14 +1137,17 @@ struct SetupView: View {
                 }
                 if deviceRepositoryCount == 0, let deviceSession, !deviceReauthorizationRequired {
                     Button("Check again") {
-                        deviceRefreshTask?.cancel()
-                        deviceRefreshGeneration &+= 1
-                        let generation = deviceRefreshGeneration
-                        deviceRefreshTask = Task {
-                            await performDeviceRepositoryRefresh(accessToken: deviceSession.accessToken)
-                            if Self.refreshTaskIsCurrent(storedGeneration: deviceRefreshGeneration, taskGeneration: generation) {
-                                deviceRefreshTask = nil
-                            }
+                        // Tracked wrapper over the single-flight entry: the
+                        // guarded entry owns the refresh task, so a manual
+                        // press coalesces with any in-flight re-check instead
+                        // of bypassing it. Recording the completion time keeps
+                        // the poller's wait satisfied by this check too — but
+                        // only when the check actually completed and
+                        // published, so a cancelled attempt never throttles
+                        // later real checks.
+                        Task {
+                            let completed = await refreshDeviceRepositoryCount(accessToken: deviceSession.accessToken)
+                            if completed { lastDeviceRepositoryCheckAt = Date() }
                         }
                     }
                     .accessibilityIdentifier("setup.github.refresh.button")
@@ -1052,6 +1164,16 @@ struct SetupView: View {
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("setup.github.refresh.issue")
+                }
+                if deviceRepositoryPollTask != nil, deviceRefreshIssue == nil {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Waiting for repository selection on GitHub…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("setup.github.waiting")
                 }
                 if !deviceAccessibleRepositories.isEmpty {
                     workspaceAccessSection
@@ -1079,7 +1201,7 @@ struct SetupView: View {
                 Text("Connect GitHub opens GitHub in your default browser: approve the code there and pick your repositories on the App installation page. The credential stays in the Mac Keychain.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Connect GitHub", action: startDeviceFlow)
+                Button("Connect GitHub") { _ = startDeviceFlow() }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("setup.github.connect.button")
                 if let deviceIssue {
@@ -1988,22 +2110,46 @@ struct SetupView: View {
     }
 
 
-    private func loadExistingMetadata() async {
-        guard let authorizationCoordinator else { return }
-        existingMetadata = await authorizationCoordinator.metadata()
+    /// Loads existing grant metadata. The startup lifecycle token is carried
+    /// in (captured at the outermost `.task` entry): the metadata read may
+    /// finish after a close, but the publication happens only while the token
+    /// is still current. Returns the metadata when published, nil when the
+    /// close suppressed it — the deterministic startup-close tests assert the
+    /// suppression directly.
+    @discardableResult
+    func loadExistingMetadata(startupLifecycle: Int) async -> [WorkspaceCredentialMetadata]? {
+        guard let authorizationCoordinator else { return nil }
+        let metadata = await authorizationCoordinator.metadata()
+        guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
+        existingMetadata = metadata
+        return metadata
     }
 
-    private func restoreCachedAuthorization() async {
-        guard let authorizationCoordinator else { return }
+    /// Restores the cached MSW Connect authorization. The startup lifecycle
+    /// token is carried in and re-checked after EVERY await before any UI
+    /// publication — a close during `resumeAuthorization`, the installation
+    /// URL read, or a repository listing suppresses the corresponding
+    /// account/installations/status/identity/repository/error mutations
+    /// (the outer chain guard alone would run too late). Returns the
+    /// discovery when published, nil when the close suppressed it.
+    @discardableResult
+    func restoreCachedAuthorization(startupLifecycle: Int) async -> GitHubAuthorizationDiscovery? {
+        guard let authorizationCoordinator else { return nil }
         // An unconfigured build cannot use or validate a stored session;
         // restoration is deferred to a configured build. Sessions are never
         // deleted by configuration mismatches.
-        guard authorizationCoordinator.isConfigured else { return }
+        guard authorizationCoordinator.isConfigured else { return nil }
         do {
-            guard let discovery = try await authorizationCoordinator.resumeAuthorization() else { return }
+            guard let discovery = try await authorizationCoordinator.resumeAuthorization() else { return nil }
+            // Guard after the resume await: a close during it must suppress
+            // the account/installations publications below.
+            guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
             account = discovery.account
             installations = discovery.installations
             let installURL = await authorizationCoordinator.installationURL()
+            // Guard after the installation-URL await: never publish it
+            // post-close.
+            guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
             githubInstallationURL = Self.validatedInstallationURL(installURL)
             authorizationSessionID = discovery.sessionID
             authorizationStatus = "Resumed the cached @\(discovery.account.login) authorization. Review saved choices before applying."
@@ -2011,25 +2157,69 @@ struct SetupView: View {
             let selectedInstallations = Set(drafts.values.compactMap(\.installationID))
             for installationID in selectedInstallations {
                 do {
-                    repositoriesByInstallation[installationID] = try await authorizationCoordinator.repositories(
+                    let repositories = try await authorizationCoordinator.repositories(
                         sessionID: discovery.sessionID,
                         installationID: installationID
                     )
+                    // Guard after the listing await: never publish a
+                    // repository list post-close.
+                    guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
+                    repositoriesByInstallation[installationID] = repositories
                 } catch {
+                    guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
                     authorizationIssue = issue(for: error)
                 }
             }
+            return discovery
         } catch {
+            guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
             authorizationIssue = issue(for: error)
+            return nil
         }
     }
 
+    /// The startup GitHub-context chain, driven by the outermost `.task` and
+    /// testable directly: captures the setup-window/device-flow lifecycle at
+    /// the OUTERMOST entry — before any startup await — and re-checks it
+    /// after every await. A close that lands while `loadExistingMetadata`,
+    /// `restoreCachedAuthorization`, or the restore itself is pending bumps
+    /// the stored generation; the guards below then return silently: the
+    /// restore is never invoked, no status/context is published, and nothing
+    /// polls. Returns whether the startup completed (and may publish
+    /// `githubContextLoaded`).
+    @discardableResult
+    func loadGitHubStartupContext() async -> Bool {
+        let startupLifecycle = setupLifecycle.generation
+        restoreResumeState()
+        loadPreflight()
+        await loadExistingMetadata(startupLifecycle: startupLifecycle)
+        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        await restoreCachedAuthorization(startupLifecycle: startupLifecycle)
+        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        await restoreDeviceSession(startupLifecycle: startupLifecycle)
+        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        githubContextLoaded = true
+        return true
+    }
+
     /// Restores the stored direct-GitHub session, rotating an expired access
-    /// token with its refresh token when available.
-    private func restoreDeviceSession() async {
+    /// token with its refresh token when available. The setup-window/device-
+    /// flow lifecycle token is captured by the OUTERMOST `.task` entry and
+    /// passed in (never re-read here): teardown (willClose, onDisappear,
+    /// cancelDeviceFlow) bumps the stored generation, so a close that lands
+    /// while revalidation is pending — or after a child re-check completed
+    /// true but before this continuation — is a terminal no-op. The shared
+    /// actor may still finish its Keychain work (credential integrity is
+    /// preserved), but nothing revives UI or poll state. Internal so the
+    /// barrier ordering tests can drive it deterministically.
+    func restoreDeviceSession(startupLifecycle: Int) async {
         guard let deviceFlow else { return }
+        let lifecycleGeneration = startupLifecycle
         do {
-            let outcome = try await GitHubDeviceSessionRefresher.shared.revalidatedSession(using: deviceFlow)
+            let outcome = try await deviceSessionRefresher.revalidatedSession(using: deviceFlow)
+            // Guard A: never assign UI state from a restore whose setup
+            // surface was torn down while revalidation was pending.
+            guard setupLifecycle.isCurrent(lifecycleGeneration) else { return }
             guard case .current(let session, _) = outcome else {
                 if case .superseded = outcome {
                     // A concurrent replacement won the epoch; publish nothing.
@@ -2059,18 +2249,27 @@ struct SetupView: View {
                 return
             }
             deviceSession = session
-            await refreshDeviceRepositoryCount(accessToken: session.accessToken)
-            deviceStatus = Self.deviceRepositorySignedInLine(
-                login: session.account.login,
-                repositoryCount: deviceRepositoryCount,
-                refreshIssue: deviceRefreshIssue
+            // Guard point 1: never create a NEW refresh task after teardown —
+            // `refreshDeviceRepositoryCount` would create it even though the
+            // earlier cancellation could only reach a nil/current handle.
+            guard setupLifecycle.isCurrent(lifecycleGeneration) else { return }
+            let completed = await refreshDeviceRepositoryCount(accessToken: session.accessToken)
+            // Guard point 2: after the child returns, still no status, stamp,
+            // or poll restart — the child may have completed true (its cancel
+            // raced a finished publish) with the close landing in this
+            // continuation's scheduling gap. `publishDeviceRepositoryRestoreResult`
+            // is the same guarded continuation the ordering test drives.
+            publishDeviceRepositoryRestoreResult(
+                lifecycleGeneration: lifecycleGeneration,
+                completed: completed
             )
         } catch is CancellationError {
             // Startup restore was cancelled; leave state untouched.
         } catch {
             // A genuinely retryable transport failure must not render as
             // "not connected": publish the stored session and keep Check
-            // again available.
+            // again available — but never after teardown.
+            guard setupLifecycle.isCurrent(lifecycleGeneration) else { return }
             if let stored = try? GitHubDeviceSessionStore().load() {
                 deviceSession = stored
                 deviceAccount = stored.account
@@ -2087,6 +2286,29 @@ struct SetupView: View {
         }
     }
 
+    /// Guarded stamp/status/poll publication of the restore continuation,
+    /// shared with the barrier ordering test: both the captured setup
+    /// lifecycle AND a completed re-check are required. A stale lifecycle
+    /// (close during revalidation or during the child re-check) is a terminal
+    /// no-op — nothing is stamped, published, or restarted. Returns whether
+    /// the continuation published, which is how the ordering test observes
+    /// the decision deterministically.
+    @discardableResult
+    func publishDeviceRepositoryRestoreResult(lifecycleGeneration: Int, completed: Bool) -> Bool {
+        guard setupLifecycle.isCurrent(lifecycleGeneration),
+              Self.shouldContinueSetupAfterRecheck(completed: completed) else {
+            return false
+        }
+        lastDeviceRepositoryCheckAt = Date()
+        startDeviceRepositoryPollingIfNeeded()
+        deviceStatus = Self.deviceRepositorySignedInLine(
+            login: deviceAccount?.login ?? "",
+            repositoryCount: deviceRepositoryCount,
+            refreshIssue: deviceRefreshIssue
+        )
+        return true
+    }
+
     /// Starts reauthorization from the reauthorization-ONLY state: drop the
     /// stale account so the account-nil branch renders the device-flow states
     /// (code entry, progress, cancellation, failures) end to end;
@@ -2098,20 +2320,36 @@ struct SetupView: View {
         startDeviceFlow()
     }
 
-    private func startDeviceFlow() {
-        guard let deviceFlow else { return }
+    /// Begins a new device flow, returning the poll task so the barrier tests
+    /// can AWAIT its terminal completion (a task's completion implies the
+    /// carried `finishDeviceFlow` invocation has fully run — a deterministic
+    /// barrier, never a sleep). Internal so the device-flow barrier tests can
+    /// drive it deterministically.
+    @discardableResult
+    func startDeviceFlow() -> Task<Void, Never>? {
+        guard let deviceFlow else { return nil }
         cancelDeviceFlow()
+        // Authoritative token for THIS flow: captured after the reset (which
+        // bumped the lifecycle), so the exact epoch the poll and verification
+        // continuations must still match after their awaits. The token is
+        // carried through the poll task into finishDeviceFlow — never re-read
+        // after the poll returns — so a token that arrives after teardown
+        // (which bumps the stored generation and cancels the poll) can only
+        // be stale.
+        let flowLifecycle = setupLifecycle.generation
         isConnectingDevice = true
         deviceIssue = nil
         deviceRefreshIssue = nil
         deviceStatus = "Requesting a GitHub code…"
-        devicePollTask = Task {
+        let pollTask = Task {
             do {
                 let authorization = try await deviceFlow.requestDeviceCode()
                 await MainActor.run {
+                    // Code/progress publication: terminal after teardown.
+                    guard !Task.isCancelled, setupLifecycle.isCurrent(flowLifecycle) else { return }
                     deviceAuthorization = authorization
                     deviceStatus = "Enter the code on GitHub, then approve."
-                    _ = NSWorkspace.shared.open(GitHubDeviceFlow.verificationURL(for: authorization))
+                    _ = openDeviceVerificationPage(GitHubDeviceFlow.verificationURL(for: authorization))
                 }
                 var interval = authorization.interval
                 let deadline = Date().addingTimeInterval(TimeInterval(authorization.expiresIn))
@@ -2126,7 +2364,7 @@ struct SetupView: View {
                             deviceCode: authorization.deviceCode
                         )
                         await MainActor.run {
-                            finishDeviceFlow(token: token)
+                            _ = finishDeviceFlow(token: token, lifecycleGeneration: flowLifecycle)
                         }
                         return
                     } catch GitHubDeviceFlowError.authorizationPending {
@@ -2139,6 +2377,8 @@ struct SetupView: View {
                 // Cancelled by the user; state already reset by cancelDeviceFlow.
             } catch {
                 await MainActor.run {
+                    // Error publication: terminal after teardown.
+                    guard !Task.isCancelled, setupLifecycle.isCurrent(flowLifecycle) else { return }
                     isConnectingDevice = false
                     deviceAuthorization = nil
                     deviceStatus = ""
@@ -2148,11 +2388,48 @@ struct SetupView: View {
                 }
             }
         }
+        devicePollTask = pollTask
+        return pollTask
     }
 
-    private func finishDeviceFlow(token: GitHubDeviceToken) {
-        guard let deviceFlow else { return }
-        Task {
+    /// Handles a device-code token that the poll obtained. Returns whether
+    /// the token was ACCEPTED (a verification was started): a stale carried
+    /// lifecycle token is rejected AT ENTRY — before `deviceVerificationTask`
+    /// is cancelled, `deviceVerificationGeneration` is bumped, or any status
+    /// changes — so a late old-flow token can never cancel or replace a newer
+    /// flow's verification. Internal so the barrier tests can invoke the
+    /// finish entry synchronously and observe the rejection.
+    @discardableResult
+    func finishDeviceFlow(token: GitHubDeviceToken, lifecycleGeneration: Int) -> Bool {
+        guard let deviceFlow else { return false }
+        // A stale carried token (this flow was torn down or superseded while
+        // the token was in flight) is terminal AT ENTRY — BEFORE any shared
+        // verification state is touched. A late old-flow token must neither
+        // cancel the newer valid verification nor bump its generation: the
+        // verification identity guard is captured AFTER this check, so the
+        // newer flow's generation is untouched and its publication proceeds.
+        guard setupLifecycle.isCurrent(lifecycleGeneration) else { return false }
+        deviceVerificationTask?.cancel()
+        deviceVerificationGeneration &+= 1
+        let generation = deviceVerificationGeneration
+        // The lifecycle token was captured at startDeviceFlow (after the
+        // reset) and carried through the poll: it is NEVER re-read here, so a
+        // token that arrives after teardown (which bumps the stored
+        // generation and cancels the poll/verification tasks) can only be
+        // stale, and every publication below — including the verification's
+        // very first await — requires it to still be current. A stale
+        // verification emits no fetches, no Keychain write, and no UI.
+        deviceVerificationTask = Task {
+            // Fail closed BEFORE any verification network work: a late token
+            // must not start account/installation fetches, a session write,
+            // or any publication.
+            guard Self.deviceVerificationMayPublish(
+                taskCancelled: Task.isCancelled,
+                storedGeneration: deviceVerificationGeneration,
+                taskGeneration: generation,
+                storedLifecycle: setupLifecycle.generation,
+                capturedLifecycle: lifecycleGeneration
+            ) else { return }
             do {
                 let account = try await deviceFlow.account(accessToken: token.accessToken)
                 // A sign-in alone grants nothing: verify that at least one
@@ -2178,8 +2455,32 @@ struct SetupView: View {
                     refreshExpiresAt: token.refreshExpiresIn.map { Date().addingTimeInterval(TimeInterval($0)) },
                     obtainedAt: Date()
                 )
-                try await GitHubDeviceSessionRefresher.shared.replaceCurrentSession(with: session)
+                // Cancelled invocations publish nothing: a cancelled
+                // predecessor must neither write the session nor clear a
+                // successor's handle.
+                guard Self.deviceVerificationMayPublish(
+                    taskCancelled: Task.isCancelled,
+                    storedGeneration: deviceVerificationGeneration,
+                    taskGeneration: generation,
+                    storedLifecycle: setupLifecycle.generation,
+                    capturedLifecycle: lifecycleGeneration
+                ) else { return }
+                // Credential integrity: the Keychain write may still finish
+                // after a close; the publication guards below keep the UI
+                // unrevived.
+                try await deviceSessionRefresher.replaceCurrentSession(with: session)
                 await MainActor.run {
+                    // Cancellation and teardown are terminal for the
+                    // publish/stamp/poll block: a stale sign-in publication
+                    // or polling restart must never revive state the teardown
+                    // owns.
+                    guard Self.deviceVerificationMayPublish(
+                        taskCancelled: Task.isCancelled,
+                        storedGeneration: deviceVerificationGeneration,
+                        taskGeneration: generation,
+                        storedLifecycle: setupLifecycle.generation,
+                        capturedLifecycle: lifecycleGeneration
+                    ) else { return }
                     deviceSession = session
                     deviceAccount = account
                     deviceRepositoryCount = accessibleRepositoryCount
@@ -2191,6 +2492,8 @@ struct SetupView: View {
                     isConnectingDevice = false
                     deviceAuthorization = nil
                     devicePollTask = nil
+                    lastDeviceRepositoryCheckAt = Date()
+                    startDeviceRepositoryPollingIfNeeded()
                     deviceStatus = Self.deviceRepositorySignedInLine(
                         login: account.login,
                         repositoryCount: accessibleRepositories.count,
@@ -2204,8 +2507,24 @@ struct SetupView: View {
                 // nothing (cancelDeviceFlow owns the cancelled state).
                 return
             } catch {
-
+                // Cancelled invocations publish nothing: the generation guard
+                // keeps a cancelled predecessor from overwriting the explicit
+                // cancellation state set by cancelDeviceFlow.
+                guard Self.deviceVerificationMayPublish(
+                    taskCancelled: Task.isCancelled,
+                    storedGeneration: deviceVerificationGeneration,
+                    taskGeneration: generation,
+                    storedLifecycle: setupLifecycle.generation,
+                    capturedLifecycle: lifecycleGeneration
+                ) else { return }
                 await MainActor.run {
+                    guard Self.deviceVerificationMayPublish(
+                        taskCancelled: Task.isCancelled,
+                        storedGeneration: deviceVerificationGeneration,
+                        taskGeneration: generation,
+                        storedLifecycle: setupLifecycle.generation,
+                        capturedLifecycle: lifecycleGeneration
+                    ) else { return }
                     isConnectingDevice = false
                     deviceAuthorization = nil
                     devicePollTask = nil
@@ -2214,6 +2533,26 @@ struct SetupView: View {
                 }
             }
         }
+        return true
+    }
+
+    /// Pure publication guard, unit-tested directly: a device-flow
+    /// verification may publish only while its task is not cancelled, it is
+    /// still the current verification, AND the setup-window/device-flow
+    /// lifecycle it captured before its first await is still current. Window
+    /// close, disappear, or explicit flow cancellation during verification is
+    /// terminal for the publish/stamp/poll block — the verification identity
+    /// guard alone cannot observe teardown.
+    static func deviceVerificationMayPublish(
+        taskCancelled: Bool,
+        storedGeneration: Int,
+        taskGeneration: Int,
+        storedLifecycle: Int,
+        capturedLifecycle: Int
+    ) -> Bool {
+        !taskCancelled &&
+            verificationTaskIsCurrent(storedGeneration: storedGeneration, taskGeneration: taskGeneration) &&
+            storedLifecycle == capturedLifecycle
     }
 
     /// True while a repository re-check is running (manual button or poller);
@@ -2228,20 +2567,25 @@ struct SetupView: View {
     /// coalesce onto the in-flight refresh. Session revalidation
     /// (load → rotate → persist) is additionally serialized by the shared
     /// `GitHubDeviceSessionRefresher` so a single-use refresh token is never
-    /// submitted twice. Keep this signature stable — Issue 1's poller calls it.
-    func refreshDeviceRepositoryCount(accessToken: String) async {
+    /// submitted twice. Returns `true` when the re-check completed and
+    /// published a result (success or failure); `false` when it was cancelled
+    /// or superseded and published nothing — callers stamp the schedule
+    /// timestamp only on completed outcomes so a cancelled attempt (window
+    /// teardown) never throttles a later real check.
+    @discardableResult
+    func refreshDeviceRepositoryCount(accessToken: String) async -> Bool {
         if let inFlight = deviceRefreshTask {
-            await inFlight.value
-            return
+            return await inFlight.value
         }
         deviceRefreshGeneration &+= 1
         let generation = deviceRefreshGeneration
-        let task = Task { await performDeviceRepositoryRefresh(accessToken: accessToken) }
+        let task = Task { await performDeviceRepositoryRefresh(accessToken: accessToken, generation: generation) }
         deviceRefreshTask = task
-        await task.value
+        let completed = await task.value
         if Self.refreshTaskIsCurrent(storedGeneration: deviceRefreshGeneration, taskGeneration: generation) {
             deviceRefreshTask = nil
         }
+        return completed
     }
 
     /// Pure identity check, unit-tested directly: a refresh task may clear
@@ -2267,7 +2611,27 @@ struct SetupView: View {
         }
     }
 
+    /// Whether this refresh invocation may still publish its result. The
+    /// single-flight entry bumps the generation for every new invocation and
+    /// teardown cancels the stored task, so a stale or cancelled predecessor
+    /// must never overwrite a newer result (a stale zero could otherwise
+    /// reopen the GitHub decision after a positive one already closed it).
+    /// A cancelled invocation publishes nothing: the transport folds
+    /// cancellation into `transportUnavailable`, so the silent-drop guard is
+    /// what keeps cancellation from surfacing as a bogus failure.
+    private func deviceRepositoryRefreshIsCurrent(generation: Int) -> Bool {
+        !Task.isCancelled && Self.refreshTaskIsCurrent(
+            storedGeneration: deviceRefreshGeneration,
+            taskGeneration: generation
+        )
+    }
 
+    /// Re-checks GitHub for repositories actually accessible to the App. An
+    /// expired access token is rotated first through the shared refresher,
+    /// the (possibly rotated) session is published to state before any
+    /// fallible listing, and every failure surfaces as `deviceRefreshIssue`
+    /// instead of collapsing into a misleading "no repositories selected"
+    /// state.
     /// Re-checks GitHub for repositories actually accessible to the App. An
     /// expired access token is rotated first through the shared refresher,
     /// the (possibly rotated) session is published to state before any
@@ -2280,14 +2644,26 @@ struct SetupView: View {
         guard let deviceFlow else { return false }
         let outcome: GitHubDeviceSessionRefreshOutcome
         do {
-            outcome = try await GitHubDeviceSessionRefresher.shared.revalidatedSession(using: deviceFlow)
+            outcome = try await deviceSessionRefresher.revalidatedSession(using: deviceFlow)
         } catch is CancellationError {
             return false
-        } catch {
-            await MainActor.run {
-                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session"))
+        } catch let refreshError as GitHubDeviceSessionRefreshError {
+            return await MainActor.run { () -> Bool in
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
+                // Quarantine: the consumed generation could not be poisoned.
+                // Reauthorization-ONLY — no session, no Check again, no
+                // polling.
+                deviceReauthorizationRequired = true
+                deviceSession = nil
+                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: refreshError, action: "refreshing your GitHub session"))
+                return true
             }
-            return
+        } catch {
+            return await MainActor.run { () -> Bool in
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
+                failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "refreshing your GitHub session"))
+                return true
+            }
         }
         guard case .current(let session, _) = outcome else {
             if case .superseded = outcome {
@@ -2305,22 +2681,27 @@ struct SetupView: View {
             }
         }
         if let session, session.isAccessExpired {
-            await MainActor.run {
-                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return }
+            return await MainActor.run { () -> Bool in
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
                 // Expired and unrefreshable (or a poisoned consumed
                 // generation): reauthorization-ONLY — no session, no Check
                 // again, no polling.
                 deviceReauthorizationRequired = true
                 deviceSession = nil
                 failDeviceRepositoryRefresh(with: "Your GitHub session has expired and cannot be refreshed. Reconnect to GitHub, then check again.")
+                return true
             }
-            return
         }
         if let session {
             // Publish the persisted (possibly rotated) session before the
             // fallible listing: a failed listing must never leave memory
             // holding a consumed pair while the Keychain holds the fresh one.
-            await MainActor.run { deviceSession = session }
+            let sessionPublished = await MainActor.run { () -> Bool in
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
+                deviceSession = session
+                return true
+            }
+            if !sessionPublished { return false }
         }
 
         let token = session?.accessToken ?? accessToken
@@ -2328,12 +2709,13 @@ struct SetupView: View {
         do {
             installations = try await deviceFlow.installations(accessToken: token)
         } catch is CancellationError {
-            return
+            return false
         } catch {
-            await MainActor.run {
+            return await MainActor.run { () -> Bool in
+                guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
                 failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(for: error, action: "listing installations"))
+                return true
             }
-            return
         }
         var accessibleRepositories: [GitHubRepository] = []
         for installation in installations {
@@ -2344,18 +2726,20 @@ struct SetupView: View {
                 )
                 accessibleRepositories.append(contentsOf: repositories)
             } catch is CancellationError {
-                return
+                return false
             } catch {
-                await MainActor.run {
+                return await MainActor.run { () -> Bool in
+                    guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
                     failDeviceRepositoryRefresh(with: Self.deviceRefreshIssueMessage(
                         for: error,
                         action: "listing repositories for installation \(installation.id)"
                     ))
+                    return true
                 }
-                return
             }
         }
-        await MainActor.run {
+        return await MainActor.run { () -> Bool in
+            guard deviceRepositoryRefreshIsCurrent(generation: generation) else { return false }
             deviceRepositoryCount = accessibleRepositories.count
             deviceAccessibleRepositories = accessibleRepositories
             deviceRefreshIssue = nil
@@ -2368,9 +2752,274 @@ struct SetupView: View {
                     refreshIssue: nil
                 )
             }
+            return true
         }
     }
 
+    /// Automatic re-check polling while the GitHub decision is still
+    /// undecided: after the device-flow sign-in, repository selection happens
+    /// on GitHub's App installation page, so the app re-checks every few
+    /// seconds instead of waiting for a manual "Check again" press.
+    private static let deviceRepositoryPollInterval: TimeInterval = 8
+
+    /// Minimum gap between focus-triggered re-checks; the automatic interval
+    /// never goes below this.
+    private static let deviceRepositoryMinRecheckInterval: TimeInterval = 5
+
+    /// Pure decision, unit-tested directly: automatic re-check polling runs
+    /// only while the full GitHub decision gate is still undecided — the
+    /// device-flow sign-in exists, zero accessible repositories, existing
+    /// grant metadata and retained verification results are both empty, the
+    /// GitHub step is the active step, and GitHub has not been skipped.
+    static func deviceRepositoryPollingActive(
+        signedIn: Bool,
+        repositoryCount: Int,
+        stepActive: Bool,
+        skipped: Bool,
+        alreadyDecided: Bool
+    ) -> Bool {
+        signedIn && repositoryCount == 0 && stepActive && !skipped && !alreadyDecided
+    }
+
+    /// Pure identity check, unit-tested directly: a poll task may clear the
+    /// stored handle only while it is still the current poller. A cancelled
+    /// predecessor must never erase the successor that replaced it, or
+    /// teardown would lose the live task's handle (leaking the poll and its
+    /// waiting UI).
+    static func pollingTaskIsCurrent(storedGeneration: Int, taskGeneration: Int) -> Bool {
+        storedGeneration == taskGeneration
+    }
+
+    /// Pure decision, unit-tested directly: a focus-regain may trigger an
+    /// immediate re-check only when the last check is older than the minimum
+    /// interval, so rapid focus churn cannot hammer the API.
+    static func shouldRecheckNow(lastCheckAt: Date?, now: Date, minimumInterval: TimeInterval) -> Bool {
+        guard let lastCheckAt else { return true }
+        return now.timeIntervalSince(lastCheckAt) >= minimumInterval
+    }
+
+    /// Pure derivation, unit-tested directly: when the poller may next run a
+    /// re-check. The deadline is measured from the last COMPLETED re-check of
+    /// any source (manual button included), so a check that finishes during
+    /// the poller's wait satisfies it and the next check follows a full
+    /// interval later instead of firing immediately. The deadline is capped
+    /// at `now + interval`: a stamp in the future (corrupted clock) yields
+    /// the normal cadence from now instead of an unbounded wait.
+    static func nextRepositoryCheckDate(lastCheckAt: Date?, now: Date, interval: TimeInterval) -> Date {
+        guard let lastCheckAt else { return .distantPast }
+        return min(lastCheckAt.addingTimeInterval(interval), now.addingTimeInterval(interval))
+    }
+
+    /// Pure decision, unit-tested directly: whether a re-check is due at
+    /// `now`, given the last completed re-check of any source. The poller
+    /// re-evaluates this after every wake, so a check that completed during
+    /// the wait (manual button or startup restore) extends the wait instead
+    /// of the poller refreshing early. A clock rollback — `now` regressed
+    /// below the stamp — is treated as due so the poller re-checks and
+    /// re-stamps instead of parking indefinitely.
+    static func repositoryCheckIsDue(lastCheckAt: Date?, now: Date, interval: TimeInterval) -> Bool {
+        guard let lastCheckAt else { return true }
+        if now < lastCheckAt { return true }
+        return now >= nextRepositoryCheckDate(lastCheckAt: lastCheckAt, now: now, interval: interval)
+    }
+
+    /// Pure decision, unit-tested directly: a `false` re-check outcome
+    /// (cancelled, superseded, no completed publication) is a terminal no-op
+    /// for the surrounding flow — teardown owns the state and must not be
+    /// revived by a status publication or a polling restart. `true` allows
+    /// the flow to stamp the schedule and continue.
+    static func shouldContinueSetupAfterRecheck(completed: Bool) -> Bool {
+        completed
+    }
+
+    /// Terminal decision for one poller cycle, shared with the ordering test:
+    /// a `false` re-check outcome — `.superseded`, a transport-reported
+    /// CancellationError that never set the poll task's cancel bit, or a
+    /// teardown — ends THIS poller with no schedule stamp and no retry on the
+    /// next wake. `true` stamps the schedule and lets the loop re-evaluate
+    /// its other exit gates. Returns whether the poller may continue.
+    @discardableResult
+    func continueDeviceRepositoryPolling(completed: Bool) -> Bool {
+        guard Self.shouldContinueSetupAfterRecheck(completed: completed) else { return false }
+        lastDeviceRepositoryCheckAt = Date()
+        return true
+    }
+
+    /// Whether the GitHub step is already decided by state outside the
+    /// device-flow sign-in itself (existing grant metadata or retained
+    /// verification results). Those disjuncts of `githubDecisionMade` do not
+    /// come from re-checks, so polling must not start or continue under them.
+    private var deviceRepositoryDecisionAlreadyMade: Bool {
+        !existingMetadata.isEmpty || !verificationResults.isEmpty
+    }
+
+    /// Starts the automatic re-check poll, cancelling any previous task so
+    /// there is exactly one at a time: an immediate re-check, then one every
+    /// 8 seconds while the GitHub decision is still undecided. The loop stops
+    /// itself as soon as the decision gate closes (repositories detected,
+    /// GitHub skipped, existing access present, step left, or the device
+    /// session is gone). When `checkImmediately` is set (focus regain), the
+    /// first re-check bypasses the poller's due gate — the focus handler has
+    /// already applied the 5 s throttle, so a coherent policy is one check
+    /// now, then the normal cadence.
+    private func startDeviceRepositoryPollingIfNeeded(checkImmediately: Bool = false) {
+        guard Self.deviceRepositoryPollingActive(
+            signedIn: deviceAccount != nil,
+            repositoryCount: deviceRepositoryCount,
+            stepActive: activeStep == .github,
+            skipped: githubSkipped,
+            alreadyDecided: deviceRepositoryDecisionAlreadyMade
+        ), deviceSession != nil else {
+            return
+        }
+        deviceRepositoryPollGeneration &+= 1
+        let generation = deviceRepositoryPollGeneration
+        deviceRepositoryPollTask?.cancel()
+        deviceRepositoryPollTask = Task {
+            defer {
+                // Only the task that is still the stored poller clears the
+                // handle; a cancelled predecessor must never erase a
+                // successor that replaced it, or teardown would lose the
+                // live task (identity guard, unit-tested).
+                if Self.pollingTaskIsCurrent(
+                    storedGeneration: deviceRepositoryPollGeneration,
+                    taskGeneration: generation
+                ) {
+                    deviceRepositoryPollTask = nil
+                }
+            }
+            var skipFirstWait = checkImmediately
+            while !Task.isCancelled {
+                if skipFirstWait {
+                    // Focus-triggered restart: re-check right away (the
+                    // focus handler already satisfied the 5 s throttle).
+                    skipFirstWait = false
+                } else {
+                    // The poll interval is measured from the last COMPLETED
+                    // re-check of any source (this poller, the manual button,
+                    // or the startup restore). The deadline is RE-EVALUATED
+                    // after every wake — capped at now + interval, with a
+                    // clock rollback treated as due — so a check that
+                    // completes during the sleep moves the deadline and the
+                    // poller keeps waiting instead of refreshing early.
+                    while !Task.isCancelled, !Self.repositoryCheckIsDue(
+                        lastCheckAt: lastDeviceRepositoryCheckAt,
+                        now: Date(),
+                        interval: Self.deviceRepositoryPollInterval
+                    ) {
+                        // Sleep only the remaining wait, capped at 2 s slices,
+                        // so the deadline is re-evaluated promptly and hit
+                        // exactly (never a full 2 s past it).
+                        let remaining = Self.nextRepositoryCheckDate(
+                            lastCheckAt: lastDeviceRepositoryCheckAt,
+                            now: Date(),
+                            interval: Self.deviceRepositoryPollInterval
+                        ).timeIntervalSince(Date())
+                        try? await Task.sleep(for: .seconds(min(max(remaining, 0), 2)))
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                guard Self.deviceRepositoryPollingActive(
+                    signedIn: deviceAccount != nil,
+                    repositoryCount: deviceRepositoryCount,
+                    stepActive: activeStep == .github,
+                    skipped: githubSkipped,
+                    alreadyDecided: deviceRepositoryDecisionAlreadyMade
+                ), let accessToken = deviceSession?.accessToken else {
+                    return
+                }
+                // Poller-level in-flight arbiter: never start a re-check
+                // while one is still running (a focus-triggered restart's
+                // predecessor may still be unwinding; the guarded refresh
+                // entry also coalesces with the manual button).
+                if deviceRepositoryCheckInFlight {
+                    try? await Task.sleep(for: .seconds(2))
+                    continue
+                }
+                // The token is re-read from the live session on every pass so
+                // a rotation performed by refreshDeviceRepositoryCount is
+                // picked up. The timestamp advances only when the re-check
+                // completed and published (a cancelled attempt must not
+                // throttle later real checks).
+                deviceRepositoryCheckInFlight = true
+                let completed = await refreshDeviceRepositoryCount(accessToken: accessToken)
+                deviceRepositoryCheckInFlight = false
+                // A false outcome is terminal for THIS poller: the re-check
+                // was cancelled or superseded (a `.superseded` epoch, a
+                // transport-reported CancellationError that never set the
+                // task-cancel bit, or a teardown) with the poll task itself
+                // still live. Continuing the loop would re-check on the next
+                // due wake and restart the very refresh cadence the terminal
+                // outcome was meant to end — no stamp, no retry. The manual
+                // and restore flows keep their own terminal handling.
+                guard continueDeviceRepositoryPolling(completed: completed) else { return }
+                guard !Task.isCancelled else { return }
+                if githubDecisionMade { return }
+            }
+        }
+    }
+
+    private func stopDeviceRepositoryPolling() {
+        deviceRepositoryPollTask?.cancel()
+        deviceRepositoryPollTask = nil
+    }
+
+    /// The common case for a focus regain is the user returning from the
+    /// browser after choosing repositories on GitHub: re-check immediately,
+    /// subject to a 5 second minimum gap so rapid focus churn cannot hammer
+    /// the API. The focus throttle is the one coherent gate: once it passes,
+    /// the restarted poller's first re-check bypasses its separate 8 s due
+    /// gate (`checkImmediately`), so the documented immediate re-check
+    /// actually happens. Restarting cancels the previous task, keeping
+    /// exactly one polling task alive.
+    private func handleDeviceWindowBecameKey(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.identifier == NSUserInterfaceItemIdentifier("setup.window") else {
+            return
+        }
+        guard Self.deviceRepositoryPollingActive(
+            signedIn: deviceAccount != nil,
+            repositoryCount: deviceRepositoryCount,
+            stepActive: activeStep == .github,
+            skipped: githubSkipped,
+            alreadyDecided: deviceRepositoryDecisionAlreadyMade
+        ), Self.shouldRecheckNow(
+            lastCheckAt: lastDeviceRepositoryCheckAt,
+            now: Date(),
+            minimumInterval: Self.deviceRepositoryMinRecheckInterval
+        ) else {
+            return
+        }
+        startDeviceRepositoryPollingIfNeeded(checkImmediately: true)
+    }
+
+    /// Ends the polling scope when the setup window closes (the view may not
+    /// disappear when the window is merely hidden). The skip task is cancelled
+    /// here as well so a grant-disable that is still awaiting the network is
+    /// not left running past the window's lifetime; the disable itself runs on
+    /// the coordinator actor and completes (revocation is idempotent), while
+    /// any post-await navigation is discarded with the window. The lifecycle
+    /// bump is the authoritative barrier: a restore/verification continuation
+    /// that captured the generation before its first await can no longer
+    /// create a refresh, publish, stamp, or restart polling — even when its
+    /// child task is not (or no longer) cancellable. The device-code poll and
+    /// verification tasks are cancelled so a late token or verification stops
+    /// immediately.
+    private func handleDeviceWindowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.identifier == NSUserInterfaceItemIdentifier("setup.window") else {
+            return
+        }
+        setupLifecycle.invalidate()
+        stopDeviceRepositoryPolling()
+        deviceRefreshTask?.cancel()
+        deviceRefreshTask = nil
+        devicePollTask?.cancel()
+        devicePollTask = nil
+        deviceVerificationTask?.cancel()
+        deviceVerificationTask = nil
+        githubSkipTask?.cancel()
+    }
 
     /// Loads the persisted per-workspace allowlist and prunes repositories
     /// that are no longer accessible to the App installation.
@@ -2406,7 +3055,20 @@ struct SetupView: View {
     private func cancelDeviceFlow() {
         devicePollTask?.cancel()
         devicePollTask = nil
-
+        deviceRefreshTask?.cancel()
+        deviceRefreshTask = nil
+        deviceVerificationTask?.cancel()
+        deviceVerificationTask = nil
+        // Invalidate any in-flight verification so its completion blocks
+        // publish nothing (they check the generation identity guard).
+        deviceVerificationGeneration &+= 1
+        // Explicit device-flow cancellation/reset also bumps the authoritative
+        // setup lifecycle: a restore/verification continuation that captured
+        // it before its first await can no longer create a refresh, publish
+        // state, stamp the schedule, or restart polling. The generation is the
+        // barrier, not merely cancelling the existing child tasks.
+        setupLifecycle.invalidate()
+        stopDeviceRepositoryPolling()
         isConnectingDevice = false
         deviceAuthorization = nil
         deviceStatus = ""

@@ -594,7 +594,7 @@ Use a regular macOS application (`LSUIElement=false`) so macOS presents a standa
 - Never pass user input through `/bin/sh -c`, zsh, AppleScript, or shell quoting.
 - Drain stdout and stderr concurrently to avoid deadlocks.
 - Keep process groups uniquely owned; send SIGTERM once, wait for confirmed exit, and escalate only after a bounded grace period.
-- Closing a window does not cancel lifecycle, credential, backup, restore, or setup operations.
+- Closing a window does not cancel durable lifecycle, credential, backup, or restore operations, but it invalidates the setup window's UI-scoped device-flow work: the device-code poll, token verification, and repository re-check refresh tasks are cancelled and the setup-lifecycle generation is bumped, so a late token or refresh can never republish status, stamp the schedule, or restart polling after teardown. Credential-actor work (Keychain rotation/save on the shared refresher) may still complete; its result is simply never re-published to the closed UI.
 - Use a PTY only when handing an interactive shell to Ghostty.
 - Use `NSWorkspace.OpenConfiguration` to open Ghostty/Zed/URLs. Do not use Apple Events for arbitrary app automation.
 
