@@ -90,6 +90,7 @@ private struct SetupResumeState: Codable {
     var identitySkipped: Bool
     var verificationResults: [GitHubWorkspaceVerificationResult]
     var verifiedIdentityByWorkspace: [String: SetupVerifiedIdentity]?
+    var disabledGitHubWorkspaces: [String]?
 }
 
 struct SetupVerifiedIdentity: Codable, Equatable {
@@ -281,6 +282,12 @@ struct SetupView: View {
     @State private var verificationResults: [GitHubWorkspaceVerificationResult] = []
     @State private var githubSkipped = false
     @State private var githubReconnectRequired = false
+    @State private var isSkippingGitHub = false
+    @State private var githubSkipTask: Task<Void, Never>?
+    @State private var githubSkipGeneration = 0
+    @State private var githubSkipIssue: String?
+    @State private var githubSkipIssueWorkspace: String?
+    @State private var disabledGitHubWorkspaces: [String] = []
     @State private var identityName = ""
     @State private var identityEmail = ""
     @State private var identityTarget = "all"
@@ -491,6 +498,17 @@ struct SetupView: View {
         signedIn && repositoryCount > 0
     }
 
+    /// Pure decision, unit-tested directly: a workspace-scoped skip failure is
+    /// resolved only when a successful commit actually includes the affected
+    /// workspace; committing unrelated workspaces must not reopen the gates
+    /// while the failed workspace stays unresolved. Dependency-missing failures
+    /// (issueWorkspace nil: no coordinator, no mswClient, or no affected
+    /// workspace reported) are never resolved by any commit — only by a
+    /// successful skip retry.
+    static func skipIssueResolved(issueWorkspace: String?, committedWorkspaces: [String]) -> Bool {
+        guard let issueWorkspace else { return false }
+        return committedWorkspaces.contains(issueWorkspace)
+    }
     /// Maps a repository re-check failure to a user-facing, actionable message
     /// so an auth/transport/decode error is never mistaken for a genuine empty
     /// selection. Pure and static for direct unit testing.
@@ -596,7 +614,12 @@ struct SetupView: View {
 
 
     private var verificationAllowsCompletion: Bool {
-        verificationResults.allSatisfy { $0.verified && $0.lifecycleRestored } &&
+        // A skip that is in flight or that failed (retryable issue) must close
+        // every completion path — githubStepComplete, canCompleteReview, the
+        // stepper's Identity/Review selectors, and the review status — not just
+        // the footer Continue button.
+        !isSkippingGitHub && githubSkipIssue == nil &&
+            verificationResults.allSatisfy { $0.verified && $0.lifecycleRestored } &&
             existingMetadata.allSatisfy { $0.recoveryState == .ready && !$0.quarantined }
     }
 
@@ -763,8 +786,104 @@ struct SetupView: View {
         }
     }
     private func advanceFromGitHub() {
-        guard githubStepComplete else { return }
+        guard githubStepComplete, !isSkippingGitHub, githubSkipIssue == nil else { return }
         activeStep = .identity
+    }
+
+    /// "Continue without GitHub": resolve reconnect-required grants before
+    /// navigating so a later bootstrap can reach `.complete` without GitHub,
+    /// then clear the verification blockers attributable to the disabled grant
+    /// and move to Identity. Genuinely remaining requirements (for example
+    /// another workspace's unhealthy grant) keep gating Review/Done as before.
+    ///
+    /// Fail-closed: when a reconnect-required grant cannot be proven disabled
+    /// (no affected workspace reported, no coordinator, or the host unbind or
+    /// revocation failed), the user stays on the GitHub step with a retryable
+    /// `githubSkipIssue` and the stale metadata snapshot is refreshed so any
+    /// quarantine dominates the completion gates.
+    private func skipGitHub() {
+        guard !githubSkipped, !isAuthorizing, !isSkippingGitHub else { return }
+        let affectedWorkspace = githubReconnectRequired ? githubAttentionWorkspace : nil
+        guard affectedWorkspace != nil || !githubReconnectRequired else {
+            githubSkipIssue = "GitHub reconnection is required, but no affected workspace was reported. Reconnect GitHub instead."
+            githubSkipIssueWorkspace = nil
+            return
+        }
+        githubSkipGeneration &+= 1
+        let generation = githubSkipGeneration
+        isSkippingGitHub = true
+        githubSkipIssue = nil
+        githubSkipIssueWorkspace = nil
+        let coordinator = authorizationCoordinator
+        githubSkipTask = Task {
+            if let affectedWorkspace {
+                guard let coordinator else {
+                    await MainActor.run {
+                        isSkippingGitHub = false
+                        githubSkipTask = nil
+                        githubSkipIssue = "GitHub access for \(affectedWorkspace) cannot be disabled because the credential service is unavailable in this build. Reconnect GitHub instead."
+                        githubSkipIssueWorkspace = nil
+                    }
+                    return
+                }
+                do {
+                    try await coordinator.disableWorkspaceGitHubAccess(affectedWorkspace)
+                } catch {
+                    // Refresh the snapshot so any quarantine applied by the
+                    // failed disable dominates the gates (fail-closed).
+                    let refreshedMetadata = await coordinator.metadata()
+                    await MainActor.run {
+                        isSkippingGitHub = false
+                        githubSkipTask = nil
+                        existingMetadata = refreshedMetadata
+                        githubSkipIssue = "GitHub access for \(affectedWorkspace) could not be disabled safely: \(error.localizedDescription) Retry when MSW Connect is available, or reconnect GitHub instead."
+                        githubSkipIssueWorkspace = affectedWorkspace
+                    }
+                    return
+                }
+            }
+            var resolvedReconnect = false
+            await MainActor.run {
+                // The user may have pressed Back (or the window closed) while
+                // the disable ran: never force navigation or claim the skip
+                // from a stale or cancelled attempt.
+                guard !Task.isCancelled,
+                      githubSkipGeneration == generation,
+                      activeStep == .github,
+                      !isReviewing else {
+                    isSkippingGitHub = false
+                    githubSkipTask = nil
+                    return
+                }
+                resolvedReconnect = affectedWorkspace != nil
+                isSkippingGitHub = false
+                githubSkipTask = nil
+                githubSkipped = true
+                authorizationIssue = nil
+                githubAttentionWorkspace = nil
+                githubReconnectRequired = false
+                githubSkipIssue = nil
+                githubSkipIssueWorkspace = nil
+                if let affectedWorkspace {
+                    if !disabledGitHubWorkspaces.contains(affectedWorkspace) {
+                        disabledGitHubWorkspaces.append(affectedWorkspace)
+                    }
+                    // The grant is gone; drop the verification blockers that
+                    // were attributable to it so the review gate can open.
+                    verificationResults.removeAll { $0.workspace == affectedWorkspace }
+                    existingMetadata.removeAll { $0.workspace == affectedWorkspace }
+                }
+                authorizationStatus = "GitHub skipped by choice. You can connect later from Settings."
+                activeStep = .identity
+            }
+            // The skip resolved a reconnect-required grant; re-run bootstrap so
+            // setup reaches `.complete` (and Done enables) without an extra
+            // manual "Verify workspaces now" step. A further reconnect error
+            // routes back to the GitHub step for the next workspace.
+            if resolvedReconnect, !Task.isCancelled {
+                runSetup()
+            }
+        }
     }
 
     private func advanceFromIdentity() {
@@ -981,18 +1100,31 @@ struct SetupView: View {
                     .disabled(!canConnectGitHub || isAuthorizing)
                     .accessibilityIdentifier("setup.github.connect.button")
             }
-            if canFinishWithoutGitHub {
-                Button("Continue without GitHub") {
-                    githubSkipped = true
-                    authorizationIssue = nil
-                    githubAttentionWorkspace = nil
-                    authorizationStatus = "GitHub skipped by choice. You can connect later from Settings."
-                    activeStep = .identity
-                }
+            // GitHub is optional, so the step must never become a dead end:
+            // the skip path is offered whenever this step is reachable, not
+            // only after bootstrap already completed. skipGitHub() disables
+            // reconnect-required grants so a later bootstrap can reach
+            // .complete without GitHub.
+            Button("Continue without GitHub") { skipGitHub() }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .disabled(githubSkipped)
+                .disabled(githubSkipped || isAuthorizing || isSkippingGitHub || isReviewing)
                 .accessibilityIdentifier("setup.github.skip.button")
+            if isSkippingGitHub {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Disabling GitHub access for the affected workspace…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .contain)
+            }
+            if let githubSkipIssue {
+                Label(githubSkipIssue, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setup.github.skip.issue")
             }
 
             if account != nil {
@@ -1566,6 +1698,7 @@ struct SetupView: View {
             if activeStep != .readiness && !(activeStep == .github && isReviewing) {
                 Button("Back", action: moveBack)
                     .keyboardShortcut(.cancelAction)
+                    .disabled(isSkippingGitHub)
             }
 
             switch activeStep {
@@ -1599,20 +1732,21 @@ struct SetupView: View {
                 if isReviewing {
                     Button("Back") { isReviewing = false }
                         .keyboardShortcut(.cancelAction)
+                        .disabled(isSkippingGitHub)
                     Button(isAuthorizing ? "Applying…" : "Apply assignments", action: commitAssignments)
                         .buttonStyle(.borderedProminent)
-                        .disabled(isAuthorizing || !hasValidAssignments)
+                        .disabled(isAuthorizing || !hasValidAssignments || isSkippingGitHub)
                         .accessibilityIdentifier("setup.github.apply.button")
                 } else {
                     if account != nil {
                         Button("Review workspace access") { isReviewing = true }
                             .buttonStyle(.borderedProminent)
-                            .disabled(!hasValidAssignments || isAuthorizing)
+                            .disabled(!hasValidAssignments || isAuthorizing || isSkippingGitHub)
                             .accessibilityIdentifier("setup.github.review.button")
                     }
                     Button("Continue", action: advanceFromGitHub)
                         .buttonStyle(.borderedProminent)
-                        .disabled(!githubStepComplete || isAuthorizing)
+                        .disabled(!githubStepComplete || isAuthorizing || isSkippingGitHub || githubSkipIssue != nil)
                         .keyboardShortcut(.defaultAction)
                 }
             case .identity:
@@ -1996,6 +2130,28 @@ struct SetupView: View {
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
+                    // A successful commit reconnects the committed workspaces:
+                    // a skip failure clears only when the affected workspace
+                    // itself was committed (never on unrelated commits, and
+                    // dependency-missing failures never clear here), the
+                    // committed workspaces leave the disabled list, and once
+                    // every disabled workspace is reconnected the step stops
+                    // reporting as skipped.
+                    if Self.skipIssueResolved(
+                        issueWorkspace: githubSkipIssueWorkspace,
+                        committedWorkspaces: assignments.map(\.workspace)
+                    ) {
+                        githubSkipIssue = nil
+                        githubSkipIssueWorkspace = nil
+                    }
+                    if !disabledGitHubWorkspaces.isEmpty {
+                        disabledGitHubWorkspaces.removeAll { workspace in
+                            assignments.contains { $0.workspace == workspace }
+                        }
+                        if disabledGitHubWorkspaces.isEmpty {
+                            githubSkipped = false
+                        }
+                    }
                     githubAttentionWorkspace = nil
                     authorizationSessionID = nil
                     isReviewing = false
@@ -2025,6 +2181,28 @@ struct SetupView: View {
                     isAuthorizing = false
                     authorizationMayCancel = false
                     authorizationTask = nil
+                    // A successful commit reconnects the committed workspaces:
+                    // a skip failure clears only when the affected workspace
+                    // itself was committed (never on unrelated commits, and
+                    // dependency-missing failures never clear here), the
+                    // committed workspaces leave the disabled list, and once
+                    // every disabled workspace is reconnected the step stops
+                    // reporting as skipped.
+                    if Self.skipIssueResolved(
+                        issueWorkspace: githubSkipIssueWorkspace,
+                        committedWorkspaces: assignments.map(\.workspace)
+                    ) {
+                        githubSkipIssue = nil
+                        githubSkipIssueWorkspace = nil
+                    }
+                    if !disabledGitHubWorkspaces.isEmpty {
+                        disabledGitHubWorkspaces.removeAll { workspace in
+                            assignments.contains { $0.workspace == workspace }
+                        }
+                        if disabledGitHubWorkspaces.isEmpty {
+                            githubSkipped = false
+                        }
+                    }
                     githubAttentionWorkspace = nil
                     authorizationSessionID = nil
                     isReviewing = false
@@ -3139,6 +3317,11 @@ struct SetupView: View {
                         // GitHub step, where the attention state lives.
                         githubReconnectRequired = true
                         githubAttentionWorkspace = protocolError.workspace
+                        // Each reconnect visit is a fresh decision cycle: a
+                        // bootstrap that still fails for another workspace must
+                        // re-offer the skip control instead of being blocked by
+                        // a previously completed skip.
+                        githubSkipped = false
                         activeStep = .github
                     } else {
                         self.error = error.localizedDescription
@@ -3201,7 +3384,12 @@ struct SetupView: View {
     }
 
     private var githubReviewSummary: String {
-        if githubSkipped { return "Not connected — you can connect later in Settings." }
+        if githubSkipped {
+            if !disabledGitHubWorkspaces.isEmpty {
+                return "Skipped — GitHub access disabled for \(disabledGitHubWorkspaces.sorted().joined(separator: ", ")). You can reconnect later in Settings."
+            }
+            return "Not connected — you can connect later in Settings."
+        }
         if let deviceAccount { return "Connected as @\(deviceAccount.login). Repositories are chosen on GitHub." }
         if !verificationResults.isEmpty {
             return verificationResults.map {
@@ -3339,7 +3527,8 @@ struct SetupView: View {
             identityConfiguredWorkspaces: identityConfiguredWorkspaces,
             identitySkipped: identitySkipped,
             verificationResults: verificationResults,
-            verifiedIdentityByWorkspace: verifiedIdentityByWorkspace
+            verifiedIdentityByWorkspace: verifiedIdentityByWorkspace,
+            disabledGitHubWorkspaces: disabledGitHubWorkspaces
         )
         guard let data = try? JSONEncoder().encode(resume) else { return }
         UserDefaults.standard.set(data, forKey: Self.resumeStateKey)
@@ -3357,6 +3546,7 @@ struct SetupView: View {
         verifiedIdentityByWorkspace = resume.verifiedIdentityByWorkspace ?? [:]
         identitySkipped = resume.identitySkipped
         verificationResults = resume.verificationResults
+        disabledGitHubWorkspaces = resume.disabledGitHubWorkspaces ?? []
         notice = "Resumed saved setup choices. Review them before continuing."
     }
     private func loadUITestState() {

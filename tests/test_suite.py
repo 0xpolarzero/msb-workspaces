@@ -574,6 +574,66 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertIn("quarantined", envelope["error"]["recovery"])
         quarantine.unlink()
 
+    def test_app_github_unbind_clears_legacy_metadata_so_bootstrap_completes(self) -> None:
+        meta = self.env.home / ".config/msw/github/dev.conf"
+        meta.parent.mkdir(parents=True, exist_ok=True)
+        meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
+        read_record = self.env.key_file("msw.github.read", "dev")
+        write_record = self.env.key_file("msw.github.write", "dev")
+        read_record.write_text("legacy-read-token")
+        write_record.write_text("legacy-write-token")
+        # The reconnect scenario is a configured workspace whose read
+        # credential is unavailable (the orphan host-write record remains).
+        read_record.unlink()
+        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", check=False, timeout=90)
+        self.assertNotEqual(proc.returncode, 0)
+        envelope = json.loads(proc.stdout)
+        self.assertEqual(envelope["error"]["code"], "MSW_GITHUB_RECONNECT_REQUIRED")
+        self.assertEqual(envelope["error"]["workspace"], "dev")
+
+        # A failing security backend proves the cleanup is fail-closed: the
+        # unbind quarantines and reports a typed error instead of claiming
+        # success while legacy records are still present.
+        state_path = self.env.root / "fake-security-unbind-state.json"
+        failed_env = {
+            "MSW_TEST_KEYCHAIN_DIR": "",
+            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+            "MSW_FAKE_SECURITY_STATE": str(state_path),
+            "MSW_FAKE_SECURITY_MODE": "delete-failure",
+        }
+        failed = json.loads(self.env.msw(
+            "app", "github-unbind", "--workspace", "dev", "--format", "json",
+            check=False, extra_env=failed_env,
+        ).stdout)
+        self.assertFalse(failed["ok"], failed)
+        self.assertEqual(failed["error"]["code"], "MSW_GITHUB_LEGACY_CLEANUP_FAILED")
+        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        self.assertTrue(quarantine.exists(), "a failed unbind must quarantine the workspace")
+        self.assertTrue(
+            write_record.exists(),
+            "an unproven deletion must not be reported as success",
+        )
+
+        # A successful retry removes the legacy capability file and BOTH legacy
+        # Keychain records, clears the quarantine marker (so bootstrap deep
+        # verification no longer dies at assert_not_quarantined), and lets the
+        # next bootstrap reach .complete — the app's "Continue without GitHub"
+        # can then unblock Done.
+        unbind = json.loads(self.env.msw(
+            "app", "github-unbind", "--workspace", "dev", "--format", "json"
+        ).stdout)
+        self.assertTrue(unbind["ok"], unbind)
+        self.assertTrue(unbind["result"]["unbound"])
+        self.assertFalse(meta.exists() or meta.is_symlink())
+        self.assertFalse(read_record.exists(), "the legacy read record must be removed")
+        self.assertFalse(write_record.exists(), "the legacy host-write record must be removed")
+        self.assertFalse(quarantine.exists(), "a successful unbind must clear the quarantine")
+        self.env.msw("start", "dev")
+        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", timeout=90)
+        envelope = json.loads(proc.stdout)
+        self.assertTrue(envelope["ok"], envelope.get("error"))
+        self.assertEqual(envelope["result"]["phase"], "complete")
+
     def test_lifecycle_resize_restart_token_guard_and_proxy(self) -> None:
         self.env.msw("start", "dev")
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
@@ -1007,6 +1067,29 @@ class GitHubAndPushTests(MSWTestCase):
                     self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertEqual(self.env.state()["sandboxes"]["dev"]["running"], should_still_run)
                 self.assertTrue(quarantine.exists())
+
+    def test_clear_quarantine_fails_on_undeletable_dangling_symlink(self) -> None:
+        command = 'source "$1"; clear_quarantine "dev"'
+        quarantine_dir = self.env.home / ".config/msw/github"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        quarantine = quarantine_dir / "dev.quarantine"
+        quarantine.symlink_to(quarantine_dir / "missing-target")
+        os.chmod(quarantine_dir, 0o500)
+        try:
+            proc = self.env.run(
+                "bash", "-c", command, "msw-clear-quarantine-test",
+                str(PACKAGE / "bin/msw"), check=False,
+                extra_env={"MSW_SOURCE_ONLY": "1"},
+            )
+        finally:
+            os.chmod(quarantine_dir, 0o700)
+        self.assertNotEqual(
+            proc.returncode, 0,
+            "a quarantine marker that survives rm (dangling symlink in a "
+            "read-only directory) must count as not cleared: enforcement "
+            "treats -e OR -L as quarantined",
+        )
+        self.assertTrue(quarantine.is_symlink())
 
     def test_interrupted_verification_failed_repair_keeps_quarantine(self) -> None:
         self.env.init_remote()

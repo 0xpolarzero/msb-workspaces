@@ -519,7 +519,13 @@ clear_quarantine() {
   local file
   file="$(quarantine_file "$1")"
   rm -f "$file"
-  [[ ! -e "$file" ]]
+  # Enforcement (assert_not_quarantined) treats -e OR -L as quarantined, so a
+  # dangling symlink that rm could not remove must still count as a failure;
+  # checking only ! -e would report success while the symlink keeps blocking.
+  if [[ -e "$file" || -L "$file" ]]; then
+    printf 'msw: could not clear quarantine for %s\n' "$1" >&2
+    return 1
+  fi
 }
 setup_transaction_arm() {
   SETUP_TRANSACTION_BOX="$1"
@@ -3064,7 +3070,7 @@ app_cmd_github_quarantine() {
   app_emit_success github-quarantine "{\"workspace\":$(app_json_string "$box"),\"quarantined\":true,\"lifecycle\":\"Stopped\"}"
 }
 app_cmd_github_unbind() {
-  local box=""
+  local box="" legacy_file="" cleanup_failed=0
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error github-unbind "missing value for --workspace"; box="$2"; shift 2 ;;
@@ -3082,6 +3088,30 @@ app_cmd_github_unbind() {
     quarantine_workspace "$box" "GitHub App credential unbinding failed" >/dev/null 2>&1 || true
     github_lock_release
     app_emit_error github-unbind "MSW_GITHUB_UNBIND_FAILED" "The VM GitHub secret could not be removed and the workspace remains quarantined." "Repair the workspace, then retry removing GitHub access." "$box" true 77
+  fi
+  # A workspace still looks GitHub-configured to bootstrap's reconnect check
+  # while its legacy capability file or legacy Keychain records survive, so
+  # disabling GitHub access removes all of them. Every step is fail-closed: an
+  # unproven deletion quarantines the workspace and reports a typed error so a
+  # retry can prove cleanup. Symlinks are rejected exactly like github-bind.
+  legacy_file="$(metadata_file "$box")"
+  if [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
+    if [[ -L "$legacy_file" ]] || ! rm -f "$legacy_file" || [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
+      cleanup_failed=1
+    fi
+  fi
+  if ! keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
+  if ! keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
+  if (( cleanup_failed )); then
+    quarantine_workspace "$box" "Legacy GitHub configuration cleanup failed" >/dev/null 2>&1 || true
+    github_lock_release
+    app_emit_error github-unbind "MSW_GITHUB_LEGACY_CLEANUP_FAILED" "GitHub access was unbound but legacy capability metadata or Keychain credentials could not be removed." "Repair the legacy GitHub configuration, then retry removing GitHub access." "$box" true 77
+  fi
+  # A prior failed unbind quarantined the workspace; a successful retry must
+  # clear that marker or bootstrap deep verification still fails.
+  if ! clear_quarantine "$box"; then
+    github_lock_release
+    app_emit_error github-unbind "MSW_GITHUB_QUARANTINE_FAILED" "GitHub access was removed but the workspace quarantine could not be cleared." "Repair the quarantined workspace, then retry removing GitHub access." "$box" true 77
   fi
   github_lock_release
   app_emit_success github-unbind "{\"workspace\":$(app_json_string "$box"),\"unbound\":true}"

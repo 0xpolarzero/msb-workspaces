@@ -1035,7 +1035,9 @@ actor MSWConnectClient {
                 throw MSWConnectError.malformedResponse
             }
             return receipt
-        } catch MSWConnectError.grantNotFound, MSWConnectError.httpStatus(404) {
+        } catch MSWConnectError.grantNotFound, MSWConnectError.grantRevoked, MSWConnectError.httpStatus(404) {
+            // DELETE is intentionally idempotent for transaction recovery: a
+            // grant that is already gone or already revoked counts as revoked.
             return MSWConnectRevocationReceipt(
                 grantID: grantID,
                 revoked: true,

@@ -687,6 +687,76 @@ actor GitHubAuthorizationCoordinator {
         }
     }
 
+    /// Disables GitHub access for one workspace so a later bootstrap can
+    /// complete without it: unbinds the host-side credential binding even when
+    /// no local metadata remains (the host may still expect a credential, as
+    /// with `MSW_GITHUB_RECONNECT_REQUIRED`), revokes every remaining remote
+    /// grant, then removes local credential metadata. Any step that cannot be
+    /// proven leaves the affected roles quarantined and throws
+    /// `revocationFailed`, so setup keeps its review gate closed rather than
+    /// bypassing cleanup.
+    func disableWorkspaceGitHubAccess(_ workspace: String) async throws {
+        // Fail-closed: without the runtime client the host-side binding cannot
+        // be removed, so bootstrap would keep re-reporting the reconnect error
+        // while this call claimed success. The caller must surface this as a
+        // retryable failure instead of navigating past an unresolved grant.
+        guard mswClient != nil else {
+            throw GitHubAuthorizationError.serviceUnavailable
+        }
+        // Reconcile any durable authorization journal first: prepared or
+        // rolling-back transactions can hold remote grants that exist outside
+        // broker metadata (journal newGrantIDs, outage-recovery placeholders),
+        // so disabling must prove those grants revoked too before reporting
+        // success. Recovery failure leaves the journal and its roles
+        // quarantined and propagates (fail-closed).
+        try await recoverPendingAuthorization()
+        let entries = await broker.allMetadata().filter { $0.workspace == workspace }
+        do {
+            // Remove the VM-held secret first, mirroring removeWorkspace.
+            // Unlike removeWorkspace this unbinds unconditionally: the local
+            // metadata can already be gone while the host binding remains.
+            if let mswClient {
+                let response = try await mswClient.unbindGitHubCredentials(workspace: workspace)
+                guard let result = response.result,
+                      result.workspace == workspace,
+                      result.unbound else {
+                    throw GitHubAuthorizationError.revocationFailed
+                }
+            }
+            for entry in entries {
+                if let grantID = entry.grantID {
+                    _ = try await connect.revokeGrant(grantID: grantID)
+                }
+            }
+            try await broker.removeAllRoles(workspace: workspace)
+        } catch {
+            let state: CredentialRecoveryState
+            if let connectError = error as? MSWConnectError {
+                switch connectError {
+                case .grantNotFound, .grantRevoked:
+                    state = .revoked
+                case .sessionExpired, .transportUnavailable, .httpStatus, .rateLimited:
+                    state = .serviceUnavailable
+                case .installationUnavailable, .installationRemoved:
+                    state = .installationRemoved
+                default:
+                    state = .quarantined
+                }
+            } else {
+                state = .quarantined
+            }
+            for entry in entries {
+                try? await broker.updateRecoveryState(
+                    workspace: workspace,
+                    role: entry.role,
+                    state: state,
+                    quarantined: true
+                )
+            }
+            throw GitHubAuthorizationError.revocationFailed
+        }
+    }
+
     func disconnectAccount() async throws {
         let entries = await broker.allMetadata()
         do {
@@ -991,8 +1061,9 @@ actor GitHubAuthorizationCoordinator {
     private func revokeGrant(_ grantID: UUID) async throws {
         do {
             _ = try await connect.revokeGrant(grantID: grantID)
-        } catch MSWConnectError.grantNotFound, MSWConnectError.httpStatus(404) {
-            // DELETE is intentionally idempotent for transaction recovery.
+        } catch MSWConnectError.grantNotFound, MSWConnectError.grantRevoked, MSWConnectError.httpStatus(404) {
+            // DELETE is intentionally idempotent for transaction recovery: a
+            // grant that is already gone or already revoked counts as revoked.
         }
     }
 

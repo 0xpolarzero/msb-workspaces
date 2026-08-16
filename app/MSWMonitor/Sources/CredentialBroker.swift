@@ -699,10 +699,12 @@ actor CredentialBroker {
     }
 
     func removeAllRoles(workspace: String) throws {
+        // Remove both roles unconditionally: `remove` also deletes the legacy
+        // Keychain records (msw.github.read/.write) for the workspace, so a
+        // workspace that only ever had legacy credentials must not short-circuit
+        // on missing schema-3 metadata and leave those records behind.
         for role in CredentialRole.allCases {
-            if metadata[metadataKey(workspace, role)] != nil {
-                try remove(workspace: workspace, role: role)
-            }
+            try remove(workspace: workspace, role: role)
         }
     }
 

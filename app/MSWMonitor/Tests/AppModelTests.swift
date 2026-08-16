@@ -1985,6 +1985,23 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(SetupView.deviceAccessDecided(signedIn: false, repositoryCount: 1))
     }
 
+    func testSkipIssueResolvedOnlyByCommittingTheAffectedWorkspace() {
+        // A dependency-missing failure (no issue workspace) is never resolved
+        // by any commit; only a successful skip retry clears it.
+        XCTAssertFalse(SetupView.skipIssueResolved(issueWorkspace: nil, committedWorkspaces: []))
+        XCTAssertFalse(SetupView.skipIssueResolved(issueWorkspace: nil, committedWorkspaces: ["dev"]),
+                       "Dependency-missing failures must not be cleared by a commit.")
+        // A workspace-scoped failure for dev is not resolved by committing
+        // unrelated workspaces: the gates must stay closed while dev's
+        // reconnect-required grant remains unresolved.
+        XCTAssertFalse(SetupView.skipIssueResolved(issueWorkspace: "dev", committedWorkspaces: []))
+        XCTAssertFalse(SetupView.skipIssueResolved(issueWorkspace: "dev", committedWorkspaces: ["playgrounds"]),
+                       "Committing only other workspaces must not clear a failed skip for dev.")
+        // Only a successful commit that includes the affected workspace
+        // reconnects it and resolves the failure.
+        XCTAssertTrue(SetupView.skipIssueResolved(issueWorkspace: "dev", committedWorkspaces: ["dev"]))
+        XCTAssertTrue(SetupView.skipIssueResolved(issueWorkspace: "dev", committedWorkspaces: ["playgrounds", "dev"]))
+    }
     func testDeviceRepositoryPollingActiveOnlyWhileUndecidedAndOnGitHubStep() {
         XCTAssertTrue(SetupView.deviceRepositoryPollingActive(
             signedIn: true, repositoryCount: 0, stepActive: true, skipped: false, alreadyDecided: false
@@ -4749,6 +4766,279 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+
+    func testDisableWorkspaceGitHubAccessUnbindsHostAndRemovesGrant() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-disable-github-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let metadataURL = temporary.appendingPathComponent("credentials.json")
+        let service = "test-disable-github-\(UUID().uuidString)"
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let configuration = testConnectConfiguration()
+        let transport = QueueConnectTransport()
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-disable-github-connect-\(UUID().uuidString)"
+        )
+        let grantID = UUID(uuidString: "00000000-0000-0000-0000-000000000091")!
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: grantID,
+                accessToken: "ghs_disable_github",
+                accessExpiresAt: clock.value.addingTimeInterval(3600),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"],
+            scopeDigest: "test-scope"
+        )
+
+        // Establish a session so the authorized revoke request can be made.
+        let start = try await connect.startAuthorization()
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-disable-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        _ = try await connect.completeAuthorization(
+            callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "disable")
+        )
+        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+            grantID: grantID,
+            revoked: true,
+            terminal: true,
+            revokedAt: clock.value
+        )))
+
+        let invocationURL = temporary.appendingPathComponent("msw-unbind-invocations.log")
+        let unbindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-unbind",
+                ok: true,
+                command: "github-unbind",
+                observedAt: clock.value,
+                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+            )),
+            as: UTF8.self
+        )
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "github-unbind" ]; then
+            printf '%s\\n' "$*" >> "\(invocationURL.path)"
+            printf '%s\\n' '\(unbindResponse)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let mswClient = MSWClient(
+            runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: temporary,
+                configuredExecutable: executable
+            )),
+            credentialBroker: broker
+        )
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            mswClient: mswClient,
+            now: clock.now,
+            journalURL: temporary.appendingPathComponent("authorization-transaction.json")
+        )
+
+        try await coordinator.disableWorkspaceGitHubAccess("dev")
+
+        let remaining = await broker.allMetadata()
+        XCTAssertTrue(
+            remaining.isEmpty,
+            "Disabling GitHub access must remove every local credential record for the workspace."
+        )
+        let unbindLog = try String(contentsOf: invocationURL, encoding: .utf8)
+        XCTAssertTrue(
+            unbindLog.contains("app github-unbind --workspace dev"),
+            "The host binding must be unbound so a later bootstrap can complete without GitHub."
+        )
+        let requests = await transport.requests()
+        let revokedPaths = requests
+            .filter { $0.httpMethod == "DELETE" }
+            .compactMap { $0.url?.path }
+        XCTAssertEqual(revokedPaths, ["/v1/grants/\(grantID.uuidString)"])
+    }
+
+    func testDisableWorkspaceGitHubAccessTreatsAlreadyRevokedGrantAsSuccess() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-disable-github-retry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        let metadataURL = temporary.appendingPathComponent("credentials.json")
+        let service = "test-disable-github-retry-\(UUID().uuidString)"
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
+        let configuration = testConnectConfiguration()
+        let transport = QueueConnectTransport()
+        let connect = MSWConnectClient(
+            configuration: configuration,
+            transport: transport,
+            keychain: keychain,
+            now: clock.now,
+            sessionService: "test-disable-github-retry-connect-\(UUID().uuidString)"
+        )
+        let grantID = UUID(uuidString: "00000000-0000-0000-0000-000000000092")!
+        try await broker.storeScopedCredential(
+            ScopedInstallationCredential(
+                grantID: grantID,
+                accessToken: "ghs_disable_github_retry",
+                accessExpiresAt: clock.value.addingTimeInterval(3600),
+                generation: 1
+            ),
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"],
+            scopeDigest: "test-scope"
+        )
+
+        let start = try await connect.startAuthorization()
+        await transport.enqueue(try testJSON(TestCallbackPayload(
+            sessionID: UUID(),
+            sessionToken: "opaque-disable-retry-session",
+            account: GitHubAccount(login: "octocat", id: 1, name: nil, email: nil),
+            expiresAt: clock.value.addingTimeInterval(3600)
+        )))
+        _ = try await connect.completeAuthorization(
+            callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "disable-retry")
+        )
+        // The service reports the grant as already revoked; a retry of the
+        // disable must treat that as a successful revocation instead of
+        // quarantining forever.
+        await transport.enqueue(
+            Data(#"{"error":{"code":"grant_revoked","message":"grant already revoked"}}"#.utf8),
+            status: 409
+        )
+
+        let invocationURL = temporary.appendingPathComponent("msw-unbind-retry-invocations.log")
+        let unbindResponse = String(
+            decoding: try testJSON(MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "github-unbind",
+                ok: true,
+                command: "github-unbind",
+                observedAt: clock.value,
+                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+            )),
+            as: UTF8.self
+        )
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "github-unbind" ]; then
+            printf '%s\\n' "$*" >> "\(invocationURL.path)"
+            printf '%s\\n' '\(unbindResponse)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let mswClient = MSWClient(
+            runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: temporary,
+                configuredExecutable: executable
+            )),
+            credentialBroker: broker
+        )
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            connect: connect,
+            mswClient: mswClient,
+            now: clock.now,
+            journalURL: temporary.appendingPathComponent("authorization-transaction.json")
+        )
+
+        // A retry after the remote grant was already revoked must succeed and
+        // finish the local cleanup, not quarantine the workspace.
+        try await coordinator.disableWorkspaceGitHubAccess("dev")
+
+        let remaining = await broker.allMetadata()
+        XCTAssertTrue(
+            remaining.isEmpty,
+            "An already-revoked grant must still be removed locally on retry."
+        )
+        let unbindLog = try String(contentsOf: invocationURL, encoding: .utf8)
+        XCTAssertTrue(
+            unbindLog.contains("app github-unbind --workspace dev"),
+            "The host binding must still be unbound on retry."
+        )
+    }
+
+    func testRemoveAllRolesClearsLegacyKeychainRecordsWithoutSchema3Metadata() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-remove-legacy-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let keychain = InMemoryConnectKeychain()
+        try keychain.save(KeychainItem(
+            service: "msw.github.read",
+            account: "dev",
+            secret: Data("legacy-read-token".utf8)
+        ))
+        try keychain.save(KeychainItem(
+            service: "msw.github.write",
+            account: "dev",
+            secret: Data("legacy-write-token".utf8)
+        ))
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-legacy-removal-\(UUID().uuidString)"
+        )
+
+        // No schema-3 metadata exists for the workspace, but the legacy
+        // Keychain records must still be removed so the host no longer treats
+        // the workspace as GitHub-configured.
+        try await broker.removeAllRoles(workspace: "dev")
+
+        XCTAssertThrowsError(try keychain.load(service: "msw.github.read", account: "dev"))
+        XCTAssertThrowsError(try keychain.load(service: "msw.github.write", account: "dev"))
+    }
 
     private func testConnectConfiguration() -> MSWConnectConfiguration {
         MSWConnectConfiguration(
