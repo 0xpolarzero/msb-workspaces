@@ -1,7 +1,15 @@
 # GitHub access in MSW Monitor
 
-GitHub is optional. MSW Monitor uses MSW Connect to apply one scoped
-repository policy to every workspace.
+GitHub can be connected during setup or skipped.
+
+## Current availability
+
+**Connect GitHub** and **Skip GitHub** are the only choices in first-run
+setup. A configured MSW Connect service and trusted token-bound scope
+attestations are required to complete authorization. If connection cannot start,
+setup says so concisely and leaves both choices available; it does not expose
+release configuration, credential, or repository diagnostics. Settings shows the
+connection status when configuration or existing access needs attention.
 
 ## Scoped workspace grants with MSW Connect
 
@@ -38,17 +46,30 @@ explicit host pushes.
 
 Applying policy is journaled and transactional. Replacement grant revocation,
 local credential rollback, quarantine, cancellation, lifecycle restoration,
-session renewal, and reauthorization remain fail-closed.
+session renewal, and reconnect recovery remain fail-closed.
 
 
 ## Recovery and disconnect
 
 Settings summarizes a connected account once and lists the effective scoped
-workspace grants without displaying credentials. **Edit repository access**
-reopens the same setup editor. Reconnect is used for expired, revoked, removed,
-or otherwise unrecoverable authorization. Removing a workspace grant or
-disconnecting a Connect account revokes remote grants before local cleanup;
-uncertain cleanup quarantines the affected roles.
+workspace grants without displaying credentials. Actions have distinct
+meanings:
+
+- **Connect** appears only when the service is ready and there is no access.
+- **Edit** changes an already healthy repository scope.
+- **Retry** handles a temporary service/network or renewal outage and never
+  opens a browser.
+- **Reconnect _workspace_** replaces a proven revoked, missing, removed, or
+  scope-mismatched grant and names the affected workspace and reason.
+- **Remove** explicitly unbinds workspace access, revokes remote grants, and
+  cleans up local records only after those steps are proven.
+
+Short-lived token expiry is normal and renews silently. A successful renewal
+stays Ready; a temporary renewal outage becomes Retry; revoked, missing, or
+mismatched grants become Reconnect. If revocation or cleanup cannot be proven,
+the old record remains visible and quarantined. The app never claims removal,
+and an unconfigured build cannot offer a destructive cleanup action it cannot
+verify.
 
 The MSW Connect endpoint, client, installation URL, and token-bound
 scope-attestation public key are release inputs. No GitHub App private key

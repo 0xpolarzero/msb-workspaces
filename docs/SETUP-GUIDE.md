@@ -60,9 +60,18 @@ msw identity "Your Full Name" work@example.com dev
 
 ## 3. Connect GitHub
 
-GitHub authorization is completed in **MSW Monitor**, not in the CLI. Open **Settings** → **GitHub** → **Connect GitHub** (the first-run setup window exposes the same action). GitHub opens in your default browser with a short code; approve it, pick your repositories on the App installation page, and the credential stays in the Mac Keychain.
+GitHub is optional. The normal build currently has no deployed MSW Connect
+service or trusted scope-attestation key, so Setup and **Settings** → **GitHub**
+show a non-actionable “not available in this build” notice. Continue without
+GitHub; no repository or `dev` access is inferred or created.
 
-If the connected account has not installed the MSW GitHub App yet, the GitHub step offers **Choose repositories on GitHub**, which opens the App installation page (`https://github.com/apps/microsandbox-workspaces/installations/new`). Approve the App for the intended account, then return to MSW Monitor.
+In a future build with those verified release inputs, GitHub authorization is
+completed in **MSW Monitor**, not in the CLI. **Connect GitHub** is shown only
+when the service is ready and there is no existing workspace access.
+
+If a connected account has not installed the configured GitHub App, the GitHub
+step offers the configured installation page. No installation URL is invented
+by an unconfigured build.
 
 The session is host-held only: workspaces never receive the token. Host-mediated workspace operations (`msw push`, clone/fetch/pull executed by the Mac) are being implemented; until they ship, these commands do not consume this session.
 

@@ -101,6 +101,91 @@ struct GitHubAuthorizationCommitResult: Sendable, Equatable {
     let verifications: [GitHubWorkspaceVerificationResult]
 }
 
+enum GitHubFeatureAvailability {
+    static let unavailableNotice = "GitHub connection couldn’t start."
+
+    static func isAvailable(configuration: MSWConnectConfiguration) -> Bool {
+        configuration.isConfigured && configuration.hasTrustedScopeAttestation
+    }
+}
+
+enum GitHubWorkspaceAccessAction: Equatable {
+    case edit
+    case retry
+    case reconnect
+}
+
+struct GitHubWorkspaceAccessPresentation: Equatable {
+    let workspace: String
+    let status: String
+    let reason: String
+    let action: GitHubWorkspaceAccessAction
+
+    static func make(
+        workspace: String,
+        entries: [WorkspaceCredentialMetadata]
+    ) -> GitHubWorkspaceAccessPresentation {
+        let needsReconnect = entries.first { entry in
+            entry.quarantined || ![.ready, .serviceUnavailable, .expired].contains(entry.recoveryState)
+        }
+        if let entry = needsReconnect {
+            return GitHubWorkspaceAccessPresentation(
+                workspace: workspace,
+                status: "Needs reconnecting",
+                reason: reconnectReason(workspace: workspace, entry: entry),
+                action: .reconnect
+            )
+        }
+        if entries.contains(where: { $0.recoveryState == .serviceUnavailable }) {
+            return GitHubWorkspaceAccessPresentation(
+                workspace: workspace,
+                status: "Service unavailable",
+                reason: "MSW Connect could not renew \(workspace)'s verified grant. Existing access remains blocked; retry does not open a browser.",
+                action: .retry
+            )
+        }
+        if entries.contains(where: { $0.recoveryState == .expired }) {
+            return GitHubWorkspaceAccessPresentation(
+                workspace: workspace,
+                status: "Renewing",
+                reason: "The short-lived token for \(workspace) expired normally and will be renewed without reconnecting.",
+                action: .retry
+            )
+        }
+        return GitHubWorkspaceAccessPresentation(
+            workspace: workspace,
+            status: entries.contains(where: \.needsRestart) ? "Ready · restart required" : "Ready",
+            reason: entries.contains(where: \.needsRestart)
+                ? "The verified scope is healthy; restart \(workspace) to finish applying it."
+                : "The verified repository scope for \(workspace) is healthy.",
+            action: .edit
+        )
+    }
+
+    private static func reconnectReason(
+        workspace: String,
+        entry: WorkspaceCredentialMetadata
+    ) -> String {
+        let quarantineSuffix = entry.quarantined ? " It remains quarantined until a new grant is verified." : ""
+        switch entry.recoveryState {
+        case .needsAuthorization:
+            return "The verified GitHub grant for \(workspace) is missing.\(quarantineSuffix)"
+        case .migrationRequired:
+            return "The legacy GitHub grant for \(workspace) cannot be verified as repository-scoped.\(quarantineSuffix)"
+        case .revoked:
+            return "GitHub revoked the verified grant for \(workspace).\(quarantineSuffix)"
+        case .installationRemoved:
+            return "The GitHub App installation for \(workspace) is missing.\(quarantineSuffix)"
+        case .scopeMismatch:
+            return "The renewed GitHub grant for \(workspace) no longer matches its verified repository scope.\(quarantineSuffix)"
+        case .quarantined:
+            return "\(workspace)'s prior grant cannot be used because cleanup or scope verification was not proven; it remains quarantined."
+        case .ready, .expired, .serviceUnavailable:
+            return "The verified GitHub grant for \(workspace) cannot be resolved safely.\(quarantineSuffix)"
+        }
+    }
+}
+
 enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
     case invalidSelection
     case invalidAppConfiguration
@@ -115,6 +200,7 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
     case revocationFailed
     case authorizationCancelled
     case authorizationDenied(String?)
+    case reconnectRequired(workspace: String, reason: String)
     case authorizationFailed
     case verificationUnavailable(String)
     case verificationFailed(String)
@@ -126,9 +212,9 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
         case .invalidSelection:
             return "Your repository choices need review."
         case .invalidAppConfiguration:
-            return "GitHub access is not ready yet. Continue without GitHub, or try again later."
+            return GitHubFeatureAvailability.unavailableNotice
         case .guestAuthorizationRequired: return "Choose Read-only access before enabling Read & write."
-        case .authorizationSessionExpired: return "Your GitHub sign-in expired. Connect GitHub again."
+        case .authorizationSessionExpired: return "The browser authorization expired. Choose Connect or Reconnect again."
         case .ownerNotInstalled: return "The selected repositories are not available yet. Manage repositories on GitHub, then reconnect."
         case .repositoryNotAllowed: return "One or more selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
         case .accountLookupFailed: return "We could not confirm your GitHub account. Try again."
@@ -141,6 +227,8 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
         case .authorizationDenied(let reason):
             return reason.map { "GitHub denied authorization: \($0). No workspace access was changed." }
                 ?? "GitHub denied authorization. No workspace access was changed."
+        case .reconnectRequired(let workspace, let reason):
+            return "Reconnect \(workspace): \(reason)"
         case .authorizationFailed:
             return "GitHub authorization failed unexpectedly. Your existing access and saved setup choices were left unchanged."
         case .verificationUnavailable(let workspace):
@@ -169,12 +257,25 @@ actor GitHubAuthorizationCoordinator {
         case committed
     }
 
+    private enum PreviousPolicyRestoreState: String, Codable, Sendable {
+        case notStarted
+        case uncertain
+        case cleaned
+        case complete
+    }
+
     private struct TransactionJournal: Codable, Sendable {
         let transactionID: UUID
         let sessionID: UUID
         let workspaceKeys: [String]
         var newGrantIDs: [UUID]
         var oldGrantIDs: [UUID]
+        /// Workspaces whose host-side GitHub binding was positively removed.
+        /// Optional so journals written by older builds decode as unproven.
+        var verifiedUnboundWorkspaces: [String]?
+        /// Optional so a legacy rollback journal is treated as an uncertain
+        /// previous-policy restore and cleaned up conservatively.
+        var previousPolicyRestoreState: PreviousPolicyRestoreState?
         var phase: TransactionPhase
         var updatedAt: Date
     }
@@ -186,6 +287,11 @@ actor GitHubAuthorizationCoordinator {
 
     private let broker: CredentialBroker
     private let connect: MSWConnectClient
+    private let tokenRefreshCoordinator: TokenRefreshCoordinator
+    /// Explicit dependency-injection seam for protocol tests whose fake grant
+    /// payloads predate signed attestations. Production call sites keep the
+    /// default false; UI fixtures bypass the coordinator entirely.
+    private let allowsUnattestedTestConfiguration: Bool
     private let mswClient: MSWClient?
     private let now: @Sendable () -> Date
     private let journalURL: URL?
@@ -195,18 +301,29 @@ actor GitHubAuthorizationCoordinator {
     init(
         broker: CredentialBroker,
         connect: MSWConnectClient = MSWConnectClient(),
+        tokenRefreshCoordinator: TokenRefreshCoordinator? = nil,
+        allowsUnattestedTestConfiguration: Bool = false,
         mswClient: MSWClient? = nil,
         now: @escaping @Sendable () -> Date = Date.init,
         journalURL: URL? = nil
     ) {
         self.broker = broker
         self.connect = connect
+        self.tokenRefreshCoordinator = tokenRefreshCoordinator ?? TokenRefreshCoordinator(
+            broker: broker,
+            connect: connect
+        )
+        self.allowsUnattestedTestConfiguration = allowsUnattestedTestConfiguration
         self.mswClient = mswClient
         self.now = now
         self.journalURL = journalURL ?? Self.defaultJournalURL()
     }
     nonisolated var isConfigured: Bool {
         connect.configuration.isConfigured
+    }
+    nonisolated var isAvailable: Bool {
+        GitHubFeatureAvailability.isAvailable(configuration: connect.configuration) ||
+            (allowsUnattestedTestConfiguration && connect.configuration.isConfigured)
     }
 
     /// Starts one browser authorization session. The resulting session may
@@ -215,6 +332,9 @@ actor GitHubAuthorizationCoordinator {
     func beginAuthorization(
         browser: (any MSWConnectBrowserAuthenticating)? = nil
     ) async throws -> GitHubAuthorizationDiscovery {
+        guard isAvailable else {
+            throw GitHubAuthorizationError.invalidAppConfiguration
+        }
         do {
             try await recoverPendingAuthorization()
         } catch GitHubAuthorizationError.serviceUnavailable {
@@ -423,6 +543,8 @@ actor GitHubAuthorizationCoordinator {
             )).sorted(),
             newGrantIDs: [],
             oldGrantIDs: Array(Set(existingEntries.compactMap(\.grantID))).sorted { $0.uuidString < $1.uuidString },
+            verifiedUnboundWorkspaces: [],
+            previousPolicyRestoreState: .notStarted,
             phase: .prepared,
             updatedAt: now()
         )
@@ -580,7 +702,7 @@ actor GitHubAuthorizationCoordinator {
                 createdGrants: createdGrants,
                 committed: committed,
                 previous: previous,
-                workspaceKeys: journal.workspaceKeys
+                journal: &journal
             )
             pending.removeValue(forKey: sessionID)
             if rollbackSucceeded {
@@ -599,7 +721,7 @@ actor GitHubAuthorizationCoordinator {
                 createdGrants: createdGrants,
                 committed: committed,
                 previous: previous,
-                workspaceKeys: journal.workspaceKeys
+                journal: &journal
             )
             pending.removeValue(forKey: sessionID)
             if rollbackSucceeded {
@@ -618,7 +740,7 @@ actor GitHubAuthorizationCoordinator {
                 createdGrants: createdGrants,
                 committed: committed,
                 previous: previous,
-                workspaceKeys: journal.workspaceKeys
+                journal: &journal
             )
             pending.removeValue(forKey: sessionID)
             if rollbackSucceeded {
@@ -649,11 +771,22 @@ actor GitHubAuthorizationCoordinator {
     }
 
     func metadata() async -> [WorkspaceCredentialMetadata] {
+        guard isAvailable else {
+            do {
+                _ = try await quarantineUnresolvableAccess()
+                return await broker.allMetadata()
+            } catch {
+                return (await broker.allMetadata()).filter {
+                    $0.quarantined || $0.recoveryState == .quarantined
+                }
+            }
+        }
         // Settings must never inspect credential metadata while a durable
         // authorization journal is still being reconciled. Recovery errors
         // leave affected roles quarantined and the journal persisted for retry.
         do {
             try await recoverPendingAuthorization()
+            await silentlyRenewExpiredGrants()
             return await broker.allMetadata()
         } catch {
             // A malformed or otherwise unrecoverable journal must not expose
@@ -677,6 +810,7 @@ actor GitHubAuthorizationCoordinator {
     }
 
     func connectedAccount() async -> GitHubAccount? {
+        guard isAvailable else { return nil }
         if let current = await connect.currentSession() {
             return current.account
         }
@@ -688,18 +822,111 @@ actor GitHubAuthorizationCoordinator {
     }
 
     func installationURL() async -> URL? {
-        connect.configuration.installationURL
+        isAvailable ? connect.configuration.installationURL : nil
+    }
+
+    /// Reads only nonsecret local facts. Used by builds that deliberately do
+    /// not ship Connect/attestations and therefore must not attempt recovery.
+    func retainedMetadata() async -> [WorkspaceCredentialMetadata] {
+        await broker.allMetadata()
+    }
+
+    /// A normal release without Connect/attestations cannot prove the state of
+    /// retained remote grants. Keep those records visible but unusable; never
+    /// imply that remote revocation or host cleanup occurred.
+    func quarantineUnresolvableAccess() async throws -> [String] {
+        if let journal = try readJournal(), !(await quarantineJournalRoles(journal)) {
+            throw GitHubAuthorizationError.revocationFailed
+        }
+        let entries = await broker.allMetadata()
+        for entry in entries where !entry.quarantined || entry.recoveryState != .quarantined {
+            try await broker.updateRecoveryState(
+                workspace: entry.workspace,
+                role: entry.role,
+                state: .quarantined,
+                quarantined: true
+            )
+        }
+        return Array(Set(entries.map(\.workspace))).sorted()
+    }
+
+    /// Retries only token renewal for a temporary outage. This deliberately
+    /// never starts browser authorization.
+    func retryUnavailableWorkspace(_ workspace: String) async throws {
+        guard isAvailable else { throw GitHubAuthorizationError.invalidAppConfiguration }
+        let entries = (await broker.allMetadata()).filter {
+            $0.workspace == workspace &&
+                !$0.quarantined &&
+                ($0.recoveryState == .serviceUnavailable || $0.recoveryState == .expired)
+        }
+        guard !entries.isEmpty else { return }
+        for entry in entries {
+            do {
+                _ = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: entry.role)
+            } catch TokenRefreshCoordinatorError.serviceUnavailable {
+                throw GitHubAuthorizationError.serviceUnavailable
+            } catch TokenRefreshCoordinatorError.missingGrant {
+                try? await broker.updateRecoveryState(
+                    workspace: workspace,
+                    role: entry.role,
+                    state: .needsAuthorization,
+                    quarantined: true
+                )
+                let updated = (await broker.allMetadata()).filter { $0.workspace == workspace }
+                let reason = GitHubWorkspaceAccessPresentation.make(
+                    workspace: workspace,
+                    entries: updated
+                ).reason
+                throw GitHubAuthorizationError.reconnectRequired(
+                    workspace: workspace,
+                    reason: reason
+                )
+            } catch TokenRefreshCoordinatorError.reauthorizationRequired {
+                let updated = (await broker.allMetadata()).filter { $0.workspace == workspace }
+                let reason = GitHubWorkspaceAccessPresentation.make(
+                    workspace: workspace,
+                    entries: updated
+                ).reason
+                throw GitHubAuthorizationError.reconnectRequired(
+                    workspace: workspace,
+                    reason: reason
+                )
+            } catch {
+                throw GitHubAuthorizationError.serviceUnavailable
+            }
+        }
+    }
+
+    private func silentlyRenewExpiredGrants() async {
+        let expired = (await broker.allMetadata()).filter { entry in
+            !entry.quarantined &&
+                (entry.recoveryState == .expired ||
+                    (entry.recoveryState == .ready && entry.accessExpiresAt.map { $0 <= now() } == true))
+        }
+        for entry in expired {
+            // The refresh coordinator records the meaningful result: ready,
+            // temporary service outage, or a quarantined reconnect reason.
+            // Metadata reads never open a browser and need not surface normal
+            // token rotation as an authorization error.
+            _ = try? await tokenRefreshCoordinator.refresh(
+                workspace: entry.workspace,
+                role: entry.role
+            )
+        }
     }
 
     func removeWorkspace(_ workspace: String) async throws {
+        try await recoverPendingAuthorization()
         let entries = await broker.allMetadata().filter { $0.workspace == workspace }
+        // With no recorded grant there is no proven binding or credential to
+        // remove. Preserve the existing no-op semantics without touching
+        // legacy broker records that cannot be paired with unbind proof.
+        guard !entries.isEmpty else { return }
         do {
             // Remove the VM-held secret before revoking its service grant. If
             // local removal cannot be proven, keep the grant usable and
             // quarantine instead of creating an unrevocable local secret.
-            if let mswClient, !entries.isEmpty {
-                _ = try await mswClient.unbindGitHubCredentials(workspace: workspace)
-            }
+            try await unbindGitHubCredentialsVerified(workspace: workspace)
             for entry in entries {
                 if let grantID = entry.grantID {
                     _ = try await connect.revokeGrant(grantID: grantID)
@@ -743,13 +970,6 @@ actor GitHubAuthorizationCoordinator {
     /// `revocationFailed`, so setup keeps its review gate closed rather than
     /// bypassing cleanup.
     func disableWorkspaceGitHubAccess(_ workspace: String) async throws {
-        // Fail-closed: without the runtime client the host-side binding cannot
-        // be removed, so bootstrap would keep re-reporting the reconnect error
-        // while this call claimed success. The caller must surface this as a
-        // retryable failure instead of navigating past an unresolved grant.
-        guard mswClient != nil else {
-            throw GitHubAuthorizationError.serviceUnavailable
-        }
         // Reconcile any durable authorization journal first: prepared or
         // rolling-back transactions can hold remote grants that exist outside
         // broker metadata (journal newGrantIDs, outage-recovery placeholders),
@@ -762,14 +982,7 @@ actor GitHubAuthorizationCoordinator {
             // Remove the VM-held secret first, mirroring removeWorkspace.
             // Unlike removeWorkspace this unbinds unconditionally: the local
             // metadata can already be gone while the host binding remains.
-            if let mswClient {
-                let response = try await mswClient.unbindGitHubCredentials(workspace: workspace)
-                guard let result = response.result,
-                      result.workspace == workspace,
-                      result.unbound else {
-                    throw GitHubAuthorizationError.revocationFailed
-                }
-            }
+            try await unbindGitHubCredentialsVerified(workspace: workspace)
             for entry in entries {
                 if let grantID = entry.grantID {
                     _ = try await connect.revokeGrant(grantID: grantID)
@@ -805,13 +1018,15 @@ actor GitHubAuthorizationCoordinator {
     }
 
     func disconnectAccount() async throws {
+        try await recoverPendingAuthorization()
         let entries = await broker.allMetadata()
         do {
             let workspaces = Set(entries.map(\.workspace))
-            if let mswClient {
-                for workspace in workspaces {
-                    _ = try await mswClient.unbindGitHubCredentials(workspace: workspace)
-                }
+            // An account with no credential metadata has no known workspace
+            // binding to remove. Otherwise every affected workspace must
+            // return positive unbind proof before account-wide revocation.
+            for workspace in workspaces {
+                try await unbindGitHubCredentialsVerified(workspace: workspace)
             }
             let grantIDs = entries.compactMap(\.grantID)
             try await connect.revokeAccount(expectedGrantIDs: grantIDs)
@@ -841,6 +1056,21 @@ actor GitHubAuthorizationCoordinator {
                     quarantined: true
                 )
             }
+            throw GitHubAuthorizationError.revocationFailed
+        }
+    }
+
+    /// Proves that MSW removed the host-side workspace binding. Callers must
+    /// complete this step before revoking remote grants or deleting local
+    /// credentials so an unverified host secret can never be orphaned.
+    private func unbindGitHubCredentialsVerified(workspace: String) async throws {
+        guard let mswClient else {
+            throw GitHubAuthorizationError.serviceUnavailable
+        }
+        let response = try await mswClient.unbindGitHubCredentials(workspace: workspace)
+        guard let result = response.result,
+              result.workspace == workspace,
+              result.unbound else {
             throw GitHubAuthorizationError.revocationFailed
         }
     }
@@ -1029,22 +1259,17 @@ actor GitHubAuthorizationCoordinator {
         createdGrants: [(workspace: String, role: CredentialRole, grant: MSWConnectGrant)],
         committed: [(workspace: String, role: CredentialRole)],
         previous: [String: PreviousCredential],
-        workspaceKeys: [String]
+        journal: inout TransactionJournal
     ) async -> Bool {
         var succeeded = true
+        let workspaceKeys = journal.workspaceKeys
         let workspaces = Set(workspaceKeys.compactMap { $0.split(separator: ".").first.map(String.init) })
 
         // Remove the newly delivered VM secret while the newly stored guest
         // token is still available. Rebinding an old policy happens only
         // after every rollback step has succeeded.
-        if let mswClient {
-            for workspace in workspaces {
-                do {
-                    _ = try await mswClient.unbindGitHubCredentials(workspace: workspace)
-                } catch {
-                    succeeded = false
-                }
-            }
+        if !createdGrants.isEmpty || !committed.isEmpty {
+            guard await verifyJournalUnbinds(&journal) else { return false }
         }
 
         for committedEntry in Set(committed.map { "\($0.workspace).\($0.role.rawValue)" }) {
@@ -1070,45 +1295,85 @@ actor GitHubAuthorizationCoordinator {
         for created in createdGrants {
             do {
                 try await revokeGrant(created.grant.id)
+                journal.newGrantIDs.removeAll { $0 == created.grant.id }
+                journal.updatedAt = now()
+                try persistJournal(journal)
             } catch {
                 succeeded = false
             }
         }
 
-        if succeeded, let mswClient {
-            for workspace in workspaces {
-                let guestKey = "\(workspace).guest"
-                if let snapshot = previous[guestKey],
-                   let bundle = snapshot.bundle,
-                   !bundle.metadata.needsRestart {
-                    do {
-                        _ = try await mswClient.bindGitHubCredentials(
-                            workspace: workspace,
-                            accessMode: "read-only",
-                            verificationRepository: bundle.metadata.verificationRepository ?? ""
-                        )
-                        try await broker.markBound(workspace: workspace, role: .guest)
-                    } catch {
-                        succeeded = false
-                    }
-                }
-                let hostKey = "\(workspace).host"
-                if let snapshot = previous[hostKey],
-                   let bundle = snapshot.bundle,
-                   !bundle.metadata.needsRestart {
-                    do {
-                        _ = try await mswClient.bindGitHubCredentials(
-                            workspace: workspace,
-                            accessMode: "host-write",
-                            verificationRepository: bundle.metadata.verificationRepository ?? ""
-                        )
-                        try await broker.markBound(workspace: workspace, role: .host)
-                    } catch {
-                        succeeded = false
-                    }
-                }
+        let intendedBindings = workspaces.sorted().flatMap { workspace in
+            CredentialRole.allCases.compactMap { role -> (String, CredentialRole, CredentialBundle)? in
+                let key = "\(workspace).\(role.rawValue)"
+                guard let bundle = previous[key]?.bundle,
+                      !bundle.metadata.needsRestart else { return nil }
+                return (workspace, role, bundle)
             }
         }
+        if succeeded, !intendedBindings.isEmpty {
+            guard let mswClient else {
+                succeeded = false
+                return await finishRollback(succeeded: succeeded, workspaceKeys: workspaceKeys)
+            }
+            do {
+                // Any earlier unbind proof becomes stale as soon as a prior
+                // policy bind can run. Persist that uncertainty first so a
+                // crash can never make recovery trust the old proof.
+                journal.previousPolicyRestoreState = .uncertain
+                journal.verifiedUnboundWorkspaces = []
+                journal.updatedAt = now()
+                try persistJournal(journal)
+
+                for (workspace, role, bundle) in intendedBindings {
+                    let accessMode = role == .host ? "host-write" : "read-only"
+                    let verificationRepository = bundle.metadata.verificationRepository ?? ""
+                    let response = try await mswClient.bindGitHubCredentials(
+                        workspace: workspace,
+                        accessMode: accessMode,
+                        verificationRepository: verificationRepository
+                    )
+                    guard let result = response.result,
+                          result.workspace == workspace,
+                          result.accessMode == accessMode,
+                          result.verificationRepository == verificationRepository,
+                          result.verified,
+                          result.lifecycleRestored else {
+                        throw GitHubAuthorizationError.revocationFailed
+                    }
+                    // A missing, mismatched, or false bind result must never
+                    // make the restored local credential appear bound.
+                    try await broker.markBound(workspace: workspace, role: role)
+                }
+
+                journal.previousPolicyRestoreState = .complete
+                journal.updatedAt = now()
+                try persistJournal(journal)
+            } catch {
+                succeeded = false
+                // A successful bind may have occurred before a later restore
+                // failed or returned an invalid result. Do not return while
+                // that possibly rebound secret remains live: invalidate the
+                // stale proof above, then require a fresh exact unbind now.
+                if await verifyJournalUnbinds(&journal) {
+                    journal.previousPolicyRestoreState = .cleaned
+                    journal.updatedAt = now()
+                    try? persistJournal(journal)
+                }
+            }
+        } else if succeeded {
+            do {
+                journal.previousPolicyRestoreState = .complete
+                journal.updatedAt = now()
+                try persistJournal(journal)
+            } catch {
+                succeeded = false
+            }
+        }
+        return await finishRollback(succeeded: succeeded, workspaceKeys: workspaceKeys)
+    }
+
+    private func finishRollback(succeeded: Bool, workspaceKeys: [String]) async -> Bool {
         if !succeeded {
             // Never leave a partially restored credential usable when remote
             // revocation, VM unbinding, or local rollback was uncertain.
@@ -1120,6 +1385,67 @@ actor GitHubAuthorizationCoordinator {
             }
         }
         return succeeded
+    }
+
+    /// Establishes durable, exact unbind proof for every workspace named by a
+    /// rollback journal. A proof is persisted before any grant or credential
+    /// cleanup, so recovery never has to repeat a potentially non-idempotent
+    /// host unbind after a crash.
+    private func verifyJournalUnbinds(_ journal: inout TransactionJournal) async -> Bool {
+        let workspaces = Set(journal.workspaceKeys.compactMap { key -> String? in
+            let components = key.split(separator: ".")
+            guard components.count == 2,
+                  CredentialRole(rawValue: String(components[1])) != nil,
+                  WorkspaceID.isValid(String(components[0])) else { return nil }
+            return String(components[0])
+        })
+        guard !workspaces.isEmpty,
+              journal.workspaceKeys.allSatisfy({ key in
+                  let components = key.split(separator: ".")
+                  return components.count == 2 &&
+                      CredentialRole(rawValue: String(components[1])) != nil &&
+                      WorkspaceID.isValid(String(components[0]))
+              }) else {
+            _ = await quarantineJournalRoles(journal)
+            journal.updatedAt = now()
+            try? persistJournal(journal)
+            return false
+        }
+
+        var verified = Set(journal.verifiedUnboundWorkspaces ?? [])
+        guard verified.isSubset(of: workspaces) else {
+            _ = await quarantineJournalRoles(journal)
+            journal.updatedAt = now()
+            try? persistJournal(journal)
+            return false
+        }
+        if verified == workspaces { return true }
+        guard let mswClient else {
+            _ = await quarantineJournalRoles(journal)
+            journal.updatedAt = now()
+            try? persistJournal(journal)
+            return false
+        }
+        for workspace in workspaces.sorted() where !verified.contains(workspace) {
+            do {
+                let response = try await mswClient.unbindGitHubCredentials(workspace: workspace)
+                guard let result = response.result,
+                      result.workspace == workspace,
+                      result.unbound else {
+                    throw GitHubAuthorizationError.revocationFailed
+                }
+                verified.insert(workspace)
+                journal.verifiedUnboundWorkspaces = verified.sorted()
+                journal.updatedAt = now()
+                try persistJournal(journal)
+            } catch {
+                _ = await quarantineJournalRoles(journal)
+                journal.updatedAt = now()
+                try? persistJournal(journal)
+                return false
+            }
+        }
+        return verified == workspaces
     }
 
     private func revokeGrant(_ grantID: UUID) async throws {
@@ -1269,6 +1595,48 @@ actor GitHubAuthorizationCoordinator {
                 try? persistJournal(journal)
                 throw GitHubAuthorizationError.revocationFailed
             }
+            let expectedGrantIDs = Set(journal.newGrantIDs)
+            let presentGrantIDs = Set(
+                (await broker.allMetadata())
+                    .filter { journal.workspaceKeys.contains($0.id) }
+                    .compactMap(\.grantID)
+            )
+            if !expectedGrantIDs.isSubset(of: presentGrantIDs) {
+                // Detect a partial local commit before revoking old grants. A
+                // crash can leave a replacement secret bound while the journal
+                // still says localCommitted, so no remote DELETE is safe until
+                // every workspace has durable, exact unbind proof.
+                journal.phase = .rollingBack
+                journal.updatedAt = now()
+                try? persistJournal(journal)
+                guard await verifyJournalUnbinds(&journal) else {
+                    throw GitHubAuthorizationError.revocationFailed
+                }
+                var remainingNewGrants = journal.newGrantIDs
+                for grantID in journal.newGrantIDs {
+                    do {
+                        try await revokeGrant(grantID)
+                        remainingNewGrants.removeAll { $0 == grantID }
+                        journal.newGrantIDs = remainingNewGrants
+                        journal.updatedAt = now()
+                        try? persistJournal(journal)
+                    } catch {
+                        journal.newGrantIDs = remainingNewGrants
+                        journal.updatedAt = now()
+                        try? persistJournal(journal)
+                        _ = await quarantineJournalRoles(journal)
+                        throw GitHubAuthorizationError.serviceUnavailable
+                    }
+                }
+                journal.previousPolicyRestoreState = .cleaned
+                journal.updatedAt = now()
+                do {
+                    try persistJournal(journal)
+                } catch {
+                    throw GitHubAuthorizationError.revocationFailed
+                }
+                throw GitHubAuthorizationError.revocationFailed
+            }
             var remaining = journal.oldGrantIDs
             for grantID in journal.oldGrantIDs {
                 do {
@@ -1287,35 +1655,6 @@ actor GitHubAuthorizationCoordinator {
                     throw GitHubAuthorizationError.serviceUnavailable
                 }
             }
-            let expectedGrantIDs = Set(journal.newGrantIDs)
-            let presentGrantIDs = Set(
-                (await broker.allMetadata())
-                    .filter { journal.workspaceKeys.contains($0.id) }
-                    .compactMap(\.grantID)
-            )
-            if !expectedGrantIDs.isSubset(of: presentGrantIDs) {
-                // A crash can leave a local commit only partially written.
-                // All journal roles were quarantined before this check; revoke
-                // every replacement grant before retaining the journal.
-                journal.phase = .rollingBack
-                var remainingNewGrants = journal.newGrantIDs
-                for grantID in journal.newGrantIDs {
-                    do {
-                        try await revokeGrant(grantID)
-                        remainingNewGrants.removeAll { $0 == grantID }
-                        journal.newGrantIDs = remainingNewGrants
-                        journal.updatedAt = now()
-                        try? persistJournal(journal)
-                    } catch {
-                        journal.newGrantIDs = remainingNewGrants
-                        journal.updatedAt = now()
-                        try? persistJournal(journal)
-                        _ = await quarantineJournalRoles(journal)
-                        throw GitHubAuthorizationError.serviceUnavailable
-                    }
-                }
-                throw GitHubAuthorizationError.revocationFailed
-            }
 
             do {
                 try await reconcileCommittedJournal(journal)
@@ -1328,10 +1667,77 @@ actor GitHubAuthorizationCoordinator {
             journal.updatedAt = now()
             try? persistJournal(journal)
             try? removeJournal()
-        case .prepared, .rollingBack:
+        case .prepared:
             guard await quarantineJournalRoles(journal) else {
                 journal.updatedAt = now()
                 try? persistJournal(journal)
+                throw GitHubAuthorizationError.revocationFailed
+            }
+            if !journal.newGrantIDs.isEmpty {
+                guard await verifyJournalUnbinds(&journal) else {
+                    throw GitHubAuthorizationError.revocationFailed
+                }
+            }
+            var remaining = journal.newGrantIDs
+            for grantID in journal.newGrantIDs {
+                do {
+                    try await revokeGrant(grantID)
+                    remaining.removeAll { $0 == grantID }
+                    journal.newGrantIDs = remaining
+                    journal.updatedAt = now()
+                    try? persistJournal(journal)
+                } catch {
+                    journal.newGrantIDs = remaining
+                    journal.updatedAt = now()
+                    try? persistJournal(journal)
+                    throw GitHubAuthorizationError.serviceUnavailable
+                }
+            }
+            try? removeJournal()
+        case .rollingBack:
+            if journal.previousPolicyRestoreState == .complete {
+                try? removeJournal()
+                return
+            }
+            guard await quarantineJournalRoles(journal) else {
+                journal.updatedAt = now()
+                try? persistJournal(journal)
+                throw GitHubAuthorizationError.revocationFailed
+            }
+            if journal.previousPolicyRestoreState == .cleaned {
+                // Rollback already established fresh exact unbind proof after
+                // a failed prior-policy restore. Keep local roles fail-closed,
+                // but do not rebind or issue an unnecessary second unbind.
+                var remaining = journal.newGrantIDs
+                for grantID in journal.newGrantIDs {
+                    do {
+                        try await revokeGrant(grantID)
+                        remaining.removeAll { $0 == grantID }
+                        journal.newGrantIDs = remaining
+                        journal.updatedAt = now()
+                        try? persistJournal(journal)
+                    } catch {
+                        journal.newGrantIDs = remaining
+                        journal.updatedAt = now()
+                        try? persistJournal(journal)
+                        throw GitHubAuthorizationError.serviceUnavailable
+                    }
+                }
+                try? removeJournal()
+                return
+            }
+            // A legacy, partial, or interrupted prior-policy restore may have
+            // rebound a secret after the journal's earlier unbind proof. Clear
+            // that stale proof durably and require a fresh exact unbind even
+            // when every replacement grant was already revoked.
+            journal.verifiedUnboundWorkspaces = []
+            journal.updatedAt = now()
+            do {
+                try persistJournal(journal)
+            } catch {
+                throw GitHubAuthorizationError.revocationFailed
+            }
+            guard await verifyJournalUnbinds(&journal) else {
                 throw GitHubAuthorizationError.revocationFailed
             }
             var remaining = journal.newGrantIDs

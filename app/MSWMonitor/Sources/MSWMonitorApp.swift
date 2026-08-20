@@ -73,9 +73,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             tokenRefreshCoordinator: refresher
         )
         self.client = mswClient
-        self.authorizationCoordinator = scopeEnforcementConfigured ? broker.map {
-            GitHubAuthorizationCoordinator(broker: $0, connect: connect, mswClient: mswClient)
-        } : nil
+        self.authorizationCoordinator = broker.map {
+            GitHubAuthorizationCoordinator(
+                broker: $0,
+                connect: connect,
+                tokenRefreshCoordinator: refresher,
+                mswClient: mswClient
+            )
+        }
         self.githubInstallationURL = installationURL
         super.init()
     }
@@ -120,7 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try LegacyDirectGitHubCredentialRetirement.remove()
             if let authorizationCoordinator {
-                try await authorizationCoordinator.recoverPendingAuthorization()
+                if authorizationCoordinator.isAvailable {
+                    try await authorizationCoordinator.recoverPendingAuthorization()
+                } else {
+                    _ = try await authorizationCoordinator.quarantineUnresolvableAccess()
+                }
             }
             recoveryResult = .success(())
         } catch {

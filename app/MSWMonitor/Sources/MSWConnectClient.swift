@@ -148,8 +148,7 @@ enum MSWConnectError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidConfiguration:
-            return "GitHub access is not ready yet. Continue without GitHub, or try again later."
+        case .invalidConfiguration: return "GitHub connection couldn’t start."
         case .invalidCallback, .callbackStateMismatch, .callbackReplayed:
             return "GitHub connection could not be completed. Try again."
         case .callbackExpired:

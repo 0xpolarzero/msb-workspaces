@@ -27,10 +27,15 @@ Then set your commit identity:
 msw identity "Your Name" you@example.com
 ```
 
-Connect GitHub from **MSW Monitor** rather than pasting tokens into the CLI:
+GitHub is optional and is not available in the normal build yet: MSW Connect
+and its trusted scope attestations are not deployed release inputs. Setup shows
+this as a non-actionable availability notice and completes without inventing
+repository access. Do not paste tokens into the CLI.
+
+Once a future build ships those verified inputs, the intended flow is:
 
 1. Open `MSW Monitor` → **Settings** → **GitHub**.
-2. Choose **Connect GitHub** and complete the hosted authorization flow.
+2. Choose **Connect GitHub** only when the app reports that the service is ready.
 3. In the repository-first editor, select each workspace that may use a repository and opt individual repositories into **Read & write** only when needed. New selections default to **Read-only**.
 
 The Connect service issues short-lived, workspace-scoped grants. The app stores only grant metadata and the scoped installation credentials required by the host/VM boundary; the guest receives a read-only capability and `msw push` uses the separate host-write capability. The CLI's former `msw github setup` token prompt is removed. See [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).

@@ -58,9 +58,10 @@ private enum GitHubDestructiveAction: Identifiable {
 
 private enum GitHubConnectionState {
     case loading
-    case unavailable
-    case signedOut
-    case sessionExpired
+    case notAvailable
+    case readyNoAccess
+    case temporaryOutage
+    case recoveryRequired
     case connected
 }
 
@@ -221,14 +222,18 @@ struct SettingsView: View {
                     LabeledContent("Status", value: githubStatusText)
                         .accessibilityIdentifier("settings.github.status")
                 }
-                Text("GitHub is optional. Reconnect only to add or change repository access.")
+                Text("GitHub is optional. Connect adds access, Edit changes a healthy scope, Retry checks a temporary outage, and Reconnect replaces a broken grant.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 githubPrimaryAction
-                Button("Disconnect GitHub…", role: .destructive) {
+                Button("Remove all GitHub access…", role: .destructive) {
                     destructiveAction = .disconnect(groupedMetadata, connectedAccount)
                 }
-                .disabled((metadata.isEmpty && connectedAccount == nil) || isUpdatingGitHub)
+                .disabled(
+                    !githubFeatureAvailable ||
+                        (metadata.isEmpty && connectedAccount == nil) ||
+                        isUpdatingGitHub
+                )
                 if let githubError {
                     recoveryMessage(githubError)
                     Button("Retry GitHub status") {
@@ -242,7 +247,11 @@ struct SettingsView: View {
                     ContentUnavailableView(
                         "No workspace access",
                         systemImage: "lock.shield",
-                        description: Text("Connect GitHub, then review repository access for each workspace.")
+                        description: Text(
+                            githubFeatureAvailable
+                                ? "Connect GitHub to review repository access for each workspace."
+                                : GitHubFeatureAvailability.unavailableNotice
+                        )
                     )
                 } else {
                     ForEach(groupedMetadata) { group in
@@ -340,21 +349,25 @@ struct SettingsView: View {
         switch githubConnectionState {
         case .loading:
             ProgressView("Loading GitHub status…")
-        case .unavailable:
-            Button("Reconnect GitHub", action: onConnect)
+        case .notAvailable:
+            Label(GitHubFeatureAvailability.unavailableNotice, systemImage: "info.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("settings.github.unavailable")
+        case .readyNoAccess:
+            Button("Connect GitHub", action: onConnect)
                 .buttonStyle(.borderedProminent)
                 .disabled(isUpdatingGitHub)
                 .accessibilityIdentifier("settings.github.connect.button")
-        case .signedOut:
-            Button("Sign in to GitHub", action: onConnect)
-                .buttonStyle(.borderedProminent)
-                .disabled(isUpdatingGitHub)
-                .accessibilityIdentifier("settings.github.connect.button")
-        case .sessionExpired:
-            Button("Reconnect GitHub", action: onConnect)
-                .buttonStyle(.borderedProminent)
-                .disabled(isUpdatingGitHub)
-                .accessibilityIdentifier("settings.github.connect.button")
+        case .temporaryOutage:
+            Button("Retry", action: retryTemporaryOutages)
+            .buttonStyle(.borderedProminent)
+            .disabled(isUpdatingGitHub)
+            .accessibilityIdentifier("settings.github.retry.button")
+        case .recoveryRequired:
+            Text("Use the workspace-specific Reconnect action below.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .connected:
             Button("Edit repository access", action: onConnect)
                 .disabled(isUpdatingGitHub)
@@ -363,30 +376,48 @@ struct SettingsView: View {
     }
 
     private func workspaceGrantRow(_ group: WorkspaceGrantGroup) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        let presentation = GitHubWorkspaceAccessPresentation.make(
+            workspace: group.workspace,
+            entries: group.entries
+        )
+        return VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 Text(group.workspace).font(.body.weight(.semibold))
                 Spacer()
-                Text(credentialStatus(for: group))
+                Text(presentation.status)
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(credentialStatusColor(for: group))
+                    .foregroundStyle(presentation.action == .edit ? Color.secondary : Color.orange)
             }
             LabeledContent("Repositories", value: repositorySummary(for: group))
                 .font(.caption)
-            if needsRetry(group) {
-                Text("Existing \(group.workspace) access needs reconnecting.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
+            Text(presentation.reason)
+                .font(.caption)
+                .foregroundStyle(presentation.action == .edit ? Color.secondary : Color.orange)
             HStack {
-                if needsRetry(group) {
-                    Button("Manage \(group.workspace) access", action: onConnect)
-                        .disabled(isUpdatingGitHub)
+                if githubFeatureAvailable {
+                    switch presentation.action {
+                    case .edit:
+                        Button("Edit \(group.workspace)", action: onConnect)
+                            .disabled(isUpdatingGitHub)
+                    case .retry:
+                        Button("Retry") { retryWorkspace(group.workspace) }
+                            .disabled(isUpdatingGitHub)
+                            .accessibilityIdentifier("settings.github.\(group.workspace).retry.button")
+                    case .reconnect:
+                        Button("Reconnect \(group.workspace)", action: onConnect)
+                            .disabled(isUpdatingGitHub)
+                            .accessibilityIdentifier("settings.github.\(group.workspace).reconnect.button")
+                    }
                 }
                 Button("Remove \(group.workspace) access…", role: .destructive) {
                     destructiveAction = .remove(group)
                 }
-                .disabled(isUpdatingGitHub)
+                .disabled(!githubFeatureAvailable || isUpdatingGitHub)
+            }
+            if !githubFeatureAvailable {
+                Text("This build cannot prove remote revocation or removal. The retained grant stays quarantined and no removal is claimed.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
         .padding(.vertical, 4)
@@ -433,9 +464,10 @@ struct SettingsView: View {
     private var githubStatusText: String {
         switch githubConnectionState {
         case .loading: return "Loading…"
-        case .unavailable: return "GitHub needs reconnecting — retry"
-        case .signedOut: return "Signed out"
-        case .sessionExpired: return "Sign-in expired — repository access needs review"
+        case .notAvailable: return "Not available in this build"
+        case .readyNoAccess: return "Ready to connect · no workspace access"
+        case .temporaryOutage: return "Service unavailable · retry without reconnecting"
+        case .recoveryRequired: return "Workspace access needs reconnecting"
         case .connected: return "Connected · \(groupedMetadata.count) workspace\(groupedMetadata.count == 1 ? "" : "s")"
         }
     }
@@ -451,18 +483,8 @@ struct SettingsView: View {
         }
     }
 
-    private func credentialStatus(for group: WorkspaceGrantGroup) -> String {
-        needsRetry(group) ? "Needs reconnecting" : "Ready"
-    }
-
-    private func credentialStatusColor(for group: WorkspaceGrantGroup) -> Color {
-        credentialStatus(for: group) == "Ready" ? .secondary : .orange
-    }
-
-    private func needsRetry(_ group: WorkspaceGrantGroup) -> Bool {
-        group.entries.contains {
-            $0.recoveryState != .ready || $0.quarantined || $0.needsRestart
-        }
+    private var githubFeatureAvailable: Bool {
+        authorizationCoordinator?.isAvailable == true
     }
 
 
@@ -496,23 +518,71 @@ struct SettingsView: View {
     private func loadGitHubState() async {
         githubError = nil
         guard let authorizationCoordinator else {
-            githubConnectionState = .unavailable
+            githubConnectionState = .notAvailable
             return
         }
         githubConnectionState = .loading
-        let account = await authorizationCoordinator.connectedAccount()
+        guard authorizationCoordinator.isAvailable else {
+            connectedAccount = nil
+            metadata = await authorizationCoordinator.retainedMetadata()
+            githubConnectionState = .notAvailable
+            return
+        }
         let refreshedMetadata = await authorizationCoordinator.metadata()
+        let account = await authorizationCoordinator.connectedAccount()
         connectedAccount = account
         metadata = refreshedMetadata
 
-        if account != nil {
-            githubConnectionState = .connected
-        } else if refreshedMetadata.isEmpty {
-            githubConnectionState = .signedOut
-        } else if refreshedMetadata.contains(where: { $0.recoveryState == .serviceUnavailable }) {
-            githubConnectionState = .unavailable
+        let presentations = Dictionary(grouping: refreshedMetadata, by: \.workspace).map {
+            GitHubWorkspaceAccessPresentation.make(workspace: $0.key, entries: $0.value)
+        }
+        if refreshedMetadata.isEmpty {
+            githubConnectionState = .readyNoAccess
+        } else if presentations.contains(where: { $0.action == .reconnect }) {
+            githubConnectionState = .recoveryRequired
+        } else if presentations.contains(where: { $0.action == .retry }) {
+            githubConnectionState = .temporaryOutage
         } else {
-            githubConnectionState = .sessionExpired
+            githubConnectionState = .connected
+        }
+    }
+
+    private func retryWorkspace(_ workspace: String) {
+        guard let authorizationCoordinator else { return }
+        isUpdatingGitHub = true
+        githubError = nil
+        Task {
+            do {
+                try await authorizationCoordinator.retryUnavailableWorkspace(workspace)
+            } catch {
+                githubError = "Retry for \(workspace) did not succeed: \(error.localizedDescription)"
+            }
+            isUpdatingGitHub = false
+            await loadGitHubStatePreservingError()
+        }
+    }
+
+    private func retryTemporaryOutages() {
+        guard let authorizationCoordinator else { return }
+        let workspaces = Set(metadata.compactMap { entry in
+            !entry.quarantined &&
+                (entry.recoveryState == .serviceUnavailable || entry.recoveryState == .expired)
+                ? entry.workspace
+                : nil
+        })
+        isUpdatingGitHub = true
+        githubError = nil
+        Task {
+            for workspace in workspaces.sorted() {
+                do {
+                    try await authorizationCoordinator.retryUnavailableWorkspace(workspace)
+                } catch {
+                    githubError = "Retry for \(workspace) did not succeed: \(error.localizedDescription)"
+                    break
+                }
+            }
+            isUpdatingGitHub = false
+            await loadGitHubStatePreservingError()
         }
     }
 
@@ -527,7 +597,7 @@ struct SettingsView: View {
                 await loadGitHubState()
             } catch {
                 isUpdatingGitHub = false
-                githubError = "Removal could not be verified. \(workspace) remains visible and may be quarantined. Retry or reauthorize: \(error.localizedDescription)"
+                githubError = "Removal could not be verified. \(workspace) remains visible and may be quarantined. Retry or reconnect: \(error.localizedDescription)"
                 await loadGitHubStatePreservingError()
             }
         }
@@ -543,10 +613,10 @@ struct SettingsView: View {
                 isUpdatingGitHub = false
                 metadata = []
                 connectedAccount = nil
-                githubConnectionState = .signedOut
+                githubConnectionState = .readyNoAccess
             } catch {
                 isUpdatingGitHub = false
-                githubError = "Disconnect could not be verified. Affected grants remain visible and may be quarantined. Retry or reauthorize: \(error.localizedDescription)"
+                githubError = "Removal could not be verified. Affected grants remain visible and may be quarantined. Retry or reconnect: \(error.localizedDescription)"
                 await loadGitHubStatePreservingError()
             }
         }
@@ -618,7 +688,7 @@ private struct GitHubImpactConfirmation: View {
                 VStack(alignment: .leading, spacing: 7) {
                     Text("• GitHub access is removed for the affected workspace.")
                     Text("• If removal cannot be verified, access remains visible for retry.")
-                    Text("• Workspace files and repositories are not deleted. Access can be restored later by reauthorizing and reviewing scope again.")
+                    Text("• Workspace files and repositories are not deleted. Access can be restored later by reconnecting and reviewing scope again.")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .font(.caption)
@@ -644,7 +714,7 @@ private struct GitHubImpactConfirmation: View {
     private var title: String {
         switch action {
         case .remove(let group): return "Remove GitHub access from \(group.workspace)?"
-        case .disconnect: return "Disconnect this GitHub account?"
+        case .disconnect: return "Remove all GitHub access?"
         }
     }
 
@@ -689,14 +759,14 @@ private struct GitHubImpactConfirmation: View {
     private var requiredPhrase: String {
         switch action {
         case .remove(let group): return group.workspace
-        case .disconnect: return "DISCONNECT"
+        case .disconnect: return "REMOVE"
         }
     }
 
     private var confirmButtonTitle: String {
         switch action {
         case .remove: return "Remove Workspace Access"
-        case .disconnect: return "Disconnect Account"
+        case .disconnect: return "Remove All Access"
         }
     }
 }

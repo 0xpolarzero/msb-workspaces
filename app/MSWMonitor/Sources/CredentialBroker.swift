@@ -12,6 +12,7 @@ enum CredentialRecoveryState: String, Codable, Sendable, Equatable {
     case expired
     case revoked
     case installationRemoved
+    case scopeMismatch
     case serviceUnavailable
     case quarantined
 }

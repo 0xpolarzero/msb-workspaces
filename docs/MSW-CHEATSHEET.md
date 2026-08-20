@@ -42,7 +42,7 @@ msw identity "Ada Lovelace" ada@example.com
 
 ## GitHub permissions
 
-Connect GitHub in **MSW Monitor** → **Settings** → **GitHub**. In the repository-first editor, select workspaces and choose **Read-only** or **Read & write** per repository, then review and apply.
+GitHub setup presents **Connect GitHub** and **Skip GitHub**. Connecting requires configured MSW Connect and trusted scope attestations; existing scopes are managed from Settings.
 
 The legacy CLI token prompt was removed:
 

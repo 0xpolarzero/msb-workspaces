@@ -11,11 +11,11 @@ enum TokenRefreshCoordinatorError: Error, LocalizedError, Sendable, Equatable {
         case .inProgress:
             return "A GitHub installation grant refresh is already in progress; try again shortly."
         case .missingGrant:
-            return "The workspace has no renewable GitHub installation grant. Reauthorize it."
+            return "The workspace has no renewable GitHub installation grant. Reconnect it."
         case .serviceUnavailable:
             return "MSW Connect could not renew the workspace grant. Retry when the service is available; the previous grant remains blocked until it can be verified."
         case .reauthorizationRequired:
-            return "The GitHub installation grant was revoked or expired. Reauthorize this workspace."
+            return "The GitHub installation grant was revoked, missing, or scope-mismatched. Reconnect this workspace."
         }
     }
 }
@@ -43,7 +43,9 @@ actor TokenRefreshCoordinator {
         guard let metadata = try await broker.metadata(for: workspace, role: role),
               let grantID = metadata.grantID,
               metadata.provider == "github-app-installation",
-              metadata.recoveryState == .ready || metadata.recoveryState == .serviceUnavailable,
+              metadata.recoveryState == .ready ||
+                metadata.recoveryState == .expired ||
+                metadata.recoveryState == .serviceUnavailable,
               !metadata.quarantined else {
             throw TokenRefreshCoordinatorError.missingGrant
         }
@@ -87,7 +89,7 @@ actor TokenRefreshCoordinator {
                 try? await broker.updateRecoveryState(
                     workspace: workspace,
                     role: role,
-                    state: .revoked,
+                    state: .scopeMismatch,
                     quarantined: true
                 )
                 throw TokenRefreshCoordinatorError.reauthorizationRequired
@@ -96,19 +98,47 @@ actor TokenRefreshCoordinator {
             return grant.credential
         } catch let error as TokenRefreshCoordinatorError {
             throw error
-        } catch MSWConnectError.sessionExpired,
-                MSWConnectError.grantNotFound,
-                MSWConnectError.grantRevoked,
-                MSWConnectError.installationUnavailable,
-                MSWConnectError.installationRemoved,
-                MSWConnectError.scopeMismatch,
-                MSWConnectError.scopeAttestationMissing,
+        } catch MSWConnectError.grantNotFound,
+                MSWConnectError.sessionExpired {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .needsAuthorization,
+                quarantined: true
+            )
+            throw TokenRefreshCoordinatorError.reauthorizationRequired
+        } catch MSWConnectError.grantRevoked {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .revoked,
+                quarantined: true
+            )
+            throw TokenRefreshCoordinatorError.reauthorizationRequired
+        } catch MSWConnectError.installationUnavailable,
+                MSWConnectError.installationRemoved {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .installationRemoved,
+                quarantined: true
+            )
+            throw TokenRefreshCoordinatorError.reauthorizationRequired
+        } catch MSWConnectError.scopeMismatch {
+            try? await broker.updateRecoveryState(
+                workspace: workspace,
+                role: role,
+                state: .scopeMismatch,
+                quarantined: true
+            )
+            throw TokenRefreshCoordinatorError.reauthorizationRequired
+        } catch MSWConnectError.scopeAttestationMissing,
                 MSWConnectError.scopeAttestationInvalid,
                 MSWConnectError.malformedResponse {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,
-                state: .revoked,
+                state: .quarantined,
                 quarantined: true
             )
             throw TokenRefreshCoordinatorError.reauthorizationRequired

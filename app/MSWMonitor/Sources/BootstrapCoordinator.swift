@@ -964,7 +964,7 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
             let failure = MSWClientError.protocolFailure(MSWProtocolError(
                 code: "MSW_GITHUB_RECONNECT_REQUIRED",
                 message: "GitHub is configured for '\(failureWorkspace)', but its credential is unavailable.",
-                recovery: "Connect GitHub for '\(failureWorkspace)' in MSW Monitor, then resume Setup.",
+                recovery: "Reconnect '\(failureWorkspace)' in MSW Monitor, then resume Setup.",
                 workspace: failureWorkspace,
                 retryable: true
             ))

@@ -594,7 +594,8 @@ actor MSWClient {
             var canRetry = false
             do {
                 if let entry = try await credentialBroker.metadata(for: workspace, role: role) {
-                    canRetry = entry.recoveryState == .serviceUnavailable && !entry.quarantined
+                    canRetry = (entry.recoveryState == .expired ||
+                        entry.recoveryState == .serviceUnavailable) && !entry.quarantined
                 }
             } catch {
                 canRetry = false
@@ -603,15 +604,15 @@ actor MSWClient {
                 let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
                 return refreshed.accessToken
             }
-            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reauthorization.")
+            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
         } catch CredentialBrokerError.quarantineRequired {
-            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reauthorization.")
+            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
         }
         if !bundle.credential.isAccessExpired {
             return bundle.credential.accessToken
         }
         guard let tokenRefreshCoordinator else {
-            throw MSWClientError.unavailable("The GitHub installation grant has expired; authorize the workspace again.")
+            throw MSWClientError.unavailable("The GitHub installation token expired, but renewal is unavailable in this build. GitHub access remains blocked.")
         }
         let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
         return refreshed.accessToken
