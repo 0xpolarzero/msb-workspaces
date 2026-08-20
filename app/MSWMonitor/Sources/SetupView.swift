@@ -893,22 +893,29 @@ struct SetupView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if showsGitHubConnectAction {
-                Button(
-                    isAuthorizing ? "Opening GitHub…" : "Connect GitHub",
-                    action: beginAuthorization
-                )
-                .buttonStyle(.borderedProminent)
-                .disabled(isAuthorizing)
-                .accessibilityIdentifier("setup.github.connect.button")
+            if account == nil {
+                Text("Connect to review repository access for each workspace, or skip and connect later from Settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            // Keep the skip path reachable whenever this step is open.
-            Button("Skip GitHub") { skipGitHub() }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .disabled(githubSkipped || isAuthorizing || isSkippingGitHub || isReviewing)
-                .accessibilityIdentifier("setup.github.skip.button")
+            // Keep the skip path reachable whenever this step is open; match
+            // the primary action's size so both buttons share one shape.
+            HStack(spacing: 12) {
+                if showsGitHubConnectAction {
+                    Button(
+                        isAuthorizing ? "Opening GitHub…" : "Connect GitHub",
+                        action: beginAuthorization
+                    )
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAuthorizing)
+                    .accessibilityIdentifier("setup.github.connect.button")
+                }
+                Button("Skip GitHub") { skipGitHub() }
+                    .buttonStyle(.bordered)
+                    .disabled(githubSkipped || isAuthorizing || isSkippingGitHub || isReviewing)
+                    .accessibilityIdentifier("setup.github.skip.button")
+            }
             if isSkippingGitHub {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -1174,7 +1181,7 @@ struct SetupView: View {
                 : "Target: \(identityTarget) only. Other workspace identities remain unchanged.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
+            HStack(spacing: 12) {
                 Button(isSavingIdentity ? "Saving…" : "Save and verify identity", action: saveIdentity)
                     .buttonStyle(.borderedProminent)
                     .disabled(!canSaveIdentity || isSavingIdentity)
@@ -1185,7 +1192,6 @@ struct SetupView: View {
                     identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.large)
                 .disabled(identitySkipped || isSavingIdentity)
                 .accessibilityIdentifier("setup.identity.skip.button")
             }
