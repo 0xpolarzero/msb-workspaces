@@ -1388,6 +1388,92 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(result.status, 0, result.stderrString)
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
     }
+
+    func testCommandRunnerReadsOptionalGitIdentity() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-git-identity-\(UUID().uuidString)", isDirectory: true)
+        let git = temporary.appendingPathComponent("bin/git")
+        try FileManager.default.createDirectory(
+            at: git.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let script = """
+        #!/bin/sh
+        [ "$1" = config ] && [ "$2" = --get ] || exit 2
+        case "$3" in
+          user.name) printf '%s\n' 'Taylor Example' ;;
+          user.email) printf '%s\n' 'taylor@example.test' ;;
+          *) exit 1 ;;
+        esac
+        """
+        try Data(script.utf8).write(to: git)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: git.path)
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            additionalSearchPaths: [git]
+        ))
+        let identity = await runner.gitIdentityConfiguration()
+
+        XCTAssertEqual(identity, GitIdentityConfiguration(
+            name: "Taylor Example",
+            email: "taylor@example.test"
+        ))
+    }
+
+    func testCommandRunnerTreatsMissingGitIdentityAsOptional() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-git-identity-missing-\(UUID().uuidString)", isDirectory: true)
+        let git = temporary.appendingPathComponent("bin/git")
+        try FileManager.default.createDirectory(
+            at: git.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        try Data("#!/bin/sh\nexit 1\n".utf8).write(to: git)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: git.path)
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            additionalSearchPaths: [git]
+        ))
+
+        let identity = await runner.gitIdentityConfiguration()
+        XCTAssertNil(identity)
+    }
+
+    func testGitIdentityPrefillNeverOverwritesUserEdits() {
+        let configuration = GitIdentityConfiguration(
+            name: "Configured Name",
+            email: "configured@example.test"
+        )
+
+        XCTAssertEqual(
+            configuration.prefilling(
+                name: "Typed Name",
+                email: "",
+                nameWasEdited: true,
+                emailWasEdited: false
+            ),
+            GitIdentityPrefill(
+                name: "Typed Name",
+                email: "configured@example.test",
+                didPrefill: true
+            )
+        )
+        XCTAssertEqual(
+            configuration.prefilling(
+                name: "",
+                email: "",
+                nameWasEdited: true,
+                emailWasEdited: true
+            ),
+            GitIdentityPrefill(name: "", email: "", didPrefill: false)
+        )
+    }
+
     func testSourceSetupUsesDevelopmentRootWithoutPrivilegedHostRepair() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-source-setup-test-\(UUID().uuidString)", isDirectory: true)

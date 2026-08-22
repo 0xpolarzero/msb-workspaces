@@ -12,6 +12,7 @@ final class StatusBarController {
     private let githubInstallationURL: URL?
     private let provider: (any GitHubProviding)?
     private let accessMode: GitHubAccessMode
+    private let commandRunner: MSWCommandRunner
     private let settingsNavigation: SettingsNavigationState
     private let startupRecoveryBlockedReason: String?
     private let retryStartupRecovery: () -> Void
@@ -25,6 +26,7 @@ final class StatusBarController {
         githubInstallationURL: URL? = nil,
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
+        commandRunner: MSWCommandRunner = MSWCommandRunner(),
         settingsNavigation: SettingsNavigationState = SettingsNavigationState(),
         startupRecoveryBlockedReason: String? = nil,
         retryStartupRecovery: @escaping () -> Void = {}
@@ -35,6 +37,7 @@ final class StatusBarController {
         self.githubInstallationURL = githubInstallationURL
         self.provider = provider
         self.accessMode = accessMode
+        self.commandRunner = commandRunner
         self.settingsNavigation = settingsNavigation
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.retryStartupRecovery = retryStartupRecovery
@@ -166,6 +169,7 @@ final class StatusBarController {
                 githubInstallationURL: githubInstallationURL,
                 provider: provider,
                 accessMode: accessMode,
+                commandRunner: commandRunner,
                 openSettings: { [weak self] section in
                     self?.showSettings(section: section, dismissingSetup: false)
                 },

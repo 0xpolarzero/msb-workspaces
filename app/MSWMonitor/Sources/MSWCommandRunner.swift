@@ -44,6 +44,34 @@ struct MSWExecutableResolution: Sendable, Equatable {
     var hasInstalledExecutable: Bool { !candidates.isEmpty }
 }
 
+struct GitIdentityConfiguration: Sendable, Equatable {
+    let name: String?
+    let email: String?
+
+    var isEmpty: Bool { name == nil && email == nil }
+
+    func prefilling(
+        name currentName: String,
+        email currentEmail: String,
+        nameWasEdited: Bool,
+        emailWasEdited: Bool
+    ) -> GitIdentityPrefill {
+        let prefilledName = !nameWasEdited && currentName.isEmpty ? (name ?? currentName) : currentName
+        let prefilledEmail = !emailWasEdited && currentEmail.isEmpty ? (email ?? currentEmail) : currentEmail
+        return GitIdentityPrefill(
+            name: prefilledName,
+            email: prefilledEmail,
+            didPrefill: prefilledName != currentName || prefilledEmail != currentEmail
+        )
+    }
+}
+
+struct GitIdentityPrefill: Sendable, Equatable {
+    let name: String
+    let email: String
+    let didPrefill: Bool
+}
+
 actor MSWCommandRunner {
     struct Configuration: Sendable {
         let homeDirectory: URL
@@ -268,6 +296,34 @@ actor MSWCommandRunner {
         return directories
             .map { $0.appending(path: name) }
             .first(where: Self.isExecutableCandidate)
+    }
+
+    /// Reads the host user's effective Git identity through the same deterministic
+    /// executable resolution and process environment used by every other app
+    /// command. Missing Git, unset values, and unreadable configuration are
+    /// all optional onboarding inputs rather than failures.
+    func gitIdentityConfiguration() async -> GitIdentityConfiguration? {
+        guard let git = resolveExecutable(named: "git") else { return nil }
+        let name = await gitConfigurationValue("user.name", executable: git)
+        let email = await gitConfigurationValue("user.email", executable: git)
+        let configuration = GitIdentityConfiguration(name: name, email: email)
+        return configuration.isEmpty ? nil : configuration
+    }
+
+    private func gitConfigurationValue(_ key: String, executable: URL) async -> String? {
+        do {
+            let result = try await run(MSWCommand(
+                executable: executable,
+                arguments: ["config", "--get", key],
+                timeout: .seconds(5),
+                captureLimit: 16 * 1024
+            ))
+            guard result.status == 0 else { return nil }
+            let value = result.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        } catch {
+            return nil
+        }
     }
 
     func makeMSWCommand(

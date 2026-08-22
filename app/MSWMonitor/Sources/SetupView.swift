@@ -11,6 +11,7 @@ final class SetupWindowController {
         githubInstallationURL: URL? = nil,
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
+        commandRunner: MSWCommandRunner = MSWCommandRunner(),
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void = {},
         uiTestMode: Bool = false,
@@ -30,6 +31,7 @@ final class SetupWindowController {
                 authorizationCoordinator: authorization,
                 provider: provider,
                 accessMode: accessMode,
+                commandRunner: commandRunner,
                 openSettings: openSettings,
                 closeSetup: closeSetup,
                 uiTestMode: uiTestMode,
@@ -235,6 +237,7 @@ struct SetupView: View {
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let provider: (any GitHubProviding)?
     let accessMode: GitHubAccessMode
+    let commandRunner: MSWCommandRunner
     let openSettings: (SettingsSection) -> Void
     let closeSetup: () -> Void
     let uiTestMode: Bool
@@ -291,6 +294,8 @@ struct SetupView: View {
     @State private var disabledGitHubWorkspaces: [String] = []
     @State private var identityName = ""
     @State private var identityEmail = ""
+    @State private var identityNameWasEdited = false
+    @State private var identityEmailWasEdited = false
     @State private var identityTarget = "all"
     @State private var identityConfiguredWorkspaces: Set<String> = []
     @State private var verifiedIdentityByWorkspace: [String: SetupVerifiedIdentity] = [:]
@@ -319,6 +324,7 @@ struct SetupView: View {
         authorizationCoordinator: GitHubAuthorizationCoordinator?,
         provider: (any GitHubProviding)?,
         accessMode: GitHubAccessMode,
+        commandRunner: MSWCommandRunner = MSWCommandRunner(),
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void,
         uiTestMode: Bool,
@@ -333,6 +339,7 @@ struct SetupView: View {
         self.authorizationCoordinator = authorizationCoordinator
         self.provider = provider
         self.accessMode = accessMode
+        self.commandRunner = commandRunner
         self.openSettings = openSettings
         self.closeSetup = closeSetup
         self.uiTestMode = uiTestMode
@@ -371,7 +378,12 @@ struct SetupView: View {
             Divider()
             stickyFooter
         }
-        .frame(minWidth: 560, minHeight: 560)
+        .frame(
+            minWidth: 560,
+            maxWidth: .infinity,
+            minHeight: 560,
+            maxHeight: .infinity
+        )
         .task {
             if uiTestMode {
                 loadUITestState()
@@ -1031,6 +1043,9 @@ struct SetupView: View {
             }
 
             HStack(spacing: 12) {
+                if showsGitHubSkipAction {
+                    skipGitHubButton
+                }
                 if showsGitHubConnectAction {
                     Button(action: beginAuthorization) {
                         HStack(spacing: 7) {
@@ -1048,13 +1063,9 @@ struct SetupView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .frame(width: 164)
                     .disabled(isConnectingGitHub)
                     .accessibilityValue(isConnectingGitHub ? "Connecting" : "Ready")
                     .accessibilityIdentifier("setup.github.connect.button")
-                }
-                if showsGitHubSkipAction {
-                    skipGitHubButton
                 }
                 Button("Cancel", action: cancelGitHubConnection)
                     .keyboardShortcut(.cancelAction)
@@ -1063,6 +1074,7 @@ struct SetupView: View {
                     .accessibilityHidden(!githubConnectionMayCancel)
                     .accessibilityIdentifier("setup.github.cancel.button")
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             if let githubSkipIssue {
                 Label(githubSkipIssue, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -1141,6 +1153,9 @@ struct SetupView: View {
             }
 
             HStack(spacing: 12) {
+                if showsGitHubSkipAction {
+                    skipGitHubButton
+                }
                 if isGitHubConnected {
                     Button(action: { loadLocalCatalog(force: true) }) {
                         HStack(spacing: 6) {
@@ -1158,7 +1173,6 @@ struct SetupView: View {
                         }
                     }
                     .controlSize(.small)
-                    .frame(width: 164)
                     .disabled(isRefreshingGitHub || isConnectingGitHub || provider == nil)
                     .accessibilityValue(isRefreshingGitHub ? "Refreshing repositories" : "Ready")
                     .accessibilityIdentifier("setup.github.refresh.button")
@@ -1172,7 +1186,6 @@ struct SetupView: View {
                         }
                     }
                     .controlSize(.small)
-                    .frame(width: 164)
                     .disabled(true)
                     .accessibilityValue("Refreshing repositories")
                     .accessibilityIdentifier("setup.github.refresh.button")
@@ -1193,15 +1206,12 @@ struct SetupView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .frame(width: 164)
                     .disabled(isConnectingGitHub || provider == nil)
                     .accessibilityValue(isConnectingGitHub ? "Connecting" : "Ready")
                     .accessibilityIdentifier("setup.github.connect-account.button")
                 }
-                if showsGitHubSkipAction {
-                    skipGitHubButton
-                }
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             if let localCatalogIssue {
                 VStack(alignment: .leading, spacing: 7) {
                     Label(localCatalogIssueTitle(localCatalogIssue.kind), systemImage: "wifi.exclamationmark")
@@ -1411,12 +1421,12 @@ struct SetupView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            TextField("Full name", text: $identityName)
+            TextField("Full name", text: identityNameBinding)
                 .textContentType(.name)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Git author full name")
                 .accessibilityIdentifier("setup.identity.name")
-            TextField("Email", text: $identityEmail)
+            TextField("Email", text: identityEmailBinding)
                 .textContentType(.emailAddress)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Git author email")
@@ -1434,6 +1444,14 @@ struct SetupView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 12) {
+                Button("Skip identity for now") {
+                    identitySkipped = true
+                    identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
+                    activeStep = .review
+                }
+                .buttonStyle(.bordered)
+                .disabled(identitySkipped || isSavingIdentity)
+                .accessibilityIdentifier("setup.identity.skip.button")
                 Button(action: saveIdentity) {
                     HStack(spacing: 7) {
                         ZStack {
@@ -1450,20 +1468,12 @@ struct SetupView: View {
                     }
                 }
                     .buttonStyle(.borderedProminent)
-                    .frame(width: 164)
                     .disabled(!canSaveIdentity || isSavingIdentity)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityValue(isSavingIdentity ? "Saving" : "Ready")
                     .accessibilityIdentifier("setup.identity.save.button")
-                Button("Skip identity for now") {
-                    identitySkipped = true
-                    identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
-                    activeStep = .review
-                }
-                .buttonStyle(.bordered)
-                .disabled(identitySkipped || isSavingIdentity)
-                .accessibilityIdentifier("setup.identity.skip.button")
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             identityStatusSlot
             if !identityConfiguredWorkspaces.isEmpty && !identityHasUnverifiedEdits {
                 Label(
@@ -1554,8 +1564,10 @@ struct SetupView: View {
     private var stickyFooter: some View {
         HStack(alignment: .center, spacing: 10) {
             footerStatus
-            Spacer(minLength: 12)
             footerActions
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("setup.actions")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -1644,19 +1656,20 @@ struct SetupView: View {
     }
 
     private var footerActions: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             if activeStep != .readiness {
                 Button("Back", action: moveBack)
+                    .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
                     .disabled(isSkippingGitHub || isApplyingGitHub || isConnectingGitHub || isSavingIdentity)
-                    .frame(width: 58)
+                    .accessibilityIdentifier("setup.back.button")
             }
 
             switch activeStep {
             case .readiness:
                 Button(isChecking ? "Checking…" : "Retry", action: loadPreflight)
+                    .buttonStyle(.bordered)
                     .disabled(isChecking || isRunning || coordinator == nil)
-                    .frame(width: 84)
                     .accessibilityIdentifier("setup.retry.button")
                 if hostIntegrationNeedsPackagedBuild {
                     Label("Install the complete MSW Monitor app", systemImage: "lock.circle")
@@ -1678,15 +1691,14 @@ struct SetupView: View {
                             (!canFinishWithoutGitHub && coordinator == nil)
                     )
                     .keyboardShortcut(.defaultAction)
-                    .frame(width: 164)
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .github:
                 if githubStepComplete {
                     Button("Continue", action: advanceFromGitHub)
                         .buttonStyle(.borderedProminent)
-                        .frame(width: 164)
                         .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("setup.github.continue.button")
                 } else {
                     Button(action: commitPolicy) {
                         HStack(spacing: 7) {
@@ -1704,7 +1716,6 @@ struct SetupView: View {
                         }
                     }
                         .buttonStyle(.borderedProminent)
-                        .frame(width: 164)
                         .disabled(!isGitHubConnected || !hasValidAssignments || isApplyingGitHub || isSkippingGitHub || githubSkipIssue != nil)
                         .keyboardShortcut(.defaultAction)
                         .accessibilityValue(isApplyingGitHub ? "Saving" : "Ready")
@@ -1714,7 +1725,6 @@ struct SetupView: View {
                 if identityStepComplete {
                     Button("Continue to review") { activeStep = .review }
                         .buttonStyle(.borderedProminent)
-                        .frame(width: 164)
                         .keyboardShortcut(.defaultAction)
                         .accessibilityIdentifier("setup.identity.continue.button")
                 }
@@ -1723,7 +1733,6 @@ struct SetupView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!canCompleteReview)
                         .keyboardShortcut(.defaultAction)
-                        .frame(width: 164)
                     .accessibilityIdentifier("setup.done.button")
             }
         }
@@ -2548,6 +2557,7 @@ struct SetupView: View {
         let startupLifecycle = setupLifecycle.generation
         restoreResumeState()
         loadPreflight()
+        await prefillIdentityFromLocalGit()
         if accessMode == .local {
             githubContextLoaded = true
             loadLocalCatalogWhenNeeded(for: activeStep)
@@ -2732,12 +2742,48 @@ struct SetupView: View {
         return "Saved for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))."
     }
 
+    private var identityNameBinding: Binding<String> {
+        Binding(
+            get: { identityName },
+            set: { value in
+                identityNameWasEdited = true
+                identityName = value
+            }
+        )
+    }
+
+    private var identityEmailBinding: Binding<String> {
+        Binding(
+            get: { identityEmail },
+            set: { value in
+                identityEmailWasEdited = true
+                identityEmail = value
+            }
+        )
+    }
+
+    private func prefillIdentityFromLocalGit() async {
+        guard let configuration = await commandRunner.gitIdentityConfiguration(),
+              !Task.isCancelled else { return }
+        let prefill = configuration.prefilling(
+            name: identityName,
+            email: identityEmail,
+            nameWasEdited: identityNameWasEdited,
+            emailWasEdited: identityEmailWasEdited
+        )
+        identityName = prefill.name
+        identityEmail = prefill.email
+        if prefill.didPrefill {
+            identityStatus = "Name/email were prefilled from this Mac's Git configuration; review or edit them before saving."
+        }
+    }
+
     private func prefillIdentity(from account: GitHubAccount) {
-        if identityName.isEmpty, let name = account.name, !name.isEmpty {
+        if !identityNameWasEdited, identityName.isEmpty, let name = account.name, !name.isEmpty {
             identityName = name
             identityStatus = "Name was prefilled from @\(account.login); review or edit it before saving."
         }
-        if identityEmail.isEmpty, let email = account.email, !email.isEmpty {
+        if !identityEmailWasEdited, identityEmail.isEmpty, let email = account.email, !email.isEmpty {
             identityEmail = email
             identityStatus = "Name/email were prefilled from @\(account.login); review or edit them before saving."
         }

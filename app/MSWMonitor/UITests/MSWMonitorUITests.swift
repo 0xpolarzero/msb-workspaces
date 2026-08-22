@@ -94,6 +94,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(primaryAction.waitForExistence(timeout: 2))
         XCTAssertEqual(primaryAction.label, "Continue")
         XCTAssertTrue(primaryAction.isEnabled)
+        let retry = app.buttons["setup.retry.button"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 2))
+        XCTAssertEqual(retry.frame.midY, primaryAction.frame.midY, accuracy: 0.5)
+        assertActionsReachTrailingEdge(of: setup, in: app)
         primaryAction.click()
 
         XCTAssertTrue(
@@ -114,6 +118,7 @@ final class MSWMonitorUITests: XCTestCase {
         let githubSkip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
         XCTAssertEqual(githubSkip.label, "Skip GitHub")
+        assertAction(githubSkip, precedes: connect, in: app)
         githubSkip.click()
 
         let identityName = app.textFields["setup.identity.name"]
@@ -127,6 +132,15 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForNonExistence(timeout: 2)
         )
+        let identityBack = app.buttons["setup.back.button"]
+        XCTAssertTrue(identityBack.waitForExistence(timeout: 2))
+        identityBack.click()
+        let githubContinue = app.buttons["setup.github.continue.button"]
+        XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
+        XCTAssertEqual(identityBack.frame.midY, githubContinue.frame.midY, accuracy: 0.5)
+        assertActionsReachTrailingEdge(of: setup, in: app)
+        githubContinue.click()
+        XCTAssertTrue(identityName.waitForExistence(timeout: 2))
         identityName.click()
         identityName.typeText("Taylor Example")
         identityEmail.click()
@@ -135,6 +149,9 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(saveIdentity.waitForExistence(timeout: 2))
         XCTAssertEqual(saveIdentity.label, "Save and review")
         XCTAssertTrue(saveIdentity.isEnabled)
+        let identitySkip = app.buttons["setup.identity.skip.button"]
+        XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
+        assertAction(identitySkip, precedes: saveIdentity, in: app)
         let saveIdentityWidth = saveIdentity.frame.width
         saveIdentity.click()
         XCTAssertEqual(saveIdentity.value as? String, "Saving")
@@ -183,10 +200,12 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
         XCTAssertFalse(app.buttons["setup.github.connect-account.button"].exists)
-        XCTAssertTrue(app.buttons["setup.github.skip.button"].exists)
+        let githubSkip = app.buttons["setup.github.skip.button"]
+        XCTAssertTrue(githubSkip.exists)
         let refreshCatalog = app.buttons["setup.github.refresh.button"]
         XCTAssertTrue(refreshCatalog.waitForExistence(timeout: 2))
         XCTAssertEqual(refreshCatalog.label, "Refresh")
+        assertAction(githubSkip, precedes: refreshCatalog, in: app)
         refreshCatalog.click()
         XCTAssertTrue(waitUntilEnabled(refreshCatalog, timeout: 2))
 
@@ -621,5 +640,34 @@ final class MSWMonitorUITests: XCTestCase {
         let element = app.staticTexts[identifier]
         XCTAssertTrue(element.waitForExistence(timeout: 2), "Missing \(identifier)")
         XCTAssertEqual(element.value as? String, text)
+    }
+
+    private func assertAction(
+        _ first: XCUIElement,
+        precedes second: XCUIElement,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertLessThan(first.frame.minX, second.frame.minX, file: file, line: line)
+        XCTAssertEqual(first.frame.midY, second.frame.midY, accuracy: 0.5, file: file, line: line)
+        let identifiers = app.buttons.allElementsBoundByIndex.map(\.identifier)
+        guard let firstIndex = identifiers.firstIndex(of: first.identifier),
+              let secondIndex = identifiers.firstIndex(of: second.identifier) else {
+            XCTFail("Missing actions in accessibility order", file: file, line: line)
+            return
+        }
+        XCTAssertLessThan(firstIndex, secondIndex, file: file, line: line)
+    }
+
+    private func assertActionsReachTrailingEdge(
+        of window: XCUIElement,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let actions = app.descendants(matching: .any)["setup.actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 2), file: file, line: line)
+        XCTAssertLessThan(window.frame.maxX - actions.frame.maxX, 30, file: file, line: line)
     }
 }

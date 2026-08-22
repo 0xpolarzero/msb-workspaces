@@ -268,6 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             githubInstallationURL: githubInstallationURL,
             provider: fixtureProvider ?? provider,
             accessMode: accessMode,
+            commandRunner: runner,
             settingsNavigation: settingsNavigation,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,
             retryStartupRecovery: retryStartupRecovery
