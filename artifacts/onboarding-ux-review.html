@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MSW Monitor Onboarding UX Review</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+    body { margin: 0; background: Canvas; color: CanvasText; }
+    main { max-width: 760px; margin: 0 auto; padding: 48px 24px; }
+    h1 { margin: 0 0 8px; font-size: 32px; letter-spacing: -.02em; }
+    .summary { margin: 0 0 28px; color: GrayText; font-size: 18px; line-height: 1.45; }
+    ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; counter-reset: issue; }
+    li { counter-increment: issue; padding: 16px 18px; border: 1px solid color-mix(in srgb, CanvasText 16%, transparent); border-radius: 12px; background: color-mix(in srgb, CanvasText 4%, Canvas); line-height: 1.5; }
+    li::before { content: counter(issue); display: inline-grid; place-items: center; width: 24px; height: 24px; margin-right: 10px; border-radius: 50%; background: #d92d20; color: white; font-weight: 700; font-size: 13px; }
+    strong { font-weight: 700; }
+    .root { margin-top: 24px; padding: 16px 18px; border-left: 4px solid #d92d20; background: color-mix(in srgb, #d92d20 8%, Canvas); line-height: 1.5; }
+    .evidence { margin-top: 26px; color: GrayText; font-size: 13px; line-height: 1.5; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Onboarding feels unstable and unclear</h1>
+  <p class="summary">The screen reacts to background work instead of staying calm and predictable.</p>
+
+  <ol>
+    <li><strong>Loading states are wrong.</strong> Refreshing GitHub also makes the Apply button say “Applying…”.</li>
+    <li><strong>Unrelated controls freeze.</strong> A refresh disables repository choices, Apply, and account management.</li>
+    <li><strong>The layout jumps.</strong> Buttons, messages, progress rows, and the main action appear, disappear, and change width.</li>
+    <li><strong>Progress appears in the wrong place.</strong> A small refresh changes the whole section instead of only the Refresh control.</li>
+    <li><strong>There are too many confirmation clicks.</strong> GitHub needs Apply, then Continue. Identity needs Save, then Review setup.</li>
+    <li><strong>“Optional” is inconsistent.</strong> Skip GitHub disappears once an account is connected, even when no repositories are found.</li>
+    <li><strong>Disabled actions are unexplained.</strong> Continue can be blocked by hidden background work with no clear reason.</li>
+    <li><strong>The wording is too technical.</strong> Terms such as VM, host credential, repository policy, and verification make first-time setup harder.</li>
+    <li><strong>The final review is misleading.</strong> It says choices are “ready to apply” after some choices were already applied.</li>
+  </ol>
+
+  <div class="root"><strong>Main cause:</strong> GitHub connect, refresh, and apply all share one loading flag. The UI cannot tell which action is actually running.</div>
+
+  <p class="evidence">Basis: current <code>SetupView.swift</code> behavior plus the native onboarding UI flow. The current fixture values are deterministic test data, not live sandbox telemetry.</p>
+</main>
+</body>
+</html>

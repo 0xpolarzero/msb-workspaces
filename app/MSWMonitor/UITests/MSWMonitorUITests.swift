@@ -110,15 +110,15 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["setup.github.refresh.button"].exists)
         let connect = app.buttons["setup.github.connect-account.button"]
         XCTAssertTrue(connect.waitForExistence(timeout: 3))
-        XCTAssertEqual(connect.label, "Connect GitHub Account on This Mac")
+        XCTAssertEqual(connect.label, "Connect GitHub")
         let githubSkip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
         XCTAssertEqual(githubSkip.label, "Skip GitHub")
         githubSkip.click()
 
-        let identitySkip = app.buttons["setup.identity.skip.button"]
-        XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
-        XCTAssertEqual(identitySkip.label, "Skip identity for now")
+        let identityName = app.textFields["setup.identity.name"]
+        let identityEmail = app.textFields["setup.identity.email"]
+        XCTAssertTrue(identityName.waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.identity"]
                 .waitForExistence(timeout: 2)
@@ -127,20 +127,28 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForNonExistence(timeout: 2)
         )
-        identitySkip.click()
-        let review = app.buttons["setup.review.button"]
-        XCTAssertTrue(review.waitForExistence(timeout: 2))
-        XCTAssertTrue(review.isEnabled)
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.final-review.title"]
-                .waitForNonExistence(timeout: 2)
-        )
-        review.click()
+        identityName.click()
+        identityName.typeText("Taylor Example")
+        identityEmail.click()
+        identityEmail.typeText("taylor@example.com")
+        let saveIdentity = app.buttons["setup.identity.save.button"]
+        XCTAssertTrue(saveIdentity.waitForExistence(timeout: 2))
+        XCTAssertEqual(saveIdentity.label, "Save and review")
+        XCTAssertTrue(saveIdentity.isEnabled)
+        let saveIdentityWidth = saveIdentity.frame.width
+        saveIdentity.click()
+        XCTAssertEqual(saveIdentity.value as? String, "Saving")
+        XCTAssertEqual(saveIdentity.frame.width, saveIdentityWidth, accuracy: 0.5)
+        XCTAssertFalse(app.buttons["setup.review.button"].exists)
 
         let finalReview = app.staticTexts["setup.final-review.title"]
         XCTAssertTrue(finalReview.waitForExistence(timeout: 2))
-        assertText("Ready to finish", identifier: "setup.final-review.title", in: app)
-        assertText("Your choices are ready to apply.", identifier: "setup.final-review.summary", in: app)
+        assertText("Review setup", identifier: "setup.final-review.title", in: app)
+        assertText(
+            "The GitHub and identity choices below are saved.",
+            identifier: "setup.final-review.summary",
+            in: app
+        )
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertEqual(done.label, "Done")
@@ -175,7 +183,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
         XCTAssertFalse(app.buttons["setup.github.connect-account.button"].exists)
-        XCTAssertFalse(app.buttons["setup.github.skip.button"].exists)
+        XCTAssertTrue(app.buttons["setup.github.skip.button"].exists)
         let refreshCatalog = app.buttons["setup.github.refresh.button"]
         XCTAssertTrue(refreshCatalog.waitForExistence(timeout: 2))
         XCTAssertEqual(refreshCatalog.label, "Refresh")
@@ -189,7 +197,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(accessInfo.isEnabled)
         accessInfo.click()
         assertText(
-            "When enabled, this VM may use the Mac-held GitHub credential to push. The credential stays on the Mac.",
+            "Allowing changes lets a workspace push updates to the selected repository. GitHub sign-in stays on this Mac.",
             identifier: "setup.github.workspace-access.help",
             in: app
         )
@@ -205,6 +213,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         let picker = app.buttons["github.workspace.dev.repository-picker.button"]
         XCTAssertTrue(picker.waitForExistence(timeout: 2))
+        let initialPickerWidth = picker.frame.width
         picker.click()
         let search = app.textFields["github.workspace.dev.repository-picker.search"]
         XCTAssertTrue(search.waitForExistence(timeout: 2))
@@ -217,7 +226,13 @@ final class MSWMonitorUITests: XCTestCase {
         app.typeKey(.escape, modifierFlags: [])
         let push = app.descendants(matching: .any)["github.workspace.dev.repository.1001.allow-pushes"]
         XCTAssertTrue(push.waitForExistence(timeout: 2))
-        XCTAssertEqual(push.label, "Allow pushes from this VM")
+        XCTAssertEqual(
+            picker.frame.width,
+            initialPickerWidth,
+            accuracy: 0.5,
+            "Repository picker width must remain stable after selection"
+        )
+        XCTAssertEqual(push.label, "Allow changes from this workspace")
         push.click()
         XCTAssertFalse(app.checkBoxes["Assign"].exists)
         XCTAssertFalse(app.staticTexts["Owner installation"].exists)
@@ -230,31 +245,12 @@ final class MSWMonitorUITests: XCTestCase {
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
-        XCTAssertFalse(app.buttons["Continue"].exists)
+        XCTAssertEqual(apply.label, "Save and continue")
         apply.click()
-
-        // Local mode writes the policy file; there are no verification
-        // results to render.
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.verifications"]
-                .waitForNonExistence(timeout: 2)
-        )
-        assertText(
-            "Applied repository access for 1 workspace(s).",
-            identifier: "setup.github.status",
-            in: app
-        )
-        let githubContinue = app.buttons["Continue"]
-        XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
-        XCTAssertTrue(waitUntilEnabled(githubContinue, timeout: 2))
-        githubContinue.click()
 
         let identitySkip = app.buttons["setup.identity.skip.button"]
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
         identitySkip.click()
-        let reviewSetup = app.buttons["setup.review.button"]
-        XCTAssertTrue(reviewSetup.waitForExistence(timeout: 2))
-        reviewSetup.click()
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertTrue(done.isEnabled)
@@ -283,12 +279,20 @@ final class MSWMonitorUITests: XCTestCase {
         let connect = app.buttons["setup.github.connect-account.button"]
         XCTAssertTrue(connect.waitForExistence(timeout: 3))
         XCTAssertFalse(app.buttons["setup.github.refresh.button"].exists)
+        let connectWidth = connect.frame.width
         connect.click()
+        XCTAssertEqual(connect.value as? String, "Connecting")
+        XCTAssertEqual(connect.frame.width, connectWidth, accuracy: 0.5)
+        assertText(
+            "Waiting for GitHub sign-in in your browser…",
+            identifier: "setup.github.status",
+            in: app
+        )
 
-        XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 5))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
         XCTAssertFalse(app.buttons["setup.github.connect-account.button"].exists)
-        XCTAssertFalse(app.buttons["setup.github.skip.button"].exists)
+        XCTAssertTrue(app.buttons["setup.github.skip.button"].exists)
         XCTAssertTrue(app.buttons["setup.github.refresh.button"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["github.workspace.dev.repository-picker.button"].waitForExistence(timeout: 2))
 
@@ -329,11 +333,77 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3)
         )
         assertText(
-            "No repositories found.",
+            "No repositories found. Add one manually, refresh, or skip GitHub.",
             identifier: "setup.github.status",
             in: app
         )
         XCTAssertTrue(waitUntilEnabled(app.buttons["setup.github.refresh.button"], timeout: 2))
+        let skip = app.buttons["setup.github.skip.button"]
+        XCTAssertTrue(skip.waitForExistence(timeout: 2))
+        XCTAssertTrue(skip.isEnabled)
+        XCTAssertTrue(app.descendants(matching: .any)["setup.github.manual-add"].exists)
+    }
+
+    func testGitHubRefreshKeepsRepositoryActionsInteractiveAndProgressLocal() {
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "build/MSWMonitor.app")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+
+        let app = XCUIApplication(url: appURL)
+        defer {
+            if app.state != .notRunning { app.terminate() }
+        }
+        app.launchArguments = ["--ui-test-setup", "--ui-test-github-interaction-states"]
+        app.launch()
+
+        let setup = app.windows["setup.window"]
+        XCTAssertTrue(setup.waitForExistence(timeout: 3))
+        app.buttons["setup.primary-action"].click()
+
+        let picker = app.buttons["github.workspace.dev.repository-picker.button"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 3))
+        picker.click()
+        let repository = app.checkBoxes["github.workspace.dev.repository.1001"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 2))
+        repository.click()
+        app.typeKey(.escape, modifierFlags: [])
+
+        let refresh = app.buttons["setup.github.refresh.button"]
+        let apply = app.buttons["setup.github.apply.button"]
+        let manage = app.buttons["setup.github.manage-account.button"]
+        XCTAssertTrue(refresh.waitForExistence(timeout: 2))
+        XCTAssertTrue(apply.waitForExistence(timeout: 2))
+        XCTAssertTrue(manage.waitForExistence(timeout: 2))
+        let refreshWidth = refresh.frame.width
+        let applyWidth = apply.frame.width
+        let pickerFrame = picker.frame
+        let statusFrame = app.staticTexts["setup.github.status"].frame
+
+        refresh.click()
+        XCTAssertEqual(refresh.label, "Refresh")
+        XCTAssertEqual(refresh.value as? String, "Refreshing repositories")
+        XCTAssertEqual(apply.label, "Save and continue")
+        XCTAssertEqual(apply.value as? String, "Ready")
+        XCTAssertTrue(apply.isEnabled, "Refresh must not disable the save action")
+        XCTAssertTrue(picker.isEnabled, "Refresh must not disable repository selection")
+        XCTAssertTrue(manage.isEnabled, "Refresh must not disable account management")
+
+        XCTAssertTrue(waitUntilEnabled(refresh, timeout: 3))
+        XCTAssertEqual(refresh.frame.width, refreshWidth, accuracy: 0.5)
+        XCTAssertEqual(apply.frame.width, applyWidth, accuracy: 0.5)
+        XCTAssertEqual(picker.frame.width, pickerFrame.width, accuracy: 0.5)
+        XCTAssertEqual(picker.frame.minY, pickerFrame.minY, accuracy: 0.5)
+        XCTAssertEqual(app.staticTexts["setup.github.status"].frame.height, statusFrame.height, accuracy: 0.5)
+
+        apply.click()
+        XCTAssertEqual(apply.value as? String, "Saving")
+        XCTAssertEqual(apply.frame.width, applyWidth, accuracy: 0.5)
+        XCTAssertTrue(refresh.isEnabled, "Saving must not make Refresh report progress")
+        XCTAssertEqual(refresh.value as? String, "Ready")
+        XCTAssertTrue(manage.isEnabled)
+        XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 3))
     }
 
     func testSetupLocalGitHubStepUnlocksWhenSystemReadyThenVerifiesThroughDone() {
@@ -387,28 +457,15 @@ final class MSWMonitorUITests: XCTestCase {
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
-        XCTAssertFalse(app.buttons["Continue"].exists)
+        XCTAssertEqual(apply.label, "Save and continue")
         apply.click()
-
-        assertText(
-            "Applied repository access for 1 workspace(s).",
-            identifier: "setup.github.status",
-            in: app
-        )
-        let githubContinue = app.buttons["Continue"]
-        XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
-        XCTAssertTrue(waitUntilEnabled(githubContinue, timeout: 2))
-        githubContinue.click()
 
         let identitySkip = app.buttons["setup.identity.skip.button"]
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
         identitySkip.click()
-        let reviewSetup = app.buttons["setup.review.button"]
-        XCTAssertTrue(reviewSetup.waitForExistence(timeout: 2))
-        reviewSetup.click()
 
         // Bootstrap is still incomplete: Done is blocked and the review step
-        // offers the workspace verification action.
+        // offers the workspace completion action.
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertFalse(done.isEnabled)
@@ -532,8 +589,12 @@ final class MSWMonitorUITests: XCTestCase {
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["setup.final-review.title"].waitForExistence(timeout: 2))
-        assertText("Ready to finish", identifier: "setup.final-review.title", in: app)
-        assertText("Your choices are ready to apply.", identifier: "setup.final-review.summary", in: app)
+        assertText("Review setup", identifier: "setup.final-review.title", in: app)
+        assertText(
+            "The GitHub and identity choices below are saved.",
+            identifier: "setup.final-review.summary",
+            in: app
+        )
     }
 
 

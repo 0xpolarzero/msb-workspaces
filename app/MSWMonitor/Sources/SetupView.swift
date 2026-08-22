@@ -267,11 +267,17 @@ struct SetupView: View {
     @State private var retainedRepositoryPolicy: [GitHubWorkspacePolicy] = []
     @State private var existingMetadata: [WorkspaceCredentialMetadata] = []
     @State private var authorizationSessionID: UUID?
-    @State private var authorizationStatus = ""
-    @State private var isAuthorizing = false
-    @State private var authorizationMayCancel = false
-    @State private var authorizationTask: Task<Void, Never>?
-    @State private var authorizationGeneration = 0
+    @State private var githubStatus = ""
+    @State private var isConnectingGitHub = false
+    @State private var githubConnectionMayCancel = false
+    @State private var githubConnectionTask: Task<Void, Never>?
+    @State private var githubConnectionGeneration = 0
+    @State private var isRefreshingGitHub = false
+    @State private var githubRefreshTask: Task<Void, Never>?
+    @State private var githubRefreshGeneration = 0
+    @State private var isApplyingGitHub = false
+    @State private var githubApplyTask: Task<Void, Never>?
+    @State private var githubApplyGeneration = 0
     @State private var uiTestAuthorizationAttempts = 0
     @State private var authorizationIssue: AuthorizationIssue?
     @State private var verificationResults: [GitHubWorkspaceVerificationResult] = []
@@ -298,7 +304,6 @@ struct SetupView: View {
     @State private var githubHostCredentialPresent = false
     @State private var githubAttentionWorkspace: String?
     @State private var localCatalogIssue: LocalCatalogIssue?
-    @State private var isConnectingAccount = false
     @State private var addedRepositoryInput = ""
     @State private var manualEntryExpanded = SetupView.manualEntryInitiallyExpanded
     @State private var deviceFlowSession: GitHubDeviceFlowSession?
@@ -427,16 +432,16 @@ struct SetupView: View {
                                 name: nil,
                                 email: nil
                             )
-                            authorizationStatus = "Connected as @\(login)."
+                            githubStatus = "Connected as @\(login)."
                         } else {
-                            authorizationStatus = "GitHub account connected."
+                            githubStatus = "GitHub account connected."
                         }
                         loadLocalCatalog(force: true)
                     },
                     onCancel: {
                         deviceFlowShown = false
                         deviceFlowSession = nil
-                        authorizationStatus = "GitHub sign-in cancelled."
+                        githubStatus = "GitHub sign-in cancelled."
                     }
                 )
             }
@@ -447,7 +452,12 @@ struct SetupView: View {
 
     private func invalidateSetupLifecycle() {
         setupLifecycle.invalidate()
-        pauseAuthorization()
+        githubConnectionGeneration &+= 1
+        githubConnectionTask?.cancel()
+        githubConnectionTask = nil
+        githubRefreshGeneration &+= 1
+        githubRefreshTask?.cancel()
+        githubRefreshTask = nil
         githubSkipTask?.cancel()
     }
 
@@ -526,6 +536,12 @@ struct SetupView: View {
 
     private var isGitHubConnected: Bool {
         account != nil || (accessMode == .local && githubHostCredentialPresent)
+    }
+
+    /// Connecting an account is not itself a GitHub decision. Keep the
+    /// optional path visible until repository access has actually been saved.
+    private var showsGitHubSkipAction: Bool {
+        !repositoryPolicyApplied
     }
 
     private var githubDecisionMade: Bool {
@@ -622,7 +638,7 @@ struct SetupView: View {
 
     private func startupRecoveryBlockedContent(_ reason: String) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Authorization recovery blocked", systemImage: "exclamationmark.octagon.fill")
+            Label("GitHub access needs attention", systemImage: "exclamationmark.octagon.fill")
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.red)
             Text("GitHub access could not be recovered after an interrupted update.")
@@ -630,11 +646,11 @@ struct SetupView: View {
             Text(reason)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Retry recovery after checking MSW Connect availability. Existing workspace access remains protected until recovery succeeds.")
+            Text("Try again when MSW Monitor can reach your workspaces. Existing GitHub access stays protected until this succeeds.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Retry authorization recovery", action: retryStartupRecovery)
+                Button("Try GitHub recovery again", action: retryStartupRecovery)
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("setup.recovery.retry.button")
                 Button("Open GitHub settings") { openSettings(.github) }
@@ -749,20 +765,20 @@ struct SetupView: View {
     /// Fail closed when the affected access cannot be proven disabled: remain
     /// on this step with a retryable issue rather than bypassing cleanup.
     private func skipGitHub() {
-        guard !githubSkipped, !isAuthorizing, !isSkippingGitHub else { return }
+        guard !githubSkipped, !isConnectingGitHub, !isApplyingGitHub, !isSkippingGitHub else { return }
         if accessMode == .local {
             // Local mode has no Connect grants to disable; skipping just
             // marks the step decided.
             githubSkipped = true
             authorizationIssue = nil
             localCatalogIssue = nil
-            authorizationStatus = "GitHub skipped."
+            githubStatus = "GitHub skipped. You can go back and connect it later."
             activeStep = .identity
             return
         }
         let affectedWorkspace = githubReconnectRequired ? githubAttentionWorkspace : nil
         guard affectedWorkspace != nil || !githubReconnectRequired else {
-            githubSkipIssue = "GitHub recovery is blocked because no affected workspace was reported. No access was changed; retry status before continuing."
+            githubSkipIssue = "MSW Monitor could not identify which workspace needs attention. No access was changed; check again before continuing."
             githubSkipIssueWorkspace = nil
             return
         }
@@ -797,7 +813,7 @@ struct SetupView: View {
                         isSkippingGitHub = false
                         githubSkipTask = nil
                         existingMetadata = refreshedMetadata
-                        githubSkipIssue = "GitHub access for \(affectedWorkspace) could not be disabled safely: \(error.localizedDescription) Retry when MSW Connect is available, or reconnect GitHub instead."
+                        githubSkipIssue = "GitHub access for \(affectedWorkspace) could not be turned off safely: \(error.localizedDescription) Try again when the workspace is available, or reconnect GitHub instead."
                         githubSkipIssueWorkspace = affectedWorkspace
                     }
                     return
@@ -833,7 +849,7 @@ struct SetupView: View {
                     verificationResults.removeAll { $0.workspace == affectedWorkspace }
                     existingMetadata.removeAll { $0.workspace == affectedWorkspace }
                 }
-                authorizationStatus = "GitHub skipped."
+                githubStatus = "GitHub skipped. You can go back and connect it later."
                 activeStep = .identity
             }
             // The skip resolved a reconnect-required grant; re-run bootstrap so
@@ -846,9 +862,26 @@ struct SetupView: View {
         }
     }
 
-    private func advanceFromIdentity() {
-        guard identityStepComplete else { return }
-        activeStep = .review
+    private var skipGitHubButton: some View {
+        Button(action: skipGitHub) {
+            HStack(spacing: 7) {
+                ZStack {
+                    Image(systemName: "forward")
+                        .opacity(isSkippingGitHub ? 0 : 1)
+                        .accessibilityHidden(true)
+                    ProgressView()
+                        .controlSize(.small)
+                        .opacity(isSkippingGitHub ? 1 : 0)
+                        .accessibilityHidden(true)
+                }
+                .frame(width: 16, height: 16)
+                Text("Skip GitHub")
+            }
+        }
+        .buttonStyle(.bordered)
+        .disabled(githubSkipped || isConnectingGitHub || isApplyingGitHub || isSkippingGitHub)
+        .accessibilityValue(isSkippingGitHub ? "Skipping" : "Ready")
+        .accessibilityIdentifier("setup.github.skip.button")
     }
 
     private func moveBack() {
@@ -868,7 +901,7 @@ struct SetupView: View {
         DisclosureGroup(isExpanded: $requirementsExpanded) {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Apple Silicon Mac running macOS 26 or later.", systemImage: "desktopcomputer")
-                Label("A signed build may ask to approve its host helper in macOS settings.", systemImage: "lock.shield")
+                Label("macOS may ask you to allow MSW Monitor to run in the background.", systemImage: "lock.shield")
                 Label("GitHub is optional and uses your default browser.", systemImage: "safari")
             }
             .padding(.top, 8)
@@ -999,27 +1032,36 @@ struct SetupView: View {
 
             HStack(spacing: 12) {
                 if showsGitHubConnectAction {
-                    Button(
-                        isAuthorizing ? "Opening GitHub…" : "Connect GitHub",
-                        action: beginAuthorization
-                    )
+                    Button(action: beginAuthorization) {
+                        HStack(spacing: 7) {
+                            ZStack {
+                                Image(systemName: "link")
+                                    .opacity(isConnectingGitHub ? 0 : 1)
+                                    .accessibilityHidden(true)
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .opacity(isConnectingGitHub ? 1 : 0)
+                                    .accessibilityHidden(true)
+                            }
+                            .frame(width: 16, height: 16)
+                            Text("Connect GitHub")
+                        }
+                    }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isAuthorizing)
+                    .frame(width: 164)
+                    .disabled(isConnectingGitHub)
+                    .accessibilityValue(isConnectingGitHub ? "Connecting" : "Ready")
                     .accessibilityIdentifier("setup.github.connect.button")
-                    Button("Skip GitHub") { skipGitHub() }
-                        .buttonStyle(.bordered)
-                        .disabled(githubSkipped || isAuthorizing || isSkippingGitHub)
-                        .accessibilityIdentifier("setup.github.skip.button")
                 }
-            }
-            if isSkippingGitHub {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Disabling GitHub access for the affected workspace…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if showsGitHubSkipAction {
+                    skipGitHubButton
                 }
-                .accessibilityElement(children: .contain)
+                Button("Cancel", action: cancelGitHubConnection)
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(githubConnectionMayCancel ? 1 : 0)
+                    .disabled(!githubConnectionMayCancel)
+                    .accessibilityHidden(!githubConnectionMayCancel)
+                    .accessibilityIdentifier("setup.github.cancel.button")
             }
             if let githubSkipIssue {
                 Label(githubSkipIssue, systemImage: "exclamationmark.triangle.fill")
@@ -1034,7 +1076,7 @@ struct SetupView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("No repositories are available yet.", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text("Refresh after repository access becomes available.")
+                        Text("Manage the connected account below, or skip GitHub and continue without it.")
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
@@ -1044,23 +1086,7 @@ struct SetupView: View {
                     repositoryPolicyEditor
                 }
                 Button("Manage Connected Account") { openSettings(.github) }
-                    .disabled(isAuthorizing)
                     .accessibilityIdentifier("setup.github.manage-account.button")
-            }
-
-            if isAuthorizing {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(authorizationStatus).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    if authorizationMayCancel {
-                        Button("Cancel wait", action: pauseAuthorization)
-                            .keyboardShortcut(.cancelAction)
-                            .accessibilityIdentifier("setup.github.cancel.button")
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("setup.github.progress")
             }
 
             if let authorizationIssue {
@@ -1089,13 +1115,7 @@ struct SetupView: View {
             }
 
 
-            if !authorizationStatus.isEmpty && !isAuthorizing {
-                Text(authorizationStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-                    .accessibilityIdentifier("setup.github.status")
-            }
+            githubStatusSlot
 
             if !verificationResults.isEmpty {
                 verificationResultsCard
@@ -1123,30 +1143,64 @@ struct SetupView: View {
             HStack(spacing: 12) {
                 if isGitHubConnected {
                     Button(action: { loadLocalCatalog(force: true) }) {
-                        Label(isAuthorizing ? "Refreshing…" : "Refresh", systemImage: "arrow.clockwise")
+                        HStack(spacing: 6) {
+                            ZStack {
+                                Image(systemName: "arrow.clockwise")
+                                    .opacity(isRefreshingGitHub ? 0 : 1)
+                                    .accessibilityHidden(true)
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .opacity(isRefreshingGitHub ? 1 : 0)
+                                    .accessibilityHidden(true)
+                            }
+                            .frame(width: 16, height: 16)
+                            Text("Refresh")
+                        }
                     }
                     .controlSize(.small)
-                    .disabled(isAuthorizing || isConnectingAccount || provider == nil)
+                    .frame(width: 164)
+                    .disabled(isRefreshingGitHub || isConnectingGitHub || provider == nil)
+                    .accessibilityValue(isRefreshingGitHub ? "Refreshing repositories" : "Ready")
                     .accessibilityIdentifier("setup.github.refresh.button")
-                } else if localCatalogAttempted && !isAuthorizing {
-                    Button("Connect GitHub Account on This Mac", action: connectGitHubAccount)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isConnectingAccount || provider == nil)
-                        .accessibilityIdentifier("setup.github.connect-account.button")
-                    Button("Skip GitHub") { skipGitHub() }
-                        .buttonStyle(.bordered)
-                        .disabled(githubSkipped || isConnectingAccount || isSkippingGitHub)
-                        .accessibilityIdentifier("setup.github.skip.button")
+                } else if isRefreshingGitHub {
+                    Button(action: {}) {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityHidden(true)
+                            Text("Refresh")
+                        }
+                    }
+                    .controlSize(.small)
+                    .frame(width: 164)
+                    .disabled(true)
+                    .accessibilityValue("Refreshing repositories")
+                    .accessibilityIdentifier("setup.github.refresh.button")
+                } else if localCatalogAttempted {
+                    Button(action: connectGitHubAccount) {
+                        HStack(spacing: 7) {
+                            ZStack {
+                                Image(systemName: "link")
+                                    .opacity(isConnectingGitHub ? 0 : 1)
+                                    .accessibilityHidden(true)
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .opacity(isConnectingGitHub ? 1 : 0)
+                                    .accessibilityHidden(true)
+                            }
+                            .frame(width: 16, height: 16)
+                            Text("Connect GitHub")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(width: 164)
+                    .disabled(isConnectingGitHub || provider == nil)
+                    .accessibilityValue(isConnectingGitHub ? "Connecting" : "Ready")
+                    .accessibilityIdentifier("setup.github.connect-account.button")
                 }
-            }
-            if isConnectingAccount {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Waiting for GitHub sign-in on this Mac…")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                if showsGitHubSkipAction {
+                    skipGitHubButton
                 }
-                .accessibilityElement(children: .contain)
             }
             if let localCatalogIssue {
                 VStack(alignment: .leading, spacing: 7) {
@@ -1156,7 +1210,7 @@ struct SetupView: View {
                         .font(.callout)
                         .accessibilityIdentifier("setup.github.issue.\(localCatalogIssue.kind.rawValue)")
                     Button("Try again", action: beginAuthorization)
-                        .disabled(isAuthorizing)
+                        .disabled(isRefreshingGitHub)
                         .accessibilityIdentifier("setup.github.retry.button")
                 }
                 .padding(10)
@@ -1165,9 +1219,6 @@ struct SetupView: View {
             }
 
             if isGitHubConnected {
-                if installations.isEmpty && repositoriesByInstallation.isEmpty {
-                    ContentUnavailableView("No repositories", systemImage: "folder", description: Text("Refresh to try again."))
-                }
                 // Manual OWNER/REPO entry is always available while a local
                 // account is connected — including zero-result and error
                 // states, where discovery found nothing to pick from.
@@ -1181,26 +1232,10 @@ struct SetupView: View {
                     repositoryPolicyEditor
                 }
                 Button("Manage Connected Account") { openSettings(.github) }
-                    .disabled(isAuthorizing)
                     .accessibilityIdentifier("setup.github.manage-account.button")
             }
 
-            if isAuthorizing {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(authorizationStatus).font(.callout).foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("setup.github.progress")
-            }
-
-            if !authorizationStatus.isEmpty && !isAuthorizing {
-                Text(authorizationStatus)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-                    .accessibilityIdentifier("setup.github.status")
-            }
+            githubStatusSlot
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github-boundary")
@@ -1212,10 +1247,20 @@ struct SetupView: View {
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("setup.github.add-repository.field")
             Button("Add repository", action: addEnteredRepository)
-                .disabled(!Self.isValidRepositoryInput(addedRepositoryInput) || isAuthorizing)
+                .disabled(!Self.isValidRepositoryInput(addedRepositoryInput) || isApplyingGitHub)
                 .accessibilityIdentifier("setup.github.add-repository.button")
         }
         .padding(.top, 2)
+    }
+
+    private var githubStatusSlot: some View {
+        Text(githubStatus.isEmpty ? " " : githubStatus)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .lineLimit(3)
+            .frame(maxWidth: .infinity, minHeight: 54, maxHeight: 54, alignment: .topLeading)
+            .accessibilityHidden(githubStatus.isEmpty)
+            .accessibilityIdentifier("setup.github.status")
     }
 
     private func localCatalogIssueTitle(_ kind: LocalCatalogIssueKind) -> String {
@@ -1268,16 +1313,16 @@ struct SetupView: View {
         case .expired, .reconnect:
             if let workspace = firstReconnectWorkspace {
                 Button("Reconnect \(workspace)", action: beginAuthorization)
-                    .disabled(!canConnectGitHub || isAuthorizing)
+                    .disabled(!canConnectGitHub || isConnectingGitHub)
                     .accessibilityIdentifier("setup.github.reconnect.button")
             } else {
                 Button("Connect GitHub", action: beginAuthorization)
-                    .disabled(!canConnectGitHub || isAuthorizing)
+                    .disabled(!canConnectGitHub || isConnectingGitHub)
                     .accessibilityIdentifier("setup.github.connect-again.button")
             }
         case .cancelled, .denied:
             Button("Connect GitHub", action: beginAuthorization)
-                .disabled(!canConnectGitHub || isAuthorizing)
+                .disabled(!canConnectGitHub || isConnectingGitHub)
                 .accessibilityIdentifier("setup.github.connect-again.button")
         case .failed:
             Text("Review the reason above and your repository choices before continuing.")
@@ -1308,8 +1353,13 @@ struct SetupView: View {
             accessMode: accessMode,
             drafts: $drafts,
             editedWorkspaces: $editedGitHubWorkspaces,
-            disabled: isAuthorizing,
-            onEdit: { repositoryPolicyApplied = false }
+            disabled: isApplyingGitHub,
+            onEdit: {
+                repositoryPolicyApplied = false
+                if accessMode == .local || disabledGitHubWorkspaces.isEmpty {
+                    githubSkipped = false
+                }
+            }
         )
         .accessibilityIdentifier("setup.github.repository-policy")
     }
@@ -1337,7 +1387,7 @@ struct SetupView: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                         Button("Reconnect \(result.workspace)", action: beginAuthorization)
-                            .disabled(!canConnectGitHub || isAuthorizing)
+                            .disabled(!canConnectGitHub || isConnectingGitHub)
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -1352,12 +1402,12 @@ struct SetupView: View {
 
     private var identitySection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Git identity").font(.title3.weight(.semibold))
-            Text("MSW writes the reviewed author name and email to the selected workspaces.")
+            Text("Your name for Git changes").font(.title3.weight(.semibold))
+            Text("Choose the name and email shown on changes you make in these workspaces.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if !canFinishWithoutGitHub {
-                Label("You can enter these values now. Saving becomes available after system setup finishes.", systemImage: "info.circle")
+                Label("You can enter these details now. Saving becomes available when workspace setup finishes.", systemImage: "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1384,34 +1434,40 @@ struct SetupView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 12) {
-                Button(isSavingIdentity ? "Saving…" : "Save and verify identity", action: saveIdentity)
+                Button(action: saveIdentity) {
+                    HStack(spacing: 7) {
+                        ZStack {
+                            Image(systemName: "checkmark")
+                                .opacity(isSavingIdentity ? 0 : 1)
+                                .accessibilityHidden(true)
+                            ProgressView()
+                                .controlSize(.small)
+                                .opacity(isSavingIdentity ? 1 : 0)
+                                .accessibilityHidden(true)
+                        }
+                        .frame(width: 16, height: 16)
+                        Text("Save and review")
+                    }
+                }
                     .buttonStyle(.borderedProminent)
+                    .frame(width: 164)
                     .disabled(!canSaveIdentity || isSavingIdentity)
                     .keyboardShortcut(.defaultAction)
+                    .accessibilityValue(isSavingIdentity ? "Saving" : "Ready")
                     .accessibilityIdentifier("setup.identity.save.button")
                 Button("Skip identity for now") {
                     identitySkipped = true
                     identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
+                    activeStep = .review
                 }
                 .buttonStyle(.bordered)
                 .disabled(identitySkipped || isSavingIdentity)
                 .accessibilityIdentifier("setup.identity.skip.button")
             }
-            if identityHasUnverifiedEdits {
-                Label(
-                    "Identity changed since the last verification. Save and verify again before finishing.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier("setup.identity.status")
-            } else if !identityStatus.isEmpty {
-                Text(identityStatus).font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("setup.identity.status")
-            }
+            identityStatusSlot
             if !identityConfiguredWorkspaces.isEmpty && !identityHasUnverifiedEdits {
                 Label(
-                    "Verified for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))",
+                    "Saved for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))",
                     systemImage: "checkmark.circle.fill"
                 )
                 .font(.caption)
@@ -1422,23 +1478,45 @@ struct SetupView: View {
         .accessibilityIdentifier("setup.identity")
     }
 
+    @ViewBuilder
+    private var identityStatusSlot: some View {
+        Group {
+            if identityHasUnverifiedEdits {
+                Label(
+                    "These details changed since they were last saved. Save them again before finishing.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("setup.identity.status")
+            } else {
+                Text(identityStatus.isEmpty ? " " : identityStatus)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(identityStatus.isEmpty)
+                    .accessibilityIdentifier("setup.identity.status")
+            }
+        }
+        .font(.caption)
+        .lineLimit(2)
+        .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36, alignment: .topLeading)
+    }
+
     private var finalReview: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Ready to finish")
+            Text("Review setup")
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("setup.final-review.title")
-            Text("Your choices are ready to apply.")
+            Text("The GitHub and identity choices below are saved.")
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("setup.final-review.summary")
-            Text("Nothing is marked complete until you review this summary and choose Done.")
+            Text("Finish any remaining workspace setup, then choose Done to close onboarding.")
                 .foregroundStyle(.secondary)
             reviewStatusLine(
                 title: "System and workspaces",
-                value: canFinishWithoutGitHub ? "Ready" : "Not verified yet",
+                value: canFinishWithoutGitHub ? "Finished" : "Still in progress",
                 ready: canFinishWithoutGitHub
             )
             if !canFinishWithoutGitHub && systemReady {
-                Button(isRunning ? "Verifying workspaces…" : "Verify workspaces now") {
+                Button(isRunning ? "Finishing workspace setup…" : "Finish workspace setup") {
                     runSetup()
                 }
                 .disabled(isRunning || coordinator == nil)
@@ -1451,7 +1529,7 @@ struct SetupView: View {
                 ready: githubDecisionMade && verificationAllowsCompletion
             )
             reviewStatusLine(
-                title: "Git identity",
+                title: "Name for Git changes",
                 value: identityReviewSummary,
                 ready: identityDecisionMade
             )
@@ -1502,8 +1580,8 @@ struct SetupView: View {
             }
         }
         .font(.caption)
-        .lineLimit(3)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .lineLimit(2)
+        .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("setup.status")
         .accessibilityValue(error ?? notice ?? footerGuidance)
@@ -1512,21 +1590,47 @@ struct SetupView: View {
     private var footerGuidance: String {
         switch activeStep {
         case .readiness:
+            if !githubContextLoaded { return "Loading your saved setup choices before you continue." }
             return canFinishWithoutGitHub
-                ? "System setup is verified. Continue to GitHub."
-                : "Continue verifies workspaces, then restores their prior state."
+                ? "System setup is finished. Continue to GitHub."
+                : "Continue prepares your workspaces, then returns them to their current state."
         case .github:
-            return githubStepComplete
-                ? "GitHub choice saved. Continue to identity."
-                : "Connect GitHub or skip it for now."
+            if isRefreshingGitHub { return "Refreshing repositories. You can keep editing your choices." }
+            if isConnectingGitHub {
+                return accessMode == .connect
+                    ? "Finish GitHub sign-in in your browser, or cancel the connection."
+                    : "Finish GitHub sign-in in your browser to continue."
+            }
+            if isApplyingGitHub { return "Saving GitHub access. You will continue automatically." }
+            if isSkippingGitHub { return "Keeping GitHub optional. You will continue automatically." }
+            if githubSkipIssue != nil { return "Retry the GitHub action above before continuing." }
+            if githubStepComplete { return "Your GitHub choice is saved. Continue when ready." }
+            if isGitHubConnected && !hasValidAssignments {
+                return "Choose at least one repository, add one manually, or skip GitHub."
+            }
+            return "Connect GitHub or skip it for now."
         case .identity:
+            if isSavingIdentity { return "Saving your name and email. Review will open automatically." }
+            if !canFinishWithoutGitHub { return "Workspace setup must finish before your name and email can be saved." }
+            if !uiTestMode && authorizationCoordinator == nil {
+                return "Workspace identity settings are unavailable. Try setup again."
+            }
+            if identityName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "Enter your name, or skip identity for now."
+            }
+            if !identityEmail.contains("@") || identityEmail.contains(where: \.isWhitespace) {
+                return "Enter a valid email address, or skip identity for now."
+            }
             return identityStepComplete
-                ? "Identity choice saved. Review before finishing."
-                : "Save and verify identity, or skip it for now."
+                ? "Your identity choice is saved."
+                : "Save your name and email, or skip identity for now."
         case .review:
-            return canCompleteReview
-                ? "Everything is ready. Choose Done to finish setup."
-                : "Complete the required choices before finishing."
+            if !githubContextLoaded { return "Loading your saved GitHub choice before setup can finish." }
+            if !canFinishWithoutGitHub { return "Finish workspace setup before choosing Done." }
+            if !githubDecisionMade { return "Go back and connect GitHub or skip it." }
+            if !identityDecisionMade { return "Go back and save your identity or skip it." }
+            if !verificationAllowsCompletion { return "GitHub access needs attention before setup can finish." }
+            return "Everything is finished. Choose Done to close onboarding."
         }
     }
 
@@ -1544,16 +1648,18 @@ struct SetupView: View {
             if activeStep != .readiness {
                 Button("Back", action: moveBack)
                     .keyboardShortcut(.cancelAction)
-                    .disabled(isSkippingGitHub)
+                    .disabled(isSkippingGitHub || isApplyingGitHub || isConnectingGitHub || isSavingIdentity)
+                    .frame(width: 58)
             }
 
             switch activeStep {
             case .readiness:
                 Button(isChecking ? "Checking…" : "Retry", action: loadPreflight)
                     .disabled(isChecking || isRunning || coordinator == nil)
+                    .frame(width: 84)
                     .accessibilityIdentifier("setup.retry.button")
                 if hostIntegrationNeedsPackagedBuild {
-                    Label("Install a complete signed build", systemImage: "lock.circle")
+                    Label("Install the complete MSW Monitor app", systemImage: "lock.circle")
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("setup.signed-build.required")
                 } else {
@@ -1572,31 +1678,52 @@ struct SetupView: View {
                             (!canFinishWithoutGitHub && coordinator == nil)
                     )
                     .keyboardShortcut(.defaultAction)
+                    .frame(width: 164)
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .github:
-                if isGitHubConnected && !repositoryPolicyApplied && hasValidAssignments {
-                    Button(isAuthorizing ? "Applying…" : "Apply repository access", action: commitPolicy)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isAuthorizing || !hasValidAssignments || isSkippingGitHub)
-                        .accessibilityIdentifier("setup.github.apply.button")
-                } else {
+                if githubStepComplete {
                     Button("Continue", action: advanceFromGitHub)
                         .buttonStyle(.borderedProminent)
-                        .disabled(!githubStepComplete || isAuthorizing || isSkippingGitHub || githubSkipIssue != nil)
+                        .frame(width: 164)
                         .keyboardShortcut(.defaultAction)
+                } else {
+                    Button(action: commitPolicy) {
+                        HStack(spacing: 7) {
+                            ZStack {
+                                Image(systemName: "checkmark")
+                                    .opacity(isApplyingGitHub ? 0 : 1)
+                                    .accessibilityHidden(true)
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .opacity(isApplyingGitHub ? 1 : 0)
+                                    .accessibilityHidden(true)
+                            }
+                            .frame(width: 16, height: 16)
+                            Text("Save and continue")
+                        }
+                    }
+                        .buttonStyle(.borderedProminent)
+                        .frame(width: 164)
+                        .disabled(!isGitHubConnected || !hasValidAssignments || isApplyingGitHub || isSkippingGitHub || githubSkipIssue != nil)
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityValue(isApplyingGitHub ? "Saving" : "Ready")
+                        .accessibilityIdentifier("setup.github.apply.button")
                 }
             case .identity:
-                Button("Review setup", action: advanceFromIdentity)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!identityStepComplete || isSavingIdentity)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("setup.review.button")
+                if identityStepComplete {
+                    Button("Continue to review") { activeStep = .review }
+                        .buttonStyle(.borderedProminent)
+                        .frame(width: 164)
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("setup.identity.continue.button")
+                }
             case .review:
-                Button("Done", action: completeSetup)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canCompleteReview)
-                    .keyboardShortcut(.defaultAction)
+                    Button("Done", action: completeSetup)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canCompleteReview)
+                        .keyboardShortcut(.defaultAction)
+                        .frame(width: 164)
                     .accessibilityIdentifier("setup.done.button")
             }
         }
@@ -1686,7 +1813,7 @@ struct SetupView: View {
                 kind: .unavailable,
                 message: "GitHub could not be reached. Try again later."
             )
-            authorizationStatus = ""
+            githubStatus = ""
             return
         }
         if uiTestGitHubScenario == nil,
@@ -1698,18 +1825,18 @@ struct SetupView: View {
             return
         }
 
-        pauseAuthorization()
-        authorizationGeneration &+= 1
-        let generation = authorizationGeneration
-        isAuthorizing = true
-        authorizationMayCancel = true
+        cancelGitHubConnection()
+        githubConnectionGeneration &+= 1
+        let generation = githubConnectionGeneration
+        isConnectingGitHub = true
+        githubConnectionMayCancel = true
         authorizationIssue = nil
-        authorizationStatus = "Opening GitHub in your default browser…"
+        githubStatus = "Opening GitHub in your browser…"
         uiTestAuthorizationAttempts += 1
 
         if let scenario = uiTestGitHubScenario {
             let shouldHoldForCancellation = scenario == "cancel-retry" && uiTestAuthorizationAttempts == 1
-            authorizationTask = Task {
+            githubConnectionTask = Task {
                 if shouldHoldForCancellation {
                     try? await Task.sleep(for: .seconds(30))
                 } else {
@@ -1721,7 +1848,7 @@ struct SetupView: View {
                     includeInstallation: scenario != "no-installation"
                 )
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
+                    guard githubConnectionGeneration == generation else { return }
                     account = discovery.account
                     installations = discovery.installations
                     githubInstallationURL = Self.validatedInstallationURL(
@@ -1732,13 +1859,13 @@ struct SetupView: View {
                         repositoriesByInstallation[installation.id] = Self.uiTestRepositories
                     }
                     prefillRepositoryPolicyDrafts()
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    isConnectingGitHub = false
+                    githubConnectionMayCancel = false
+                    githubConnectionTask = nil
                     githubSkipped = false
-                    authorizationStatus = discovery.installations.isEmpty
-                        ? "No MSW App installation was found. Install the app, then connect GitHub again."
-                        : "Choose repository access, then apply it."
+                    githubStatus = discovery.installations.isEmpty
+                        ? "No repositories are available for this account. You can refresh, add one manually, or skip GitHub."
+                        : "Choose which repositories each workspace can use."
                     prefillIdentity(from: discovery.account)
                 }
             }
@@ -1747,7 +1874,7 @@ struct SetupView: View {
 
         guard let authorizationCoordinator else { return }
         let browser = MSWConnectBrowser.shared
-        authorizationTask = Task {
+        githubConnectionTask = Task {
             do {
                 let discovery = try await authorizationCoordinator.beginAuthorization(browser: browser)
                 let installURL = await authorizationCoordinator.installationURL()
@@ -1760,28 +1887,28 @@ struct SetupView: View {
                     )
                 }
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
+                    guard githubConnectionGeneration == generation else { return }
                     account = discovery.account
                     installations = discovery.installations
                     githubInstallationURL = Self.validatedInstallationURL(installURL)
                     authorizationSessionID = discovery.sessionID
                     repositoriesByInstallation = loadedRepositories
                     prefillRepositoryPolicyDrafts()
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    isConnectingGitHub = false
+                    githubConnectionMayCancel = false
+                    githubConnectionTask = nil
                     githubSkipped = false
-                    authorizationStatus = "Choose repository access, then apply it."
+                    githubStatus = "Choose which repositories each workspace can use."
                     prefillIdentity(from: discovery.account)
                 }
             } catch {
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    guard githubConnectionGeneration == generation else { return }
+                    isConnectingGitHub = false
+                    githubConnectionMayCancel = false
+                    githubConnectionTask = nil
                     authorizationIssue = issue(for: error)
-                    authorizationStatus = ""
+                    githubStatus = ""
                 }
             }
         }
@@ -1796,7 +1923,7 @@ struct SetupView: View {
 
     private func loadLocalCatalog(force: Bool = false) {
         guard force || !localCatalogAttempted else { return }
-        guard !isAuthorizing else { return }
+        guard !isRefreshingGitHub else { return }
         guard let provider else {
             authorizationIssue = AuthorizationIssue(
                 kind: .unavailable,
@@ -1805,34 +1932,35 @@ struct SetupView: View {
             return
         }
         localCatalogAttempted = true
-        pauseAuthorization()
-        authorizationGeneration &+= 1
-        let generation = authorizationGeneration
-        isAuthorizing = true
-        authorizationMayCancel = false
+        githubRefreshGeneration &+= 1
+        let generation = githubRefreshGeneration
+        isRefreshingGitHub = true
         authorizationIssue = nil
         localCatalogIssue = nil
-        authorizationStatus = "Loading GitHub repositories…"
-        authorizationTask = Task {
+        githubStatus = ""
+        githubRefreshTask?.cancel()
+        githubRefreshTask = Task {
             do {
                 let catalog = try await provider.loadCatalog()
                 let policy = await provider.currentPolicy()
                 try Task.checkCancellation()
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
+                    guard githubRefreshGeneration == generation else { return }
                     account = catalog.account
                     githubHostCredentialPresent = catalog.hostCredentialPresent
                     installations = catalog.installations
                     repositoriesByInstallation = catalog.repositoriesByInstallation
                     githubInstallationURL = nil
                     authorizationSessionID = nil
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
-                    githubSkipped = false
-                    authorizationStatus = catalog.hostCredentialPresent &&
-                        catalog.installations.isEmpty && catalog.repositoriesByInstallation.isEmpty
-                        ? GitHubLocalStrings.noReposCopy : ""
+                    isRefreshingGitHub = false
+                    githubRefreshTask = nil
+                    if !catalog.hostCredentialPresent {
+                        githubStatus = "Connect GitHub to choose repositories, or skip it for now."
+                    } else if catalog.installations.isEmpty && catalog.repositoriesByInstallation.isEmpty {
+                        githubStatus = "No repositories found. Add one manually, refresh, or skip GitHub."
+                    } else {
+                        githubStatus = "Repositories are up to date."
+                    }
                     prefillLocalRepositoryPolicyDrafts(policy: policy)
                     if let account {
                         prefillIdentity(from: account)
@@ -1842,10 +1970,9 @@ struct SetupView: View {
                 // Setup closed or the lifecycle was invalidated; no publication.
             } catch {
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    guard githubRefreshGeneration == generation else { return }
+                    isRefreshingGitHub = false
+                    githubRefreshTask = nil
                     let kind: LocalCatalogIssueKind
                     if case .unavailable? = error as? GitHubCatalogError {
                         kind = .unavailable
@@ -1856,7 +1983,7 @@ struct SetupView: View {
                         kind: kind,
                         message: error.localizedDescription
                     )
-                    authorizationStatus = ""
+                    githubStatus = ""
                 }
             }
         }
@@ -1870,33 +1997,44 @@ struct SetupView: View {
     /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
     /// in-app device sheet. Other typed remedies surface verbatim.
     private func connectGitHubAccount() {
-        guard let provider, !isConnectingAccount else { return }
-        isConnectingAccount = true
+        guard let provider, !isConnectingGitHub else { return }
+        githubConnectionGeneration &+= 1
+        let generation = githubConnectionGeneration
+        githubConnectionTask?.cancel()
+        isConnectingGitHub = true
+        githubConnectionMayCancel = false
         authorizationIssue = nil
         localCatalogIssue = nil
-        authorizationStatus = ""
-        Task {
+        githubStatus = "Waiting for GitHub sign-in in your browser…"
+        githubConnectionTask = Task {
             do {
                 let account = try await provider.connectAccount()
-                isConnectingAccount = false
+                try Task.checkCancellation()
+                guard githubConnectionGeneration == generation else { return }
+                isConnectingGitHub = false
+                githubConnectionTask = nil
                 if let account {
                     self.account = account
-                    authorizationStatus = "Connected as @\(account.login)."
+                    githubStatus = "Connected as @\(account.login)."
                 } else {
-                    authorizationStatus = "GitHub account connected."
+                    githubStatus = "GitHub account connected."
                 }
                 loadLocalCatalog(force: true)
             } catch GitHubCatalogError.ghWebLoginRequired {
                 // gh is unauthenticated and no device-flow client ID is
                 // configured: launch the installed gh web OAuth flow, then
                 // retry the host-credential acquisition.
-                await launchGhWebLoginAndRetry()
+                await launchGhWebLoginAndRetry(generation: generation)
             } catch GitHubCatalogError.deviceFlowAvailable {
                 // The CLI reported the Device Flow is available (a client ID
                 // is explicitly configured); present the in-app device sheet.
-                await beginDeviceFlow()
+                await beginDeviceFlow(generation: generation)
+            } catch is CancellationError {
+                // Setup closed or a newer connection attempt replaced this one.
             } catch {
-                isConnectingAccount = false
+                guard githubConnectionGeneration == generation else { return }
+                isConnectingGitHub = false
+                githubConnectionTask = nil
                 localCatalogIssue = LocalCatalogIssue(
                     kind: .unavailable,
                     message: error.localizedDescription
@@ -1908,32 +2046,42 @@ struct SetupView: View {
     /// Launches the installed gh web OAuth flow (`gh auth login --web`),
     /// surfaces the waiting state, and retries `connectAccount()` once gh
     /// reports the browser sign-in completed.
-    private func launchGhWebLoginAndRetry() async {
+    private func launchGhWebLoginAndRetry(generation: Int) async {
         guard let provider else {
-            isConnectingAccount = false
+            isConnectingGitHub = false
+            githubConnectionTask = nil
             return
         }
-        authorizationStatus = "Waiting for GitHub sign-in in your browser…"
+        githubStatus = "Waiting for GitHub sign-in in your browser…"
         do {
             try await provider.launchGhWebLogin()
             // gh stored the token; retry the host-credential acquisition.
             let account = try await provider.connectAccount()
-            isConnectingAccount = false
+            try Task.checkCancellation()
+            guard githubConnectionGeneration == generation else { return }
+            isConnectingGitHub = false
+            githubConnectionTask = nil
             if let account {
                 self.account = account
-                authorizationStatus = "Connected as @\(account.login)."
+                githubStatus = "Connected as @\(account.login)."
             } else {
-                authorizationStatus = "GitHub account connected."
+                githubStatus = "GitHub account connected."
             }
             loadLocalCatalog(force: true)
         } catch GitHubCatalogError.ghWebLoginRequired {
-            isConnectingAccount = false
+            guard githubConnectionGeneration == generation else { return }
+            isConnectingGitHub = false
+            githubConnectionTask = nil
             localCatalogIssue = LocalCatalogIssue(
                 kind: .unavailable,
                 message: "GitHub sign-in did not complete. Retry when ready."
             )
+        } catch is CancellationError {
+            // Setup closed or a newer connection attempt replaced this one.
         } catch {
-            isConnectingAccount = false
+            guard githubConnectionGeneration == generation else { return }
+            isConnectingGitHub = false
+            githubConnectionTask = nil
             localCatalogIssue = LocalCatalogIssue(
                 kind: .unavailable,
                 message: error.localizedDescription
@@ -1941,16 +2089,19 @@ struct SetupView: View {
         }
     }
 
-    private func beginDeviceFlow() async {
+    private func beginDeviceFlow(generation: Int) async {
+        guard githubConnectionGeneration == generation, !Task.isCancelled else { return }
         guard let provider else {
-            isConnectingAccount = false
+            isConnectingGitHub = false
+            githubConnectionTask = nil
             return
         }
         let session = GitHubDeviceFlowSession(
             startDeviceFlow: { try await provider.startDeviceFlow() },
             pollDeviceFlow: { deviceId in try await provider.pollDeviceFlow(deviceId: deviceId) }
         )
-        isConnectingAccount = false
+        isConnectingGitHub = false
+        githubConnectionTask = nil
         deviceFlowSession = session
         deviceFlowShown = true
     }
@@ -2074,50 +2225,49 @@ struct SetupView: View {
     private func commitPolicy() {
         let workspacePolicies = workspacePolicy
         guard !workspacePolicies.isEmpty else {
-            authorizationStatus = "Choose a workspace to update."
+            githubStatus = "Choose at least one repository, or skip GitHub."
             return
         }
         let policy = workspacePolicies.flatMap { $0.repositories }
 
-        authorizationGeneration &+= 1
-        let generation = authorizationGeneration
-        isAuthorizing = true
-        authorizationMayCancel = false
+        githubApplyGeneration &+= 1
+        let generation = githubApplyGeneration
+        isApplyingGitHub = true
         authorizationIssue = nil
-        authorizationStatus = "Applying repository access…"
-        authorizationTask?.cancel()
+        githubStatus = ""
+        githubApplyTask?.cancel()
 
         if accessMode == .local {
             guard let provider else {
-                authorizationStatus = "GitHub local access is unavailable in this build."
-                isAuthorizing = false
+                githubStatus = "GitHub is unavailable in this build."
+                isApplyingGitHub = false
                 return
             }
-            authorizationTask = Task {
+            githubApplyTask = Task {
                 do {
                     try await provider.commit(workspacePolicies)
                     try Task.checkCancellation()
                     await MainActor.run {
-                        guard authorizationGeneration == generation else { return }
+                        guard githubApplyGeneration == generation else { return }
                         existingMetadata = []
                         verificationResults = []
-                        isAuthorizing = false
-                        authorizationMayCancel = false
-                        authorizationTask = nil
+                        isApplyingGitHub = false
+                        githubApplyTask = nil
+                        githubSkipped = false
                         repositoryPolicyApplied = true
                         authorizationSessionID = nil
-                        authorizationStatus = "Applied repository access for \(workspacePolicies.count) workspace(s)."
+                        githubStatus = "GitHub access saved for \(workspacePolicies.count) workspace(s)."
+                        activeStep = .identity
                     }
                 } catch is CancellationError {
                     // The setup surface closed or the lifecycle was invalidated.
                 } catch {
                     await MainActor.run {
-                        guard authorizationGeneration == generation else { return }
-                        isAuthorizing = false
-                        authorizationMayCancel = false
-                        authorizationTask = nil
+                        guard githubApplyGeneration == generation else { return }
+                        isApplyingGitHub = false
+                        githubApplyTask = nil
                         authorizationIssue = issue(for: error)
-                        authorizationStatus = ""
+                        githubStatus = ""
                     }
                 }
             }
@@ -2125,7 +2275,7 @@ struct SetupView: View {
         }
 
         if uiTestGitHubScenario != nil {
-            authorizationTask = Task {
+            githubApplyTask = Task {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard !Task.isCancelled else { return }
                 let partitions = Dictionary(grouping: policy, by: { "\($0.workspace).\($0.installationID)" })
@@ -2161,12 +2311,11 @@ struct SetupView: View {
                     return results
                 }
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
+                    guard githubApplyGeneration == generation else { return }
                     existingMetadata = []
                     verificationResults = verifications
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    isApplyingGitHub = false
+                    githubApplyTask = nil
                     // A successful commit reconnects the committed workspaces:
                     // a skip failure clears only when the affected workspace
                     // itself was committed (never on unrelated commits, and
@@ -2197,7 +2346,8 @@ struct SetupView: View {
                     }
                     repositoryPolicyApplied = true
                     authorizationSessionID = nil
-                    authorizationStatus = "Applied repository access for \(workspacePolicies.count) workspace(s)."
+                    githubStatus = "GitHub access saved for \(workspacePolicies.count) workspace(s)."
+                    activeStep = .identity
                 }
             }
             return
@@ -2205,11 +2355,11 @@ struct SetupView: View {
 
         guard let authorizationCoordinator,
               let sessionID = authorizationSessionID else {
-            authorizationStatus = "Connect GitHub before applying repository access."
-            isAuthorizing = false
+            githubStatus = "Connect GitHub before saving repository access."
+            isApplyingGitHub = false
             return
         }
-        authorizationTask = Task {
+        githubApplyTask = Task {
             do {
                 let result = try await authorizationCoordinator.commitPolicyWithVerification(
                     sessionID: sessionID,
@@ -2217,12 +2367,11 @@ struct SetupView: View {
                 )
                 let refreshed = await authorizationCoordinator.metadata()
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
+                    guard githubApplyGeneration == generation else { return }
                     existingMetadata = refreshed
                     verificationResults = result.verifications
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    isApplyingGitHub = false
+                    githubApplyTask = nil
                     // A successful commit reconnects the committed workspaces:
                     // a skip failure clears only when the affected workspace
                     // itself was committed (never on unrelated commits, and
@@ -2253,43 +2402,39 @@ struct SetupView: View {
                     }
                     repositoryPolicyApplied = true
                     authorizationSessionID = nil
+                    githubStatus = "GitHub access saved for \(workspacePolicies.count) workspace(s)."
+                    activeStep = .identity
                 }
             } catch {
                 let retained = await authorizationCoordinator.verificationResults()
                 let refreshed = await authorizationCoordinator.metadata()
                 await MainActor.run {
-                    guard authorizationGeneration == generation else { return }
+                    guard githubApplyGeneration == generation else { return }
                     verificationResults = retained
                     existingMetadata = refreshed
-                    isAuthorizing = false
-                    authorizationMayCancel = false
-                    authorizationTask = nil
+                    isApplyingGitHub = false
+                    githubApplyTask = nil
                     authorizationIssue = issue(for: error)
-                    authorizationStatus = ""
+                    githubStatus = ""
                 }
             }
         }
     }
 
-    private func pauseAuthorization() {
-        guard authorizationMayCancel else {
-            if isAuthorizing {
-                authorizationStatus = "Applying and verification continue safely. Reopen setup to review the retained result."
-            }
-            return
-        }
-        authorizationGeneration &+= 1
-        authorizationTask?.cancel()
-        authorizationTask = nil
-        if isAuthorizing {
+    private func cancelGitHubConnection() {
+        guard githubConnectionMayCancel else { return }
+        githubConnectionGeneration &+= 1
+        githubConnectionTask?.cancel()
+        githubConnectionTask = nil
+        if isConnectingGitHub {
             authorizationIssue = AuthorizationIssue(
                 kind: .cancelled,
-                message: "GitHub connection was cancelled. Existing access and saved repository choices were preserved."
+                message: "GitHub connection was cancelled. Your existing access and repository choices were kept."
             )
         }
-        authorizationStatus = "GitHub connection cancelled."
-        isAuthorizing = false
-        authorizationMayCancel = false
+        githubStatus = "GitHub connection cancelled."
+        isConnectingGitHub = false
+        githubConnectionMayCancel = false
     }
 
     private static func validatedInstallationURL(_ value: URL?) -> URL? {
@@ -2370,7 +2515,7 @@ struct SetupView: View {
             guard setupLifecycle.isCurrent(startupLifecycle) else { return nil }
             githubInstallationURL = Self.validatedInstallationURL(installURL)
             authorizationSessionID = discovery.sessionID
-            authorizationStatus = "Resumed the cached @\(discovery.account.login) authorization. Review saved choices before applying."
+            githubStatus = "Reconnected as @\(discovery.account.login). Review your saved repository choices."
             prefillIdentity(from: discovery.account)
             for installation in discovery.installations {
                 do {
@@ -2462,7 +2607,7 @@ struct SetupView: View {
                     isRunning = false
                     notice = result.requiresApproval
                         ? (result.phase == MSWBootstrapState.Phase.hostIntegration.rawValue
-                            ? "Approve the host helper in Login Items, then choose Retry."
+                            ? "Allow MSW Monitor in Login Items, then choose Retry."
                             : result.message)
                         : result.message
                 }
@@ -2501,23 +2646,47 @@ struct SetupView: View {
     }
 
     private var canSaveIdentity: Bool {
-        canFinishWithoutGitHub &&
+        (uiTestMode || authorizationCoordinator != nil) &&
+            canFinishWithoutGitHub &&
             !identityName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             identityEmail.contains("@") &&
             !identityEmail.contains(where: \.isWhitespace)
     }
 
     private func saveIdentity() {
-        guard canSaveIdentity, let authorizationCoordinator else {
-            identityStatus = "Identity cannot be saved until the verified MSW runtime is available."
+        guard canSaveIdentity else {
+            identityStatus = "Your name and email can be saved after workspace setup finishes."
             return
         }
         isSavingIdentity = true
         identitySkipped = false
-        identityStatus = "Applying and verifying the reviewed identity…"
+        identityStatus = "Saving your name and email…"
         let name = identityName.trimmingCharacters(in: .whitespacesAndNewlines)
         let email = identityEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = identityTarget == "all" ? nil : identityTarget
+        if uiTestMode {
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    let workspaces = target.map { [$0] } ?? Workspace.ID.allCases.map(\.rawValue)
+                    let savedIdentity = SetupVerifiedIdentity(name: name, email: email)
+                    for workspace in workspaces {
+                        verifiedIdentityByWorkspace[workspace] = savedIdentity
+                    }
+                    identityConfiguredWorkspaces.formUnion(workspaces)
+                    isSavingIdentity = false
+                    identityStatus = "Saved \(name) <\(email)> for \(workspaces.joined(separator: ", "))."
+                    activeStep = .review
+                }
+            }
+            return
+        }
+        guard let authorizationCoordinator else {
+            isSavingIdentity = false
+            identityStatus = "Workspace identity settings are unavailable. Try setup again."
+            return
+        }
         Task {
             do {
                 let result = try await authorizationCoordinator.setIdentity(
@@ -2532,12 +2701,13 @@ struct SetupView: View {
                     }
                     identityConfiguredWorkspaces.formUnion(result.workspaces)
                     isSavingIdentity = false
-                    identityStatus = "Verified \(result.name) <\(result.email)> for \(result.workspaces.joined(separator: ", "))."
+                    identityStatus = "Saved \(result.name) <\(result.email)> for \(result.workspaces.joined(separator: ", "))."
+                    activeStep = .review
                 }
             } catch {
                 await MainActor.run {
                     isSavingIdentity = false
-                    identityStatus = "Identity was not changed: \(error.localizedDescription) Retry after checking the MSW runtime."
+                    identityStatus = "Your name and email were not changed: \(error.localizedDescription) Try again after workspace setup is available."
                 }
             }
         }
@@ -2558,8 +2728,8 @@ struct SetupView: View {
     private var identityReviewSummary: String {
         if identitySkipped { return "Skipped by choice; configure it later in Workspace Settings." }
         if identityConfiguredWorkspaces.isEmpty { return "Not configured yet." }
-        if identityHasUnverifiedEdits { return "Changed since last verification; save and verify again." }
-        return "Verified for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))."
+        if identityHasUnverifiedEdits { return "Changed since last save; save again." }
+        return "Saved for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))."
     }
 
     private func prefillIdentity(from account: GitHubAccount) {
@@ -2618,7 +2788,7 @@ struct SetupView: View {
         if error is CancellationError {
             return AuthorizationIssue(
                 kind: .cancelled,
-                message: "GitHub authorization was cancelled. Saved choices and existing access were preserved."
+                message: "GitHub connection was cancelled. Your saved choices and existing access were kept."
             )
         }
         return AuthorizationIssue(kind: .failed, message: error.localizedDescription)
@@ -2626,12 +2796,12 @@ struct SetupView: View {
 
     private func issueTitle(_ kind: AuthorizationIssueKind) -> String {
         switch kind {
-        case .cancelled: return "Authorization cancelled"
-        case .expired: return "Authorization expired"
-        case .denied: return "Authorization denied"
-        case .unavailable: return "Authorization unavailable"
+        case .cancelled: return "GitHub connection cancelled"
+        case .expired: return "GitHub connection expired"
+        case .denied: return "GitHub connection declined"
+        case .unavailable: return "GitHub unavailable"
         case .reconnect: return "Reconnect required"
-        case .failed: return "Authorization failed"
+        case .failed: return "GitHub connection failed"
         }
     }
 
@@ -2652,7 +2822,7 @@ struct SetupView: View {
         case .expired: return "Connect GitHub again, then review repository access."
         case .denied: return "Review your repository choices, then try again."
         case .unavailable: return "Check your connection and try again."
-        case .reconnect: return "Reconnect, then review the affected workspace and repository scope."
+        case .reconnect: return "Reconnect, then review the repositories available to the affected workspace."
         case .failed: return "Try again. Existing access remains unchanged."
         }
     }
@@ -2664,7 +2834,7 @@ struct SetupView: View {
 
     private var githubVerificationAge: String {
         let latest = existingMetadata.map(\.updatedAt).max()
-        return latest.map(verificationAge) ?? "Never verified"
+        return latest.map(verificationAge) ?? "Not checked yet"
     }
 
     private func verificationAge(_ date: Date) -> String {
@@ -2739,7 +2909,7 @@ struct SetupView: View {
         guard authorizationIssue == nil else { return }
         authorizationIssue = AuthorizationIssue(
             kind: .reconnect,
-            message: "The verified repository scope for \(workspace) no longer matches the repositories available from its GitHub App installation."
+            message: "The repositories previously chosen for \(workspace) no longer match those available from GitHub. Reconnect to review them."
         )
     }
 
@@ -2829,7 +2999,7 @@ struct SetupView: View {
             githubSkipped = true
             identitySkipped = true
             identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
-            authorizationStatus = "GitHub skipped by choice. You can connect later from Settings."
+            githubStatus = "GitHub skipped by choice. You can connect later from Settings."
             activeStep = .review
         } else {
             githubSkipped = false
@@ -2886,9 +3056,9 @@ struct SetupView: View {
     private func label(for phase: MSWBootstrapState.Phase) -> String {
         switch phase {
         case .welcome: return "Welcome"
-        case .preflight: return "Preflight"
+        case .preflight: return "Requirements"
         case .toolchain: return "Tools"
-        case .hostIntegration: return "Host"
+        case .hostIntegration: return "System access"
         case .workspaces: return "Workspaces"
         case .github: return "GitHub"
         case .identity: return "Identity"
@@ -2962,7 +3132,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Workspace Access")
                                 .font(.headline)
-                            Text("When enabled, this VM may use the Mac-held GitHub credential to push. The credential stays on the Mac.")
+                            Text("Allowing changes lets a workspace push updates to the selected repository. GitHub sign-in stays on this Mac.")
                                 .fixedSize(horizontal: false, vertical: true)
                                 .accessibilityIdentifier("setup.github.workspace-access.help")
                             HStack {
@@ -2996,6 +3166,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
                     openPicker = workspace.rawValue
                 } label: {
                     Label(selectionTitle(for: workspace), systemImage: "chevron.up.chevron.down")
+                        .frame(width: 142, alignment: .leading)
                 }
                 .disabled(disabled)
                 .accessibilityLabel("Choose repositories for \(workspace.rawValue)")
@@ -3073,18 +3244,18 @@ private struct RepositoryWorkspacePolicyEditor: View {
                 .accessibilityHidden(true)
             Text(repository.fullName).lineLimit(1)
             Spacer(minLength: 8)
-            Toggle("Allow pushes from this VM", isOn: pushBinding(
+            Toggle("Allow changes from this workspace", isOn: pushBinding(
                 workspace,
                 repository: repository,
                 installation: installation
             ))
             .toggleStyle(.switch)
-            .accessibilityLabel("Allow pushes from this VM")
+            .accessibilityLabel("Allow changes from this workspace")
             .controlSize(.small)
             .disabled(disabled || repository.canPush == false)
             .help(repository.canPush == false
                 ? "GitHub does not grant push access to this repository."
-                : "Allow this VM to push to this repository.")
+                : "Allow this workspace to push changes to this repository.")
             .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).allow-pushes")
         }
         .padding(.leading, 4)

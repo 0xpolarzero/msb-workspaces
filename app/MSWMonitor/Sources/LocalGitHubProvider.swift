@@ -339,11 +339,14 @@ actor GitHubFixtureProvider: GitHubProviding {
     nonisolated var isAvailable: Bool { true }
 
     func loadCatalog() async throws -> GitHubCatalog {
+        loadAttempts += 1
+        if scenario == "interaction-states", loadAttempts > 1 {
+            try await Task.sleep(for: .seconds(2))
+        }
         if scenario == "unavailable" {
             throw GitHubCatalogError.unavailable("GitHub could not be reached. Try again later.")
         }
         if scenario == "cancel-retry" {
-            loadAttempts += 1
             if loadAttempts == 1 {
                 throw GitHubCatalogError.unavailable("GitHub could not be reached. Try again later.")
             }
@@ -374,11 +377,18 @@ actor GitHubFixtureProvider: GitHubProviding {
 
     func currentPolicy() async -> GitHubPolicyFile? { nil }
 
-    func commit(_ policy: [GitHubWorkspacePolicy]) async throws {}
+    func commit(_ policy: [GitHubWorkspacePolicy]) async throws {
+        if scenario == "interaction-states" {
+            try await Task.sleep(for: .seconds(2))
+        }
+    }
 
     func removeAllAccess() async throws {}
 
     func connectAccount() async throws -> GitHubAccount? {
+        if scenario == "disconnected" {
+            try await Task.sleep(for: .seconds(3))
+        }
         connected = true
         return Self.fixtureAccount
     }
