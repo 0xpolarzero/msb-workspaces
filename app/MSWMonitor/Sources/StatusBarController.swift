@@ -125,8 +125,23 @@ final class StatusBarController {
         popover.performClose(nil)
         model.setPollingVisible(false)
         settingsNavigation.section = section
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        setupWindowController?.close()
+        setupWindowController = nil
         NSApp.activate(ignoringOtherApps: true)
+        // Use the Settings scene's real application-menu action. Dispatching
+        // after the setup window closes lets SwiftUI finish removing that
+        // window before it presents and selects the requested Settings pane.
+        DispatchQueue.main.async {
+            let settingsItem = NSApp.mainMenu?.items
+                .compactMap(\.submenu)
+                .flatMap(\.items)
+                .first { $0.title == "Settings…" }
+            if let settingsItem, let action = settingsItem.action {
+                NSApp.sendAction(action, to: settingsItem.target, from: settingsItem)
+            } else {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            }
+        }
     }
 
     private func showSetup() {

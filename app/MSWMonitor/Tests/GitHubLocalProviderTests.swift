@@ -160,21 +160,18 @@ final class GitHubLocalProviderTests: XCTestCase {
         return (try? String(contentsOf: file, encoding: .utf8)) ?? ""
     }
 
-    // MARK: - Labels (§8)
+    // MARK: - Access semantics
 
     func testAccessModeLabelsMatchContract() {
-        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Clone/pull (push from Mac)")
-        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Clone/pull + Push from VM")
-        XCTAssertEqual(GitHubRepositoryAccessMode.footnote, "Local editing and commits always work.")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Pushes off")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Pushes on")
         // JSON schema values stay read-only|read-write (D6).
         XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.rawValue, "read-only")
         XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.rawValue, "read-write")
     }
 
-    func testPickerCaptionAndNoReposCopy() {
-        XCTAssertTrue(GitHubLocalStrings.pickerCaption.contains("Clone/pull + Push from VM"))
-        XCTAssertTrue(GitHubLocalStrings.pickerCaption.contains("Your workspace never receives a GitHub credential."))
-        XCTAssertEqual(GitHubLocalStrings.loadActionTitle, "Load GitHub repositories")
+    func testConciseLocalGitHubStrings() {
+        XCTAssertEqual(GitHubLocalStrings.noReposCopy, "No repositories found.")
         XCTAssertEqual(GitHubLocalStrings.settingsNoCredential, "GitHub account not connected on this Mac")
     }
 
@@ -1231,6 +1228,18 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(emptyCatalog.account?.login, "octocat")
         XCTAssertTrue(emptyCatalog.installations.isEmpty)
         XCTAssertTrue(emptyCatalog.repositoriesByInstallation.isEmpty)
+
+        let disconnected = GitHubFixtureProvider(scenario: "disconnected")
+        let disconnectedCatalog = try await disconnected.loadCatalog()
+        XCTAssertFalse(disconnectedCatalog.hostCredentialPresent)
+        XCTAssertNil(disconnectedCatalog.account)
+        XCTAssertTrue(disconnectedCatalog.repositoriesByInstallation.isEmpty)
+        let connectedAccount = try await disconnected.connectAccount()
+        XCTAssertEqual(connectedAccount?.login, "octocat")
+        let connectedCatalog = try await disconnected.loadCatalog()
+        XCTAssertTrue(connectedCatalog.hostCredentialPresent)
+        XCTAssertEqual(connectedCatalog.account?.login, "octocat")
+        XCTAssertEqual(connectedCatalog.repositoriesByInstallation[42]?.count, 2)
 
         let retry = GitHubFixtureProvider(scenario: "cancel-retry")
         do {

@@ -256,9 +256,6 @@ struct SettingsView: View {
                         LabeledContent("Status", value: githubStatusText)
                             .accessibilityIdentifier("settings.github.status")
                     }
-                    Text("GitHub is optional. Connect adds access, Edit changes a healthy scope, Retry checks a temporary outage, and Reconnect replaces a broken grant.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     githubPrimaryAction
                     Button("Remove all GitHub access…", role: .destructive) {
                         destructiveAction = .disconnect(groupedMetadata, connectedAccount)
@@ -328,9 +325,6 @@ struct SettingsView: View {
                 LabeledContent("Status", value: githubStatusText)
                     .accessibilityIdentifier("settings.github.status")
             }
-            Text(GitHubRepositoryAccessMode.footnote)
-                .font(.caption)
-                .foregroundStyle(.secondary)
             localGitHubPrimaryAction
             Button("Remove all GitHub access…", role: .destructive) {
                 destructiveAction = .disconnect([], connectedAccount)
@@ -379,9 +373,7 @@ struct SettingsView: View {
                 ContentUnavailableView(
                     "No repository access",
                     systemImage: "lock.shield",
-                    description: Text(
-                        "Load GitHub repositories in setup to grant workspace access. \(GitHubRepositoryAccessMode.footnote)"
-                    )
+                    description: Text("Assign repositories from setup.")
                 )
             } else {
                 ForEach(workspaces, id: \.rawValue) { workspace in

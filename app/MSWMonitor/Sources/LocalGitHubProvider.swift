@@ -75,12 +75,9 @@ enum GitHubCatalogError: Error, LocalizedError, Sendable, Equatable {
 }
 
 enum GitHubLocalStrings {
-    static let loadActionTitle = "Load GitHub repositories"
     static let settingsNoCredential = "GitHub account not connected on this Mac"
     static let settingsConnectAccount = "Connect GitHub account on this Mac…"
-    static let pickerCaption = "Push from the VM is allowed only for repositories set to Clone/pull + Push from VM. Your workspace never receives a GitHub credential."
-    static let noReposCopy = "No repositories were found for your GitHub account. Grant access in GitHub, then load again."
-    static let manageRepositoriesURL = URL(string: "https://github.com/settings/repositories")
+    static let noReposCopy = "No repositories found."
     static let detailFootnote = "GitHub access is enforced by the local proxy on this Mac. Your workspace never receives a GitHub credential. Local editing and commits always work."
 }
 
@@ -332,9 +329,11 @@ actor GitHubLocalProvider: GitHubProviding {
 actor GitHubFixtureProvider: GitHubProviding {
     let scenario: String?
     private var loadAttempts = 0
+    private var connected: Bool
 
     init(scenario: String?) {
         self.scenario = scenario
+        self.connected = scenario != "disconnected"
     }
 
     nonisolated var isAvailable: Bool { true }
@@ -357,6 +356,14 @@ actor GitHubFixtureProvider: GitHubProviding {
                 repositoriesByInstallation: [:]
             )
         }
+        if !connected {
+            return GitHubCatalog(
+                account: nil,
+                hostCredentialPresent: false,
+                installations: [],
+                repositoriesByInstallation: [:]
+            )
+        }
         return GitHubCatalog(
             account: Self.fixtureAccount,
             hostCredentialPresent: true,
@@ -371,7 +378,10 @@ actor GitHubFixtureProvider: GitHubProviding {
 
     func removeAllAccess() async throws {}
 
-    func connectAccount() async throws -> GitHubAccount? { Self.fixtureAccount }
+    func connectAccount() async throws -> GitHubAccount? {
+        connected = true
+        return Self.fixtureAccount
+    }
 
     func launchGhWebLogin() async throws {}
 

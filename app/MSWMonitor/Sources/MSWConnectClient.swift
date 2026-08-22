@@ -170,9 +170,9 @@ enum MSWConnectError: Error, LocalizedError, Sendable, Equatable {
         case .scopeMismatch, .scopeAttestationMissing, .scopeAttestationInvalid:
             return "GitHub returned access that did not match your choices. Existing access stayed unchanged."
         case .accountBoundaryViolation, .repositoryNotAllowed:
-            return "One or more selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
+            return "One or more selected repositories are no longer available. Refresh repository access, then reconnect."
         case .installationUnavailable, .installationRemoved:
-            return "The selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
+            return "The selected repositories are no longer available. Refresh repository access, then reconnect."
         case .rateLimited(let retryAfter):
             if let retryAfter {
                 return "GitHub is busy. Try again in \(retryAfter) seconds."

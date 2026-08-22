@@ -2074,8 +2074,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(decoded, policy)
         XCTAssertEqual(decoded.id, "dev.42.101")
         XCTAssertEqual(decoded.mode, .readOnly)
-        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Clone/pull (push from Mac)")
-        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Clone/pull + Push from VM")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Pushes off")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Pushes on")
         XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.rawValue, "read-only")
         XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.rawValue, "read-write")
     }

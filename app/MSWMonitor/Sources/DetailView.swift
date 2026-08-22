@@ -1075,9 +1075,6 @@ private struct GitHubWorkspaceRow: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
-                Text(GitHubRepositoryAccessMode.footnote)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)

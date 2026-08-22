@@ -5,18 +5,14 @@ enum GitHubRepositoryAccessMode: String, Codable, Sendable, CaseIterable, Equata
     case readOnly = "read-only"
     case readWrite = "read-write"
 
-    /// Behavior-based user-facing labels (Path C §8). JSON schema values stay
-    /// read-only|read-write; only these strings change.
+    /// JSON schema values stay read-only|read-write; these concise labels mirror
+    /// the single push toggle without reintroducing access-mode terminology.
     var label: String {
         switch self {
-        case .readOnly: "Clone/pull (push from Mac)"
-        case .readWrite: "Clone/pull + Push from VM"
+        case .readOnly: "Pushes off"
+        case .readWrite: "Pushes on"
         }
     }
-
-    /// Footnote rendered wherever modes appear (§8): settings rows, detail
-    /// rows, and the picker editor.
-    static let footnote = "Local editing and commits always work."
 }
 
 /// Canonical non-secret repository policy. Repository identity is never
@@ -219,10 +215,10 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
             return "Your repository choices need review."
         case .invalidAppConfiguration:
             return GitHubFeatureAvailability.unavailableNotice
-        case .guestAuthorizationRequired: return "Choose Clone/pull (push from Mac) access before enabling Clone/pull + Push from VM."
+        case .guestAuthorizationRequired: return "Assign the repository before allowing pushes from the VM."
         case .authorizationSessionExpired: return "The browser authorization expired. Choose Connect or Reconnect again."
-        case .ownerNotInstalled: return "The selected repositories are not available yet. Manage repositories on GitHub, then reconnect."
-        case .repositoryNotAllowed: return "One or more selected repositories are no longer available. Manage repositories on GitHub, then reconnect."
+        case .ownerNotInstalled: return "The selected repositories are not available yet. Refresh repository access, then reconnect."
+        case .repositoryNotAllowed: return "One or more selected repositories are no longer available. Refresh repository access, then reconnect."
         case .accountLookupFailed: return "We could not confirm your GitHub account. Try again."
         case .credentialCommitFailed: return "We could not apply repository access. Existing access stayed unchanged."
         case .serviceUnavailable: return "GitHub could not be reached. Existing workspace access stayed unchanged."
