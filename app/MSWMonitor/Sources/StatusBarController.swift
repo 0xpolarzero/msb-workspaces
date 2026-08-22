@@ -10,6 +10,8 @@ final class StatusBarController {
     private let bootstrapCoordinator: (any MSWBootstrapCoordinating)?
     private let authorizationCoordinator: GitHubAuthorizationCoordinator?
     private let githubInstallationURL: URL?
+    private let provider: (any GitHubProviding)?
+    private let accessMode: GitHubAccessMode
     private let settingsNavigation: SettingsNavigationState
     private let startupRecoveryBlockedReason: String?
     private let retryStartupRecovery: () -> Void
@@ -21,6 +23,8 @@ final class StatusBarController {
         bootstrapCoordinator: (any MSWBootstrapCoordinating)? = nil,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         githubInstallationURL: URL? = nil,
+        provider: (any GitHubProviding)? = nil,
+        accessMode: GitHubAccessMode = .local,
         settingsNavigation: SettingsNavigationState = SettingsNavigationState(),
         startupRecoveryBlockedReason: String? = nil,
         retryStartupRecovery: @escaping () -> Void = {}
@@ -29,6 +33,8 @@ final class StatusBarController {
         self.bootstrapCoordinator = bootstrapCoordinator
         self.authorizationCoordinator = authorizationCoordinator
         self.githubInstallationURL = githubInstallationURL
+        self.provider = provider
+        self.accessMode = accessMode
         self.settingsNavigation = settingsNavigation
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.retryStartupRecovery = retryStartupRecovery
@@ -136,6 +142,8 @@ final class StatusBarController {
                 coordinator: bootstrapCoordinator,
                 authorizationCoordinator: authorizationCoordinator,
                 githubInstallationURL: githubInstallationURL,
+                provider: provider,
+                accessMode: accessMode,
                 openSettings: { [weak self] section in self?.showSettings(section: section) },
                 closeSetup: { [weak self] in self?.setupWindowController?.close() },
                 uiTestMode: arguments.contains("--ui-test-setup") ||

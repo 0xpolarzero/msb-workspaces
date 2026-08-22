@@ -1,4 +1,15 @@
 #!/bin/sh
+# GIT_ASKPASS helper for MSW host-side git operations.
+#
+# Local mode (MSW_GITHUB_MODE=local, §5/§8): answers ONLY github.com prompts,
+# emitting the host credential's accessToken through the fail-closed
+# msw-github-host-token helper (missing/invalid record => exit 1, nothing
+# emitted). Any non-github.com prompt exits 1 so the token can never be
+# handed to another host.
+#
+# Connect mode (legacy): answers with the host write token from
+# MSW_GITHUB_WRITE_TOKEN, a schema-3 app installation record, or the
+# MSW_KEYCHAIN_SERVICE/MSW_KEYCHAIN_ACCOUNT record (test mode).
 set -eu
 
 service="${MSW_KEYCHAIN_SERVICE:-msw.github.write}"
@@ -6,6 +17,7 @@ account="${MSW_KEYCHAIN_ACCOUNT:-}"
 security_bin="${MSW_SECURITY_BIN:-/usr/bin/security}"
 keychain_home="${MSW_KEYCHAIN_HOME:-$HOME}"
 test_keychain_dir="${MSW_TEST_KEYCHAIN_DIR:-}"
+host_token_bin="${MSW_HOST_TOKEN_BIN:-}"
 prompt="${1:-}"
 
 safe_component() {
@@ -23,6 +35,31 @@ keychain_read() {
     HOME="$keychain_home" "$security_bin" find-generic-password \
       -w -s "$service_name" -a "$account_name" 2>/dev/null
   fi
+}
+
+resolve_host_token_bin() {
+  if [ -n "$host_token_bin" ]; then
+    [ -x "$host_token_bin" ] || return 1
+    printf '%s\n' "$host_token_bin"
+    return 0
+  fi
+  dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  if [ -x "$dir/msw-github-host-token" ]; then
+    printf '%s\n' "$dir/msw-github-host-token"
+    return 0
+  fi
+  if [ -x "${HOME:-}/.local/libexec/msw-github-host-token" ]; then
+    printf '%s\n' "${HOME:-}/.local/libexec/msw-github-host-token"
+    return 0
+  fi
+  return 1
+}
+
+host_token() {
+  bin="$(resolve_host_token_bin)" || return 1
+  token="$("$bin")" || return 1
+  [ -n "$token" ] || return 1
+  printf '%s\n' "$token"
 }
 
 valid_installation_token() {
@@ -62,10 +99,23 @@ EOF
 
 case "$prompt" in
   *sername*|*Username*)
-    printf '%s\n' 'x-access-token'
+    if [ "${MSW_GITHUB_MODE:-}" = local ]; then
+      case "$prompt" in
+        *github.com*) printf '%s\n' 'x-access-token' ;;
+        *) exit 1 ;;
+      esac
+    else
+      printf '%s\n' 'x-access-token'
+    fi
     ;;
   *assword*)
-    if valid_installation_token "${MSW_GITHUB_WRITE_TOKEN:-}"; then
+    if [ "${MSW_GITHUB_MODE:-}" = local ]; then
+      case "$prompt" in
+        *github.com*) ;;
+        *) exit 1 ;;
+      esac
+      host_token || exit 1
+    elif valid_installation_token "${MSW_GITHUB_WRITE_TOKEN:-}"; then
       printf '%s\n' "$MSW_GITHUB_WRITE_TOKEN"
     elif [ -n "${MSW_APP_KEYCHAIN_SERVICE:-}" ]; then
       raw="$(keychain_read "$MSW_APP_KEYCHAIN_SERVICE" "${MSW_APP_KEYCHAIN_ACCOUNT:-profile}")" || exit 1

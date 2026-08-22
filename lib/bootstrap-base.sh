@@ -151,38 +151,25 @@ fi
 ZSHRC
 chsh -s /usr/bin/zsh root
 
-log "Configuring Git and hidden GitHub read credentials"
-cat >/usr/local/bin/msw-github-credential <<'CREDENTIAL_HELPER'
-#!/bin/sh
-set -eu
-operation="${1:-}"
-[ "$operation" = get ] || exit 0
-protocol=""
-host=""
-while IFS='=' read -r key value; do
-  case "$key" in
-    protocol) protocol="$value" ;;
-    host) host="$value" ;;
-  esac
-done
-if [ "$protocol" = https ] && [ "$host" = github.com ] && [ -n "${GH_TOKEN:-}" ]; then
-  printf 'username=x-access-token\npassword=%s\n\n' "$GH_TOKEN"
-fi
-CREDENTIAL_HELPER
-chmod 0755 /usr/local/bin/msw-github-credential
-
+log "Configuring Git"
 git config --system init.defaultBranch main
 git config --system fetch.prune true
 git config --system pull.ff only
 git config --system rerere.enabled true
-git config --system credential.https://github.com.username x-access-token
-git config --system credential.https://github.com.helper '!/usr/local/bin/msw-github-credential'
-# Keep clones, submodules, and GitHub CLI operations on HTTPS so the guest can
-# use the host-injected read-only placeholder instead of an SSH private key.
+# Keep clones, submodules, and GitHub CLI operations on HTTPS so the guest
+# reaches GitHub through the host's repo-aware proxy (Path C §7). No
+# credentials are baked into the base image.
 git config --system url.https://github.com/.insteadOf git@github.com:
 git config --system --add url.https://github.com/.insteadOf ssh://git@github.com/
 git config --system --add url.https://github.com/.insteadOf ssh://git@github.com:22/
 gh config set git_protocol https --host github.com
+
+# Path C §7: never prompt interactively for GitHub credentials inside a
+# workspace; the proxy enforces access with the workspace capability.
+cat >/etc/profile.d/msw-github.sh <<'PROFILE'
+export GIT_TERMINAL_PROMPT=0
+PROFILE
+chmod 0644 /etc/profile.d/msw-github.sh
 
 mkdir -p /workspace /var/lib/msw-runtime
 chmod 0755 /workspace /var/lib/msw-runtime
@@ -193,6 +180,8 @@ MicroSandbox development workspace
   Docker:    docker compose up --build
   Runtimes:  mise use <tool>@<version>
   Python:    uv sync / uv run ...
+  GitHub:    use git inside the workspace. GitHub API calls are not supported
+             here; run API operations from the Mac.
 MOTD
 
 log "Validating base image"

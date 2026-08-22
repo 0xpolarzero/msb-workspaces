@@ -35,7 +35,18 @@ readonly GITHUB_META_DIR="$HOME/.config/msw/github"
 readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/MSW Monitor/credentials.json"
 SETUP_TRANSACTION_ACTIVE=0
 SETUP_TRANSACTION_BOX=""
+MIGRATION_PREEXISTING_QUARANTINE=0
 GITHUB_LOCK_HELD=0
+
+# Path C §1: single source of truth for GitHub mode. config.sh provides the
+# default (local); these fallbacks cover older configs that predate the mode
+# switch. Invalid values fail closed before any credential or proxy work.
+: "${MSW_GITHUB_MODE:=local}"
+: "${MSW_GITHUB_PROXY_PORT:=18446}"
+case "$MSW_GITHUB_MODE" in
+  local|connect) ;;
+  *) printf 'msw: invalid MSW_GITHUB_MODE %s (expected local or connect)\n' "$MSW_GITHUB_MODE" >&2; exit 1 ;;
+esac
 
 MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 SSH_BIN="${MSW_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
@@ -45,10 +56,53 @@ JQ_BIN="${MSW_JQ_BIN:-$(command -v jq 2>/dev/null || true)}"
 OPEN_BIN="${MSW_OPEN_BIN:-/usr/bin/open}"
 SECURITY_BIN="${MSW_SECURITY_BIN:-/usr/bin/security}"
 ASKPASS_BIN="${MSW_ASKPASS_BIN:-$HOME/.local/libexec/msw-git-askpass}"
+RELAY_BIN="${MSW_GITHUB_RELAY_BIN:-}"
+SHUTTLE_BIN="${MSW_GITHUB_SHUTTLE_BIN:-}"
+MSW_PYTHON_BIN="${MSW_PYTHON_BIN:-/usr/bin/python3}"
+MSW_SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+if [[ -z "$RELAY_BIN" ]]; then
+  if [[ -f "$HOME/.local/libexec/msw-github-relay.py" ]]; then
+    RELAY_BIN="$HOME/.local/libexec/msw-github-relay.py"
+  else
+    RELAY_BIN="$MSW_SCRIPT_ROOT/../lib/msw-github-relay.py"
+  fi
+fi
+if [[ -z "$SHUTTLE_BIN" ]]; then
+  if [[ -f "$HOME/.local/libexec/msw-github-shuttle.py" ]]; then
+    SHUTTLE_BIN="$HOME/.local/libexec/msw-github-shuttle.py"
+  else
+    SHUTTLE_BIN="$MSW_SCRIPT_ROOT/../lib/msw-github-shuttle.py"
+  fi
+fi
+PORT_FORWARDER_BIN="${MSW_PORT_FORWARDER_BIN:-}"
+if [[ -z "$PORT_FORWARDER_BIN" ]]; then
+  if [[ -f "$HOME/.local/libexec/msw-port-forwarder.py" ]]; then
+    PORT_FORWARDER_BIN="$HOME/.local/libexec/msw-port-forwarder.py"
+  else
+    PORT_FORWARDER_BIN="$MSW_SCRIPT_ROOT/../lib/msw-port-forwarder.py"
+  fi
+fi
 GTAR_BIN="${MSW_GTAR_BIN:-$(command -v gtar 2>/dev/null || command -v tar 2>/dev/null || true)}"
 ZSTD_BIN="${MSW_ZSTD_BIN:-$(command -v zstd 2>/dev/null || true)}"
 SHASUM_BIN="${MSW_SHASUM_BIN:-$(command -v shasum 2>/dev/null || true)}"
 LOCKF_BIN="${MSW_LOCKF_BIN:-$(command -v lockf 2>/dev/null || true)}"
+GH_BIN="${MSW_GH_BIN:-$(command -v gh 2>/dev/null || true)}"
+HOST_TOKEN_BIN="${MSW_HOST_TOKEN_BIN:-}"
+if [[ -z "$HOST_TOKEN_BIN" ]]; then
+  if [[ -x "$MSW_SCRIPT_ROOT/msw-github-host-token" ]]; then
+    HOST_TOKEN_BIN="$MSW_SCRIPT_ROOT/msw-github-host-token"
+  elif [[ -x "$HOME/.local/libexec/msw-github-host-token" ]]; then
+    HOST_TOKEN_BIN="$HOME/.local/libexec/msw-github-host-token"
+  fi
+fi
+MSW_KEYCHAIN_BRIDGE="${MSW_KEYCHAIN_BRIDGE:-}"
+if [[ -z "$MSW_KEYCHAIN_BRIDGE" ]]; then
+  if [[ -x "$MSW_SCRIPT_ROOT/msw-keychain-bridge" ]]; then
+    MSW_KEYCHAIN_BRIDGE="$MSW_SCRIPT_ROOT/msw-keychain-bridge"
+  elif [[ -x "$HOME/.local/libexec/msw-keychain-bridge" ]]; then
+    MSW_KEYCHAIN_BRIDGE="$HOME/.local/libexec/msw-keychain-bridge"
+  fi
+fi
 
 fatal() { printf 'msw: %s\n' "$*" >&2; exit 1; }
 note() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -365,6 +419,764 @@ write_metadata() {
   printf 'verification_repo=%s\naccess=%s\nconfigured_at=%s\n' "$repo" "$access" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(metadata_file "$box")"
 }
 
+# ---------------------------------------------------------------------------
+# Path C §2 policy helpers. The policy file is the single source of truth for
+# enforcement: missing/malformed file, unknown workspace, and unknown repo all
+# DENY at the proxy. Policy writes serialize on the existing per-workspace
+# GitHub lock (github_lock_acquire) and are always atomic tmp+rename with mode
+# 0600 (directory 0700).
+# ---------------------------------------------------------------------------
+policy_file() { printf '%s' "${MSW_POLICY_FILE:-$HOME/Library/Application Support/MSW Monitor/github-policy.json}"; }
+
+# Path C §2 / high-risk / closure: ONE strict policy validator shared by every
+# host gate (push, verify, host-credential checks, app reads). A malformed
+# policy denies host push and host API work exactly like the proxy's
+# fail-closed rule: schemaVersion numeric integer 1, every workspace key is a
+# valid workspace name, every capability is 48 lowercase hex chars and UNIQUE
+# across workspaces, every repo is a canonical lowercase owner/name where each
+# segment starts [a-z0-9] and continues [a-z0-9._-]* (matching the proxy
+# target grammar), no .git/query/trailing slash, valid modes only, and
+# duplicate canonicals are rejected.
+policy_json_valid() {
+  local payload="$1"
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  printf '%s\n' "$payload" | "$JQ_BIN" -e '
+    .schemaVersion == 1 and
+    (.workspaces | type == "object") and
+    (([.workspaces | keys[] | select(. == "dev" or . == "playgrounds" or . == "personal")] | length) == (.workspaces | keys | length)) and
+    ([.workspaces[] |
+      (.capability | type == "string" and ((test("[\\r\\n]")) | not) and test("^[0-9a-f]{48}$")) and
+      (.repos | type == "array") and
+      ([.repos[] |
+        (.canonical | type == "string") and
+        ((.canonical | test("[\\r\\n]")) | not) and
+        (.canonical | test("^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")) and
+        ((.canonical | endswith(".git")) | not) and
+        (.mode == "read-only" or .mode == "read-write")
+      ] | all) and
+      ([.repos[].canonical] | unique | length) == ([.repos[].canonical] | length)
+    ] | all) and
+    ([.workspaces[].capability] | unique | length) == ([.workspaces[].capability] | length)
+  ' >/dev/null 2>&1
+}
+
+policy_validate() {
+  local file payload
+  file="$(policy_file)"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  payload="$(cat "$file" 2>/dev/null)" || return 1
+  policy_json_valid "$payload"
+}
+
+policy_atomic_write() {
+  local file tmp
+  file="$(policy_file)"
+  tmp="$file.tmp.$$"
+  umask 077
+  if ! "$JQ_BIN" "$@" "$file" >"$tmp" 2>/dev/null; then rm -f "$tmp"; return 1; fi
+  chmod 600 "$tmp"
+  if ! mv "$tmp" "$file"; then rm -f "$tmp"; return 1; fi
+}
+
+policy_workspace_capability() {
+  local box="$1"
+  "$JQ_BIN" -r --arg w "$box" '.workspaces[$w].capability // empty' "$(policy_file)" 2>/dev/null
+}
+
+policy_repo_mode() {
+  local box="$1" repo="$2"
+  "$JQ_BIN" -r --arg w "$box" --arg r "$repo" '
+    .workspaces[$w].repos // [] | map(select(.canonical == $r)) | first | .mode // empty
+  ' "$(policy_file)" 2>/dev/null
+}
+
+policy_first_ticked_repo() {
+  local box="$1"
+  "$JQ_BIN" -r --arg w "$box" '
+    .workspaces[$w].repos // [] | map(select((.canonical | type == "string") and (.canonical | length > 0))) | first | .canonical // empty
+  ' "$(policy_file)" 2>/dev/null
+}
+
+policy_repo_summary() {
+  local box="$1"
+  "$JQ_BIN" -r --arg w "$box" '
+    .workspaces[$w].repos // []
+    | if length == 0 then " none"
+      else ([.[] | " " + .canonical + " (" + .mode + ")"] | join(","))
+      end
+  ' "$(policy_file)" 2>/dev/null || printf ' none'
+}
+
+policy_repo_json() {
+  local box="$1"
+  "$JQ_BIN" -c --arg w "$box" '.workspaces[$w].repos // []' "$(policy_file)" 2>/dev/null || printf '[]'
+}
+
+# §8/§11: policy writes are journaled (append-only intent + committed lines)
+# so a crash mid-write leaves a recoverable trail beside the mutation.
+policy_journal() {
+  local box="$1" action="$2" status="$3" file
+  file="$GITHUB_META_DIR/policy-journal.jsonl"
+  mkdir -p "$GITHUB_META_DIR" 2>/dev/null || true
+  umask 077
+  printf '%s\n' "$("$JQ_BIN" -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg b "$box" --arg a "$action" --arg s "$status" \
+    '{schemaVersion:1,event:"policy-write",workspace:$b,action:$a,status:$s,timestamp:$t}')" >>"$file" 2>/dev/null || true
+}
+
+canonicalize_github_repo() {
+  local repo="${1:-}"
+  repo="${repo%.git}"
+  repo="${repo%/}"
+  repo="$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')"
+  printf '%s\n' "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Path C §5 host credential: one versioned JSON record in the Keychain
+# (MSW_HOST_KEYCHAIN_SERVICE/ACCOUNT; MSW_TEST_KEYCHAIN_DIR file fallback),
+# plus a nonsecret metadata file beside the policy file (MSW_HOST_META_FILE).
+# The record is written only after verification passes; rotation bumps
+# generation+1 in a single record; revocation deletes metadata FIRST and is
+# fail-closed. The token bytes never appear in argv, logs, journals, or files.
+# ---------------------------------------------------------------------------
+# §5 re-review: the bridge-owned item lives under the .v2 service namespace.
+# The legacy item at org.microsandbox.MSWMonitor.github-host was created by
+# security(1) with the security-CLI ACL; the bridge (Security.framework via
+# python) must NEVER SecItemUpdate/CopyMatching/Delete it (a foreign-ACL
+# prompt would hang the CLI). The legacy item stays dormant and unread.
+host_credential_service() { printf '%s' "${MSW_HOST_KEYCHAIN_SERVICE:-org.microsandbox.MSWMonitor.github-host.v2}"; }
+host_credential_account() { printf '%s' "${MSW_HOST_KEYCHAIN_ACCOUNT:-user}"; }
+host_meta_file() { printf '%s' "${MSW_HOST_META_FILE:-$HOME/Library/Application Support/MSW Monitor/github-host.json}"; }
+
+host_credential_token_valid() {
+  local token="$1"
+  [[ -n "$token" && "${#token}" -le 4096 ]] || return 1
+  case "$token" in
+    gho_*|ghp_*|github_pat_*|ghu_*) ;;
+    ghs_*|ghr_*) return 1 ;;  # installation tokens and refresh tokens are the wrong kind
+    *) return 1 ;;
+  esac
+  case "$token" in
+    *[![:graph:]]*) return 1 ;;
+  esac
+}
+
+host_credential_record_valid() {
+  local raw="$1" token
+  [[ -n "$raw" ]] || return 1
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  "$JQ_BIN" -e '
+    type == "object" and
+    .schemaVersion == 1 and
+    (.provider == "gh-cli" or .provider == "oauth-device-flow") and
+    (.tokenKind == "oauth" or .tokenKind == "classic-pat" or .tokenKind == "fine-grained-pat") and
+    (.accessToken | type == "string" and length > 0 and length <= 4096) and
+    (.accountLogin | type == "string" and length > 0) and
+    (.verifiedAt | type == "string" and length > 0) and
+    (.generation | type == "number" and . >= 1) and
+    (.storedAt | type == "string" and length > 0)
+  ' <<<"$raw" >/dev/null 2>&1 || return 1
+  token="$("$JQ_BIN" -r '.accessToken' <<<"$raw" 2>/dev/null)" || return 1
+  host_credential_token_valid "$token"
+}
+
+host_credential_read() {
+  local service account raw
+  service="$(host_credential_service)"; account="$(host_credential_account)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    raw="$(keychain_get "$service" "$account" 2>/dev/null)" || return 1
+  else
+    raw="$(host_keychain_py get "$service" "$account" 2>/dev/null)" || return 1
+  fi
+  [[ -n "$raw" ]] || return 1
+  host_credential_record_valid "$raw" || return 1
+  printf '%s\n' "$raw"
+}
+
+# Single-record atomic upsert: write the record, then prove it reads back as a
+# valid record. Nothing is persisted on an invalid record.
+# §5 real-keychain store/read/delete goes through the standalone bridge
+# bin/msw-keychain-bridge (Security.framework in-process; record via stdin
+# pipes only — never argv/env/tempfiles, no 128-byte prompted-mode truncation).
+# See host_keychain_py below.
+
+host_credential_write() {
+  local record="$1" service account file tmp
+  host_credential_record_valid "$record" || return 1
+  service="$(host_credential_service)"; account="$(host_credential_account)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    mkdir -p "$MSW_TEST_KEYCHAIN_DIR" || return 1
+    chmod 700 "$MSW_TEST_KEYCHAIN_DIR" 2>/dev/null || true
+    file="$(keychain_test_file "$service" "$account")"
+    umask 077
+    printf '%s\n' "$record" >"$file.tmp.$$" || { rm -f "$file.tmp.$$"; return 1; }
+    chmod 600 "$file.tmp.$$" 2>/dev/null || true
+    if ! mv "$file.tmp.$$" "$file"; then rm -f "$file.tmp.$$"; return 1; fi
+  else
+    # §5 hygiene (re-review): the record reaches Security.framework
+    # in-process through a real pipe (normal stdin) — never argv, env, or
+    # tempfiles (security(1)'s prompted stdin is limited to 128 bytes).
+    if ! printf '%s\n' "$record" | host_keychain_py put "$service" "$account"; then
+      return 1
+    fi
+  fi
+  host_credential_read >/dev/null 2>&1
+}
+
+# §5 hygiene (re-review): security(1)'s prompted `-w` stdin mode reads at most
+# 128 bytes, so the versioned JSON host-credential record (with the token)
+# cannot go through it, and passing it in argv is forbidden. All Keychain
+# access for the host credential goes through the standalone bridge
+# bin/msw-keychain-bridge (Security.framework, in-process) with NORMAL stdin:
+# the record reaches `put` through a real pipe — never argv, env, or
+# tempfiles. The writer (bin/msw) and readers (helper/askpass) run the same
+# python binary, so the item's creator trust extends to the readers'
+# SecItemCopyMatching — no security(1) prompts. Usage:
+#   host_keychain_py put SERVICE ACCOUNT     (record on stdin)
+#   host_keychain_py get SERVICE ACCOUNT     (record on stdout; 44 = missing)
+#   host_keychain_py delete SERVICE ACCOUNT  (SecItemDelete + proof)
+host_keychain_py() {
+  local action="$1" service="$2" account="${3:-user}"
+  [[ -n "$MSW_KEYCHAIN_BRIDGE" && -x "$MSW_KEYCHAIN_BRIDGE" ]] || {
+    printf 'msw: keychain bridge missing: %s\n' "${MSW_KEYCHAIN_BRIDGE:-<unset>}" >&2
+    return 1
+  }
+  MSW_FAKE_KC_DELETE_FAIL="${MSW_FAKE_KC_DELETE_FAIL:-0}" \
+    "$MSW_PYTHON_BIN" "$MSW_KEYCHAIN_BRIDGE" "$action" "$service" "$account"
+}
+
+host_credential_delete() {
+  local service account
+  service="$(host_credential_service)"; account="$(host_credential_account)"
+  if [[ "${MSW_FAKE_KC_DELETE_FAIL:-0}" == 1 ]]; then
+    printf 'msw: Keychain delete failure injected\n' >&2
+    return 1
+  fi
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    rm -f "$(keychain_test_file "$service" "$account")"
+    [[ ! -e "$(keychain_test_file "$service" "$account")" ]] || {
+      printf 'msw: could not verify Keychain item removal %s/%s\n' "$service" "$account" >&2
+      return 1
+    }
+  else
+    # the bridge itself proves removal (SecItemDelete + read-back probe)
+    host_keychain_py delete "$service" "$account" || return 1
+  fi
+}
+
+host_meta_read() {
+  local file
+  file="$(host_meta_file)"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  cat "$file"
+}
+
+host_meta_delete() {
+  local file
+  file="$(host_meta_file)"
+  rm -f "$file"
+  [[ ! -e "$file" && ! -L "$file" ]]
+}
+
+# Durable metadata: fsync the file and its parent directory so the activation
+# record / revocation tombstone survives a crash. Python stdlib (no extra
+# tools). Directory fsync is best-effort; file fsync failure is fatal.
+fsync_path() {
+  local path="$1" mode="${2:-file}"
+  "$MSW_PYTHON_BIN" - "$path" "$mode" <<'PY' || return 1
+import os
+import sys
+path, mode = sys.argv[1], sys.argv[2]
+try:
+    fd = os.open(path, os.O_RDONLY)
+except OSError:
+    sys.exit(1)
+try:
+    os.fsync(fd)
+except OSError:
+    if mode == "dir":
+        sys.exit(0)  # best-effort on platforms that reject dir fsync
+    sys.exit(1)
+finally:
+    os.close(fd)
+PY
+}
+
+host_meta_write() {
+  local meta="$1" file dir
+  if [[ "${MSW_FAKE_HOST_META_WRITE_FAIL:-0}" == 1 ]]; then
+    printf 'msw: metadata write failure injected\n' >&2
+    return 1
+  fi
+  file="$(host_meta_file)"; dir="$(dirname "$file")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  umask 077
+  printf '%s\n' "$meta" >"$file.tmp.$$" || { rm -f "$file.tmp.$$"; return 1; }
+  chmod 600 "$file.tmp.$$"
+  fsync_path "$file.tmp.$$" file || { rm -f "$file.tmp.$$"; return 1; }
+  if ! mv "$file.tmp.$$" "$file"; then rm -f "$file.tmp.$$"; return 1; fi
+  fsync_path "$dir" dir
+}
+
+# §5/blocker 4: the global credential lock serializes store/rotate/remove so
+# a revocation tombstone can never race a concurrent store. fd 8 is reserved;
+# acquisition is idempotent within one process (fcntl locks are per-process,
+# so re-acquiring on a fresh fd would silently release the first lock).
+HOST_CRED_LOCK_HELD=0
+host_credential_lock_file() { printf '%s/credential.lock\n' "$GITHUB_META_DIR"; }
+host_credential_lock_acquire() {
+  local lock
+  (( HOST_CRED_LOCK_HELD == 0 )) || return 0
+  require_command_path lockf "$LOCKF_BIN"
+  lock="$(host_credential_lock_file)"
+  mkdir -p "$GITHUB_META_DIR" || return 1
+  chmod 700 "$GITHUB_META_DIR" || return 1
+  if ! exec 8>>"$lock"; then return 1; fi
+  if ! "$LOCKF_BIN" -s -t 0 8; then
+    exec 8>&-
+    return 1
+  fi
+  HOST_CRED_LOCK_HELD=1
+  return 0
+}
+host_credential_lock_release() {
+  if (( HOST_CRED_LOCK_HELD )); then
+    exec 8>&-
+    HOST_CRED_LOCK_HELD=0
+  fi
+}
+
+# §5/blocker 4 activation gate: the nonsecret metadata must exist, be active,
+# and carry the SAME generation/accountLogin as the Keychain record. A revoked
+# / revocation-uncertain tombstone or any mismatch denies the credential
+# globally (every workspace), so an unproven revocation can never leave other
+# workspaces live. The record bytes reach jq only through stdin.
+host_meta_matches_record() {
+  local raw="$1" gen login
+  gen="$(printf '%s' "$raw" | "$JQ_BIN" -r '.generation // 0' 2>/dev/null || true)"
+  login="$(printf '%s' "$raw" | "$JQ_BIN" -r '.accountLogin // ""' 2>/dev/null || true)"
+  [[ "$gen" =~ ^[0-9]+$ && "$gen" -ge 1 ]] || return 1
+  [[ -n "$login" ]] || return 1
+  host_meta_read 2>/dev/null | "$JQ_BIN" -e --arg g "$gen" --arg l "$login" '
+    .schemaVersion == 1 and
+    .state == "active" and
+    (.generation | type == "number") and
+    (.generation | tostring) == $g and
+    (.accountLogin | type == "string" and length > 0) and
+    .accountLogin == $l
+  ' >/dev/null 2>&1
+}
+
+# §5/blocker 4 revocation tombstone: a durable GLOBAL deny written BEFORE the
+# Keychain deletion. state "revoked" = clean intent; "revocation-uncertain" =
+# the Keychain deletion failed, so every helper denies until the record is
+# repaired. Neither state is ever "active", so the helper and
+# host_credential_available both deny.
+host_meta_tombstone() {
+  local state="$1" tombstone
+  tombstone="$("$JQ_BIN" -nc --arg s "$state" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{schemaVersion:1,state:$s,revokedAt:$t}')" || return 1
+  host_meta_write "$tombstone"
+}
+
+# §5 re-review: an INDEPENDENT global deny marker that every helper checks
+# BEFORE touching the Keychain. A revocation records it FIRST (durable,
+# fsync'd) so even a crash mid-revocation — or any unproven later step —
+# leaves the credential globally denied. A successful store clears it.
+host_credential_deny_marker() { printf '%s' "${MSW_CREDENTIAL_DENY_MARKER:-$HOME/.config/msw/credential-disabled}"; }
+host_credential_deny_marker_present() {
+  local marker
+  marker="$(host_credential_deny_marker)"
+  [[ -e "$marker" || -L "$marker" ]]
+}
+host_credential_deny_marker_write() {
+  local marker dir
+  marker="$(host_credential_deny_marker)"; dir="$(dirname "$marker")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  umask 077
+  printf '%s\n' "host GitHub credential revoked; all helpers deny globally" >"$marker.tmp.$$" || { rm -f "$marker.tmp.$$"; return 1; }
+  chmod 600 "$marker.tmp.$$" || { rm -f "$marker.tmp.$$"; return 1; }
+  fsync_path "$marker.tmp.$$" file || { rm -f "$marker.tmp.$$"; return 1; }
+  if ! mv "$marker.tmp.$$" "$marker"; then rm -f "$marker.tmp.$$"; return 1; fi
+  fsync_path "$dir" dir
+}
+host_credential_deny_marker_clear() {
+  local marker
+  marker="$(host_credential_deny_marker)"
+  rm -f "$marker"
+  [[ ! -e "$marker" && ! -L "$marker" ]]
+}
+
+# Last-resort deny domain for a revocation whose file marker, Keychain deny
+# item, metadata tombstone, and token deletion could not be proven. The helper
+# and every host credential gate check this before touching the token.
+host_credential_global_quarantine() {
+  printf '%s' "${MSW_GLOBAL_CREDENTIAL_QUARANTINE:-$GITHUB_META_DIR/credential.quarantine}"
+}
+host_credential_global_quarantine_present() {
+  local file
+  file="$(host_credential_global_quarantine)"
+  [[ -e "$file" || -L "$file" ]]
+}
+host_credential_global_quarantine_write() {
+  local file dir
+  file="$(host_credential_global_quarantine)"; dir="$(dirname "$file")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  umask 077
+  printf '%s\n' "host GitHub credential state unproven; all access denied" >"$file.tmp.$$" ||
+    { rm -f "$file.tmp.$$"; return 1; }
+  chmod 600 "$file.tmp.$$" || { rm -f "$file.tmp.$$"; return 1; }
+  fsync_path "$file.tmp.$$" file || { rm -f "$file.tmp.$$"; return 1; }
+  mv "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; return 1; }
+  fsync_path "$dir" dir
+}
+host_credential_global_quarantine_clear() {
+  local file
+  file="$(host_credential_global_quarantine)"
+  rm -f "$file"
+  [[ ! -e "$file" && ! -L "$file" ]]
+}
+# Best-effort global proxy disable, used only inside the revocation fallback
+# and ONLY counted as proven when the launchd job is actually gone.
+host_credential_disable_proxy_global() {
+  local plist
+  plist="$(github_proxy_plist_file)"
+  /bin/launchctl bootout "gui/$(id -u)/$(github_proxy_launchd_label)" >/dev/null 2>&1 || true
+  /bin/launchctl unload -w "$plist" >/dev/null 2>&1 || true
+  rm -f "$plist" 2>/dev/null || true
+  ! github_proxy_launchd_loaded
+}
+
+# §5 closure re-review: an INDEPENDENT SECOND deny domain — a dedicated
+# Keychain deny item at the .v2.deny service, queried by the helper BEFORE the
+# activation record. The helper proceeds only on an explicit item-not-found;
+# a present deny item OR any deny-query error denies globally (fail-closed).
+# The revocation must prove at least one durable deny gate (file marker OR
+# this item) BEFORE any mutation.
+host_credential_deny_service() { printf '%s' "${MSW_HOST_KEYCHAIN_DENY_SERVICE:-org.microsandbox.MSWMonitor.github-host.v2.deny}"; }
+host_credential_deny_account() { printf '%s' "${MSW_HOST_KEYCHAIN_DENY_ACCOUNT:-user}"; }
+host_credential_deny_item_present() {
+  local service account rc
+  service="$(host_credential_deny_service)"; account="$(host_credential_deny_account)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    # file seam: the deny item is a keychain-test-dir file named like the item
+    [[ -f "$(keychain_test_file "$service" "$account")" ]]
+    return
+  fi
+  rc="$(host_keychain_py get "$service" "$account" >/dev/null 2>&1; printf '%s' "$?")" || rc=1
+  [[ "$rc" == 44 ]] && return 1
+  return 0
+}
+host_credential_deny_item_set() {
+  local service account
+  service="$(host_credential_deny_service)"; account="$(host_credential_deny_account)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    mkdir -p "$MSW_TEST_KEYCHAIN_DIR" 2>/dev/null || return 1
+    umask 077
+    printf '%s\n' '{"schemaVersion":1,"state":"revoked"}' >"$(keychain_test_file "$service" "$account")" || return 1
+  else
+    printf '%s\n' '{"schemaVersion":1,"state":"revoked"}' | host_keychain_py put "$service" "$account" || return 1
+  fi
+  # VERIFY the deny item reads back
+  host_credential_deny_item_present
+}
+host_credential_deny_item_clear() {
+  local service account
+  service="$(host_credential_deny_service)"; account="$(host_credential_deny_account)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    rm -f "$(keychain_test_file "$service" "$account")"
+  else
+    host_keychain_py delete "$service" "$account" >/dev/null 2>&1 || true
+  fi
+}
+
+# Availability is fail-closed: BOTH global deny gates (Keychain deny item,
+# then the file marker) must be absent, PLUS a complete, schema-valid record
+# AND an active activation metadata record that matches its
+# generation/accountLogin.
+host_credential_available() {
+  local raw
+  host_credential_global_quarantine_present && return 1
+  host_credential_deny_item_present && return 1
+  host_credential_deny_marker_present && return 1
+  raw="$(host_credential_read 2>/dev/null)" || return 1
+  host_meta_matches_record "$raw"
+}
+
+# host_github_api METHOD PATH [TOKEN] — api.github.com only; the Bearer
+# credential is delivered to curl through stdin (`-H @-`), never through argv
+# or a temp file, so there is nothing to clean up on any signal path. In
+# tests MSW_PROXY_UPSTREAM_ROOT points at the fake GitHub.
+host_github_api() {
+  local method="$1" path="$2" token="${3:-}" base status=0 output=""
+  require_command_path curl "$CURL_BIN"
+  base="${MSW_PROXY_UPSTREAM_ROOT:-https://api.github.com}"
+  base="${base%/}"
+  local args=(-sS --max-time 30 --connect-timeout 10 -X "$method")
+  args+=(-H "Accept: application/vnd.github+json" -H "User-Agent: MSWMonitor")
+  if [[ -n "$token" ]]; then
+    output="$(printf 'Authorization: Bearer %s\n' "$token" | "$CURL_BIN" "${args[@]}" -H @- "$base$path" 2>/dev/null)" || status=$?
+  else
+    output="$("$CURL_BIN" "${args[@]}" "$base$path" 2>/dev/null)" || status=$?
+  fi
+  (( status == 0 )) || return 1
+  printf '%s\n' "$output"
+}
+
+# Newline-separated canonical:mode lines for every read-write repo across the
+# whole policy (the host credential is global; it must push to all of them).
+policy_read_write_repos() {
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  "$JQ_BIN" -r '
+    .workspaces // {} | to_entries[] | .value.repos // [] | .[]
+    | select(.mode == "read-write" and (.canonical | type == "string") and (.canonical | length > 0))
+    | .canonical
+  ' "$(policy_file)" 2>/dev/null | sort -u
+}
+
+# Verify a token against api.github.com: GET /user, then every read-write
+# policy repo GET /repos/{o}/{r} must report permissions.push==true. Prints a
+# JSON repoChecks array on success. Never persists anything on failure.
+host_credential_verify_token() {
+  local token="$1" user_json login repo repo_json push_ok now checks=() check
+  user_json="$(host_github_api GET /user "$token")" || return 1
+  login="$(printf '%s' "$user_json" | "$JQ_BIN" -r '.login // empty' 2>/dev/null)" || return 1
+  [[ -n "$login" ]] || return 1
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if policy_validate; then
+    while IFS= read -r repo; do
+      [[ -n "$repo" ]] || continue
+      repo_json="$(host_github_api GET "/repos/$repo" "$token")" || return 1
+      push_ok="$(printf '%s' "$repo_json" | "$JQ_BIN" -r '.permissions.push // false' 2>/dev/null || true)"
+      [[ "$push_ok" == true ]] || return 1
+      checks+=("{\"canonical\":$(app_json_string "$repo"),\"mode\":\"read-write\",\"push\":true,\"checkedAt\":$(app_json_string "$now")}")
+    done < <(policy_read_write_repos)
+  fi
+  printf '['; local sep=""; if (( ${#checks[@]} > 0 )); then for check in "${checks[@]}"; do printf '%s%s' "$sep" "$check"; sep=","; done; fi; printf ']\n'
+  printf '%s\n' "$login"
+}
+
+# Persist a verified record + nonsecret activation metadata, serialized on the
+# global credential lock (blocker 4: store/rotate/remove never race). The
+# keychain record is written first; if metadata cannot be written the record
+# is revoked so no token survives an unproven store. §5 hygiene: the token
+# reaches jq ONLY through stdin (`input`), never through argv; the argv args
+# are nonsecret metadata (provider/kind/login/generation/timestamps).
+host_credential_store() {
+  local provider="$1" token_kind="$2" token="$3" login="$4" generation="$5" checks_json="$6"
+  local now record meta
+  [[ "$generation" =~ ^[0-9]+$ && "$generation" -ge 1 ]] || return 1
+  if ! host_credential_lock_acquire; then
+    printf 'msw: could not acquire the global host credential lock\n' >&2
+    return 1
+  fi
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(printf '%s\n' "$token" | "$JQ_BIN" -ncR --arg p "$provider" --arg k "$token_kind" --arg l "$login" --argjson g "$generation" --arg v "$now" --arg s "$now" \
+    'input as $t | {schemaVersion:1,provider:$p,tokenKind:$k,accessToken:$t,accountLogin:$l,verifiedAt:$v,generation:$g,storedAt:$s}')" || { host_credential_lock_release; return 1; }
+  host_credential_write "$record" || { host_credential_lock_release; return 1; }
+  meta="$("$JQ_BIN" -nc --arg p "$provider" --arg k "$token_kind" --arg l "$login" --arg v "$now" --arg s "$now" --argjson g "$generation" --argjson c "$checks_json" \
+    '{schemaVersion:1,state:"active",provider:$p,tokenKind:$k,accountLogin:$l,verifiedAt:$v,generation:$g,storedAt:$s,repoChecks:$c}')" || { host_credential_delete; host_credential_lock_release; return 1; }
+  host_meta_write "$meta" || { host_credential_delete; host_credential_lock_release; return 1; }
+  # a fresh verified record + active metadata reactivates the credential:
+  # clear both prior global deny gates (best-effort; they must never block a
+  # verified store).
+  host_credential_deny_marker_clear >/dev/null 2>&1 || true
+  host_credential_deny_item_clear >/dev/null 2>&1 || true
+  host_credential_global_quarantine_clear >/dev/null 2>&1 || true
+  host_credential_lock_release
+}
+
+# Reuse gh when present and its local keyring holds a token. The token is
+# captured in-process (command substitution) and never reaches our children's
+# argv, logs, or env. §8 UX: `gh auth status --active` makes a NETWORK
+# round-trip and can time out while the local keyring token is perfectly
+# readable, so acquisition NEVER gates on it — a timeout must not be reported
+# as "gh not authenticated". `gh auth token` reads the local keyring; the
+# token shape is validated here and the real verification happens in
+# host_credential_verify_token (GET /user via host_github_api), which emits
+# the typed network/verification error on failure.
+gh_auth_token() {
+  local gh_bin token
+  gh_bin="${MSW_GH_BIN:-$(command -v gh 2>/dev/null || true)}"
+  [[ -n "$gh_bin" && -x "$gh_bin" ]] || return 1
+  token="$("$gh_bin" auth token 2>/dev/null)" || return 1
+  host_credential_token_valid "$token" || return 1
+  printf '%s\n' "$token"
+}
+
+host_credential_token_kind() {
+  case "$1" in
+    gho_*|ghu_*) printf 'oauth\n' ;;
+    ghp_*) printf 'classic-pat\n' ;;
+    github_pat_*) printf 'fine-grained-pat\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# §5 OAuth Device Flow. The public client ID is a release input
+# (MSW_HOST_OAUTH_CLIENT_ID), never hardcoded; without it the helpers fail with
+# exit 66 (typed not-configured) so callers can emit the JSON error contract.
+# Endpoints honor MSW_PROXY_UPSTREAM_ROOT so tests exercise the real wire path.
+host_oauth_client_id() { printf '%s' "${MSW_HOST_OAUTH_CLIENT_ID:-}"; }
+
+host_oauth_curl() {
+  # usage: host_oauth_curl POST path [curl args...]  → JSON body on stdout
+  local method="$1" path="$2"; shift 2
+  require_command_path curl "$CURL_BIN"
+  local base
+  base="${MSW_PROXY_UPSTREAM_ROOT:-https://github.com}"
+  "$CURL_BIN" -sS --max-time 30 -X "$method" "${base%/}$path" \
+    -H 'Accept: application/json' "$@" 2>/dev/null
+}
+
+# One POST /login/device/code. Prints a JSON object with device_code,
+# user_code, verification_uri, interval, expires_in. Exit 66 = client ID unset.
+host_device_flow_start() {
+  local client_id json device_code user_code verification_uri interval expires_in
+  client_id="$(host_oauth_client_id)"
+  [[ -n "$client_id" ]] || return 66
+  json="$(host_oauth_curl POST /login/device/code \
+    --data-urlencode "client_id=$client_id" \
+    --data-urlencode 'scope=repo')" || return 1
+  device_code="$(printf '%s' "$json" | "$JQ_BIN" -r '.device_code // empty' 2>/dev/null || true)"
+  user_code="$(printf '%s' "$json" | "$JQ_BIN" -r '.user_code // empty' 2>/dev/null || true)"
+  verification_uri="$(printf '%s' "$json" | "$JQ_BIN" -r '.verification_uri // empty' 2>/dev/null || true)"
+  interval="$(printf '%s' "$json" | "$JQ_BIN" -r '.interval // 5' 2>/dev/null || true)"
+  expires_in="$(printf '%s' "$json" | "$JQ_BIN" -r '.expires_in // 900' 2>/dev/null || true)"
+  [[ -n "$device_code" && -n "$user_code" && -n "$verification_uri" ]] || return 1
+  printf '%s' "$("$JQ_BIN" -nc \
+    --arg d "$device_code" --arg u "$user_code" --arg v "$verification_uri" \
+    --argjson i "$interval" --argjson e "$expires_in" \
+    '{device_code:$d,user_code:$u,verification_uri:$v,interval:$i,expires_in:$e}')"
+  return 0
+}
+
+# ONE POST /login/oauth/access_token exchange. Prints the raw JSON body
+# ({"access_token":...} or {"error":...}). Exit 66 = client ID unset.
+host_device_flow_poll() {
+  local device_code="$1" client_id
+  client_id="$(host_oauth_client_id)"
+  [[ -n "$client_id" ]] || return 66
+  host_oauth_curl POST /login/oauth/access_token \
+    --data-urlencode "client_id=$client_id" \
+    --data-urlencode "device_code=$device_code" \
+    --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:device_code' || return 1
+}
+
+# Interactive plain-auth loop (TTY required): start, prompt, poll.
+host_device_flow_interactive() {
+  local start_json device_code user_code verification_uri interval poll_interval \
+        token_json error token attempt=0
+  start_json="$(host_device_flow_start)" || return $?
+  device_code="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.device_code // empty')"
+  user_code="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.user_code // empty')"
+  verification_uri="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.verification_uri // empty')"
+  interval="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.interval // 5')"
+  note "GitHub authorization required"
+  printf 'Visit %s and enter code: %s\n' "$verification_uri" "$user_code"
+  poll_interval="$interval"
+  while (( attempt < 120 )); do
+    attempt=$((attempt + 1))
+    sleep "$poll_interval"
+    token_json="$(host_device_flow_poll "$device_code")" || return 1
+    error="$(printf '%s' "$token_json" | "$JQ_BIN" -r '.error // empty' 2>/dev/null || true)"
+    case "$error" in
+      authorization_pending) continue ;;
+      slow_down) poll_interval=$((poll_interval + 5)); continue ;;
+      expired_token) printf 'msw: GitHub Device Flow expired; restart: msw github auth\n' >&2; return 76 ;;
+      access_denied) printf 'msw: GitHub Device Flow access denied; restart: msw github auth\n' >&2; return 76 ;;
+      "")
+        token="$(printf '%s' "$token_json" | "$JQ_BIN" -r '.access_token // empty' 2>/dev/null || true)"
+        [[ -n "$token" ]] || { printf 'msw: GitHub Device Flow returned no access token\n' >&2; return 1; }
+        host_credential_token_valid "$token" || { printf 'msw: GitHub Device Flow returned an invalid token kind\n' >&2; return 1; }
+        printf '%s\n' "$token"
+        return 0
+        ;;
+    esac
+  done
+  printf 'msw: GitHub Device Flow authorization timed out; restart: msw github auth\n' >&2
+  return 75
+}
+
+# Verify a fresh token, then store it with rotation semantics (generation =
+# existing+1, or 1). Exits: 0 ok, 68 verification failed, 69 store failed.
+# Never persists anything on failure; never prints the token.
+host_credential_commit_token() {
+  local provider="$1" token="$2" generation=1 existing="" login_and_checks checks_json login token_kind
+  token_kind="$(host_credential_token_kind "$token")" || return 1
+  if existing="$(host_credential_read 2>/dev/null)"; then
+    generation="$("$JQ_BIN" -r '.generation // 0' <<<"$existing" 2>/dev/null || true)"
+    [[ "$generation" =~ ^[0-9]+$ ]] || generation=0
+    generation=$((generation + 1))
+  fi
+  login_and_checks="$(host_credential_verify_token "$token")" || return 68
+  checks_json="${login_and_checks%%$'\n'*}"
+  login="${login_and_checks#*$'\n'}"
+  host_credential_store "$provider" "$token_kind" "$token" "$login" "$generation" "$checks_json" || return 69
+  return 0
+}
+
+# Acquire a fresh, verified host credential. force=1 rotates (generation+1);
+# force=0 reuses an existing valid record. Nothing is persisted unless every
+# verification step passes. Exit codes: 0 ok; 66 not configured; 67 TTY
+# required; 68 verification failed; 69 store failed; 75/76 device flow
+# timed out / expired-or-denied; 1 other. Messages go to stderr (text mode);
+# --json callers emit the typed JSON error from the exit code.
+host_credential_acquire() {
+  local force="$1" token="" provider="" acquire_rc=0
+  if (( force == 0 )); then
+    if host_credential_available; then
+      return 0
+    fi
+  fi
+  if token="$(gh_auth_token 2>/dev/null)"; then
+    provider=gh-cli
+  fi
+  if [[ -z "$token" ]]; then
+    # §5 fallback ordering: the missing client ID is reported FIRST (typed,
+    # naming both remedies), so non-interactive callers can route to the
+    # device flow even when no TTY is available.
+    if [[ -z "$(host_oauth_client_id)" ]]; then
+      printf 'msw: gh is not authenticated and the OAuth Device Flow client ID (MSW_HOST_OAUTH_CLIENT_ID) is not set. Run: gh auth login\n' >&2
+      return 66
+    fi
+    if [[ ! -t 0 ]]; then
+      printf 'msw: OAuth Device Flow requires an interactive terminal for plain auth; run: msw github auth --device\n' >&2
+      return 67
+    fi
+    token="$(host_device_flow_interactive)"
+    acquire_rc=$?
+    if (( acquire_rc != 0 )); then
+      return "$acquire_rc"
+    fi
+    provider=oauth-device-flow
+  fi
+  host_credential_commit_token "$provider" "$token"
+}
+
+# Nonsecret status object: provider/tokenKind/accountLogin/verifiedAt/
+# generation/storedAt/repoChecks (no token bytes). Requires the activation
+# metadata (blocker 4): a revoked/mismatched credential reports missing.
+host_credential_status_json() {
+  local raw meta
+  host_credential_deny_item_present && return 1
+  host_credential_deny_marker_present && return 1
+  raw="$(host_credential_read 2>/dev/null)" || return 1
+  host_meta_matches_record "$raw" || return 1
+  meta="$(host_meta_read 2>/dev/null || true)"
+  "$JQ_BIN" -nc \
+    --argjson record "$(printf '%s' "$raw" | "$JQ_BIN" -c '{provider,tokenKind,accountLogin,verifiedAt,generation,storedAt}')" \
+    --argjson checks "$(if [[ -n "$meta" ]]; then printf '%s' "$meta" | "$JQ_BIN" -c '.repoChecks // []'; else printf '[]'; fi)" \
+    '$record + {repoChecks: $checks}'
+}
+
+host_credential_state() {
+  if host_credential_available; then printf 'present\n'; else printf 'missing\n'; fi
+}
+
 sandbox_exists() { workspace_msb "$1" inspect "$1" >/dev/null 2>&1; }
 sandbox_inspect_state() {
   local box="$1" output
@@ -428,12 +1240,17 @@ github_lock_exit() {
 }
 
 github_lock_acquire() {
-  local box="$1" lock
+  local box="$1" strict="${2:-0}" lock
   require_command_path lockf "$LOCKF_BIN"
   mkdir -p "$GITHUB_META_DIR" || return 1
   chmod 700 "$GITHUB_META_DIR" || return 1
   lock="$(github_lock_file "$box")"
   if [[ -d "$lock" ]]; then
+    if (( strict )); then
+      # §11.1: a stale/unacquirable legacy lock directory is surfaced for
+      # manual review — never unlinked directly.
+      return 2
+    fi
     if ! github_lock_reclaim_legacy "$lock"; then
       (( MSW_APP_MODE == 1 )) && return 1
       fatal "GitHub operation already in progress for workspace '$box'"
@@ -527,9 +1344,14 @@ clear_quarantine() {
     return 1
   fi
 }
+# §11 closure re-review: preexisting_quarantine ($2) is recorded in
+# MIGRATION_PREEXISTING_QUARANTINE BEFORE the EXIT/INT/TERM/HUP traps are
+# installed, so a signal arriving at the arm hook can never truncate a
+# pre-existing marker (the trap reads the flag that was already set).
 setup_transaction_arm() {
   SETUP_TRANSACTION_BOX="$1"
   SETUP_TRANSACTION_ACTIVE=1
+  MIGRATION_PREEXISTING_QUARANTINE="${2:-0}"
   trap 'setup_transaction_trap EXIT $?' EXIT
   trap 'setup_transaction_trap INT 130' INT
   trap 'setup_transaction_trap TERM 143' TERM
@@ -549,7 +1371,14 @@ setup_transaction_trap() {
   trap '' INT TERM HUP
   if (( SETUP_TRANSACTION_ACTIVE )); then
     SETUP_TRANSACTION_ACTIVE=0
-    quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
+    if (( MIGRATION_PREEXISTING_QUARANTINE )); then
+      # §11.5/blocker 6+4: an interrupted migration must NEVER truncate a
+      # pre-existing marker; record the interrupt in the durable journal only.
+      migration_journal "$SETUP_TRANSACTION_BOX" interrupted \
+        "setup interrupted by ${signal} (pre-existing quarantine marker preserved)" >/dev/null 2>&1 || true
+    else
+      quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
+    fi
   fi
   github_lock_release
   trap - INT TERM HUP
@@ -576,7 +1405,8 @@ workspace_msb() {
 workspace_msb_with_read_token() {
   local box="$1" token="" status
   shift
-  if token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
+  # Path C §1: local mode never reads Connect grants or keychain tokens.
+  if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
     if GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
       status=0
     else
@@ -590,7 +1420,7 @@ workspace_msb_with_read_token() {
 workspace_msb_with_read_token_for_cleanup() {
   local box="$1" token="" status
   shift
-  if token="$(app_credential_value_for_cleanup "$box" guest 2>/dev/null)"; then
+  if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(app_credential_value_for_cleanup "$box" guest 2>/dev/null)"; then
     if GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
       status=0
     else
@@ -605,6 +1435,9 @@ workspace_msb_with_read_token_for_cleanup() {
 
 start_sandbox() {
   local box="$1"
+  # §11 trigger: any local-mode operation that starts a workspace first
+  # retires legacy GitHub state so the fail-closed checks below can pass.
+  migrate_local_if_needed "$box"
   assert_not_quarantined "$box"
   if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
     { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
@@ -741,6 +1574,196 @@ validate_port() {
   (( numeric >= 1 && numeric <= 65535 )) || fatal "$label must be an integer from 1 to 65535"
 }
 
+# ---------------------------------------------------------------------------
+# Published-port warnings and host-managed forwarding. msb never publishes
+# ports (no --port args at create): the desired list stays the immutable
+# config, and lib/msw-port-forwarder.py — one launchd KeepAlive agent per
+# workspace — keeps ONE OpenSSH `-L <ip>:P:127.0.0.1:P` per currently free
+# port while the VM runs. Occupied ports are omitted and persisted here as
+# skippedPorts so `msw app state` can surface a portWarning for the MSW
+# Monitor app. `msw start`/`msw restart` only kick the forwarder after a
+# successful boot; nothing ever removes or recreates a sandbox for a port.
+# File: ~/.config/msw/workspace-state/<box>.json
+#   {"schemaVersion":1,"desiredPorts":["127.0.0.10:3000:3000",...],
+#    "skippedPorts":[3000],"stillInUse":[3000],"warnedAt":"<iso>"}
+# ---------------------------------------------------------------------------
+workspace_state_dir() { printf '%s/.config/msw/workspace-state\n' "$HOME"; }
+workspace_state_file() { printf '%s/%s.json\n' "$(workspace_state_dir)" "$1"; }
+
+workspace_state_read_field() {
+  # usage: workspace_state_read_field FILE FIELD  → prints the raw JSON value
+  # Only our own schema is read: integer arrays and plain strings.
+  local file="$1" field="$2"
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  sed -n "s/.*\"$field\":\[\([0-9,]*\)\].*/\1/p; s/.*\"$field\":\"\([^\"]*\)\".*/\1/p" "$file" 2>/dev/null
+}
+
+workspace_state_write() {
+  # usage: workspace_state_write BOX DESIRED_CSV SKIPPED_CSV STILL_CSV WARNED_AT
+  # DESIRED_CSV is the comma-joined full published port spec list
+  # ("127.0.0.10:3000:3000,..."); skipped/still are comma-joined ints.
+  local box="$1" desired_csv="$2" skipped_csv="$3" still_csv="$4" warned_at="$5"
+  local dir file tmp port spec desired_json="" d old_ifs="$IFS"
+  dir="$(workspace_state_dir)"; file="$(workspace_state_file "$box")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  IFS=' '
+  for port in ${skipped_csv//,/ } ${still_csv//,/ }; do
+    [[ "$port" =~ ^[0-9]+$ ]] || { IFS="$old_ifs"; return 1; }
+  done
+  for spec in ${desired_csv//,/ }; do
+    [[ "$spec" =~ ^[0-9.:]+$ ]] || { IFS="$old_ifs"; return 1; }
+    [[ -n "$desired_json" ]] && desired_json+=","
+    desired_json+="\"$spec\""
+  done
+  IFS="$old_ifs"
+  tmp="$file.tmp.$$"
+  printf '{"schemaVersion":1,"desiredPorts":[%s],"skippedPorts":[%s],"stillInUse":[%s],"warnedAt":%s}\n' \
+    "$desired_json" "$skipped_csv" "$still_csv" "$(app_json_string "$warned_at")" >"$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
+__workspace_state_init() {
+  # Internal: setup.sh initializes the workspace-state file with the FULL
+  # desired published port list after every create. Live skippedPorts are
+  # maintained by the host-managed port forwarder
+  # (lib/msw-port-forwarder.py), never by setup.
+  # usage: msw __workspace-state-init WORKSPACE
+  local box="${1:-}" bind_ip p desired_csv=""
+  validate_workspace "$box"
+  (( $# == 1 )) || fatal "usage: msw __workspace-state-init WORKSPACE"
+  bind_ip="$(workspace_ip "$box")"
+  while IFS= read -r p; do
+    [[ -n "$desired_csv" ]] && desired_csv+=","
+    desired_csv+="$bind_ip:$p:$p"
+  done < <(expand_ports)
+  workspace_state_write "$box" "$desired_csv" "" "" "$(app_now)" ||
+    fatal "could not record the workspace state for $box"
+}
+
+# ---------------------------------------------------------------------------
+# Host-managed port forwarder lifecycle (lib/msw-port-forwarder.py). One
+# launchd KeepAlive agent per workspace polls the sandbox and keeps an SSH
+# forward per free published port; it never starts a stopped VM and never
+# touches the sandbox config. `msw start`/`msw restart` only kick it after a
+# successful boot.
+# ---------------------------------------------------------------------------
+port_forwarder_label() { printf 'org.microsandbox.MSWMonitor.port-forwarder.%s' "$1"; }
+port_forwarder_plist() { printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$(port_forwarder_label "$1")"; }
+port_forwarder_pidfile() { printf '%s/port-forwarder-%s.pid\n' "$HOME/.local/state/msw" "$1"; }
+port_forwarder_logfile() { printf '%s/port-forwarder-%s.log\n' "$HOME/.local/state/msw" "$1"; }
+
+port_forwarder_stop() {
+  # Stops the detached fallback process (test mode / launchd unavailable).
+  local box="$1" pidfile pid
+  pidfile="$(port_forwarder_pidfile "$box")"
+  [[ -f "$pidfile" ]] || return 0
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  rm -f "$pidfile"
+  [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill "$pid" >/dev/null 2>&1 || true
+}
+
+port_forwarder_stop_launchd() {
+  local box="$1" plist label
+  plist="$(port_forwarder_plist "$box")"; label="$(port_forwarder_label "$box")"
+  /bin/launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || /bin/launchctl unload -w "$plist" 2>/dev/null || true
+}
+
+port_forwarder_launchd_start() {
+  local box="$1" plist
+  plist="$(port_forwarder_plist "$box")"
+  mkdir -p "$(dirname "$plist")" || return 1
+  cat >"$plist.tmp.$$" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$(port_forwarder_label "$box")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$MSW_PYTHON_BIN</string>
+    <string>$PORT_FORWARDER_BIN</string>
+    <string>$box</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MSW_MSB_BIN</key><string>$MSB_BIN</string>
+    <key>MSW_SSH_BIN</key><string>$SSH_BIN</string>
+    <key>MSW_SSH_PROXY_NO_START</key><string>1</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$(port_forwarder_logfile "$box")</string>
+  <key>StandardErrorPath</key><string>$(port_forwarder_logfile "$box")</string>
+</dict>
+</plist>
+PLIST
+  if ! mv "$plist.tmp.$$" "$plist"; then rm -f "$plist.tmp.$$"; return 1; fi
+  chmod 0644 "$plist"
+  /bin/launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || /bin/launchctl load -w "$plist" 2>/dev/null || return 1
+  return 0
+}
+
+port_forwarder_start() {
+  # Install the per-workspace launch agent (production). Test mode is a
+  # no-op: the forwarder is kicked on demand instead.
+  local box="$1"
+  [[ "${MSW_TEST_MODE:-0}" == 1 ]] && return 0
+  port_forwarder_stop_launchd "$box" 2>/dev/null || true
+  if port_forwarder_launchd_start "$box"; then
+    return 0
+  fi
+  warn "could not install the port forwarder launch agent for $box"
+  return 1
+}
+
+port_forwarder_kick() {
+  # Force an immediate forwarder reconcile after a successful boot. In
+  # production the KeepAlive agent restarts (kickstart -k); in tests a
+  # one-shot helper process probes and updates the state synchronously so
+  # fixtures and assertions observe a deterministic reconcile.
+  local box="$1"
+  if [[ "${MSW_TEST_MODE:-0}" == 1 ]]; then
+    if [[ -n "$PORT_FORWARDER_BIN" && -x "$PORT_FORWARDER_BIN" ]]; then
+      MSW_PORT_FORWARDER_ONESHOT=1 "$MSW_PYTHON_BIN" "$PORT_FORWARDER_BIN" "$box" >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+  /bin/launchctl kickstart -k "gui/$(id -u)/$(port_forwarder_label "$box")" >/dev/null 2>&1 || \
+    port_forwarder_start "$box" >/dev/null 2>&1 || true
+}
+
+workspace_port_warning() {
+  # usage: workspace_port_warning BOX  → prints the warning string ("" if none)
+  local box="$1" file skipped still warned_at bind_ip label
+  file="$(workspace_state_file "$box")"
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  skipped="$(workspace_state_read_field "$file" skippedPorts)"
+  [[ -n "$skipped" ]] || return 0
+  still="$(workspace_state_read_field "$file" stillInUse)"
+  warned_at="$(workspace_state_read_field "$file" warnedAt)"
+  bind_ip="$(workspace_ip "$box")"
+  label="$(printf '%s' "$skipped" | sed 's/,/, /g')"
+  if [[ -n "$still" ]]; then
+    printf 'Published port(s) %s are in use on %s and are not being forwarded to %s (checked %s); they will be forwarded automatically once the port is free.' \
+      "$label" "$bind_ip" "$box" "$warned_at"
+  else
+    printf 'Published port(s) %s were in use on %s and were skipped; they are free now and will be forwarded on the next reconcile.' \
+      "$label" "$bind_ip" "$box"
+  fi
+}
+
+workspace_state_skipped_json() {
+  # usage: workspace_state_skipped_json BOX  → prints a JSON int array ("[]" if none)
+  local box="$1" file skipped
+  file="$(workspace_state_file "$box")"
+  skipped="$(workspace_state_read_field "$file" skippedPorts)"
+  printf '[%s]' "$skipped"
+}
+
 cmd_shell() {
   local box="$1" path
   validate_workspace "$box"
@@ -797,7 +1820,14 @@ MSG
 
 cmd_start() {
   local target="${1:-all}" box
-  while IFS= read -r box; do ensure_running "$box"; echo "$box: running"; done < <(for_targets "$target")
+  while IFS= read -r box; do
+    ensure_running "$box"
+    # Published ports are forwarded host-side; kick the forwarder now that
+    # the sandbox is booted. It never starts a stopped VM and never touches
+    # the sandbox config (no recreate, ever).
+    port_forwarder_kick "$box" || true
+    echo "$box: running"
+  done < <(for_targets "$target")
 }
 
 cmd_stop() {
@@ -816,6 +1846,8 @@ cmd_restart() {
   local target="${1:-all}" box
   while IFS= read -r box; do
     sandbox_exists "$box" || fatal "workspace '$box' does not exist"
+    # §11 trigger: restart also retires legacy state before the fail-closed check.
+    migrate_local_if_needed "$box"
     assert_not_quarantined "$box"
     note "Restarting $box"
     if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
@@ -823,6 +1855,7 @@ cmd_restart() {
       fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
     fi
     workspace_msb_with_read_token "$box" restart -q -t 60 "$box"
+    port_forwarder_kick "$box" || true
   done < <(for_targets "$target")
 }
 
@@ -886,6 +1919,7 @@ cmd_update() {
     "$MSB_BIN" self update
   fi
   "$MSB_BIN" doctor
+  verify_vendored_h11_if_enforced
 }
 
 cmd_tunnel() {
@@ -913,9 +1947,11 @@ Host dev.msb playgrounds.msb personal.msb
   User root
   IdentityFile $HOME/.ssh/msw_ed25519
   IdentitiesOnly yes
+  UserKnownHostsFile $HOME/.ssh/msw_known_hosts
   ProxyCommand $HOME/.local/bin/msw-ssh-proxy %h
 SSH
   chmod 600 "$HOME/.ssh/config.d/msw.conf"
+  touch "$HOME/.ssh/msw_known_hosts"; chmod 600 "$HOME/.ssh/msw_known_hosts"
 }
 
 cmd_host_repair() {
@@ -992,6 +2028,7 @@ Host dev.msb playgrounds.msb personal.msb
   User root
   IdentityFile $HOME/.ssh/msw_ed25519
   IdentitiesOnly yes
+  UserKnownHostsFile $HOME/.ssh/msw_known_hosts
   ProxyCommand $HOME/.local/bin/msw-ssh-proxy %h
   ServerAliveInterval 30
   ServerAliveCountMax 3
@@ -999,6 +2036,7 @@ Host dev.msb playgrounds.msb personal.msb
   SetEnv TERM=xterm-256color
 SSH
   chmod 600 "$HOME/.ssh/config.d/msw.conf"
+  touch "$HOME/.ssh/msw_known_hosts"; chmod 600 "$HOME/.ssh/msw_known_hosts"
   touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
   local include_line="Include $HOME/.ssh/config.d/*"
   if ! grep -qxF "$include_line" "$HOME/.ssh/config"; then
@@ -1141,12 +2179,19 @@ cmd_clean() {
 
 bind_github_read_token() {
   local box="$1"
+  # Path C §1: local mode never binds a GitHub secret into a guest.
+  [[ "$MSW_GITHUB_MODE" != local ]] || return 0
   keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
   workspace_msb_with_read_token "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart >/dev/null
 }
 
 remove_github_secret() {
-  local box="$1" inspect_rc
+  local box="$1" allow_local="${2:-0}" inspect_rc legacy_token="" status=0
+  # Path C §1: ordinary local-mode operations never touch guest secrets. The
+  # §11 migration passes allow_local=1 to retire a LEGACY binding.
+  if [[ "$MSW_GITHUB_MODE" == local && "$allow_local" != 1 ]]; then
+    return 0
+  fi
   if sandbox_inspect_state "$box"; then
     :
   else
@@ -1154,6 +2199,18 @@ remove_github_secret() {
     if (( inspect_rc == 1 )); then return 0; fi
     printf 'msw: could not inspect workspace %s before removing its GitHub secret\n' "$box" >&2
     return 1
+  fi
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    # §11.3: legacy sandboxes reference GH_TOKEN@... whose source value still
+    # lives in the legacy read keychain item; supply it in-process ONLY to
+    # satisfy msb config resolution — never persisted, logged, or exported.
+    if legacy_token="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then
+      GH_TOKEN="$legacy_token" workspace_msb_with_read_token_for_cleanup "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
+      status=$?
+      unset GH_TOKEN
+      unset legacy_token
+      return "$status"
+    fi
   fi
   workspace_msb_with_read_token_for_cleanup "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
 }
@@ -1193,6 +2250,12 @@ host_git_run() {
     MSW_APP_KEYCHAIN_SERVICE="$app_service" \
     MSW_APP_KEYCHAIN_ACCOUNT=profile \
     MSW_GITHUB_WRITE_TOKEN="${MSW_GITHUB_WRITE_TOKEN:-}" \
+    MSW_GITHUB_MODE="$MSW_GITHUB_MODE" \
+    MSW_HOST_KEYCHAIN_SERVICE="${MSW_HOST_KEYCHAIN_SERVICE:-}" \
+    MSW_HOST_KEYCHAIN_ACCOUNT="${MSW_HOST_KEYCHAIN_ACCOUNT:-}" \
+    MSW_HOST_META_FILE="${MSW_HOST_META_FILE:-}" \
+    MSW_HOST_TOKEN_BIN="${MSW_HOST_TOKEN_BIN:-}" \
+    MSW_KEYCHAIN_BRIDGE="${MSW_KEYCHAIN_BRIDGE:-}" \
     MSW_TEST_KEYCHAIN_DIR="${MSW_TEST_KEYCHAIN_DIR:-}" \
     GIT_LFS_SKIP_SMUDGE=1 \
     "$@"
@@ -1274,12 +2337,35 @@ push_impl() {
       host-write) keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "host write token missing for $box" ;;
     esac
   fi
-  local repo_root branch local_sha remote_raw canonical_url remote_sha ff_status commits
+  local repo_root branch local_sha remote_raw canonical_url remote_sha ff_status commits canonical_repo local_repo_mode
   repo_root="$(resolve_guest_repo "$box" "$relative")"
   remote_raw="$(guest_exec_w "$box" "$repo_root" git config --get remote.origin.url)"
   canonical_url="$(normalize_github_remote "$remote_raw")"
   require_repository_access "$box" "${canonical_url#https://github.com/}" guest
   require_repository_access "$box" "${canonical_url#https://github.com/}" host
+  # Path C §8 push gate (local mode): the canonical repo must be on the
+  # workspace's ticked list and the host credential must be available. Host
+  # push is allowed for every selected repo in BOTH modes — only VM-originated
+  # push is gated by read-write (enforced by the proxy's receive-pack rules).
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    # High-risk fail-closed: the strict policy validator runs at EVERY host
+    # gate; a corrupt policy denies host push exactly like the proxy denies VM
+    # access. The repo must be ticked with an EXPLICIT valid mode.
+    if ! policy_validate; then
+      fatal "GitHub policy file is missing or malformed: $(policy_file); host push fails closed until it is repaired (run: msw github proxy-configure)"
+    fi
+    canonical_repo="${canonical_url#https://github.com/}"
+    canonical_repo="${canonical_repo%.git}"
+    canonical_repo="$(printf '%s' "$canonical_repo" | tr '[:upper:]' '[:lower:]')"
+    local_repo_mode="$(policy_repo_mode "$box" "$canonical_repo" 2>/dev/null || true)"
+    case "$local_repo_mode" in
+      read-only|read-write) ;;
+      *) fatal "repository '$canonical_repo' is not on workspace '$box' allowed list; add it with: msw app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" ;;
+    esac
+    if ! host_credential_available; then
+      fatal "host GitHub credential is not provisioned for $box; outbound pushes fail closed until it is (run: msw github auth)"
+    fi
+  fi
   guest_exec_w "$box" "$repo_root" git fetch --prune origin
   branch="$(guest_exec_w "$box" "$repo_root" git symbolic-ref --quiet --short HEAD)" || fatal "detached HEAD cannot be pushed"
   guest_exec_w "$box" "$repo_root" git check-ref-format --branch "$branch" >/dev/null
@@ -1371,6 +2457,8 @@ SUMMARY
 cmd_push() {
   local box="$1" relative="$2"; shift 2
   local force_mode=0 assume_yes=0 arg
+  # §11 trigger: first local-mode push retires legacy state first.
+  migrate_local_if_needed "$box"
   for arg in "$@"; do
     case "$arg" in
       --force-with-lease) force_mode=1 ;;
@@ -1394,9 +2482,106 @@ read_hidden_token() {
   printf '%s' "$value"
 }
 
+cmd_github_verify_local() {
+  local box="$1" repo="${2:-}" cap repo_mode host_cred_state raw token user_json login repo_json push_ok entry probe_repo failed=0
+  validate_workspace "$box"
+  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
+  if ! policy_validate; then
+    github_lock_release
+    fatal "GitHub policy file is missing or malformed: $(policy_file)"
+  fi
+  cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+  if [[ -z "$cap" ]]; then
+    github_lock_release
+    fatal "workspace '$box' has no GitHub capability; run: msw github proxy-configure $box"
+  fi
+  if [[ -n "$repo" ]]; then
+    validate_github_repo "$repo"
+    repo="$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')"
+    repo_mode="$(policy_repo_mode "$box" "$repo" 2>/dev/null || true)"
+    if [[ -z "$repo_mode" ]]; then
+      github_lock_release
+      fatal "repository '$repo' is not on workspace '$box' allowed list; it cannot be cloned or pushed from the VM"
+    fi
+    case "$repo_mode" in
+      read-only|read-write) ;;
+      *)
+        github_lock_release
+        fatal "repository '$repo' has an invalid mode '$repo_mode' in the GitHub policy" ;;
+    esac
+  fi
+  if host_credential_available; then
+    host_cred_state=present
+  else
+    host_cred_state=missing
+  fi
+  printf 'Workspace:        %s\n' "$box"
+  printf 'Mode:             local\n'
+  printf 'Capability:       minted\n'
+  printf 'Repositories:    %s\n' "$(policy_repo_summary "$box" 2>/dev/null || printf ' none')"
+  printf 'Host credential:  %s\n' "$host_cred_state"
+  if [[ "$host_cred_state" == present ]]; then
+    # §8 local probe: GET /user plus per-repo capability checks via
+    # host_github_api — no VM branch operations.
+    raw="$(host_credential_read)" || { github_lock_release; fatal "host GitHub credential record is invalid; re-provision with: msw github auth --force"; }
+    token="$(printf '%s' "$raw" | "$JQ_BIN" -r '.accessToken')"
+    if user_json="$(host_github_api GET /user "$token")" &&
+      login="$(printf '%s' "$user_json" | "$JQ_BIN" -r '.login // empty' 2>/dev/null)" && [[ -n "$login" ]]; then
+      printf 'Account:          %s\n' "$login"
+    else
+      failed=1
+      printf 'Account:          unreachable (fail-closed)\n'
+    fi
+    if [[ -n "$repo" ]]; then
+      if repo_json="$(host_github_api GET "/repos/$repo" "$token")"; then
+        if [[ "$repo_mode" == read-write ]]; then
+          push_ok="$(printf '%s' "$repo_json" | "$JQ_BIN" -r '.permissions.push // false' 2>/dev/null || true)"
+          printf 'Permissions:      %s push=%s\n' "$repo" "$push_ok"
+          [[ "$push_ok" == true ]] || failed=1
+        else
+          printf 'Permissions:      %s (read-only; VM push denied by the proxy)\n' "$repo"
+        fi
+      else
+        failed=1
+        printf 'Permissions:      %s unreachable (fail-closed)\n' "$repo"
+      fi
+    else
+      while IFS= read -r probe_repo; do
+        [[ -n "$probe_repo" ]] || continue
+        if repo_json="$(host_github_api GET "/repos/$probe_repo" "$token")"; then
+          push_ok="$(printf '%s' "$repo_json" | "$JQ_BIN" -r '.permissions.push // false' 2>/dev/null || true)"
+          printf 'Permissions:      %s push=%s\n' "$probe_repo" "$push_ok"
+          [[ "$push_ok" == true ]] || failed=1
+        else
+          failed=1
+          printf 'Permissions:      %s unreachable (fail-closed)\n' "$probe_repo"
+        fi
+      done < <(policy_read_write_repos)
+    fi
+    unset token raw
+  fi
+  github_lock_release
+  if [[ "$host_cred_state" != present ]]; then
+    fatal "host GitHub credential is missing for $box; the proxy needs it for every outbound request (run: msw github auth)"
+  fi
+  if (( failed )); then
+    fatal "host GitHub credential verification failed for $box; rotate it with: msw github auth --force"
+  fi
+  if [[ -n "$repo" ]]; then
+    ok "GitHub access verified for $box (local): $repo is $repo_mode"
+  else
+    ok "GitHub access verified for $box (local mode)"
+  fi
+}
+
 cmd_github_verify() {
   local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_heads="" remote_sha="" host_write=1 read_token="" verify_status=0
   validate_workspace "$box"
+  # Path C §8: local mode runs a policy/capability probe with no VM branch ops.
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    cmd_github_verify_local "$box" "$repo"
+    return
+  fi
   if (( inherited_lock == 0 )); then
     if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
     lock_acquired=1
@@ -1487,6 +2672,10 @@ cmd_github_verify() {
 }
 
 cmd_github_setup() {
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    fatal "msw github setup is the legacy Connect flow; local mode uses the repo-aware proxy — run: msw github proxy-configure ${1:-WORKSPACE}"
+  fi
+
   if [[ "${MSW_TEST_MODE:-0}" != 1 ]]; then
     fatal "legacy GitHub token setup was removed; use MSW Monitor's Connect GitHub flow"
   fi
@@ -1606,19 +2795,138 @@ INFO
 }
 
 cmd_github_status() {
-  local target="${1:-all}" box repo read_state write_state
-  printf '%-13s %-10s %-10s %s\n' WORKSPACE GUEST_READ HOST_WRITE VERIFICATION_REPO
-  while IFS= read -r box; do
-    if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
-    if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
-    repo="$(metadata_repo "$box" 2>/dev/null || printf '-')"
-    printf '%-13s %-10s %-10s %s\n' "$box" "$read_state" "$write_state" "$repo"
-  done < <(for_targets "$target")
+  local target="all" format="text" box repo read_state write_state cap_state repo_summary shuttle_state host_cred_state mode
+  while (( $# > 0 )); do
+    case "$1" in
+      --format)
+        (( $# >= 2 )) || fatal "usage: msw github status [WORKSPACE|all] [--format json|text]"
+        format="$2"; shift 2 ;;
+      dev|playgrounds|personal|all) target="$1"; shift ;;
+      *) fatal "usage: msw github status [WORKSPACE|all] [--format json|text]" ;;
+    esac
+  done
+  case "$format" in json|text) ;; *) fatal "status format must be json or text" ;; esac
+  mode="$MSW_GITHUB_MODE"
+  if [[ "$format" == json ]]; then
+    local items="" entry
+    while IFS= read -r box; do
+      if [[ "$mode" == local ]]; then
+        cap_state="$(policy_capability_state "$box")"
+        shuttle_state="$(shuttle_state "$box")"
+        host_cred_state="$(host_credential_state | tr -d '\n')"
+        entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"shuttle\":$(app_json_string "$shuttle_state"),\"hostCredential\":$(app_json_string "$host_cred_state")}"
+      else
+        if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
+        if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
+        repo="$(metadata_repo "$box" 2>/dev/null || true)"
+        entry="{\"workspace\":$(app_json_string "$box"),\"guestRead\":$(app_json_string "$read_state"),\"hostWrite\":$(app_json_string "$write_state"),\"verificationRepo\":$(app_json_optional "$repo")}"
+      fi
+      [[ -n "$items" ]] && items+=","
+      items+="$entry"
+    done < <(for_targets "$target")
+    printf '{"mode":%s,"workspaces":[%s]}\n' "$(app_json_string "$mode")" "$items"
+    return
+  fi
+  if [[ "$mode" == local ]]; then
+    printf '%-13s %-8s %-10s %-12s %-12s %s\n' WORKSPACE MODE CAPABILITY REPOS HOST_CRED SHUTTLE
+    while IFS= read -r box; do
+      cap_state="$(policy_capability_state "$box")"
+      shuttle_state="$(shuttle_state "$box")"
+      repo_summary="$(policy_repo_summary "$box")"
+      host_cred_state="$(host_credential_state | tr -d '\n')"
+      printf '%-13s %-8s %-10s %-12s %-12s %s\n' "$box" local "$cap_state" "$repo_summary" "$host_cred_state" "$shuttle_state"
+    done < <(for_targets "$target")
+  else
+    printf '%-13s %-10s %-10s %-18s %s\n' WORKSPACE GUEST_READ HOST_WRITE VERIFICATION_REPO MODE
+    while IFS= read -r box; do
+      if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
+      if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
+      repo="$(metadata_repo "$box" 2>/dev/null || printf '-')"
+      printf '%-13s %-10s %-10s %-18s %s\n' "$box" "$read_state" "$write_state" "$repo" connect
+    done < <(for_targets "$target")
+  fi
 }
 
 cmd_github_remove() {
-  local box="$1" meta_file cleanup_failed=0
+  local box="$1" meta_file cleanup_failed=0 record_gone=0
   validate_workspace "$box"
+  # Path C §5 revocation (local), closure re-review invariant: before any
+  # failed remove returns, the credential is globally denied OR the token is
+  # proven deleted — no other workspace can remain live on it.
+  # Store/rotate/remove serialize on the global credential lock. Sequence:
+  #   1. prove at least ONE durable global deny gate BEFORE any mutation:
+  #      the independent file marker (fsync) AND/OR the dedicated Keychain
+  #      deny item (.v2.deny, written + verified via the bridge). If neither
+  #      can be proven, attempt the inactive metadata tombstone + a PROVEN
+  #      token deletion (bridge delete + read-back proof); if still no deny
+  #      can be proven, ABORT BEFORE mutation with a typed global safety error.
+  #   2. proven Keychain deletion of the activation record.
+  #   3. metadata tombstone (revoked; revocation-uncertain on step-2 failure).
+  # The legacy msw.github.read/write keychain items are NEVER touched.
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
+    if ! host_credential_lock_acquire; then github_lock_release; fatal "could not acquire the global host credential lock"; fi
+    record_gone=0
+    deny_proven=0
+    # 1) at least one durable deny gate must be proven BEFORE any mutation.
+    if host_credential_deny_marker_write; then deny_proven=1; fi
+    if host_credential_deny_item_set; then deny_proven=1; fi
+    if (( deny_proven != 1 )); then
+      # Neither gate could be recorded. Fallback: an inactive metadata
+      # tombstone (helpers require active metadata, so an inactive record is
+      # itself a deny) AND/OR a PROVEN token deletion.
+      if host_meta_tombstone revocation-uncertain >/dev/null 2>&1; then
+        deny_proven=1
+      fi
+      if host_credential_delete; then
+        deny_proven=1
+        record_gone=1
+      fi
+    fi
+    if (( deny_proven != 1 )); then
+      # The primary marker, Keychain deny item, metadata tombstone, and token
+      # deletion were all unprovable. Establish a durable global quarantine in
+      # the migration state domain; every helper checks it before the token.
+      if host_credential_global_quarantine_write; then
+        deny_proven=1
+        cleanup_failed=1
+      else
+        host_credential_lock_release
+        github_lock_release
+        fatal "host GitHub credential revocation refused: no durable global deny or quarantine could be recorded; credential state remains active and requires manual recovery"
+      fi
+    fi
+    # 2) proven token deletion — no helper can emit the token afterwards.
+    if (( record_gone != 1 )); then
+      if ! host_credential_delete; then
+        host_meta_tombstone revocation-uncertain >/dev/null 2>&1 || true
+        cleanup_failed=1
+      else
+        record_gone=1
+      fi
+    fi
+    # 3) metadata tombstone replaces any active metadata.
+    if (( cleanup_failed == 0 )) && [[ -e "$(host_meta_file)" || -L "$(host_meta_file)" ]]; then
+      if ! host_meta_tombstone revoked; then
+        cleanup_failed=1
+      fi
+    fi
+    host_credential_lock_release
+    if (( cleanup_failed )); then
+      if ! quarantine_workspace "$box" "Host GitHub credential removal failed"; then
+        fatal "host GitHub credential removal failed and workspace quarantine could not be recorded"
+      fi
+      fatal "host GitHub credential removal failed; workspace quarantined (the global deny gates remain in effect)"
+    fi
+    # Token + metadata proven gone; the deny gates are now moot — clear them.
+    host_credential_deny_marker_clear >/dev/null 2>&1 || true
+    host_credential_deny_item_clear >/dev/null 2>&1 || true
+    host_credential_global_quarantine_clear >/dev/null 2>&1 || true
+    host_meta_delete >/dev/null 2>&1 || true
+    github_lock_release
+    ok "removed the host GitHub credential"
+    return
+  fi
   if app_metadata_profile_present "$box" guest || app_metadata_profile_present "$box" host; then
     fatal "schema-3 GitHub App grants must be revoked from MSW Monitor so the service grant is revoked; no local credentials were changed"
   fi
@@ -1641,7 +2949,18 @@ cmd_github_remove() {
 }
 
 cmd_github() {
-  local sub="${1:-status}"; shift || true
+  local sub="${1:-status}" trigger_target="all"
+  shift || true
+  # §11 trigger: the first local-mode GitHub operation retires legacy state
+  # per workspace as one journaled transaction (explicit 'migrate' excluded).
+  if [[ "$MSW_GITHUB_MODE" == local && "$sub" != migrate ]]; then
+    case "$sub" in
+      verify|remove) [[ -n "${1:-}" ]] && trigger_target="$1" ;;
+      capability) [[ "${1:-}" == rotate && -n "${2:-}" ]] && trigger_target="$2" ;;
+      proxy-configure) [[ -n "${1:-}" && "$1" != all ]] && trigger_target="$1" ;;
+    esac
+    migrate_local_if_needed "$trigger_target"
+  fi
   case "$sub" in
     setup)
       (( $# >= 2 && $# <= 3 )) || fatal "usage: msw github setup WORKSPACE OWNER/REPO [--read-only]"
@@ -1652,14 +2971,1033 @@ cmd_github() {
       cmd_github_verify "$1" "${2:-}"
       ;;
     status)
-      cmd_github_status "${1:-all}"
+      cmd_github_status "$@"
       ;;
     remove)
       (( $# == 1 )) || fatal "usage: msw github remove WORKSPACE"
       cmd_github_remove "$1"
       ;;
+    auth)
+      cmd_github_auth "$@"
+      ;;
+    repos)
+      cmd_github_repos "$@"
+      ;;
+    migrate)
+      (( $# <= 1 )) || fatal "usage: msw github migrate [WORKSPACE|all]"
+      cmd_github_migrate "${1:-all}"
+      ;;
+    proxy-configure)
+      (( $# <= 1 )) || fatal "usage: msw github proxy-configure [WORKSPACE]"
+      cmd_github_proxy_configure "$@"
+      ;;
+    proxy)
+      local proxy_op="${1:-status}"
+      shift || true
+      case "$proxy_op" in
+        install) (( $# == 0 )) || fatal "usage: msw github proxy install"; cmd_github_proxy_install ;;
+        uninstall) (( $# == 0 )) || fatal "usage: msw github proxy uninstall"; cmd_github_proxy_uninstall ;;
+        status) (( $# == 0 )) || fatal "usage: msw github proxy status"; cmd_github_proxy_status ;;
+        *) fatal "usage: msw github proxy install|uninstall|status" ;;
+      esac
+      ;;
+    capability)
+      (( $# == 2 )) || fatal "usage: msw github capability rotate WORKSPACE"
+      [[ "$1" == rotate ]] || fatal "usage: msw github capability rotate WORKSPACE"
+      cmd_github_capability_rotate "$2"
+      ;;
     *) fatal "unknown github command '$sub'" ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# Path C §8 local-mode commands: proxy-configure (transport install), capability
+# rotate, auth (Phase 2 refusal), plus the shuttle lifecycle helpers they use.
+# ---------------------------------------------------------------------------
+# Typed JSON error contract for --format json auth/device/repos commands.
+# Printed to stdout with a nonzero exit; text mode uses stderr messages.
+host_auth_error_json() {
+  local code="$1" message="$2"; shift 2
+  local remedies_json="" sep=""
+  for remedy in "$@"; do
+    remedies_json+="$sep$(app_json_string "$remedy")"
+    sep=","
+  done
+  printf '{"ok":false,"error":{"code":%s,"message":%s,"remedies":[%s]}}\n' \
+    "$(app_json_string "$code")" "$(app_json_string "$message")" "$remedies_json"
+}
+
+host_auth_error_exit() {
+  # usage: host_auth_error_exit CODE EXITCODE MESSAGE REMEDY...
+  local code="$1" rc="$2" message="$3"; shift 3
+  if [[ "$fmt" == json ]]; then
+    host_auth_error_json "$code" "$message" "$@"
+  else
+    printf 'msw: %s\n' "$message" >&2
+  fi
+  exit "$rc"
+}
+
+cmd_github_auth_device_start() {
+  local fmt="$1" start_json rc=0 device_code user_code verification_uri interval expires_in expires_at
+  start_json="$(host_device_flow_start)" || rc=$?
+  if (( rc != 0 )); then
+    if (( rc == 66 )); then
+      host_auth_error_exit MSW_HOST_OAUTH_NOT_CONFIGURED 66 \
+        "the OAuth Device Flow client ID (MSW_HOST_OAUTH_CLIENT_ID) is not set" \
+        "Set MSW_HOST_OAUTH_CLIENT_ID to the release's public client ID" \
+        "Run 'gh auth login' and use plain 'msw github auth'"
+    fi
+    host_auth_error_exit MSW_HOST_DEVICE_FLOW_START_FAILED 1 \
+      "GitHub Device Flow could not be started" \
+      "Check the GitHub API and your network, then retry"
+  fi
+  device_code="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.device_code // empty')"
+  user_code="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.user_code // empty')"
+  verification_uri="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.verification_uri // empty')"
+  interval="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.interval // 5')"
+  expires_in="$(printf '%s' "$start_json" | "$JQ_BIN" -r '.expires_in // 900')"
+  expires_at="$(( $(date +%s) + expires_in ))"
+  expires_at="$(date -u -r "$expires_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$expires_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "$fmt" == json ]]; then
+    printf '%s\n' "$("$JQ_BIN" -nc --arg d "$device_code" --arg c "$user_code" --arg v "$verification_uri" --arg e "$expires_at" --argjson i "$interval" \
+      '{ok:true,deviceId:$d,code:$c,verificationUri:$v,expiresAt:$e,interval:$i}')"
+  else
+    printf 'GitHub authorization required\n'
+    printf 'Visit %s and enter code: %s (device code: %s)\n' "$verification_uri" "$user_code" "$device_code"
+  fi
+}
+
+cmd_github_auth_device_complete() {
+  local device_code="$1" fmt="$2" token_json rc=0 error token interval status_json
+  if [[ -z "$device_code" ]]; then
+    if [[ "$fmt" == json ]]; then
+      host_auth_error_json MSW_INVALID_REQUEST "msw github auth --device-complete requires the DEVICE_CODE returned by --device" "Run 'msw github auth --device --format json' and pass the deviceId back"
+    else
+      printf 'usage: msw github auth --device-complete DEVICE_CODE [--json]\n' >&2
+    fi
+    exit 64
+  fi
+  token_json="$(host_device_flow_poll "$device_code")" || rc=$?
+  if (( rc != 0 )); then
+    if (( rc == 66 )); then
+      host_auth_error_exit MSW_HOST_OAUTH_NOT_CONFIGURED 66 \
+        "the OAuth Device Flow client ID (MSW_HOST_OAUTH_CLIENT_ID) is not set" \
+        "Set MSW_HOST_OAUTH_CLIENT_ID to the release's public client ID" \
+        "Run 'gh auth login' and use plain 'msw github auth'"
+    fi
+    host_auth_error_exit MSW_HOST_DEVICE_FLOW_POLL_FAILED 1 \
+      "GitHub Device Flow poll failed" \
+      "Check the GitHub API and your network, then retry"
+  fi
+  error="$(printf '%s' "$token_json" | "$JQ_BIN" -r '.error // empty' 2>/dev/null || true)"
+  case "$error" in
+    authorization_pending)
+      if [[ "$fmt" == json ]]; then printf '{"ok":true,"status":"pending"}\n'; else printf 'authorization pending\n'; fi
+      return 0
+      ;;
+    slow_down)
+      interval="$(printf '%s' "$token_json" | "$JQ_BIN" -r '.interval // 5' 2>/dev/null || true)"
+      if [[ "$fmt" == json ]]; then
+        printf '{"ok":true,"status":"slow_down","interval":%s}\n' "$interval"
+      else
+        printf 'slow down; retry in %s seconds\n' "$interval"
+      fi
+      return 0
+      ;;
+    expired_token)
+      if [[ "$fmt" == json ]]; then
+        printf '{"ok":false,"status":"expired","error":{"code":"MSW_DEVICE_EXPIRED","message":"GitHub Device Flow expired; start a new one"}}\n'
+      else
+        printf 'msw: GitHub Device Flow expired; start a new one: msw github auth --device\n' >&2
+      fi
+      exit 76
+      ;;
+    access_denied)
+      if [[ "$fmt" == json ]]; then
+        printf '{"ok":false,"status":"denied","error":{"code":"MSW_DEVICE_DENIED","message":"GitHub Device Flow access denied"}}\n'
+      else
+        printf 'msw: GitHub Device Flow access denied; start again: msw github auth --device\n' >&2
+      fi
+      exit 76
+      ;;
+    "")
+      token="$(printf '%s' "$token_json" | "$JQ_BIN" -r '.access_token // empty' 2>/dev/null || true)"
+      [[ -n "$token" ]] || host_auth_error_exit MSW_HOST_DEVICE_FLOW_NO_TOKEN 1 \
+        "GitHub Device Flow returned no access token" "Retry the device flow"
+      host_credential_token_valid "$token" || host_auth_error_exit MSW_HOST_DEVICE_FLOW_INVALID_TOKEN 1 \
+        "GitHub Device Flow returned an invalid token kind" "Retry the device flow"
+      if ! host_credential_commit_token oauth-device-flow "$token"; then
+        rc=$?
+        unset token
+        if (( rc == 68 )); then
+          host_auth_error_exit MSW_HOST_CREDENTIAL_VERIFICATION_FAILED 68 \
+            "host GitHub credential verification failed (GET /user or a read-write repo permissions.push check); nothing was stored" \
+            "Verify the credential can read the ticked read-write repositories" \
+            "Run 'msw github auth --force' to rotate"
+        fi
+        host_auth_error_exit MSW_HOST_CREDENTIAL_STORE_FAILED 69 \
+          "host GitHub credential could not be stored; nothing was kept" \
+          "Check Keychain access and retry"
+      fi
+      unset token
+      status_json="$(host_credential_status_json)" || host_auth_error_exit MSW_HOST_CREDENTIAL_STORE_FAILED 69 \
+        "host GitHub credential was stored but could not be read back" "Check Keychain access and retry"
+      if [[ "$fmt" == json ]]; then
+        printf '{"ok":true,"status":"authorized","metadata":%s}\n' "$status_json"
+      else
+        ok "host GitHub credential provisioned"
+        printf '%s\n' "$status_json"
+      fi
+      return 0
+      ;;
+    *)
+      host_auth_error_exit MSW_HOST_DEVICE_FLOW_POLL_FAILED 1 \
+        "GitHub Device Flow returned an unexpected response" "Retry the device flow"
+      ;;
+  esac
+}
+
+cmd_github_auth() {
+  local force=0 fmt=text device=0 device_complete="" status_json acquire_rc=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --force) force=1; shift ;;
+      --json) fmt=json; shift ;;
+      --format) [[ "${2:-}" == json ]] || fatal "usage: msw github auth [--force] [--json|--format json] [--device [--device-complete DEVICE_CODE]]"; fmt=json; shift 2 ;;
+      --device) device=1; shift ;;
+      --device-complete) device=1; device_complete="${2:-}"; shift 2 ;;
+      *) fatal "usage: msw github auth [--force] [--json|--format json] [--device [--device-complete DEVICE_CODE]]" ;;
+    esac
+  done
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    host_auth_error_exit MSW_GITHUB_MODE_MISMATCH 69 \
+      "msw github auth is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow" \
+      "Switch MSW_GITHUB_MODE=local"
+  fi
+  require_command_path jq "$JQ_BIN"
+  if (( device )); then
+    if [[ -n "$device_complete" ]]; then
+      cmd_github_auth_device_complete "$device_complete" "$fmt"
+      return
+    fi
+    cmd_github_auth_device_start "$fmt"
+    return
+  fi
+  if (( force == 0 )) && host_credential_available; then
+    status_json="$(host_credential_status_json)" || host_auth_error_exit MSW_HOST_CREDENTIAL_INVALID 1 \
+      "host GitHub credential record is invalid; re-provision with: msw github auth --force" \
+      "Run 'msw github auth --force' to rotate"
+    if [[ "$fmt" == json ]]; then
+      printf '%s\n' "$status_json"
+      return 0
+    fi
+    printf 'Host GitHub credential already provisioned (provider %s, account %s, generation %s); use --force to rotate.\n' \
+      "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.provider' 2>/dev/null || true)" \
+      "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.accountLogin' 2>/dev/null || true)" \
+      "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.generation' 2>/dev/null || true)"
+    return 0
+  fi
+  [[ "$fmt" == json ]] || { if (( force == 0 )); then note "Provisioning the host GitHub credential"; else note "Rotating the host GitHub credential"; fi; }
+  host_credential_acquire "$force" || acquire_rc=$?
+  if (( acquire_rc != 0 )); then
+    case "$acquire_rc" in
+      66) host_auth_error_exit MSW_HOST_OAUTH_NOT_CONFIGURED 66 \
+            "gh is not authenticated and the OAuth Device Flow client ID (MSW_HOST_OAUTH_CLIENT_ID) is not set" \
+            "Run 'gh auth login' then retry" \
+            "Set MSW_HOST_OAUTH_CLIENT_ID to the release's public client ID, or use the device flow (--device)" ;;
+      67) host_auth_error_exit MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED 67 \
+            "OAuth Device Flow requires an interactive terminal for plain 'msw github auth'" \
+            "Run 'msw github auth' in a terminal" \
+            "Use 'msw github auth --device' and complete it with --device-complete" ;;
+      68) host_auth_error_exit MSW_HOST_CREDENTIAL_VERIFICATION_FAILED 68 \
+            "host GitHub credential verification failed (GET /user or a read-write repo permissions.push check); nothing was stored" \
+            "Verify the credential can read the ticked read-write repositories" \
+            "Run 'msw github auth --force' to rotate" ;;
+      69) host_auth_error_exit MSW_HOST_CREDENTIAL_STORE_FAILED 69 \
+            "host GitHub credential could not be stored; nothing was kept" \
+            "Check Keychain access and retry" ;;
+      75) host_auth_error_exit MSW_DEVICE_TIMED_OUT 75 \
+            "GitHub Device Flow authorization timed out; restart: msw github auth --device" \
+            "Start a new device flow" ;;
+      76) host_auth_error_exit MSW_DEVICE_EXPIRED 76 \
+            "GitHub Device Flow ended (expired or denied); start again: msw github auth --device" \
+            "Start a new device flow" ;;
+      *) host_auth_error_exit MSW_HOST_CREDENTIAL_ACQUISITION_FAILED 1 \
+            "host GitHub credential acquisition failed" \
+            "Check the GitHub API and your network, then retry" ;;
+    esac
+  fi
+  status_json="$(host_credential_status_json)" || host_auth_error_exit MSW_HOST_CREDENTIAL_STORE_FAILED 69 \
+    "host GitHub credential was stored but could not be read back" "Check Keychain access and retry"
+  if [[ "$fmt" == json ]]; then
+    printf '%s\n' "$status_json"
+    return 0
+  fi
+  ok "host GitHub credential provisioned"
+  printf 'Provider:    %s\n' "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.provider' 2>/dev/null || true)"
+  printf 'Token kind:  %s\n' "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.tokenKind' 2>/dev/null || true)"
+  printf 'Account:     %s\n' "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.accountLogin' 2>/dev/null || true)"
+  printf 'Verified:    %s\n' "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.verifiedAt' 2>/dev/null || true)"
+  printf 'Generation:  %s\n' "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.generation' 2>/dev/null || true)"
+  printf 'Repo checks: %s read-write repos verified\n' "$(printf '%s' "$status_json" | "$JQ_BIN" -r '.repoChecks | length' 2>/dev/null || true)"
+}
+
+policy_in_policy_json() {
+  if policy_validate; then
+    "$JQ_BIN" -c '[.workspaces[] | .repos[]? | .canonical] | unique' "$(policy_file)" 2>/dev/null || printf '[]'
+  else
+    printf '[]'
+  fi
+}
+
+# Picker discovery (§8/§B): paginated GET /user/repos (per_page=100,
+# visibility=all, all affiliations) plus GET /user/orgs and per-org
+# /orgs/{org}/repos. Normalized, deduped by canonical (lowercased full_name),
+# sorted. inPolicy = canonical present in ANY workspace's policy.
+host_repos_discover() {
+  local owner="${1:-}" token="${2:-}" page=1 entries=0 chunks="" orgs_json="" org repos_json page_json
+  while :; do
+    page_json="$(host_github_api GET "/user/repos?per_page=100&visibility=all&affiliation=owner,collaborator,organization_member&page=$page" "$token")" || return 1
+    [[ "$page_json" == \[*\] ]] || break
+    chunks+="$page_json"$'\n'
+    entries="$(printf '%s' "$page_json" | "$JQ_BIN" -r 'length' 2>/dev/null || printf '0')"
+    (( entries < 100 )) && break
+    page=$((page + 1))
+    (( page <= 20 )) || break
+  done
+  if orgs_json="$(host_github_api GET "/user/orgs?per_page=100" "$token" 2>/dev/null)" && [[ "$orgs_json" == \[*\] ]]; then
+    while IFS= read -r org; do
+      [[ -n "$org" ]] || continue
+      page=1
+      while :; do
+        repos_json="$(host_github_api GET "/orgs/$org/repos?per_page=100&type=all&page=$page" "$token")" || return 1
+        [[ "$repos_json" == \[*\] ]] || break
+        chunks+="$repos_json"$'\n'
+        entries="$(printf '%s' "$repos_json" | "$JQ_BIN" -r 'length' 2>/dev/null || printf '0')"
+        (( entries < 100 )) && break
+        page=$((page + 1))
+        (( page <= 20 )) || break
+      done
+    done < <(printf '%s' "$orgs_json" | "$JQ_BIN" -r '.[] | .login // empty' 2>/dev/null || true)
+  fi
+  if [[ -n "$owner" ]]; then owner="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"; fi
+  printf '%s' "$chunks" | "$JQ_BIN" -s --arg owner "$owner" --argjson policy "$(policy_in_policy_json)" '
+    [ .[] | .[]? | select((.full_name // "") != "") ]
+    | if $owner != "" then map(select(((.owner.login // "") | ascii_downcase) == $owner)) else . end
+    | map(. as $r | {
+        canonical: (($r.full_name // "") | ascii_downcase),
+        name: ($r.name // ($r.full_name // "")),
+        owner: ($r.owner.login // ""),
+        private: (($r.private // false) == true),
+        permissions: { pull: (($r.permissions.pull // false) == true), push: (($r.permissions.push // false) == true) },
+        inPolicy: any($policy[] == (($r.full_name // "") | ascii_downcase))
+      })
+    | unique_by(.canonical)
+    | sort_by(.canonical)
+  ' 2>/dev/null
+}
+
+cmd_github_repos() {
+  local owner="" fmt=text raw token repos_json
+  while (( $# > 0 )); do
+    case "$1" in
+      --owner) (( $# >= 2 )) || fatal "usage: msw github repos [--owner OWNER] [--format json|text]"; owner="$2"; shift 2 ;;
+      --format) (( $# >= 2 )) || fatal "usage: msw github repos [--owner OWNER] [--format json|text]"; fmt="$2"; shift 2 ;;
+      *) fatal "usage: msw github repos [--owner OWNER] [--format json|text]" ;;
+    esac
+  done
+  case "$fmt" in json|text) ;; *) fatal "format must be json or text" ;; esac
+  require_command_path jq "$JQ_BIN"
+  if ! host_credential_available; then
+    host_auth_error_exit MSW_HOST_CREDENTIAL_MISSING 1 \
+      "host GitHub credential is not provisioned" \
+      "Run 'msw github auth'"
+  fi
+  raw="$(host_credential_read)" || host_auth_error_exit MSW_HOST_CREDENTIAL_MISSING 1 \
+    "host GitHub credential record is invalid" \
+    "Run 'msw github auth --force'"
+  token="$(printf '%s' "$raw" | "$JQ_BIN" -r '.accessToken')"
+  if ! repos_json="$(host_repos_discover "$owner" "$token")"; then
+    unset token
+    host_auth_error_exit MSW_REPOSITORY_DISCOVERY_FAILED 1 \
+      "GitHub repository discovery failed" \
+      "Check the GitHub API and your network" \
+      "Run 'msw github auth --force' to rotate the credential"
+  fi
+  unset token
+  if [[ "$fmt" == json ]]; then
+    printf '{"ok":true,"mode":"local","repos":%s}\n' "$repos_json"
+  else
+    printf '%-42s %-5s %-8s\n' REPOSITORY PUSH IN_POLICY
+    printf '%s' "$repos_json" | "$JQ_BIN" -r '.[] | "\(.canonical)\t\(.permissions.push)\t\(.inPolicy)"' 2>/dev/null || true
+  fi
+}
+
+shuttle_pidfile() { printf '%s/shuttle-%s.pid\n' "$HOME/.local/state/msw" "$1"; }
+shuttle_logfile() { printf '%s/shuttle-%s.log\n' "$HOME/.local/state/msw" "$1"; }
+
+shuttle_running() {
+  local box="$1" pidfile pid
+  pidfile="$(shuttle_pidfile "$box")"
+  [[ -f "$pidfile" ]] || return 1
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  ps -p "$pid" -o command= 2>/dev/null | grep -q 'msw-github-shuttle' || return 1
+}
+
+shuttle_stop() {
+  local box="$1" pidfile pid i
+  pidfile="$(shuttle_pidfile "$box")"
+  if [[ -f "$pidfile" ]]; then
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      for i in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+  fi
+}
+
+proxy_shuttle_launchd_label() { printf 'org.microsandbox.MSWMonitor.github-shuttle.%s' "$1"; }
+proxy_shuttle_launchd_plist() { printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$(proxy_shuttle_launchd_label "$1")"; }
+
+proxy_shuttle_stop_launchd() {
+  local box="$1" plist label
+  plist="$(proxy_shuttle_launchd_plist "$box")"; label="$(proxy_shuttle_launchd_label "$box")"
+  /bin/launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || /bin/launchctl unload -w "$plist" 2>/dev/null || true
+}
+
+proxy_shuttle_launchd_start() {
+  local box="$1" plist
+  plist="$(proxy_shuttle_launchd_plist "$box")"
+  mkdir -p "$(dirname "$plist")" || return 1
+  cat >"$plist.tmp.$$" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$(proxy_shuttle_launchd_label "$box")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$MSW_PYTHON_BIN</string>
+    <string>$SHUTTLE_BIN</string>
+    <string>$box</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MSW_MSB_BIN</key><string>$MSB_BIN</string>
+    <key>MSW_GITHUB_PROXY_PORT</key><string>$MSW_GITHUB_PROXY_PORT</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>$(shuttle_logfile "$box")</string>
+  <key>StandardErrorPath</key><string>$(shuttle_logfile "$box")</string>
+</dict>
+</plist>
+PLIST
+  if ! mv "$plist.tmp.$$" "$plist"; then rm -f "$plist.tmp.$$"; return 1; fi
+  chmod 0644 "$plist"
+  /bin/launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || /bin/launchctl load -w "$plist" 2>/dev/null || return 1
+  return 0
+}
+
+# Start the per-workspace shuttle idempotently. Production uses a launchd
+# LaunchAgent (KeepAlive); test mode and launchd failures fall back to a
+# detached background process with a pidfile. The shuttle itself respawns the
+# guest relay on every failure, so stopping/restarting the workspace heals the
+# tunnel automatically.
+proxy_shuttle_start() {
+  local box="$1" pidfile logfile
+  pidfile="$(shuttle_pidfile "$box")"; logfile="$(shuttle_logfile "$box")"
+  mkdir -p "$(dirname "$pidfile")" || return 1
+  proxy_shuttle_stop_launchd "$box" 2>/dev/null || true
+  shuttle_stop "$box" || true
+  if [[ "${MSW_TEST_MODE:-0}" != 1 ]]; then
+    if proxy_shuttle_launchd_start "$box"; then
+      sleep 1
+      shuttle_running "$box" && return 0
+    fi
+    warn "launchd shuttle unavailable; falling back to a direct background shuttle for $box"
+  fi
+  MSW_MSB_BIN="$MSB_BIN" MSW_GITHUB_PROXY_PORT="$MSW_GITHUB_PROXY_PORT" \
+    nohup "$MSW_PYTHON_BIN" "$SHUTTLE_BIN" "$box" >>"$logfile" 2>&1 &
+  printf '%s\n' "$!" >"$pidfile"
+  sleep 1
+  if ! shuttle_running "$box"; then
+    warn "shuttle for $box did not stay up; see $logfile"
+    return 1
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# GitHub proxy launch agent (Path C §4). Deterministic install/teardown:
+# render the plist from the installed template (or the repo template),
+# plutil -lint, then bootstrap gui/$UID. Uninstall bootouts BEFORE deleting
+# the plist. The rendered port comes from MSW_GITHUB_PROXY_PORT.
+# ---------------------------------------------------------------------------
+github_proxy_launchd_label() { printf 'org.microsandbox.MSWMonitor.github-proxy'; }
+github_proxy_plist_file() { printf '%s/Library/LaunchAgents/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$HOME"; }
+github_proxy_plist_template() {
+  if [[ -f "$HOME/.local/share/msw/github-proxy.plist" ]]; then
+    printf '%s\n' "$HOME/.local/share/msw/github-proxy.plist"
+  else
+    printf '%s/../launchd/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$MSW_SCRIPT_ROOT"
+  fi
+}
+github_proxy_log_file() { printf '%s/Library/Logs/MSWMonitor/github-proxy.log\n' "$HOME"; }
+
+github_proxy_render_plist() {
+  # Renders the launch agent. Production uses the defaults; tests inject
+  # unique labels/ports/env via MSW_PROXY_PLIST_* seams so a real
+  # socket-activated proxy can be exercised without touching the production
+  # agent (which Main bootstraps on 18446 after a real setup).
+  local plist template log_dir log_file label root port
+  plist="${MSW_PROXY_PLIST_FILE:-$(github_proxy_plist_file)}"
+  label="${MSW_PROXY_PLIST_LABEL:-$(github_proxy_launchd_label)}"
+  root="${MSW_PROXY_PLIST_ROOT:-$HOME/.local}"
+  log_file="${MSW_PROXY_PLIST_LOG:-$(github_proxy_log_file)}"
+  # config.sh assigns MSW_GITHUB_PROXY_PORT unconditionally, so the test
+  # seam is a separate variable (defaults to the configured port).
+  port="${MSW_PROXY_PLIST_PORT:-${MSW_GITHUB_PROXY_PORT:-18446}}"
+  log_dir="$(dirname "$log_file")"
+  template="$(github_proxy_plist_template)"
+  mkdir -p "$log_dir" "$(dirname "$plist")" || return 1
+  sed -e "s|__MSW_ROOT__|$root|g" \
+      -e "s|/tmp/msw-github-proxy.stderr.log|$log_file|g" \
+      -e "s|<string>18446</string>|<string>$port</string>|g" \
+      -e "s|org.microsandbox.MSWMonitor.github-proxy|$label|g" \
+      "$template" >"$plist.tmp.$$" || { rm -f "$plist.tmp.$$"; return 1; }
+  # Test seam: inject extra EnvironmentVariables entries (one KEY=VALUE per
+  # line, e.g. the policy/upstream/keychain paths a socket-activated test
+  # proxy needs) at the template's <!-- MSW_PROXY_EXTRA_ENV --> marker.
+  if [[ -n "${MSW_PROXY_PLIST_EXTRA_ENV:-}" ]]; then
+    MSW_PROXY_PLIST_EXTRA_ENV="$MSW_PROXY_PLIST_EXTRA_ENV" "$MSW_PYTHON_BIN" - "$plist.tmp.$$" >"$plist.tmp.$$.2" <<'PY' || { rm -f "$plist.tmp.$$" "$plist.tmp.$$.2"; return 1; }
+import os
+import sys
+
+template = open(sys.argv[1]).read()
+extra = os.environ["MSW_PROXY_PLIST_EXTRA_ENV"]
+entries = []
+for line in extra.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    key, _, value = line.partition("=")
+    entries.append("        <key>%s</key><string>%s</string>" % (key, value))
+sys.stdout.write(template.replace("<!-- MSW_PROXY_EXTRA_ENV -->", "\n".join(entries)))
+PY
+    mv "$plist.tmp.$$.2" "$plist.tmp.$$" || { rm -f "$plist.tmp.$$" "$plist.tmp.$$.2"; return 1; }
+  fi
+  mv "$plist.tmp.$$" "$plist" || { rm -f "$plist.tmp.$$"; return 1; }
+  chmod 0644 "$plist"
+  /usr/bin/plutil -lint "$plist" >/dev/null || return 1
+  return 0
+}
+
+github_proxy_launchd_loaded() {
+  /bin/launchctl print "gui/$(id -u)/$(github_proxy_launchd_label)" >/dev/null 2>&1
+}
+
+cmd_github_proxy_install() {
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    fatal "the GitHub proxy launch agent only runs in local mode; switch MSW_GITHUB_MODE=local first"
+  fi
+  github_proxy_render_plist || fatal "could not render the GitHub proxy launch agent plist"
+  /bin/launchctl bootout "gui/$(id -u)/$(github_proxy_launchd_label)" >/dev/null 2>&1 || true
+  /bin/launchctl bootstrap "gui/$(id -u)" "$(github_proxy_plist_file)" || \
+    fatal "could not bootstrap the GitHub proxy launch agent"
+  ok "GitHub proxy launch agent installed on 127.0.0.1:${MSW_GITHUB_PROXY_PORT:-18446}"
+}
+
+cmd_github_proxy_uninstall() {
+  local plist
+  plist="$(github_proxy_plist_file)"
+  /bin/launchctl bootout "gui/$(id -u)/$(github_proxy_launchd_label)" >/dev/null 2>&1 || true
+  rm -f "$plist"
+  ok "GitHub proxy launch agent removed"
+}
+
+cmd_github_proxy_status() {
+  if github_proxy_launchd_loaded; then
+    echo "installed and loaded (127.0.0.1:${MSW_GITHUB_PROXY_PORT:-18446})"
+  elif [[ -f "$(github_proxy_plist_file)" ]]; then
+    echo "installed, not loaded"
+  else
+    echo "not installed"
+  fi
+}
+
+policy_capability_state() {
+  local box="$1" cap
+  if ! policy_validate; then printf 'missing\n'; return; fi
+  cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+  if [[ -n "$cap" ]]; then printf 'minted\n'; else printf 'missing\n'; fi
+}
+
+shuttle_state() {
+  local box="$1"
+  if shuttle_running "$box"; then printf 'running\n'; else printf 'stopped\n'; fi
+}
+
+# Ensure the policy file exists (schema v1 skeleton) and the workspace has a
+# minted capability. Ordinary re-runs preserve the existing capability.
+proxy_policy_ensure_workspace() {
+  local box="$1" cap file dir
+  file="$(policy_file)"; dir="$(dirname "$file")"
+  mkdir -p "$dir" || fatal "could not create the GitHub policy directory: $dir"
+  chmod 700 "$dir" 2>/dev/null || true
+  if [[ -L "$file" ]]; then fatal "GitHub policy file must not be a symlink: $file"; fi
+  if [[ ! -f "$file" ]]; then
+    umask 077
+    printf '%s\n' '{"schemaVersion":1,"workspaces":{}}' >"$file.tmp.$$" || fatal "could not write the GitHub policy file"
+    mv "$file.tmp.$$" "$file" || fatal "could not install the GitHub policy file"
+    chmod 600 "$file"
+  fi
+  policy_validate || fatal "GitHub policy file is malformed: $file (expected schemaVersion 1 with a workspaces object)"
+  cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+  if [[ -z "$cap" ]]; then
+    cap="$(openssl rand -hex 24)" || fatal "could not generate a workspace capability"
+    policy_atomic_write --arg w "$box" --arg c "$cap" \
+      '(.workspaces[$w].repos // []) as $repos | .workspaces[$w] = {capability: $c, repos: $repos}' \
+      || fatal "could not update the GitHub policy file"
+  fi
+  printf '%s\n' "$cap"
+}
+
+proxy_install_relay() {
+  local box="$1"
+  workspace_msb "$box" copy -q "$RELAY_BIN" "$box:/var/lib/msw-runtime/msw-github-relay.py"
+}
+
+# Path C §7 per-workspace git config: insteadOf rewrites for every github.com
+# URL form (the ssh forms chain through to https, then to the proxy) plus the
+# objects host, and the capability extraHeader scoped to the proxy prefix.
+# The base image's ssh->https chain (url.https://github.com/.insteadOf) is
+# removed first: with both rules present, git's equal-length tie-break is
+# version/order dependent and can route ssh URLs to https://github.com
+# directly, bypassing the proxy.
+proxy_guest_configure() {
+  local box="$1" capability="$2"
+  guest_exec "$box" bash -s -- "$capability" <<'GUEST'
+set -Eeuo pipefail
+capability="$1"
+proxy_base="http://127.0.0.1:18446"
+github_base="$proxy_base/github.com/"
+objects_base="$proxy_base/objects.githubusercontent.com/"
+git config --system --unset-all url.https://github.com/.insteadOf 2>/dev/null || true
+git config --global --unset-all "url.$github_base.insteadOf" 2>/dev/null || true
+git config --global --add "url.$github_base.insteadOf" https://github.com/
+git config --global --add "url.$github_base.insteadOf" git@github.com:
+git config --global --add "url.$github_base.insteadOf" ssh://git@github.com/
+git config --global --add "url.$github_base.insteadOf" ssh://git@github.com:22/
+git config --global --unset-all "url.$objects_base.insteadOf" 2>/dev/null || true
+git config --global --add "url.$objects_base.insteadOf" https://objects.githubusercontent.com/
+git config --global "http.$proxy_base/.extraHeader" "X-MSW-Capability: $capability"
+GUEST
+}
+
+proxy_configure_one() {
+  local box="$1" capability
+  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
+  capability="$(proxy_policy_ensure_workspace "$box")" || { github_lock_release; return 1; }
+  if ! sandbox_exists "$box"; then github_lock_release; fatal "workspace '$box' does not exist"; fi
+  if ! ensure_running "$box"; then github_lock_release; fatal "could not start workspace '$box'"; fi
+  if ! proxy_install_relay "$box"; then github_lock_release; fatal "could not install the relay inside $box"; fi
+  if ! proxy_guest_configure "$box" "$capability"; then github_lock_release; fatal "could not configure git inside $box"; fi
+  if ! proxy_shuttle_start "$box"; then github_lock_release; fatal "could not start the GitHub shuttle for $box"; fi
+  github_lock_release
+  ok "GitHub proxy transport configured for $box"
+}
+
+cmd_github_proxy_configure() {
+  local target="${1:-all}" box
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    fatal "msw github proxy-configure is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow"
+  fi
+  case "$target" in
+    dev|playgrounds|personal|all) ;;
+    *) fatal "usage: msw github proxy-configure [WORKSPACE]" ;;
+  esac
+  require_command_path jq "$JQ_BIN"
+  require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
+  require_command_path python3 "$(command -v python3 2>/dev/null || true)"
+  [[ -f "$SHUTTLE_BIN" ]] || fatal "shuttle script missing: $SHUTTLE_BIN (rerun setup.sh)"
+  [[ -f "$RELAY_BIN" ]] || fatal "relay script missing: $RELAY_BIN (rerun setup.sh)"
+  while IFS= read -r box; do proxy_configure_one "$box"; done < <(for_targets "$target")
+}
+
+# Path C §2/§8: mint a fresh capability, atomically rewrite the policy, and
+# update the guest's extraHeader. The old capability dies immediately because
+# the proxy re-reads the policy per request.
+cmd_github_capability_rotate() {
+  local box="$1" new_cap
+  validate_workspace "$box"
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    fatal "msw github capability rotate is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow"
+  fi
+  require_command_path jq "$JQ_BIN"
+  require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
+  if ! policy_validate; then fatal "GitHub policy file is missing or malformed: $(policy_file)"; fi
+  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
+  if [[ -z "$(policy_workspace_capability "$box" 2>/dev/null || true)" ]]; then
+    github_lock_release
+    fatal "workspace '$box' is not in the GitHub policy; run: msw github proxy-configure $box"
+  fi
+  new_cap="$(openssl rand -hex 24)" || { github_lock_release; fatal "could not generate a workspace capability"; }
+  if ! policy_atomic_write --arg w "$box" --arg c "$new_cap" '.workspaces[$w].capability = $c'; then
+    github_lock_release
+    fatal "could not update the GitHub policy file"
+  fi
+  if sandbox_inspect_state "$box" && workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
+    if ! proxy_guest_configure "$box" "$new_cap"; then
+      github_lock_release
+      fatal "capability rotated in the policy, but the guest extraHeader could not be updated (re-run: msw github proxy-configure $box)"
+    fi
+  else
+    warn "$box is not running; the new capability applies when the guest is next configured (msw github proxy-configure $box)"
+  fi
+  github_lock_release
+  ok "rotated GitHub capability for $box; the old capability is denied immediately"
+}
+
+# ---------------------------------------------------------------------------
+# Path C §11 local-mode entry migration (legacy state retirement). One
+# journaled transaction per workspace: lock-first (refuse if held, never steal,
+# never unlink), journal intent BEFORE any mutation, secret removal with proof,
+# conf archived (never blind-deleted), quarantine discipline (pre-existing
+# markers preserved untouched; own marker cleared only after every step is
+# proven), policy skeleton minted. The persistent lock stays in place;
+# github_lock_release only closes fd 9.
+# ---------------------------------------------------------------------------
+migration_journal_file() { printf '%s/migrated-local/journal.jsonl\n' "$GITHUB_META_DIR"; }
+
+JOURNAL_WRITE_COUNT=0
+
+# §11/blocker 6 durability: O_APPEND under a journal-wide flock (fcntl), one
+# full write, fsync(file) + fsync(parent dir) via Python
+# os.open/os.write/os.fsync. No /usr/bin/sync, no tmp+rename that could lose
+# concurrent cross-workspace lines. The dir is created 0700 and every line
+# lands in a 0600 file. Failures are NEVER silent: journal_intent aborts the
+# migration before any mutation, and post-mutation events
+# (migration_journal_checked) quarantine the workspace.
+journal_append_line() {
+  local line="$1" file dir
+  JOURNAL_WRITE_COUNT=$((JOURNAL_WRITE_COUNT + 1))
+  if [[ -n "${MSW_FAKE_JOURNAL_FAIL_ON:-}" ]]; then
+    case "$MSW_FAKE_JOURNAL_FAIL_ON" in
+      *[!0-9]*) ;;
+      *)
+        if (( JOURNAL_WRITE_COUNT >= MSW_FAKE_JOURNAL_FAIL_ON )); then
+          printf 'msw: migration journal write %s failed (injected)\n' "$JOURNAL_WRITE_COUNT" >&2
+          return 1
+        fi
+        ;;
+    esac
+  fi
+  file="$(migration_journal_file)"
+  dir="$(dirname "$file")"
+  if [[ ! -d "$dir" ]]; then
+    mkdir -p "$dir" || return 1
+    chmod 700 "$dir" || return 1
+  fi
+  umask 077
+  MSW_JOURNAL_FILE="$file" MSW_JOURNAL_LINE="$line" \
+  MSW_FAKE_JOURNAL_SHORT_WRITE="${MSW_FAKE_JOURNAL_SHORT_WRITE:-}" \
+  MSW_FAKE_JOURNAL_ZERO_WRITE="${MSW_FAKE_JOURNAL_ZERO_WRITE:-}" \
+  "$MSW_PYTHON_BIN" - <<'PY' || return 1
+import fcntl
+import os
+import sys
+
+path = os.environ["MSW_JOURNAL_FILE"]
+line = os.environ["MSW_JOURNAL_LINE"]
+
+
+def write_all(fd, data):
+    """Loop os.write until every byte lands; a zero/short write is failure."""
+    view = memoryview(data)
+    if os.environ.get("MSW_FAKE_JOURNAL_ZERO_WRITE"):
+        return False
+    first = True
+    while view:
+        try:
+            if os.environ.get("MSW_FAKE_JOURNAL_SHORT_WRITE") and first and len(view) > 1:
+                written = os.write(fd, view[: len(view) // 2])
+                first = False
+            else:
+                written = os.write(fd, view)
+        except OSError:
+            return False
+        if written <= 0:
+            return False
+        view = view[written:]
+    return True
+
+
+try:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+except OSError:
+    sys.exit(1)
+try:
+    os.fchmod(fd, 0o600)  # enforce 0600 even if the file pre-existed
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    if not write_all(fd, line.encode("utf-8") + b"\n"):
+        sys.exit(1)
+    os.fsync(fd)
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+try:
+    dfd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+except OSError:
+    sys.exit(1)
+PY
+}
+
+migration_journal() {
+  local box="$1" event="$2" detail="${3:-}" line
+  line="$("$JQ_BIN" -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg b "$box" --arg e "$event" --arg d "$detail" \
+    '{schemaVersion:1,event:$e,workspace:$b,detail:$d,timestamp:$t}')" || return 1
+  journal_append_line "$line"
+}
+
+# §11.2: the intent journal is MANDATORY and must land BEFORE any mutation.
+# A failed intent write aborts the migration with the workspace untouched.
+journal_intent() {
+  local box="$1" intent="$2" line
+  line="$("$JQ_BIN" -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg b "$box" --arg e intent --arg d "$intent" \
+    '{schemaVersion:1,event:$e,workspace:$b,detail:$d,timestamp:$t}')" || return 1
+  journal_append_line "$line"
+}
+
+# §11.5/blocker 6 failure discipline: when a quarantine marker PRE-EXISTED the
+# migration, NEVER call the truncating quarantine_workspace writer — the
+# original reason must survive byte-for-byte; instead record the new failure
+# in the durable journal/sidecar and leave the marker untouched. When no
+# marker pre-existed, quarantine_workspace writes the migration's own marker
+# as before.
+migration_quarantine_on_failure() {
+  local box="$1" reason="$2" preexisting="${3:-0}"
+  if (( preexisting )); then
+    migration_journal "$box" failed "$reason" >/dev/null 2>&1 || true
+    return 0
+  fi
+  quarantine_workspace "$box" "$reason" >/dev/null 2>&1 || true
+  migration_journal "$box" failed "$reason" >/dev/null 2>&1 || true
+}
+
+# Post-mutation journal events must never fail silently: a write failure here
+# quarantines the workspace (preserving a pre-existing marker byte-for-byte)
+# and stops the transaction.
+migration_journal_checked() {
+  local box="$1" event="$2" detail="${3:-}" step="$4" preexisting="${5:-0}"
+  if ! migration_journal "$box" "$event" "$detail"; then
+    migration_quarantine_on_failure "$box" "Migration journal write failed after ${step}" "$preexisting" || true
+    setup_transaction_disarm
+    github_lock_release
+    fatal "msw github migrate: migration journal write failed for '$box' after $step; workspace quarantined"
+  fi
+}
+
+migration_needed() {
+  local box="$1" conf quarantine_path
+  conf="$(metadata_file "$box")"; quarantine_path="$(quarantine_file "$box")"
+  [[ -f "$conf" && ! -L "$conf" ]] && return 0
+  [[ -e "$quarantine_path" || -L "$quarantine_path" ]] && return 0
+  if sandbox_inspect_state "$box" 2>/dev/null; then
+    workspace_msb "$box" inspect "$box" --format json 2>/dev/null | grep -q 'GH_TOKEN' && return 0
+  fi
+  return 1
+}
+
+migrate_workspace_local() {
+  local box="$1" conf quarantine_path reason="" preexisting_quarantine=0 set_quarantine=0 lock_rc=0 \
+        had_conf=0 conf_archive="" archive_dir="" stamp="" secret_was_bound=0 secret_spec="" \
+        step_failed=0 inspect_rc
+  validate_workspace "$box"
+  conf="$(metadata_file "$box")"
+  quarantine_path="$(quarantine_file "$box")"
+  [[ -f "$conf" && ! -L "$conf" ]] && had_conf=1
+  if [[ -e "$quarantine_path" || -L "$quarantine_path" ]]; then
+    preexisting_quarantine=1
+    if [[ -f "$quarantine_path" && ! -L "$quarantine_path" ]]; then
+      reason="$(sed -n '1p' "$quarantine_path" 2>/dev/null || true)"
+    fi
+  fi
+
+  # §11.1 lock-first: strict acquire — a held lock REFUSES (never delete or
+  # steal), and a stale legacy lock DIRECTORY is surfaced for manual review,
+  # never unlinked directly.
+  if github_lock_acquire "$box" 1; then
+    lock_rc=0
+  else
+    lock_rc=$?
+  fi
+  if (( lock_rc == 2 )); then
+    fatal "msw github migrate: workspace '$box' has a legacy lock directory at $(github_lock_file "$box") that needs manual review; migration never deletes locks"
+  fi
+  if (( lock_rc != 0 )); then
+    fatal "msw github migrate: workspace '$box' refused: another GitHub operation holds the workspace lock; retry after it finishes"
+  fi
+  setup_transaction_arm "$box" "$preexisting_quarantine"
+  # Test seam: park immediately after the arm hook (traps armed, preexisting
+  # flag already recorded) so a test can deliver a signal at the hook and
+  # prove the pre-existing marker survives byte-for-byte.
+  if [[ -n "${MSW_FAKE_MIGRATION_ARM_PAUSE_FILE:-}" ]]; then
+    if [[ -n "${MSW_FAKE_MIGRATION_ARM_PAUSE_REACHED:-}" ]]; then
+      : >"$MSW_FAKE_MIGRATION_ARM_PAUSE_REACHED"
+    fi
+    while [[ -e "$MSW_FAKE_MIGRATION_ARM_PAUSE_FILE" ]]; do sleep 0.1; done
+  fi
+
+  # §11.2 journal intent INCLUDING discovered state, before any mutation.
+  if sandbox_inspect_state "$box" 2>/dev/null; then
+    secret_spec="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null | grep -o 'GH_TOKEN[^,"}]*' | head -n 1 || true)"
+    [[ "$secret_spec" == GH_TOKEN* ]] && secret_was_bound=1
+  fi
+  migration_intent="$("$JQ_BIN" -nc \
+    --argjson conf "$([[ "$had_conf" == 1 ]] && printf true || printf false)" \
+    --argjson q "$([[ "$preexisting_quarantine" == 1 ]] && printf true || printf false)" \
+    --arg r "$reason" \
+    --argjson s "$([[ "$secret_was_bound" == 1 ]] && printf true || printf false)" \
+    '{confPresent:$conf,quarantinePreExisted:$q,quarantineReason:$r,secretBound:$s,lockState:"acquired"}')" || migration_intent="{}"
+  if ! journal_intent "$box" "$migration_intent"; then
+    setup_transaction_disarm
+    github_lock_release
+    fatal "msw github migrate: could not write the migration journal for '$box' ($(migration_journal_file)); no state was changed"
+  fi
+  # Test seam: park the transaction here (after the durable intent, while the
+  # signal/EXIT traps are armed) so a test can deliver SIGTERM/SIGINT at a
+  # deterministic point (MSW_FAKE_MIGRATION_PAUSE_REACHED marks the park).
+  if [[ -n "${MSW_FAKE_MIGRATION_PAUSE_FILE:-}" ]]; then
+    if [[ -n "${MSW_FAKE_MIGRATION_PAUSE_REACHED:-}" ]]; then
+      : >"$MSW_FAKE_MIGRATION_PAUSE_REACHED"
+    fi
+    while [[ -e "$MSW_FAKE_MIGRATION_PAUSE_FILE" ]]; do sleep 0.1; done
+  fi
+
+  # §11.5 quarantine discipline.
+  if (( preexisting_quarantine )); then
+    warn "workspace '$box' is already quarantined (${reason:-reason unknown}); migration preserves the pre-existing marker"
+  else
+    if ! printf '%s\n' "Legacy GitHub state migration in progress" >"$quarantine_path" 2>/dev/null; then
+      migration_journal "$box" failed "migration quarantine marker could not be set" >/dev/null 2>&1 || true
+      setup_transaction_disarm
+      github_lock_release
+      fatal "msw github migrate: could not set the migration quarantine marker for '$box'; refusing to proceed"
+    fi
+    set_quarantine=1
+    migration_journal_checked "$box" quarantine-set "migration-owned marker" "setting the migration quarantine" "$preexisting_quarantine"
+  fi
+
+  # §11.3 secret removal with proof via inspect. Failure => quarantine + stop
+  # (a pre-existing marker is preserved byte-for-byte, §11.5/blocker 6).
+  if (( secret_was_bound )); then
+    if ! remove_github_secret "$box" 1; then
+      migration_quarantine_on_failure "$box" "Legacy GitHub secret removal failed during migration" "$preexisting_quarantine"
+      setup_transaction_disarm
+      github_lock_release
+      fatal "msw github migrate: could not remove the legacy GitHub secret from '$box'; workspace quarantined"
+    fi
+    if sandbox_inspect_state "$box" 2>/dev/null &&
+      workspace_msb "$box" inspect "$box" --format json 2>/dev/null | grep -q 'GH_TOKEN'; then
+      migration_quarantine_on_failure "$box" "Legacy GitHub secret removal could not be proven during migration" "$preexisting_quarantine"
+      setup_transaction_disarm
+      github_lock_release
+      fatal "msw github migrate: legacy GitHub secret removal from '$box' could not be proven; workspace quarantined"
+    fi
+    migration_journal_checked "$box" secret-removed "removal proven by inspect" "removing the legacy secret" "$preexisting_quarantine"
+  fi
+
+  # §11.4 archive the legacy conf (preserve, never blind-delete).
+  if (( had_conf )); then
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    archive_dir="$GITHUB_META_DIR/migrated-local"
+    mkdir -p "$archive_dir" 2>/dev/null || true
+    chmod 700 "$archive_dir" 2>/dev/null || true
+    conf_archive="$archive_dir/$box.conf.$stamp"
+    if [[ -e "$conf_archive" ]]; then conf_archive="$archive_dir/$box.conf.$stamp.$$"; fi
+    if ! mv "$conf" "$conf_archive" 2>/dev/null; then
+      migration_quarantine_on_failure "$box" "Legacy GitHub metadata archiving failed during migration" "$preexisting_quarantine"
+      setup_transaction_disarm
+      github_lock_release
+      fatal "msw github migrate: could not archive legacy metadata for '$box'; workspace quarantined"
+    fi
+    if [[ -f "$conf_archive" && ! -e "$conf" && ! -L "$conf" ]]; then
+      migration_journal_checked "$box" archived "{\"archive\":$(app_json_string "${conf_archive#"$GITHUB_META_DIR"/}")}" "archiving legacy metadata" "$preexisting_quarantine"
+    else
+      migration_quarantine_on_failure "$box" "Legacy GitHub metadata archiving could not be proven during migration" "$preexisting_quarantine"
+      setup_transaction_disarm
+      github_lock_release
+      fatal "msw github migrate: legacy metadata archiving could not be proven for '$box'; workspace quarantined"
+    fi
+  fi
+
+  # §11.6 policy-file skeleton (mint capability; empty repo list = no access).
+  if ! proxy_policy_ensure_workspace "$box" >/dev/null; then
+    migration_quarantine_on_failure "$box" "GitHub policy skeleton failed during migration" "$preexisting_quarantine"
+    setup_transaction_disarm
+    github_lock_release
+    fatal "msw github migrate: could not write the GitHub policy skeleton for '$box'; workspace quarantined"
+  fi
+  migration_journal_checked "$box" policy-written "skeleton ensured" "writing the policy skeleton" "$preexisting_quarantine"
+
+  if (( set_quarantine )); then
+    if ! clear_quarantine "$box"; then
+      migration_quarantine_on_failure "$box" "Migration quarantine cleanup failed" "$preexisting_quarantine"
+      setup_transaction_disarm
+      github_lock_release
+      fatal "msw github migrate: migration quarantine could not be cleared for '$box'; workspace quarantined"
+    fi
+    migration_journal_checked "$box" quarantine-cleared "migration-owned marker removed" "clearing the migration quarantine" "$preexisting_quarantine"
+  fi
+  migration_journal_checked "$box" committed "all steps proven" "completing the migration" "$preexisting_quarantine"
+  setup_transaction_disarm
+  github_lock_release
+  ok "legacy GitHub state migrated for $box"
+  if (( preexisting_quarantine )); then
+    warn "workspace '$box' remains quarantined (pre-existing reason: ${reason:-unknown}); review it before use"
+  fi
+}
+
+cmd_github_migrate() {
+  local target="${1:-all}" box
+  case "$target" in dev|playgrounds|personal|all) ;; *) fatal "usage: msw github migrate [WORKSPACE|all]" ;; esac
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    fatal "msw github migrate is a local-mode command; legacy state retirement only runs in local mode"
+  fi
+  require_command_path jq "$JQ_BIN"
+  require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
+  while IFS= read -r box; do
+    if migration_needed "$box"; then
+      migrate_workspace_local "$box"
+    else
+      printf '%-13s nothing to migrate\n' "$box"
+    fi
+  done < <(for_targets "$target")
+}
+
+# §11 trigger: the first local-mode GitHub operation per workspace retires
+# legacy state as one journaled transaction before the operation proceeds.
+# The transaction's progress goes to stderr so machine-readable stdout
+# (e.g. `msw github status --format json`) stays clean; the explicit
+# `msw github migrate` command reports on stdout.
+migrate_local_if_needed() {
+  local target="${1:-all}" box
+  [[ "$MSW_GITHUB_MODE" == local ]] || return 0
+  while IFS= read -r box; do
+    migration_needed "$box" || continue
+    migrate_workspace_local "$box" >&2
+  done < <(for_targets "$target")
 }
 
 host_network_check() {
@@ -1698,9 +4036,12 @@ cmd_check_quick() {
 }
 
 check_one_deep() {
-  local box="$1" was_running=0 failed=0 host direct_url docker_url direct_unit docker_name
+  local box="$1" was_running=0 failed=0 host direct_url docker_url direct_unit docker_name probe_repo probe_code
   workspace_msb "$box" ping -q "$box" >/dev/null 2>&1 && was_running=1
   ensure_running "$box"
+  # Published ports are host-forwarded over SSH; make sure the forwarder has
+  # reconciled before probing them.
+  port_forwarder_kick "$box" || true
   host="$(workspace_host "$box")"
   direct_unit="msw-health-direct-${box}"
   docker_name="msw-health-docker-${box}"
@@ -1715,12 +4056,28 @@ set -Eeuo pipefail
 [ "$(cat /proc/1/comm)" = systemd ]
 [ "$(findmnt -n -o FSTYPE /workspace)" = ext4 ]
 [ "$(findmnt -n -o FSTYPE /var/lib/msw-runtime)" = ext4 ]
-systemctl is-active --quiet docker
-systemctl is-active --quiet containerd
-docker info >/dev/null
+ready=0
+for attempt in $(seq 1 60); do
+  if systemctl is-active --quiet docker &&
+     systemctl is-active --quiet containerd &&
+     docker info >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.5
+done
+[ "$ready" = 1 ] || { echo "Docker/containerd did not become ready within 30 seconds" >&2; exit 1; }
 docker compose version >/dev/null
 docker buildx version >/dev/null
-curl -fsS --max-time 20 https://github.com/robots.txt >/dev/null
+github_ready=0
+for attempt in 1 2 3; do
+  if curl -fsS --max-time 20 https://github.com/robots.txt >/dev/null; then
+    github_ready=1
+    break
+  fi
+  sleep 1
+done
+[ "$github_ready" = 1 ] || { echo "GitHub connectivity check failed after 3 attempts" >&2; exit 1; }
 SCRIPT
   guest_script "$box" "$script" || failed=1
 
@@ -1744,7 +4101,35 @@ SCRIPT
   [[ "$body" == *"Welcome to nginx"* ]] || { echo "$box: Docker published port failed" >&2; failed=1; }
   guest_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
 
-  if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
+  # Path C §7/§9: local mode asserts the guest carries NO GH_TOKEN at all and
+  # probes proxy reachability through the endpoint. Connect mode keeps the
+  # legacy placeholder assertion.
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in "") exit 0;; *) exit 1;; esac' || {
+      echo "$box: local mode must not expose GH_TOKEN inside the guest" >&2; failed=1;
+    }
+    if [[ -f "$(policy_file)" ]]; then
+      probe_repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
+      if [[ -n "$probe_repo" ]]; then
+        if host_credential_available; then
+          guest_exec "$box" env GIT_TERMINAL_PROMPT=0 git ls-remote "http://127.0.0.1:18446/github.com/$probe_repo.git" >/dev/null 2>&1 || {
+            echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
+          }
+        else
+          probe_code="$(guest_exec "$box" curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18446/github.com/$probe_repo.git/info/refs?service=git-upload-pack" 2>/dev/null || true)"
+          if [[ ! "$probe_code" =~ ^[0-9]{3}$ ]]; then
+            echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
+          else
+            note "$box: proxy reachable (HTTP $probe_code); git requests fail closed until the host credential is provisioned (Phase 2)"
+          fi
+        fi
+      else
+        note "$box: no GitHub repositories ticked; skipping proxy reachability"
+      fi
+    else
+      note "$box: no GitHub policy; skipping proxy reachability"
+    fi
+  elif keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
     guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
       echo "$box: GitHub secret is not represented by a guest placeholder" >&2; failed=1;
     }
@@ -1759,6 +4144,7 @@ cmd_check() {
   local deep=0 arg failed=0 box
   for arg in "$@"; do case "$arg" in --deep) deep=1 ;; *) fatal "unknown check option: $arg" ;; esac; done
   cmd_check_quick
+  verify_vendored_h11_if_enforced
   (( deep == 1 )) || return 0
   require_command_path ssh "$SSH_BIN"
   require_command_path curl "$CURL_BIN"
@@ -2073,9 +4459,16 @@ Repositories
 
 GitHub permissions
   Connect GitHub                           Use MSW Monitor's Connect GitHub flow
-  msw github verify WORKSPACE [REPO]  Rerun the configured permission test
-  msw github status [WORKSPACE|all]   Show credential presence
-  msw github remove WORKSPACE         Remove that workspace's tokens
+  msw github auth [--force] [--json]       Provision/rotate the host credential
+  msw github auth --device [--json]        Start OAuth Device Flow (prints code once)
+  msw github auth --device-complete CODE   One device-flow exchange attempt
+  msw github repos [--owner O] [--json]    Discover GitHub repositories (picker)
+  msw github migrate [WORKSPACE|all]       Retire legacy GitHub state (local mode)
+  msw github proxy-configure [WORKSPACE]   Install the repo-aware proxy transport
+  msw github capability rotate WORKSPACE   Rotate that workspace's capability
+  msw github verify WORKSPACE [REPO]       Verify GitHub access
+  msw github status [WORKSPACE|all]        Show credential/capability state
+  msw github remove WORKSPACE              Revoke the host credential (local mode)
 
 Websites
   msw open WORKSPACE [PORT] [SCHEME]    Start VM and open published URL
@@ -2104,6 +4497,7 @@ Backup / reference
   msw help
 Machine-readable app integration
   msw app handshake|state|metrics|logs|repositories|ports|github-state
+  msw app github-policy-get|github-policy-set|github-policy-apply
   msw app url|clone|pull|identity|disk|resize|clean|upgrade|update
   msw app check|backup|restore|push-plan|plan|apply|bootstrap|help
 HELP
@@ -2303,6 +4697,20 @@ app_profile_expiry_state() {
 
 app_workspace_credential_state() {
   local box="$1" access needs_restart host_needs_restart guest_expiry host_expiry recovery_state host_recovery_state
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    # §8: host push is allowed for every ticked repo in both modes, so the
+    # local credential state is Ready exactly when the host credential exists.
+    if app_workspace_quarantined "$box"; then
+      printf 'Quarantined'
+    elif ! policy_validate; then
+      printf 'Unconfigured'
+    elif host_credential_available; then
+      printf 'Ready'
+    else
+      printf 'Needs authorization'
+    fi
+    return
+  fi
   if app_workspace_quarantined "$box"; then
     printf 'Quarantined'
   elif app_metadata_profile_present "$box" guest; then
@@ -2387,6 +4795,7 @@ app_workspace_json() {
   local metrics_observed_at="" github_observed_at="" activity_observed_at=""
   local credential purpose host ip cpus max_cpus memory max_memory root_disk verification_repo access
   local account_login installation_id access_expires refresh_expires needs_restart host_needs_restart quarantine_reason role
+  local skipped_ports_json port_warning
   if app_workspace_quarantined "$box"; then
     quarantine="quarantined"
     if [[ -f "$(quarantine_file "$box")" && ! -L "$(quarantine_file "$box")" ]]; then
@@ -2440,7 +4849,9 @@ app_workspace_json() {
     needs_restart=false
   fi
   [[ -n "$needs_restart" ]] || needs_restart=false
-  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s}}' \
+  skipped_ports_json="$(workspace_state_skipped_json "$box")"
+  port_warning="$(workspace_port_warning "$box")"
+  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s}}' \
     "$(app_json_string "$box")" \
     "$(app_json_string "$purpose")" \
     "$(app_json_string "$lifecycle")" \
@@ -2466,6 +4877,8 @@ app_workspace_json() {
     "$(app_json_string "$root_disk")" \
     "$(app_json_string "$host")" \
     "$(app_json_string "$ip")" \
+    "$skipped_ports_json" \
+    "$(app_json_string "$port_warning")" \
     "$([[ "$quarantine" == clear && ( "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] && printf true || printf false)" \
     "$([[ "$lifecycle" == Running ]] && printf true || printf false)" \
     "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
@@ -2921,7 +5334,7 @@ app_cmd_ports() {
 
 app_cmd_github_state() {
   local target="all" box items="" repo access provider configured quarantine account_login installation_id access_expires refresh_expires needs_restart
-  local host_access_expires host_refresh_expires host_needs_restart
+  local host_access_expires host_refresh_expires host_needs_restart cap cap_state host_cred_state
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error github-state "missing value for --workspace"; target="$2"; shift 2 ;;
@@ -2934,6 +5347,31 @@ app_cmd_github_state() {
   fi
   for box in "${WORKSPACES[@]}"; do
     [[ "$target" == all || "$target" == "$box" ]] || continue
+    if [[ "$MSW_GITHUB_MODE" == local ]]; then
+      # §1/§8: local mode never reads Connect grants; report policy state.
+      provider="local-policy"
+      configured=false
+      if policy_validate; then
+        cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+        [[ -n "$cap" ]] && configured=true
+      fi
+      repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
+      access="unconfigured"
+      if policy_validate; then
+        if "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos // [] | any(.mode == "read-write")' "$(policy_file)" >/dev/null 2>&1; then
+          access="read-write"
+        elif "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos // [] | length > 0' "$(policy_file)" >/dev/null 2>&1; then
+          access="read-only"
+        fi
+      fi
+      cap_state="$(policy_capability_state "$box")"
+      host_cred_state="$(host_credential_state | tr -d '\n')"
+      quarantine=false
+      app_workspace_quarantined "$box" && quarantine=true
+      [[ -n "$items" ]] && items+=","
+      items+="{\"workspace\":$(app_json_string "$box"),\"provider\":$(app_json_string "$provider"),\"configured\":$configured,\"accessMode\":$(app_json_string "$access"),\"verificationRepository\":$(app_json_optional "$repo"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"hostCredential\":$(app_json_string "$host_cred_state"),\"quarantined\":$quarantine}"
+      continue
+    fi
     configured=false
     repo=""
     access=""
@@ -2978,6 +5416,484 @@ app_cmd_github_state() {
   app_emit_success github-state "{\"workspaces\":[$items]}"
 }
 
+app_cmd_github_policy_get() {
+  local target="all" box items="" entry
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error github-policy-get "missing value for --workspace"; target="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-policy-get "github-policy-get requires --format json"; shift 2 ;;
+      *) app_usage_error github-policy-get "unknown github-policy-get option '$1'" ;;
+    esac
+  done
+  if [[ "$target" != all ]]; then
+    is_workspace "$target" || app_usage_error github-policy-get "workspace must be dev, playgrounds, or personal"
+  fi
+  if ! policy_validate; then
+    app_emit_error github-policy-get "MSW_POLICY_MISSING" "The GitHub policy file is missing or malformed." "Run 'msw github proxy-configure' or 'msw github migrate' to initialize it." "" false 78
+  fi
+  for box in "${WORKSPACES[@]}"; do
+    [[ "$target" == all || "$target" == "$box" ]] || continue
+    entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_optional "$(policy_workspace_capability "$box" 2>/dev/null || true)"),\"repos\":$(policy_repo_json "$box")}"
+    [[ -n "$items" ]] && items+=","
+    items+="$entry"
+  done
+  app_emit_success github-policy-get "{\"workspaces\":[$items]}"
+}
+
+# §8/§2: journaled atomic policy mutation, serialized on the per-workspace
+# GitHub lock. Ordinary edits never regenerate the workspace capability.
+app_cmd_github_policy_set() {
+  local box="" repo="" mode="" action="set" canonical_repo="" cap repo_json mode_json
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error github-policy-set "missing value for --workspace"; box="$2"; shift 2 ;;
+      --repository) [[ $# -ge 2 ]] || app_usage_error github-policy-set "missing value for --repository"; repo="$2"; shift 2 ;;
+      --mode) [[ $# -ge 2 ]] || app_usage_error github-policy-set "missing value for --mode"; mode="$2"; shift 2 ;;
+      --remove) action=remove; shift ;;
+      --clear) action=clear; shift ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-policy-set "github-policy-set requires --format json"; shift 2 ;;
+      *) app_usage_error github-policy-set "unknown github-policy-set option '$1'" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error github-policy-set "workspace must be dev, playgrounds, or personal"
+  case "$action" in
+    set)
+      app_valid_repository "$repo" || app_usage_error github-policy-set "repository must be OWNER/REPOSITORY"
+      [[ "$mode" == read-only || "$mode" == read-write ]] || app_usage_error github-policy-set "mode must be read-only or read-write"
+      ;;
+    remove)
+      app_valid_repository "$repo" || app_usage_error github-policy-set "repository must be OWNER/REPOSITORY"
+      ;;
+    clear) ;;
+  esac
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    app_emit_error github-policy-set "MSW_GITHUB_MODE_MISMATCH" "GitHub policy edits are local-mode operations." "Switch MSW_GITHUB_MODE=local or use the Connect flow for connect-mode access." "$box" false 69
+  fi
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error github-policy-set "MSW_JSON_TOOL_UNAVAILABLE" "The policy editor requires jq." "Repair the MSW toolchain and retry the policy edit." "$box" true 69
+  if ! github_lock_acquire "$box"; then
+    app_emit_error github-policy-set "MSW_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then retry the policy edit." "$box" true 73
+  fi
+  if ! proxy_policy_ensure_workspace "$box" >/dev/null 2>&1; then
+    app_emit_error github-policy-set "MSW_POLICY_WRITE_FAILED" "The GitHub policy file could not be initialized." "Repair the policy file and retry." "$box" true 69
+  fi
+  canonical_repo="$(canonicalize_github_repo "$repo")"
+  policy_journal "$box" "$action" "started"
+  case "$action" in
+    set)
+      if ! policy_atomic_write --arg w "$box" --arg r "$canonical_repo" --arg m "$mode" \
+        '(.workspaces[$w].repos // []) as $repos | ($repos | map(select(.canonical != $r))) as $rest | .workspaces[$w].repos = ($rest + [{canonical: $r, mode: $m}])'; then
+        policy_journal "$box" "$action" "failed"
+        app_emit_error github-policy-set "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be updated." "Retry the policy edit." "$box" true 69
+      fi
+      ;;
+    remove)
+      if ! policy_atomic_write --arg w "$box" --arg r "$canonical_repo" \
+        '.workspaces[$w].repos = ((.workspaces[$w].repos // []) | map(select(.canonical != $r)))'; then
+        policy_journal "$box" "$action" "failed"
+        app_emit_error github-policy-set "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be updated." "Retry the policy edit." "$box" true 69
+      fi
+      ;;
+    clear)
+      if ! policy_atomic_write --arg w "$box" '.workspaces[$w].repos = []'; then
+        policy_journal "$box" "$action" "failed"
+        app_emit_error github-policy-set "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be updated." "Retry the policy edit." "$box" true 69
+      fi
+      ;;
+  esac
+  policy_journal "$box" "$action" "committed"
+  github_lock_release
+  cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+  if [[ "$action" == clear ]]; then repo_json="null"; else repo_json="$(app_json_string "$canonical_repo")"; fi
+  if [[ "$action" == set ]]; then mode_json="$(app_json_string "$mode")"; else mode_json="null"; fi
+  app_emit_success github-policy-set \
+    "{\"workspace\":$(app_json_string "$box"),\"action\":$(app_json_string "$action"),\"repository\":$repo_json,\"mode\":$mode_json,\"capability\":$(app_json_optional "$cap"),\"repos\":$(policy_repo_json "$box")}"
+}
+
+# ---------------------------------------------------------------------------
+# §8/blocker 3: atomic full-policy apply. Reads the FULL desired policy JSON
+# from stdin (never argv), validates it strictly, acquires every affected
+# workspace's GitHub lock, provisions/verifies the transport (relay + guest
+# config + shuttle) with the final capabilities BEFORE one atomic policy
+# commit, and restores the pre-apply policy on any unproven step (typed
+# error). Idempotent: re-applying the same desired state succeeds. The
+# per-repo github-policy-set command remains the CLI fallback.
+#
+# Request (stdin, schema v1, full desired state):
+#   {"schemaVersion":1,"workspaces":{"dev":{"repos":[{"canonical":"owner/name",
+#    "mode":"read-only"|"read-write"}]}, ...}}
+# Capabilities are optional in the request: a valid existing capability is
+# preserved (transport continuity); otherwise one is minted. A workspace key
+# missing from the request is cleared (deny).
+# ---------------------------------------------------------------------------
+MSW_APPLY_LOCKED=()
+
+app_apply_release_all() {
+  local box fd
+  # bash 3.2 + set -u: a declared-but-empty array is still "set", so the
+  # ${arr[@]+...} guard does NOT protect the expansion; check the length
+  # (the EXIT trap always calls this, including on error paths).
+  if (( ${#MSW_APPLY_LOCKED[@]} > 0 )); then
+    for box in "${MSW_APPLY_LOCKED[@]}"; do
+      case "$box" in
+        dev) fd=5 ;; playgrounds) fd=6 ;; personal) fd=7 ;;
+      esac
+      eval "exec ${fd}>&-" 2>/dev/null || true
+    done
+  fi
+  MSW_APPLY_LOCKED=()
+  if [[ -n "$MSW_APPLY_SNAPSHOT" ]]; then
+    rm -f "$MSW_APPLY_SNAPSHOT" 2>/dev/null || true
+    MSW_APPLY_SNAPSHOT=""
+  fi
+}
+
+# Acquire the per-workspace GitHub locks for ALL THREE workspaces in the
+# fixed order dev < playgrounds < personal (no deadlock), because the apply
+# replaces the FULL workspaces object — omitted workspaces are cleared, so a
+# concurrent per-repo edit of any workspace must serialize against the apply.
+# Uses fds 5-7 so several workspace locks can be held at once (fd 9 is the
+# single-workspace lock used elsewhere).
+app_apply_lock_all() {
+  local request="$1" box fd lock
+  MSW_APPLY_LOCKED=()
+  [[ -n "${LOCKF_BIN:-}" && -x "${LOCKF_BIN:-}" ]] || return 1
+  mkdir -p "$GITHUB_META_DIR" || return 1
+  chmod 700 "$GITHUB_META_DIR" || return 1
+  for box in "${WORKSPACES[@]}"; do
+    case "$box" in
+      dev) fd=5 ;; playgrounds) fd=6 ;; personal) fd=7 ;;
+    esac
+    lock="$(github_lock_file "$box")"
+    if [[ -d "$lock" ]]; then
+      if ! github_lock_reclaim_legacy "$lock"; then
+        app_apply_release_all
+        return 1
+      fi
+    fi
+    if ! eval "exec ${fd}>>\"$lock\""; then app_apply_release_all; return 1; fi
+    if ! "$LOCKF_BIN" -s -t 0 "$fd"; then
+      eval "exec ${fd}>&-"
+      app_apply_release_all
+      return 1
+    fi
+    printf '%s\n' "$$" >"$lock"
+    MSW_APPLY_LOCKED+=("$box")
+  done
+  return 0
+}
+
+# Snapshot the policy file byte-exactly (cp, preserving the trailing newline)
+# AFTER the locks are held, so no concurrent writer can interleave. The
+# snapshot is removed when the apply finishes (success or failure).
+MSW_APPLY_SNAPSHOT=""
+app_apply_snapshot() {
+  local file="$1"
+  file="$(policy_file)"
+  MSW_APPLY_SNAPSHOT="$file.snapshot.$$"
+  rm -f "$MSW_APPLY_SNAPSHOT" 2>/dev/null || true
+  if [[ -f "$file" && ! -L "$file" ]]; then
+    cp -p "$file" "$MSW_APPLY_SNAPSHOT" 2>/dev/null || { MSW_APPLY_SNAPSHOT=""; return 1; }
+    printf '1'
+  else
+    : >"$MSW_APPLY_SNAPSHOT"
+    printf '0'
+  fi
+}
+
+# Restore the pre-apply policy from the byte-exact snapshot (locks still
+# held); a failed restore means the typed error must name the policy path for
+# manual repair.
+app_apply_rollback_policy() {
+  local file="$1" old_exists="$2" tmp
+  file="$(policy_file)"
+  if [[ -n "$MSW_APPLY_SNAPSHOT" && -f "$MSW_APPLY_SNAPSHOT" ]]; then
+    if (( old_exists )); then
+      tmp="$file.tmp.$$"
+      umask 077
+      if cp "$MSW_APPLY_SNAPSHOT" "$tmp" 2>/dev/null &&
+        chmod 600 "$tmp" 2>/dev/null &&
+        fsync_path "$tmp" file 2>/dev/null &&
+        mv "$tmp" "$file" 2>/dev/null; then
+        return 0
+      fi
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+    rm -f "$file" 2>/dev/null || true
+    [[ ! -e "$file" && ! -L "$file" ]]
+  fi
+}
+
+# Bounded end-to-end transport readiness (re-review item 3): before the
+# policy commit, prove the guest can reach the MSW proxy through the
+# relay/shuttle with the DESIRED capability. The deliberate probe (bare
+# info/refs, no service param — so git smart-HTTP denies are NOT converted to
+# the HTTP 200 git-deny form) MUST return EXACTLY HTTP 403 with the proxy's
+# "msw-proxy:" error body: that is the expected deny for the uncommitted
+# capability (unknown capability / policy missing / missing-service when the
+# capability is already committed). Anything else — 200, 404, 500, 503, an
+# unrelated listener, or a dead path — fails the probe. Production
+# ensures/repairs the host proxy LaunchAgent first. Test seams:
+# MSW_FAKE_TRANSPORT_PROBE=403|fail models ONLY the expected deny (the fake
+# msb stubs the relay); MSW_TRANSPORT_PROBE_PORT overrides the probe port.
+app_apply_verify_transport() {
+  local box="$1" capability="$2" code="" body="" probe_repo="" probe_url="" port body_and_code
+  if [[ "${MSW_TEST_MODE:-0}" != 1 ]]; then
+    if ! github_proxy_launchd_loaded; then
+      github_proxy_render_plist || return 1
+      /bin/launchctl bootout "gui/$(id -u)/$(github_proxy_launchd_label)" >/dev/null 2>&1 || true
+      /bin/launchctl bootstrap "gui/$(id -u)" "$(github_proxy_plist_file)" || return 1
+    fi
+  fi
+  if [[ -n "${MSW_FAKE_TRANSPORT_PROBE:-}" ]]; then
+    # only the expected deny (403) counts as ready; any other modeled code
+    # (200/404/500/503) must fail the probe
+    [[ "$MSW_FAKE_TRANSPORT_PROBE" == 403 ]]
+    return
+  fi
+  probe_repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
+  [[ -n "$probe_repo" ]] || probe_repo="acme/demo"
+  port="${MSW_TRANSPORT_PROBE_PORT:-${MSW_GITHUB_PROXY_PORT:-18446}}"
+  # No service= param: a bare info/refs yields a real HTTP 403 from the MSW
+  # proxy (unknown capability for the uncommitted capability, or
+  # missing-service when it is committed).
+  probe_url="http://127.0.0.1:${port}/github.com/${probe_repo}.git/info/refs"
+  body_and_code="$(guest_exec "$box" curl -sS -w '\n%{http_code}' --max-time 10 \
+    -H "X-MSW-Capability: $capability" "$probe_url" 2>/dev/null || true)"
+  code="${body_and_code##*$'\n'}"
+  body="${body_and_code%$'\n'*}"
+  [[ "$code" == 403 && "$body" == *"msw-proxy:"* ]]
+}
+
+# Provision + verify the transport for one workspace with its FINAL
+# capability. Runs inside a command substitution so any fatal() (quarantine /
+# start failure) converts to a typed error instead of aborting the envelope.
+app_apply_provision_transport() {
+  local box="$1" capability="$2"
+  # The parent holds the workspace locks on fds 5-7. The shuttle spawned here
+  # must NOT inherit them: an inherited fd would pin the flock for the
+  # shuttle's lifetime and deadlock the next apply.
+  exec 5>&- 2>/dev/null || true
+  exec 6>&- 2>/dev/null || true
+  exec 7>&- 2>/dev/null || true
+  if app_workspace_quarantined "$box"; then
+    printf 'msw: workspace %s is quarantined\n' "$box" >&2
+    return 1
+  fi
+  if [[ "${MSW_FAKE_APPLY_PROVISION_FAIL:-}" == "$box" ]]; then
+    printf 'msw: transport provisioning failure injected for %s\n' "$box" >&2
+    return 1
+  fi
+  if ! sandbox_exists "$box"; then
+    printf 'msw: workspace %s does not exist\n' "$box" >&2
+    return 1
+  fi
+  ensure_running "$box" || return 1
+  proxy_install_relay "$box" || return 1
+  proxy_guest_configure "$box" "$capability" || return 1
+  proxy_shuttle_start "$box" || return 1
+  # readiness: a bounded end-to-end guest probe with the desired capability
+  app_apply_verify_transport "$box" "$capability" || return 1
+  return 0
+}
+
+app_cmd_github_policy_apply() {
+  local request="" old_exists=0 failed=0 box cap caps_json="" sep="" items="" \
+        final_policy="" file tmp output="" format=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --format) [[ "${2:-}" == json ]] || app_usage_error github-policy-apply "github-policy-apply requires --format json"; shift 2 ;;
+      *) app_usage_error github-policy-apply "unknown github-policy-apply option '$1'" ;;
+    esac
+  done
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    app_emit_error github-policy-apply "MSW_GITHUB_MODE_MISMATCH" \
+      "GitHub policy apply is a local-mode operation." \
+      "Switch MSW_GITHUB_MODE=local or use the Connect flow for connect-mode access." "" false 69
+    return
+  fi
+  app_require_config github-policy-apply
+  app_require_runtime github-policy-apply
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || {
+    app_emit_error github-policy-apply "MSW_JSON_TOOL_UNAVAILABLE" "The policy editor requires jq." "Repair the MSW toolchain and retry the policy apply." "" true 69
+    return
+  }
+  if ! command -v openssl >/dev/null 2>&1; then
+    app_emit_error github-policy-apply "MSW_JSON_TOOL_UNAVAILABLE" "openssl is required to mint workspace capabilities." "Repair the MSW toolchain and retry the policy apply." "" true 69
+    return
+  fi
+  [[ -f "$SHUTTLE_BIN" && -f "$RELAY_BIN" ]] || {
+    app_emit_error github-policy-apply "MSW_TRANSPORT_UNAVAILABLE" "The GitHub transport scripts are missing." "Rerun setup.sh to install the relay and shuttle." "" true 69
+    return
+  }
+  if [[ -t 0 ]]; then
+    app_emit_error github-policy-apply "MSW_INVALID_REQUEST" \
+      "github-policy-apply reads the full desired policy JSON from stdin." \
+      "Pipe the schema-v1 policy JSON to the command's stdin." "" false 64
+    return
+  fi
+  request="$(cat 2>/dev/null || true)"
+  # Strict request validation (capabilities optional; the CLI preserves or
+  # mints them). A workspace key missing from the request is cleared.
+  if ! printf '%s\n' "$request" | "$JQ_BIN" -e '
+      .schemaVersion == 1 and
+      (.workspaces | type == "object") and
+      (([.workspaces | keys[] | select(. == "dev" or . == "playgrounds" or . == "personal")] | length) == (.workspaces | keys | length)) and
+      ([.workspaces[] |
+        ((.capability // "") == "" or (.capability | type == "string" and test("^[0-9a-f]{48}$"))) and
+        (.repos | type == "array") and
+        ([.repos[] |
+          (.canonical | type == "string") and
+          (.canonical | test("^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*$")) and
+          ((.canonical | endswith(".git")) | not) and
+          (.mode == "read-only" or .mode == "read-write")
+        ] | all) and
+        ([.repos[].canonical] | unique | length) == ([.repos[].canonical] | length)
+      ] | all)
+    ' >/dev/null 2>&1; then
+    app_emit_error github-policy-apply "MSW_INVALID_REQUEST" \
+      "The desired policy JSON on stdin failed strict validation." \
+      "Send schema-v1 workspaces with canonical owner/name repos, valid modes, and no duplicates." "" false 64
+    return
+  fi
+
+  policy_journal all apply started
+
+  # Lock ALL THREE workspaces FIRST (the apply replaces the full workspaces
+  # object, so no concurrent per-repo edit may interleave), then snapshot the
+  # policy byte-exactly (cp, preserving the trailing newline) under the locks.
+  if ! app_apply_lock_all "$request"; then
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_OPERATION_CONFLICT" \
+      "Another GitHub operation is already running for a workspace." \
+      "Wait for it to finish, then retry the policy apply." "" true 73
+    return
+  fi
+  trap 'app_apply_release_all' EXIT
+  file="$(policy_file)"
+  old_exists="$(app_apply_snapshot "$file")" || {
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The current GitHub policy could not be snapshotted for the apply." "Repair the policy file and retry." "" true 69
+    return
+  }
+
+  # Final capabilities: a valid existing capability is preserved; else mint.
+  caps_json="{"
+  sep=""
+  for box in "${WORKSPACES[@]}"; do
+    "$JQ_BIN" -e --arg w "$box" '.workspaces | has($w)' <<<"$request" >/dev/null 2>&1 || continue
+    cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+    if [[ ! "$cap" =~ ^[0-9a-f]{48}$ ]]; then
+      cap="$(openssl rand -hex 24)" || {
+        app_apply_release_all
+        policy_journal all apply failed
+        app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "A workspace capability could not be generated." "Retry the policy apply." "$box" true 69
+        return
+      }
+    fi
+    caps_json+="${sep}$(app_json_string "$box"):$(app_json_string "$cap")"
+    sep=","
+  done
+  caps_json+="}"
+
+  # Provision + verify the transport for every affected workspace BEFORE the
+  # single atomic policy commit. A provisioning/readiness failure changes NO
+  # policy — so the pre-apply snapshot is NEVER restored (nothing to restore);
+  # the typed error is returned with the policy file untouched.
+  for box in "${WORKSPACES[@]}"; do
+    "$JQ_BIN" -e --arg w "$box" '.workspaces | has($w)' <<<"$request" >/dev/null 2>&1 || continue
+    cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
+    if ! output="$(app_apply_provision_transport "$box" "$cap" 2>&1)"; then
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_TRANSPORT_PROVISION_FAILED" \
+        "GitHub proxy transport could not be provisioned for workspace $box; the policy was NOT changed." \
+        "Check the workspace runtime and retry the policy apply." "$box" true 77
+      return
+    fi
+  done
+  # Test seam: park here (locks still held) so a test can prove concurrent
+  # per-repo edits are serialized against the apply
+  # (MSW_FAKE_APPLY_PAUSE_REACHED marks the park).
+  if [[ -n "${MSW_FAKE_APPLY_PAUSE_FILE:-}" ]]; then
+    if [[ -n "${MSW_FAKE_APPLY_PAUSE_REACHED:-}" ]]; then
+      : >"$MSW_FAKE_APPLY_PAUSE_REACHED"
+    fi
+    while [[ -e "$MSW_FAKE_APPLY_PAUSE_FILE" ]]; do sleep 0.1; done
+  fi
+
+  # ONE atomic policy commit (tmp + fsync + rename, 0600). -n: the full
+  # request/caps come from --argjson; stdin was already consumed by `cat`.
+  final_policy="$("$JQ_BIN" -nc --argjson req "$request" --argjson caps "$caps_json" '
+    {schemaVersion: 1,
+     workspaces: (($req.workspaces // {}) | with_entries(
+       .value = {capability: ($caps[.key] // ""), repos: (.value.repos // [])}
+     ))}
+  ')" || {
+    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The final desired policy could not be composed." "Retry the policy apply." "" true 69
+    return
+  }
+  if ! policy_json_valid "$final_policy"; then
+    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_INVALID_REQUEST" "The composed final policy failed strict validation." "Retry the policy apply with a valid request." "" false 64
+    return
+  fi
+  tmp="$file.tmp.$$"
+  if ! mkdir -p "$(dirname "$file")"; then
+    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy directory could not be created." "Repair the policy directory permissions and retry." "" true 69
+    return
+  fi
+  chmod 700 "$(dirname "$file")" 2>/dev/null || true
+  umask 077
+  if ! printf '%s\n' "$final_policy" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be written." "Repair the policy directory permissions and retry." "" true 69
+    return
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! fsync_path "$tmp" file; then
+    rm -f "$tmp" 2>/dev/null || true
+    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be made durable." "Retry the policy apply." "" true 69
+    return
+  fi
+  if ! mv "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be committed atomically." "Retry the policy apply." "" true 69
+    return
+  fi
+  fsync_path "$(dirname "$file")" dir || true
+  policy_journal all apply committed
+  app_apply_release_all
+
+  items=""
+  for box in "${WORKSPACES[@]}"; do
+    "$JQ_BIN" -e --arg w "$box" '.workspaces | has($w)' <<<"$request" >/dev/null 2>&1 || continue
+    cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
+    [[ -n "$items" ]] && items+=","
+    items+="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap"),\"repos\":$(policy_repo_json "$box")}"
+  done
+  app_emit_success github-policy-apply \
+    "{\"applied\":true,\"provisioned\":true,\"committed\":true,\"workspaces\":[$items]}"
+}
+
 app_cmd_github_bind() {
   local box="" repo="" mode="read-only" before="Unknown" after="Unknown" verify_output="" legacy_file=""
   while (( $# > 0 )); do
@@ -2993,6 +5909,13 @@ app_cmd_github_bind() {
   app_valid_repository "$repo" || app_usage_error github-bind "repository must be OWNER/REPOSITORY"
   [[ "$mode" == host-write || "$mode" == read-only ]] ||
     app_usage_error github-bind "mode must be host-write or read-only"
+  # Path C §1: local mode refuses the Connect bind flow with a typed
+  # mode-mismatch error; access is configured through the policy file.
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    app_emit_error github-bind "MSW_GITHUB_MODE_MISMATCH" \
+      "GitHub bind is not available in local mode." \
+      "Local mode uses the repo-aware GitHub proxy; configure access with 'msw github proxy-configure'." "$box" false 69
+  fi
   app_require_config github-bind
   app_require_runtime github-bind
   require_repository_access "$box" "$repo" guest
@@ -3079,6 +6002,13 @@ app_cmd_github_unbind() {
     esac
   done
   is_workspace "$box" || app_usage_error github-unbind "workspace must be dev, playgrounds, or personal"
+  # Path C §1: local mode refuses the Connect unbind flow with a typed
+  # mode-mismatch error; local mode never binds GitHub secrets.
+  if [[ "$MSW_GITHUB_MODE" == local ]]; then
+    app_emit_error github-unbind "MSW_GITHUB_MODE_MISMATCH" \
+      "GitHub unbind is not available in local mode." \
+      "Local mode never binds GitHub secrets; remove access through the policy file." "$box" false 69
+  fi
   app_require_config github-unbind
   app_require_runtime github-unbind
   if ! github_lock_acquire "$box"; then
@@ -3342,7 +6272,8 @@ app_redact() {
     -e 's#([Bb][Aa][Ss][Ii][Cc][[:space:]]+)[A-Za-z0-9+/=]+#\1[REDACTED]#g' \
     -e 's#(gh[osuphr]_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
     -e 's#(github_pat_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
-    -e 's#((MSW_GITHUB_READ_TOKEN(_[A-Za-z0-9_]+)?|MSW_GITHUB_WRITE_TOKEN(_[A-Za-z0-9_]+)?|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN)=)[^[:space:]]+#\1[REDACTED]#g' \
+    -e 's#((MSW_GITHUB_READ_TOKEN(_[A-Za-z0-9_]+)?|MSW_GITHUB_WRITE_TOKEN(_[A-Za-z0-9_]+)?|MSW_HOST_TOKEN(_[A-Za-z0-9_]+)?|MSW_HOST_OAUTH_TOKEN(_[A-Za-z0-9_]+)?|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN)=)[^[:space:]]+#\1[REDACTED]#g' \
+    -e 's#(X-MSW-Capability:[[:space:]]*)[^[:space:]]+#\1[REDACTED]#g' \
     -e 's#(https?://)[^[:space:]@/:]+:[^[:space:]@]+@#\1[REDACTED]@#g'
 }
 
@@ -3429,7 +6360,7 @@ app_cmd_plan() {
 }
 app_cmd_push_plan() {
   local box="" path="" status="" snapshot_json="" repo_json="" credential_state="" quarantine_state=""
-  local branch="" local_sha="" remote_sha="" canonical="" pushability="" worktree_state="" destination_state=""
+  local branch="" local_sha="" remote_sha="" canonical="" canonical_repo="" pushability="" worktree_state="" destination_state=""
   local ahead=0 behind=0 plan_id="" now="" plan_path="" phrase="" effects=""
   local -a repositories=()
   while (( $# > 0 )); do
@@ -3478,6 +6409,18 @@ app_cmd_push_plan() {
   behind="$("$JQ_BIN" -r '.behindCount // 0' <<<"$repo_json")"
   [[ "$pushability" == pushable || "$pushability" == publish ]] || app_emit_error push-plan "MSW_PUSH_BLOCKED" "MSW policy does not allow pushing this repository state." "Resolve detached, diverged, unavailable, or unauthorized state before reviewing a push." "$box" false 77
   [[ "$pushability" == publish || "$ahead" =~ ^[1-9][0-9]*$ ]] || app_emit_error push-plan "MSW_NOTHING_TO_PUSH" "The reviewed repository has no committed changes to transfer." "Refresh the repository after committing the branch you want to push." "$box" false 77
+  # §8 local gate: the canonical repo must be on the workspace's ticked list
+  # (host push is allowed for every selected repo in BOTH modes).
+  if [[ "$MSW_GITHUB_MODE" == local && "$canonical" == https://github.com/* ]]; then
+    canonical_repo="${canonical#https://github.com/}"
+    canonical_repo="${canonical_repo%.git}"
+    canonical_repo="$(printf '%s' "$canonical_repo" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$canonical_repo" == */* && "$canonical_repo" != */*/* ]]; then
+      if [[ -z "$(policy_repo_mode "$box" "$canonical_repo" 2>/dev/null || true)" ]]; then
+        app_emit_error push-plan "MSW_PUSH_NOT_AUTHORIZED" "The repository is not on this workspace's GitHub allowed list." "Add it with: msw app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" "$box" false 77
+      fi
+    fi
+  fi
   plan_id="$(app_request_id)"
   now="$(date +%s)"
   plan_path="$(app_plan_file "$plan_id")"
@@ -3708,6 +6651,9 @@ Machine-readable MSW Monitor commands:
   msw app push-plan --workspace WORKSPACE --repositories PATH... --format json
   msw app ports [--workspace WORKSPACE] --format json
   msw app github-state [--workspace WORKSPACE] --format json
+  msw app github-policy-get [--workspace WORKSPACE] --format json
+  msw app github-policy-set --workspace WORKSPACE --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear] --format json
+  msw app github-policy-apply --format json   (full desired policy JSON on stdin; provision+commit atomically)
   msw app github-bind --workspace WORKSPACE --repository OWNER/REPO --mode read-only|host-write --format json
   msw app github-unbind --workspace WORKSPACE --format json
   msw app github-quarantine --workspace WORKSPACE --format json
@@ -3760,6 +6706,9 @@ cmd_app() {
     repositories) app_cmd_repositories "$@" ;;
     ports) app_cmd_ports "$@" ;;
     github-state) app_cmd_github_state "$@" ;;
+    github-policy-get) app_cmd_github_policy_get "$@" ;;
+    github-policy-set) app_cmd_github_policy_set "$@" ;;
+    github-policy-apply) app_cmd_github_policy_apply "$@" ;;
     github-bind) app_cmd_github_bind "$@" ;;
     github-unbind) app_cmd_github_unbind "$@" ;;
     github-quarantine) app_cmd_github_quarantine "$@" ;;
@@ -3849,11 +6798,124 @@ main() {
       "$LOCKF_BIN" -s -t 0 9 >/dev/null 2>&1 || fatal "internal GitHub verification lock missing"
       cmd_github_verify "$1" "$2" "${3:-}" 1
       ;;
+    __workspace-state-init)
+      (( $# == 1 )) || fatal "internal workspace state arguments missing"
+      __workspace_state_init "$@"
+      ;;
+    __port-forwarder-start)
+      (( $# == 1 )) || fatal "internal port forwarder arguments missing"
+      port_forwarder_start "$1"
+      ;;
+    __proxy-plist-render)
+      (( $# == 0 )) || fatal "internal proxy plist arguments missing"
+      github_proxy_render_plist || fatal "could not render the GitHub proxy launch agent plist"
+      ;;
+    __verify-vendored-h11)
+      # Phase 1 entry point for setup.sh / proxy start; also used by tests.
+      verify_vendored_h11
+      ;;
     backup) (( $# <= 1 )) || fatal "usage: msw backup [DIRECTORY]"; cmd_backup "${1:-$MSW_BACKUP_DIR}" ;;
     restore) cmd_restore "$@" ;;
     *) fatal "unknown command '$command'; run: msw help" ;;
   esac
 }
+
+# ============================================================================
+# Vendored h11 verification region — Path C §6 (append-only; Phase 1 may wire
+# MSW_VENDOR_H11_ENFORCED or call verify_vendored_h11 directly, but MUST NOT
+# edit the existing helper below).
+# ----------------------------------------------------------------------------
+# Phase 0: verify_vendored_h11 plus guarded (no-op) call sites in cmd_check /
+# cmd_update. Self-contained so setup.sh can invoke it in Phase 1: verifies
+# every vendored file's SHA-256 against the lib/vendor/h11 block in
+# MANIFEST.txt AND the vendored __version__ floor, importing h11 ONLY from the
+# vendored tree via sys.path insertion — never from site-packages. Any failure
+# exits nonzero (setup fails / proxy refuses to start in Phase 1).
+readonly MSW_VENDOR_H11_FLOOR="0.16.0"
+readonly MSW_VENDOR_H11_ENFORCED="${MSW_VENDOR_H11_ENFORCED:-0}"
+
+verify_vendored_h11() {
+  local vendor_dir manifest py_bin shasum_bin script_dir root \
+        entry sha path rel file actual version status=0 count=0 tree_file manifest_paths=""
+  vendor_dir="${MSW_VENDOR_H11_DIR:-}"
+  manifest="${MSW_MANIFEST_FILE:-}"
+  py_bin="${MSW_PYTHON_BIN:-/usr/bin/python3}"
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)" || return 1
+  root="$(cd "$script_dir/.." && pwd -P)" || return 1
+  [[ -n "$vendor_dir" ]] || vendor_dir="$root/lib/vendor/h11"
+  [[ -n "$manifest" ]] || manifest="$root/MANIFEST.txt"
+  vendor_dir="${vendor_dir%/}"
+  [[ -d "$vendor_dir" ]] || { warn "vendored h11 tree missing: $vendor_dir"; return 1; }
+  [[ -f "$manifest" ]] || { warn "MANIFEST.txt missing: $manifest"; return 1; }
+  [[ -x "$py_bin" ]] || { warn "python3 not found at $py_bin"; return 1; }
+  shasum_bin="${SHASUM_BIN:-shasum}"
+  command -v "$shasum_bin" >/dev/null 2>&1 || { warn "shasum not found"; return 1; }
+  # 1) Every lib/vendor/h11 entry in MANIFEST.txt must exist with a matching
+  #    SHA-256; the entry set is collected for the completeness check below.
+  while IFS= read -r entry; do
+    case "$entry" in
+      \#*|'') continue ;;
+      *lib/vendor/h11/*)
+        sha="${entry%%  *}"
+        path="${entry#*  }"
+        [[ "$path" == lib/vendor/h11/* ]] || continue
+        rel="${path#lib/vendor/h11/}"
+        file="$vendor_dir/$rel"
+        [[ -f "$file" ]] || { warn "vendored file missing: $path"; status=1; continue; }
+        actual="$("$shasum_bin" -a 256 "$file" 2>/dev/null | cut -d' ' -f1)"
+        if [[ "$actual" != "$sha" ]]; then
+          warn "vendored hash mismatch for $path (manifest $sha, actual ${actual:-<unreadable>})"
+          status=1
+        fi
+        manifest_paths+="$path"$'\n'
+        count=$((count+1))
+        ;;
+    esac
+  done < "$manifest"
+  # 2) Every file in the vendored tree must be listed in MANIFEST.txt.
+  while IFS= read -r tree_file; do
+    rel="${tree_file#"$vendor_dir"/}"
+    if [[ "$rel" == "$tree_file" ]] || ! grep -Fxq "lib/vendor/h11/$rel" <<<"$manifest_paths"; then
+      warn "vendored file missing from MANIFEST.txt: lib/vendor/h11/$rel"
+      status=1
+    fi
+  done < <(find "$vendor_dir" -type f | sort)
+  (( count > 0 )) || { warn "no lib/vendor/h11 entries in MANIFEST.txt"; return 1; }
+  (( status == 0 )) || { warn "vendored h11 hash verification failed"; return 1; }
+  # 3) Vendored __version__ floor, importing ONLY from the vendored tree.
+  version="$("$py_bin" - "$vendor_dir" "$MSW_VENDOR_H11_FLOOR" <<'PY'
+import os, re, sys
+vendor_dir = os.path.realpath(sys.argv[1])
+floor = sys.argv[2]
+sys.path.insert(0, os.path.dirname(vendor_dir))
+import h11
+mod_dir = os.path.realpath(os.path.dirname(h11.__file__))
+if mod_dir != vendor_dir:
+    sys.stderr.write("h11 resolved to %s, not the vendored tree %s\n" % (mod_dir, vendor_dir))
+    sys.exit(1)
+def version_key(v):
+    return [int(x) for x in re.split(r"[^0-9]+", v) if x]
+if version_key(h11.__version__) < version_key(floor):
+    sys.stderr.write("vendored h11 %s is below the floor %s\n" % (h11.__version__, floor))
+    sys.exit(1)
+print(h11.__version__)
+PY
+)"
+  (( $? == 0 )) || { warn "vendored h11 version check failed"; return 1; }
+  ok "vendored h11 $version verified ($count files, floor $MSW_VENDOR_H11_FLOOR)"
+  return 0
+}
+
+# Guarded call sites — no-ops while MSW_VENDOR_H11_ENFORCED is 0, so existing
+# commands behave unchanged this phase. Phase 1 flips the flag to enforce.
+verify_vendored_h11_if_enforced() {
+  (( MSW_VENDOR_H11_ENFORCED == 1 )) || return 0
+  verify_vendored_h11 || fatal "vendored h11 verification failed"
+}
+# ============================================================================
+# End vendored h11 verification region
+# ============================================================================
+
 
 if [[ "${MSW_SOURCE_ONLY:-0}" != 1 ]]; then
   main "$@"

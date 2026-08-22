@@ -12,6 +12,8 @@ struct MSWMonitorApp: App {
             SettingsView(
                 navigation: appDelegate.settingsNavigation,
                 authorizationCoordinator: appDelegate.authorizationCoordinator,
+                provider: appDelegate.provider,
+                accessMode: appDelegate.accessMode,
             )
         }
     }
@@ -22,13 +24,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
     private let runner: MSWCommandRunner
     private let credentialBroker: CredentialBroker?
-    private let connect: MSWConnectClient
+    private let connect: MSWConnectClient?
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: MSWClient
     let settingsNavigation = SettingsNavigationState()
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let githubInstallationURL: URL?
-    override init() {
+    let accessMode: GitHubAccessMode
+    let policyStore: GitHubPolicyStore?
+    let provider: (any GitHubProviding)?
+
+    /// Test seam: local-mode init must never build or pass any Connect
+    /// dependency (broker, client, refresher, coordinator).
+    var hasConnectDependencies: Bool {
+        credentialBroker != nil || connect != nil ||
+            tokenRefreshCoordinator != nil || authorizationCoordinator != nil
+    }
+
+    /// Test seam: the CLI client itself must be broker-free in local mode.
+    var clientHasConnectDependencies: Bool {
+        client.hasConnectDependencies
+    }
+
+    convenience override init() {
+        let configuration = Self.readConnectConfiguration()
+        self.init(connectConfiguration: configuration, policyStore: nil)
+    }
+
+    /// Test seam + single construction path: resolves the mode BEFORE
+    /// constructing any Connect dependency, so local mode never instantiates
+    /// or passes the Connect broker/client/coordinator (no credentials.json
+    /// reads, no Connect Keychain access, no fallback broker creation).
+    init(
+        connectConfiguration: MSWConnectConfiguration,
+        policyStore: GitHubPolicyStore?,
+        makeBroker: () -> CredentialBroker? = { try? CredentialBroker() }
+    ) {
+        let accessMode: GitHubAccessMode = connectConfiguration.hasTrustedScopeAttestation ? .connect : .local
+        self.accessMode = accessMode
+        self.githubInstallationURL = connectConfiguration.installationURL
+        let runner = MSWCommandRunner()
+        self.runner = runner
+        if accessMode == .connect {
+            let connect = MSWConnectClient(configuration: connectConfiguration)
+            let broker = makeBroker()
+            let refresher = broker.map {
+                TokenRefreshCoordinator(broker: $0, connect: connect)
+            }
+            let mswClient = MSWClient(
+                runner: runner,
+                credentialBroker: broker,
+                tokenRefreshCoordinator: refresher
+            )
+            self.connect = connect
+            self.credentialBroker = broker
+            self.tokenRefreshCoordinator = refresher
+            self.client = mswClient
+            self.authorizationCoordinator = broker.map {
+                GitHubAuthorizationCoordinator(
+                    broker: $0,
+                    connect: connect,
+                    tokenRefreshCoordinator: refresher,
+                    mswClient: mswClient
+                )
+            }
+            self.policyStore = nil
+            self.provider = nil
+        } else {
+            // Local mode: no Connect broker, client, refresher, or
+            // coordinator. The CLI client is broker-free, so routine local
+            // operations never request Connect Keychain records.
+            self.connect = nil
+            self.credentialBroker = nil
+            self.tokenRefreshCoordinator = nil
+            self.client = MSWClient(runner: runner)
+            self.authorizationCoordinator = nil
+            let store = policyStore ?? GitHubPolicyStore.standard()
+            self.policyStore = store
+            self.provider = GitHubLocalProvider(client: self.client, policyStore: store)
+            store.startWatching()
+        }
+        super.init()
+    }
+
+    /// Reads the Connect build configuration from Info.plist. Reading the
+    /// bundle's own Info.plist is not a Connect store access.
+    static func readConnectConfiguration() -> MSWConnectConfiguration {
         let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let connectBaseURL = configuredBaseURL.flatMap { value in
@@ -49,45 +130,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let scopeAttestationKey = configuredAttestation.flatMap { value in
             value.isEmpty ? nil : Data(base64Encoded: value)
         }
-        let connectConfiguration = MSWConnectConfiguration(
+        return MSWConnectConfiguration(
             baseURL: connectBaseURL,
             clientID: connectClientID,
             installationURL: installationURL,
             scopeAttestationPublicKey: scopeAttestationKey,
             requiresScopeAttestation: !(configuredAttestation?.isEmpty ?? true)
         )
-        let connect = MSWConnectClient(configuration: connectConfiguration)
-        let runner = MSWCommandRunner()
-        let broker = try? CredentialBroker()
-        let scopeEnforcementConfigured = connectConfiguration.hasTrustedScopeAttestation
-        let refresher = scopeEnforcementConfigured ? broker.map {
-            TokenRefreshCoordinator(broker: $0, connect: connect)
-        } : nil
-        self.runner = runner
-        self.credentialBroker = broker
-        self.connect = connect
-        self.tokenRefreshCoordinator = refresher
-        let mswClient = MSWClient(
-            runner: runner,
-            credentialBroker: broker,
-            tokenRefreshCoordinator: refresher
-        )
-        self.client = mswClient
-        self.authorizationCoordinator = broker.map {
-            GitHubAuthorizationCoordinator(
-                broker: $0,
-                connect: connect,
-                tokenRefreshCoordinator: refresher,
-                mswClient: mswClient
-            )
-        }
-        self.githubInstallationURL = installationURL
-        super.init()
     }
     /// Routes `msw://` callback URLs from the default browser to the pending
     /// authorization session (the same route as `NSApplicationDelegate`
-    /// URL-event delivery).
+    /// URL-event delivery). Local mode has no Connect session to route.
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard accessMode == .connect else { return }
         for url in urls where MSWConnectBrowser.shared.handleCallback(url) {
             return
         }
@@ -124,7 +179,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let recoveryResult: Result<Void, Error>
         do {
             try LegacyDirectGitHubCredentialRetirement.remove()
-            if let authorizationCoordinator {
+            if accessMode == .connect, let authorizationCoordinator {
                 if authorizationCoordinator.isAvailable {
                     try await authorizationCoordinator.recoverPendingAuthorization()
                 } else {
@@ -159,6 +214,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         credentialAccessAllowed: Bool,
         startupRecoveryBlockedReason: String? = nil
     ) {
+        let arguments = ProcessInfo.processInfo.arguments
+        let uiTestGitHubScenario = arguments.compactMap { argument -> String? in
+            let prefix = "--ui-test-github-"
+            return argument.hasPrefix(prefix) ? String(argument.dropFirst(prefix.count)) : nil
+        }.first
+        let fixtureProvider: (any GitHubProviding)? = (fixtureMode && accessMode == .local)
+            ? GitHubFixtureProvider(scenario: uiTestGitHubScenario)
+            : nil
         let model: AppModel
         let operationCoordinator: MSWOperationCoordinator?
         let startupRecoveryRetry: (() -> Void)? = startupRecoveryBlockedReason == nil
@@ -166,6 +229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : { [weak self] in self?.retryStartupRecovery() }
         if fixtureMode || !credentialAccessAllowed {
             model = AppModel(
+                provider: fixtureProvider ?? provider,
+                accessMode: accessMode,
                 startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
                 startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry
             )
@@ -178,7 +243,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 client: client,
                 operationCoordinator: operationCoordinator,
                 operationService: service,
-                diagnostics: diagnostics
+                diagnostics: diagnostics,
+                provider: provider,
+                accessMode: accessMode
             )
         }
         let bootstrap: (any MSWBootstrapCoordinating)?
@@ -199,6 +266,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bootstrapCoordinator: bootstrap,
             authorizationCoordinator: authorizationCoordinator,
             githubInstallationURL: githubInstallationURL,
+            provider: fixtureProvider ?? provider,
+            accessMode: accessMode,
             settingsNavigation: settingsNavigation,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,
             retryStartupRecovery: retryStartupRecovery
@@ -207,7 +276,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.setPollingVisible(false)
         UNUserNotificationCenter.current().delegate = self
         observeNotificationEvents(from: model)
-        let arguments = ProcessInfo.processInfo.arguments
         let uiTestGitHubFlow = arguments.contains(where: { $0.hasPrefix("--ui-test-github-") })
         if arguments.contains("--ui-test-open-popover") ||
             arguments.contains("--ui-test-setup") ||

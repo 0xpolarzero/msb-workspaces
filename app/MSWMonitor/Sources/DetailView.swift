@@ -450,6 +450,14 @@ struct DetailView: View {
     private var ports: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionToolbar(actionTitle: "Refresh") { model.loadPorts(for: navigation.workspace) }
+            if let warning = scopedPortWarning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("details.ports.warning")
+            }
             if let value = model.portsSnapshot {
                 FreshnessNotice(freshness: value.freshness, observedAt: nil, reason: nil)
                 LabeledContent("Reported scope", value: value.workspace)
@@ -487,12 +495,28 @@ struct DetailView: View {
         }
     }
 
+    private var scopedPortWarning: String? {
+        guard let workspace = navigation.workspace,
+              let snapshot = model.workspaces.first(where: { $0.id == workspace }),
+              let warning = snapshot.portWarning,
+              !warning.isEmpty else {
+            return nil
+        }
+        return warning
+    }
+
     private var github: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionToolbar(actionTitle: "Refresh") { model.loadGitHubState() }
-            Text("Token values remain in the Mac Keychain and are never rendered here. VM access is read-only; pushes are performed by the Mac host when configured.")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if model.accessMode == .local {
+                Text(GitHubLocalStrings.detailFootnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Token values remain in the Mac Keychain and are never rendered here. VM access is read-only; pushes are performed by the Mac host when configured.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let value = model.githubSnapshot {
                 let items = navigation.workspace.map { id in
                     value.workspaces.filter { $0.workspace == id.rawValue }
@@ -510,6 +534,9 @@ struct DetailView: View {
                 ContentUnavailableView("No GitHub snapshot", systemImage: "person.crop.circle.badge.questionmark", description: Text("Refresh to inspect nonsecret authorization metadata."))
             }
             detailError
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .githubPolicyDidChange)) { _ in
+            model.loadGitHubState()
         }
     }
 
@@ -1015,7 +1042,21 @@ private struct GitHubWorkspaceRow: View {
                     Label("Restart required", systemImage: "arrow.clockwise.circle").foregroundStyle(.orange)
                 }
             }
-            if item.quarantined || !item.configured {
+            if item.provider == "local-policy" {
+                if !item.configured {
+                    Text("No repository access recorded for this workspace.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let repos = item.repos, repos.isEmpty {
+                    Text("No repositories assigned; repository access is blocked.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Repository access ready.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if item.quarantined || !item.configured {
                 Text("Repository access needs reconnecting.")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -1026,6 +1067,16 @@ private struct GitHubWorkspaceRow: View {
             } else {
                 Text("Repository access ready.")
                     .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let repos = item.repos, !repos.isEmpty {
+                Text(repos.map { "\($0.canonical) — \($0.modeLabel)" }.joined(separator: "\n"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Text(GitHubRepositoryAccessMode.footnote)
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         }

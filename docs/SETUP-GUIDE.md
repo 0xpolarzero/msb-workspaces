@@ -22,7 +22,7 @@ cd microsandbox-workspaces
 The installer may request your macOS administrator password to add three private loopback addresses and local browser names. It then:
 
 1. Installs Homebrew when missing.
-2. Installs GNU tar, zstd, Git LFS, and MicroSandbox.
+2. Installs GNU tar, zstd, Git LFS, the GitHub CLI (`gh`), and MicroSandbox.
 3. Runs MicroSandbox diagnostics.
 4. Builds one reusable Ubuntu 24.04 ARM64 development snapshot.
 5. Creates `dev`, `playgrounds`, and `personal` from that snapshot.
@@ -60,20 +60,80 @@ msw identity "Your Full Name" work@example.com dev
 
 ## 3. Connect GitHub
 
-GitHub is optional. The normal build currently has no deployed MSW Connect
-service or trusted scope-attestation key, so Setup and **Settings** → **GitHub**
-show a non-actionable “not available in this build” notice. Continue without
-GitHub; no repository or `dev` access is inferred or created.
+GitHub is optional, and the GitHub credential always stays on this Mac. No
+GitHub token is ever bound into a workspace. Git inside a VM reaches GitHub
+through a private host-side proxy on `127.0.0.1:18446` — loopback only, with
+no LAN listener — that checks every request against the workspace's capability
+and repository policy. Each workspace runs one host “shuttle” bridged to a
+guest relay over the existing SSH transport, so GitHub requests are checked
+on the Mac and a workspace cannot mutate repositories it was not given.
 
-In a future build with those verified release inputs, GitHub authorization is
-completed in **MSW Monitor**, not in the CLI. **Connect GitHub** is shown only
-when the service is ready and there is no existing workspace access.
+### Set up access (app)
 
-If a connected account has not installed the configured GitHub App, the GitHub
-step offers the configured installation page. No installation URL is invented
-by an unconfigured build.
+Open **MSW Monitor** → **Settings** → **GitHub**:
 
-The session is host-held only: workspaces never receive the token. Host-mediated workspace operations (`msw push`, clone/fetch/pull executed by the Mac) are being implemented; until they ship, these commands do not consume this session.
+1. **Connect the account on this Mac.** The installer includes the GitHub CLI
+   (`gh`); if it is not already signed in, run `gh auth login` once (web
+   OAuth in your browser). The app reuses the authenticated `gh` session,
+   verifying `GET /user` and `permissions.push` for every repository ticked
+   for VM push; a Device Flow fallback is available when a client ID is
+   configured. The credential is stored as one versioned record in the
+   login Keychain
+   (`org.microsandbox.MSWMonitor.github-host.v2`); the token never appears in
+   command arguments, logs, journals, or backups. Any pre-v2 item remains
+   dormant and unread.
+2. **Tick repositories per workspace.** The policy starts empty: until a
+   repository is selected, that workspace cannot reach GitHub through the
+   proxy. A new assignment defaults to **Clone/pull (push from Mac)**; toggle
+   **Clone/pull + Push from VM** only for repositories that must accept pushes
+   initiated inside the VM.
+3. **Review and apply.** Nothing changes until the reviewed policy is applied.
+   Policy writes are journaled and atomic; the proxy re-reads the policy on
+   every request, so a mode flip applies on the next request.
+
+The two modes mean exactly this — local editing and commits always work in
+both:
+
+| Mode | Clone/pull | Local edit & commit | Host push (`msw push`, app Push) | Push from inside the VM |
+|---|---|---|---|---|
+| **Clone/pull (push from Mac)** (read-only) | yes | always | yes | no |
+| **Clone/pull + Push from VM** (read-write) | yes | always | yes | yes |
+
+Host push is allowed for every selected repository in either mode. Only push
+originating inside a VM is gated by the mode, enforced by the proxy's
+receive-pack rules. A missing, malformed, or unknown policy entry denies
+access — for the proxy and for host push alike.
+
+GitHub API and GraphQL calls from inside a workspace are not supported in this
+version; use git, or run API operations from the Mac.
+
+### Recovery and CLI
+
+The same surface is available from the terminal:
+
+```bash
+msw github auth [--force] [--json]          # provision or rotate the host credential
+msw github status [WORKSPACE|all]           # mode, capability, repos, credential, shuttle
+msw github verify WORKSPACE [OWNER/REPO]    # probe policy, capability, credential (no VM writes)
+msw github remove WORKSPACE                 # revoke the host credential (fail-closed)
+msw github capability rotate WORKSPACE      # mint a fresh capability; the old one is denied immediately
+msw github proxy-configure [WORKSPACE]      # install or repair the proxy transport idempotently
+msw github repos [--owner OWNER] [--json]   # discover repositories for the picker
+msw app github-policy-set --workspace WORKSPACE --repository OWNER/REPO --mode read-only|read-write
+```
+
+Troubleshoot with `msw github status`, then `msw github verify`; repair the
+transport with `msw github proxy-configure`, and rotate a compromised
+credential with `msw github auth --force`. `msw check --deep` asserts that no
+guest holds a `GH_TOKEN` and probes proxy reachability from the guest. Legacy
+Connect-era state is retired automatically on first local-mode use as one
+journaled transaction (archiving `~/.config/msw/github/<box>.conf` and proving
+old guest secrets are removed); run `msw github migrate [WORKSPACE|all]` to do
+it explicitly.
+
+Connect mode (`MSW_GITHUB_MODE=connect`) remains available as a rollback
+alternative; local mode is the default and never reads or writes Connect
+grants.
 
 ## 4. Enter a workspace from Ghostty
 
@@ -177,6 +237,8 @@ http://personal.msw.test:3000
 
 The same port can be active in all three VMs because each workspace has its own loopback IP.
 
+Published ports are forwarded host-side: while a VM runs, the Mac keeps an SSH forward per free desired port. A port already in use on the Mac is skipped with a warning (`skippedPorts`/`portWarning` in `msw app state`) and never blocks, stops, or recreates the workspace.
+
 The server inside the VM must bind to `0.0.0.0`, not only `127.0.0.1`. Examples:
 
 ```bash
@@ -222,7 +284,7 @@ git commit -m "Implement example"
 git pull --ff-only
 ```
 
-The VM has no GitHub credential of its own. Host-mediated clone, fetch, and pull are being implemented; until they ship, private repositories are fetched by the Mac.
+The VM has no GitHub credential of its own. Clone, fetch, and pull inside a workspace are served by the Mac through the private host proxy (`127.0.0.1:18446`), which authenticates with the Keychain-held host credential and enforces the workspace's repository policy. `git push` from inside the VM succeeds only for repositories ticked **Clone/pull + Push from VM**; the proxy denies it for read-only entries. GitHub API calls from inside a workspace are not supported; run API operations from the Mac.
 
 Push explicitly from a Mac terminal:
 
@@ -353,5 +415,5 @@ Useful repair/rebuild modes:
 - Within one workspace, agents can access all repositories, processes, guest credentials, and Docker resources in that workspace.
 - No host directory, host Docker socket, or host SSH agent is shared by this setup.
 - The public network profile permits internet access but blocks direct host/private-network access.
-- The GitHub session is host-held and is never bound into VM traffic; workspace GitHub operations are host-mediated, so a workspace cannot mutate repositories directly. Unrestricted internet still permits source-code exfiltration to unrelated services.
+- The GitHub credential is host-held in the Mac Keychain and is never bound into VM traffic. Workspaces reach GitHub only through the private host proxy, which enforces the per-workspace policy: a workspace can mutate exactly the repositories ticked **Clone/pull + Push from VM**, and host push from the Mac covers every selected repository. GitHub API and GraphQL calls from inside a workspace are not supported in this version. Unrestricted internet still permits source-code exfiltration to unrelated services.
 - Prefer ARM64 or multi-architecture container images for native M4 performance.

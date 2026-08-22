@@ -4,17 +4,27 @@ actor MSWClient {
     private let runner: MSWCommandRunner
     private let credentialBroker: CredentialBroker?
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
+    private let ghResolver: @Sendable () async -> URL?
     private var lastState: MSWStateResponse?
     private var lastStateObservedAt: Date?
 
     init(
         runner: MSWCommandRunner = MSWCommandRunner(),
         credentialBroker: CredentialBroker? = nil,
-        tokenRefreshCoordinator: TokenRefreshCoordinator? = nil
+        tokenRefreshCoordinator: TokenRefreshCoordinator? = nil,
+        ghResolver: (@Sendable () async -> URL?)? = nil
     ) {
         self.runner = runner
         self.credentialBroker = credentialBroker
         self.tokenRefreshCoordinator = tokenRefreshCoordinator
+        self.ghResolver = ghResolver ?? { await runner.resolveExecutable(named: "gh") }
+    }
+
+    /// Test seam: local-mode clients must never carry Connect dependencies
+    /// (Path C §1 / reviewer blocker 7). A nil broker means `accessToken`
+    /// returns immediately without reading any Connect Keychain record.
+    nonisolated var hasConnectDependencies: Bool {
+        credentialBroker != nil || tokenRefreshCoordinator != nil
     }
 
     func executableURL() async -> URL? {
@@ -189,6 +199,262 @@ actor MSWClient {
         if let workspace { arguments += ["--workspace", workspace] }
         return try await execute(arguments: arguments, as: MSWGitHubStateResponse.self, command: "github-state")
     }
+
+    // MARK: - Path C local mode
+
+    /// `msw github status --format json` (raw, non-envelope CLI output).
+    func githubStatus() async throws -> MSWGitHubStatusResponse {
+        try await runRawJSON(
+            arguments: ["github", "status", "--format", "json"],
+            as: MSWGitHubStatusResponse.self,
+            command: "github status"
+        )
+    }
+
+    /// `msw github auth --json`: nonsecret host-credential metadata. Succeeds
+    /// fully non-interactively via gh reuse; on failure (gh not authenticated
+    /// and no device client ID, or verification failure) the CLI prints a
+    /// typed `{ok:false,error}` document to stdout with a nonzero exit.
+    func githubAuth(force: Bool = false) async throws -> MSWGitHubAuthMetadata {
+        var arguments = ["github", "auth"]
+        if force { arguments.append("--force") }
+        arguments.append("--json")
+        let request = try await runner.makeMSWCommand(arguments: arguments, timeout: .seconds(180))
+        let output = try await runner.run(request)
+        // Success is the bare nonsecret metadata object. Guard against the
+        // failure document decoding as an all-optional metadata struct.
+        if let metadata = try? MSWProtocolDecoder.decoder().decode(MSWGitHubAuthMetadata.self, from: output.stdout),
+           metadata.accountLogin != nil || metadata.provider != nil {
+            guard output.status == 0 else {
+                throw MSWClientError.processFailed(
+                    command: "github auth",
+                    status: output.status,
+                    message: "MSW returned success metadata with a failing exit status."
+                )
+            }
+            return metadata
+        }
+        throw Self.rawCLIError(from: output.stdout, command: "github auth", fallbackStatus: output.status)
+    }
+
+    func githubAuthMetadata() async throws -> MSWGitHubAuthMetadata {
+        try await githubAuth(force: false)
+    }
+
+    /// Launches the installed gh CLI's web OAuth flow
+    /// (`gh auth login --hostname github.com --git-protocol https --web
+    /// --skip-ssh-key`), which opens the default browser and waits for the
+    /// user to complete sign-in. The caller retries `githubAuth()` after
+    /// this returns. Throws a typed error when gh is unavailable.
+    func githubWebLogin() async throws {
+        guard let gh = await ghResolver() else {
+            throw MSWClientError.unavailable(
+                "The GitHub CLI (gh) is not installed on this Mac. Install it, then sign in again."
+            )
+        }
+        let request = MSWCommand(
+            executable: gh,
+            arguments: [
+                "auth", "login",
+                "--hostname", "github.com",
+                "--git-protocol", "https",
+                "--web",
+                "--skip-ssh-key"
+            ],
+            timeout: .seconds(600)
+        )
+        let output = try await runner.run(request)
+        guard output.status == 0 else {
+            let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw MSWClientError.processFailed(
+                command: "gh auth login",
+                status: output.status,
+                message: message.isEmpty ? nil : message
+            )
+        }
+    }
+
+    /// `msw github repos --format json`: paginated repository discovery
+    /// (CLI paginates internally; flat, deduped, sorted by canonical).
+    func githubRepos() async throws -> [MSWGitHubDiscoveredRepo] {
+        let response = try await runRawCLI(arguments: ["github", "repos", "--format", "json"], command: "github repos")
+        guard response.ok == true, let repos = response.repos else {
+            throw Self.rawCLIError(from: response, command: "github repos")
+        }
+        return repos
+    }
+
+    /// `msw github auth --device --format json`: one-shot device-flow start.
+    /// `deviceId` is the poll handle passed to `githubAuthDeviceComplete`.
+    func githubAuthDevice() async throws -> MSWDeviceFlowStart {
+        let response = try await runRawCLI(arguments: ["github", "auth", "--device", "--format", "json"], command: "github auth --device")
+        guard response.ok == true,
+              let deviceId = response.deviceId,
+              let code = response.code,
+              let verificationUri = response.verificationUri,
+              let expiresAt = response.expiresAt else {
+            throw Self.rawCLIError(from: response, command: "github auth --device")
+        }
+        return MSWDeviceFlowStart(
+            deviceId: deviceId,
+            code: code,
+            verificationUri: verificationUri,
+            expiresAt: expiresAt,
+            interval: response.interval ?? 5
+        )
+    }
+
+    /// `msw github auth --device-complete DEVICE_ID --format json`: exactly
+    /// one exchange attempt (the app drives the poll loop with interval
+    /// sleeps). Authorization stores and verifies the credential.
+    func githubAuthDeviceComplete(deviceId: String) async throws -> MSWDeviceFlowPoll {
+        guard !deviceId.isEmpty else { throw MSWClientError.invalidArguments }
+        let response = try await runRawCLI(
+            arguments: ["github", "auth", "--device-complete", deviceId, "--format", "json"],
+            command: "github auth --device-complete"
+        )
+        if response.ok == true {
+            switch response.status {
+            case "slow_down":
+                return MSWDeviceFlowPoll(status: .slowDown, interval: response.interval, accountLogin: nil)
+            case "authorized":
+                return MSWDeviceFlowPoll(
+                    status: .authorized,
+                    interval: nil,
+                    accountLogin: response.metadata?.accountLogin
+                )
+            case "expired":
+                return MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+            case "denied":
+                return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+            default:
+                return MSWDeviceFlowPoll(status: .pending, interval: response.interval, accountLogin: nil)
+            }
+        }
+        switch response.status {
+        case "expired":
+            return MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+        case "denied":
+            return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+        default:
+            throw Self.rawCLIError(from: response, command: "github auth --device-complete")
+        }
+    }
+
+    /// Runs a raw CLI command whose output is a `{ok:...,error:...}`-style
+    /// JSON document (success fields vary per command; failures go to stdout
+    /// with a nonzero exit).
+    private func runRawCLI(
+        arguments: [String],
+        command: String,
+        timeout: Duration = .seconds(60)
+    ) async throws -> MSWGitHubCLIResponse {
+        let request = try await runner.makeMSWCommand(arguments: arguments, timeout: timeout)
+        let output = try await runner.run(request)
+        do {
+            return try MSWProtocolDecoder.decoder().decode(MSWGitHubCLIResponse.self, from: output.stdout)
+        } catch {
+            let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw MSWClientError.processFailed(
+                command: command,
+                status: output.status,
+                message: message.isEmpty ? nil : message
+            )
+        }
+    }
+
+    /// Converts a decoded raw-CLI response into a typed error.
+    private static func rawCLIError(
+        from response: MSWGitHubCLIResponse,
+        command: String
+    ) -> MSWClientError {
+        let error = response.error
+        return .rawCLIError(
+            code: error?.code ?? "MSW_CLI_ERROR",
+            message: error?.message ?? "\(command) failed."
+        )
+    }
+
+    /// Converts raw stdout into a typed raw-CLI error (used by commands whose
+    /// success payload is not the union-shaped document).
+    private static func rawCLIError(
+        from stdout: Data,
+        command: String,
+        fallbackStatus: Int32
+    ) -> MSWClientError {
+        if let response = try? MSWProtocolDecoder.decoder().decode(MSWGitHubCLIResponse.self, from: stdout),
+           response.ok == false,
+           let error = response.error {
+            return .rawCLIError(code: error.code ?? "MSW_CLI_ERROR", message: error.message ?? "\(command) failed.")
+        }
+        let message = String(decoding: stdout, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return .processFailed(
+            command: command,
+            status: fallbackStatus,
+            message: message.isEmpty ? nil : message
+        )
+    }
+
+    /// ONE `msw app github-policy-apply` invocation carrying the FULL desired
+    /// policy on stdin. The CLI validates the request, acquires the
+    /// per-workspace github locks, provisions/verifies the transport for
+    /// every workspace using the final capabilities, and performs ONE atomic
+    /// policy-file commit (rolling back byte-exact on any unproven step).
+    /// Typed failures (MSW_INVALID_REQUEST, MSW_GITHUB_MODE_MISMATCH,
+    /// MSW_OPERATION_CONFLICT, MSW_TRANSPORT_PROVISION_FAILED,
+    /// MSW_POLICY_WRITE_FAILED, MSW_INTERNAL_ERROR) surface as protocol
+    /// failures; the caller marks the operation applied only after the CLI
+    /// reports provisioned + committed.
+    func githubPolicyApply(_ request: MSWGitHubPolicyApplyRequest) async throws -> MSWGitHubPolicyApplyResult {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let input: Data
+        do {
+            input = try encoder.encode(request)
+        } catch {
+            throw MSWClientError.invalidArguments
+        }
+        let envelope = try await execute(
+            arguments: [
+                "app", "github-policy-apply",
+                "--format", "json"
+            ],
+            as: MSWGitHubPolicyApplyResult.self,
+            command: "github-policy-apply",
+            stdin: input,
+            timeout: .seconds(600)
+        )
+        guard let result = envelope.result else {
+            throw MSWClientError.missingResult(command: "github-policy-apply")
+        }
+        return result
+    }
+
+    /// Runs a raw (non-envelope) JSON CLI command and decodes its stdout.
+    private func runRawJSON<Value: Codable & Sendable>(
+        arguments: [String],
+        as type: Value.Type,
+        command: String,
+        timeout: Duration = .seconds(30)
+    ) async throws -> Value {
+        let request = try await runner.makeMSWCommand(arguments: arguments, timeout: timeout)
+        let output = try await runner.run(request)
+        guard output.status == 0 else {
+            let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw MSWClientError.processFailed(
+                command: command,
+                status: output.status,
+                message: message.isEmpty ? nil : message
+            )
+        }
+        do {
+            return try MSWProtocolDecoder.decoder().decode(type, from: output.stdout)
+        } catch {
+            throw MSWClientError.malformedJSON(command: command)
+        }
+    }
+
 
     func bindGitHubCredentials(
         workspace: String,

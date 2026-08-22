@@ -9,6 +9,8 @@ final class SetupWindowController {
         coordinator: (any MSWBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         githubInstallationURL: URL? = nil,
+        provider: (any GitHubProviding)? = nil,
+        accessMode: GitHubAccessMode = .local,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void = {},
         uiTestMode: Bool = false,
@@ -18,14 +20,16 @@ final class SetupWindowController {
         startupRecoveryBlockedReason: String? = nil,
         retryStartupRecovery: @escaping () -> Void = {}
     ) {
-        let fallbackBroker = try? CredentialBroker()
-        let authorization = authorizationCoordinator ?? fallbackBroker.map {
-            GitHubAuthorizationCoordinator(broker: $0)
-        }
+        let authorization = Self.resolvedAuthorization(
+            accessMode: accessMode,
+            authorizationCoordinator: authorizationCoordinator
+        )
         let hosting = NSHostingController(
             rootView: SetupView(
                 coordinator: coordinator,
                 authorizationCoordinator: authorization,
+                provider: provider,
+                accessMode: accessMode,
                 openSettings: openSettings,
                 closeSetup: closeSetup,
                 uiTestMode: uiTestMode,
@@ -53,12 +57,31 @@ final class SetupWindowController {
     }
 
     func close() { window.close() }
+
+    /// Resolves the coordinator passed to SetupView. Local mode NEVER
+    /// instantiates or passes a Connect broker/coordinator — even when a
+    /// caller supplies one, local mode drops it (Path C §1 / reviewer
+    /// blocker 7). Connect mode keeps the pre-existing fallback behavior.
+    static func resolvedAuthorization(
+        accessMode: GitHubAccessMode,
+        authorizationCoordinator: GitHubAuthorizationCoordinator?
+    ) -> GitHubAuthorizationCoordinator? {
+        guard accessMode == .connect else { return nil }
+        return authorizationCoordinator ?? (try? CredentialBroker()).map {
+            GitHubAuthorizationCoordinator(broker: $0)
+        }
+    }
 }
 
-private struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
+struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
     let workspace: Workspace.ID
+    /// Connect mode only: the single installation scoping this workspace's
+    /// selections (one-installation rule). Local mode leaves this nil so a
+    /// workspace may select repositories from MULTIPLE owners.
     var installationID: Int?
-    var repositoryModes: [Int: GitHubRepositoryAccessMode]
+    /// Selections keyed by canonical repository (owner/name). Local mode
+    /// spans owners; connect mode is scoped to `installationID`.
+    var repositoryModes: [String: GitHubRepositoryAccessMode]
 
     var id: Workspace.ID { workspace }
 
@@ -140,6 +163,17 @@ private struct AuthorizationIssue: Identifiable {
     var id: String { kind.rawValue }
 }
 
+private enum LocalCatalogIssueKind: String {
+    case unavailable
+    case failed
+}
+
+private struct LocalCatalogIssue: Identifiable {
+    let kind: LocalCatalogIssueKind
+    let message: String
+    var id: String { kind.rawValue }
+}
+
 private enum SetupStep: String, CaseIterable, Identifiable {
     case readiness
     case github
@@ -195,6 +229,8 @@ final class SetupLifecycleGate {
 struct SetupView: View {
     let coordinator: (any MSWBootstrapCoordinating)?
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
+    let provider: (any GitHubProviding)?
+    let accessMode: GitHubAccessMode
     let openSettings: (SettingsSection) -> Void
     let closeSetup: () -> Void
     let uiTestMode: Bool
@@ -256,11 +292,23 @@ struct SetupView: View {
     @State private var activeStep: SetupStep = .readiness
     @State private var githubContextLoaded = false
     @State private var githubAttentionWorkspace: String?
+    @State private var localCatalogIssue: LocalCatalogIssue?
+    @State private var isConnectingAccount = false
+    @State private var addedRepositoryInput = ""
+    @State private var manualEntryExpanded = SetupView.manualEntryInitiallyExpanded
+    @State private var deviceFlowSession: GitHubDeviceFlowSession?
+    @State private var deviceFlowShown = false
+
+    /// Manual OWNER/REPO entry is a collapsible fallback below the discovery
+    /// list and starts collapsed.
+    static let manualEntryInitiallyExpanded = false
 
     /// Explicit initializer keeps the setup dependencies visible at call sites.
     init(
         coordinator: (any MSWBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator?,
+        provider: (any GitHubProviding)?,
+        accessMode: GitHubAccessMode,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping () -> Void,
         uiTestMode: Bool,
@@ -273,6 +321,8 @@ struct SetupView: View {
     ) {
         self.coordinator = coordinator
         self.authorizationCoordinator = authorizationCoordinator
+        self.provider = provider
+        self.accessMode = accessMode
         self.openSettings = openSettings
         self.closeSetup = closeSetup
         self.uiTestMode = uiTestMode
@@ -355,6 +405,33 @@ struct SetupView: View {
         .onChange(of: verifiedIdentityByWorkspace) { _, _ in
             if !uiTestMode { persistResumeState() }
         }
+        .sheet(isPresented: $deviceFlowShown) {
+            if let session = deviceFlowSession {
+                GitHubDeviceFlowView(
+                    session: session,
+                    onComplete: { login in
+                        deviceFlowShown = false
+                        deviceFlowSession = nil
+                        if let login, !login.isEmpty {
+                            account = GitHubAccount(
+                                login: login,
+                                id: GitHubLocalProvider.stableID(login),
+                                name: nil,
+                                email: nil
+                            )
+                            authorizationStatus = "Connected as @\(login). Load repositories to review access."
+                        } else {
+                            authorizationStatus = "GitHub account is connected on this Mac. Load repositories to review access."
+                        }
+                    },
+                    onCancel: {
+                        deviceFlowShown = false
+                        deviceFlowSession = nil
+                        authorizationStatus = "GitHub sign-in cancelled."
+                    }
+                )
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.root")
     }
@@ -386,6 +463,9 @@ struct SetupView: View {
     private var canConnectGitHub: Bool {
         if uiTestGitHubScenario == "unavailable" {
             return false
+        }
+        if accessMode == .local {
+            return provider != nil
         }
         return uiTestGitHubScenario != nil ||
             (authorizationCoordinator != nil &&
@@ -622,8 +702,12 @@ struct SetupView: View {
         case .readiness:
             return true
         case .github:
+            // Local mode has no Connect recovery gate: the policy can be
+            // configured as soon as preflight passes, even while bootstrap
+            // finishes creating workspaces.
             return githubContextLoaded &&
-                (canFinishWithoutGitHub || (systemReady && githubReconnectRequired))
+                (canFinishWithoutGitHub ||
+                 (systemReady && (githubReconnectRequired || accessMode == .local)))
         case .identity:
             return githubContextLoaded && canFinishWithoutGitHub && githubStepComplete
         case .review:
@@ -636,7 +720,8 @@ struct SetupView: View {
     }
     private func advanceFromReadiness() {
         guard githubContextLoaded else { return }
-        if canFinishWithoutGitHub || githubReconnectRequired {
+        if canFinishWithoutGitHub || githubReconnectRequired ||
+            (accessMode == .local && systemReady) {
             activeStep = .github
         } else {
             runSetup()
@@ -655,6 +740,16 @@ struct SetupView: View {
     /// on this step with a retryable issue rather than bypassing cleanup.
     private func skipGitHub() {
         guard !githubSkipped, !isAuthorizing, !isSkippingGitHub else { return }
+        if accessMode == .local {
+            // Local mode has no Connect grants to disable; skipping just
+            // marks the step decided.
+            githubSkipped = true
+            authorizationIssue = nil
+            localCatalogIssue = nil
+            authorizationStatus = "GitHub skipped."
+            activeStep = .identity
+            return
+        }
         let affectedWorkspace = githubReconnectRequired ? githubAttentionWorkspace : nil
         guard affectedWorkspace != nil || !githubReconnectRequired else {
             githubSkipIssue = "GitHub recovery is blocked because no affected workspace was reported. No access was changed; retry status before continuing."
@@ -874,7 +969,16 @@ struct SetupView: View {
         .accessibilityIdentifier("setup.check.\(check.id)")
     }
 
+    @ViewBuilder
     private var githubBoundary: some View {
+        if accessMode == .local {
+            localGitHubBoundary
+        } else {
+            connectGitHubBoundary
+        }
+    }
+
+    private var connectGitHubBoundary: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("GitHub").font(.title3.weight(.semibold))
 
@@ -1017,6 +1121,199 @@ struct SetupView: View {
         .accessibilityIdentifier("setup.github-boundary")
     }
 
+    private var localGitHubBoundary: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("GitHub").font(.title3.weight(.semibold))
+
+            if let account {
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier("setup.github.account")
+                    if localManageRepositoriesURL != nil {
+                        Button("Manage repositories on GitHub", action: openLocalManageRepositories)
+                            .accessibilityIdentifier("setup.github.manage-repositories.button")
+                    }
+                }
+                Text("Choose repository access for each workspace.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Connect your GitHub account on this Mac to load repositories, or skip and connect later from Settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                if showsGitHubConnectAction {
+                    Button(
+                        isAuthorizing ? "Loading…" : GitHubLocalStrings.loadActionTitle,
+                        action: beginAuthorization
+                    )
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isAuthorizing || provider == nil)
+                    .accessibilityIdentifier("setup.github.load.button")
+                    if account == nil {
+                        Button("Connect GitHub account on this Mac…", action: connectGitHubAccount)
+                            .disabled(isConnectingAccount || isAuthorizing)
+                            .accessibilityIdentifier("setup.github.connect-account.button")
+                    }
+                }
+                Button("Skip GitHub") { skipGitHub() }
+                    .buttonStyle(.bordered)
+                    .disabled(githubSkipped || isAuthorizing || isSkippingGitHub || isReviewing)
+                    .accessibilityIdentifier("setup.github.skip.button")
+            }
+            if isConnectingAccount {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Waiting for GitHub sign-in on this Mac…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .contain)
+            }
+            if let localCatalogIssue {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label(localCatalogIssueTitle(localCatalogIssue.kind), systemImage: "wifi.exclamationmark")
+                        .font(.callout.weight(.semibold))
+                    Text(localCatalogIssue.message)
+                        .font(.caption)
+                    Button("Try again", action: beginAuthorization)
+                        .disabled(isAuthorizing)
+                        .accessibilityIdentifier("setup.github.retry.button")
+                }
+                .font(.caption)
+                .padding(10)
+                .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("setup.github.issue.\(localCatalogIssue.kind.rawValue)")
+            }
+
+            if account != nil {
+                if installations.isEmpty && repositoriesByInstallation.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("No repositories are available yet.", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(GitHubLocalStrings.noReposCopy)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if localManageRepositoriesURL != nil {
+                            Button("Manage repositories on GitHub", action: openLocalManageRepositories)
+                                .accessibilityIdentifier("setup.github.install.button")
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                }
+                // Manual OWNER/REPO entry is always available while a local
+                // account is connected — including zero-result and error
+                // states, where discovery found nothing to pick from.
+                DisclosureGroup(isExpanded: $manualEntryExpanded) {
+                    addRepositoryRow
+                } label: {
+                    Text("Add a repository manually")
+                        .font(.caption)
+                }
+                .accessibilityIdentifier("setup.github.manual-add")
+                if !repositoriesByInstallation.isEmpty {
+                    repositoryPolicyEditor
+                }
+                if isReviewing {
+                    reviewCard
+                }
+                Button("Manage connected account in Settings") { openSettings(.github) }
+                    .disabled(isAuthorizing)
+            }
+
+            if isAuthorizing {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(authorizationStatus).font(.caption).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("setup.github.progress")
+            }
+
+            if !authorizationStatus.isEmpty && !isAuthorizing {
+                Text(authorizationStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+                    .accessibilityIdentifier("setup.github.status")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.github-boundary")
+    }
+
+    private var addRepositoryRow: some View {
+        HStack(spacing: 8) {
+            TextField("owner/repository", text: $addedRepositoryInput)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("setup.github.add-repository.field")
+            Button("Add repository", action: addEnteredRepository)
+                .disabled(!Self.isValidRepositoryInput(addedRepositoryInput) || isAuthorizing)
+                .accessibilityIdentifier("setup.github.add-repository.button")
+        }
+        .padding(.top, 2)
+    }
+
+    private var localManageRepositoriesURL: URL? {
+        GitHubLocalStrings.manageRepositoriesURL
+    }
+
+    private func openLocalManageRepositories() {
+        guard let url = localManageRepositoriesURL,
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "github.com" else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func localCatalogIssueTitle(_ kind: LocalCatalogIssueKind) -> String {
+        switch kind {
+        case .unavailable: return "GitHub unavailable"
+        case .failed: return "GitHub repositories could not be loaded"
+        }
+    }
+
+    private static func isValidRepositoryInput(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return GitHubLocalProvider.isValidCanonical(GitHubLocalProvider.canonicalize(trimmed))
+    }
+
+    private func addEnteredRepository() {
+        let canonical = GitHubLocalProvider.canonicalize(addedRepositoryInput)
+        guard Self.isValidRepositoryInput(canonical),
+              let (owner, name) = GitHubLocalProvider.splitCanonical(canonical) else {
+            return
+        }
+        let ownerID = GitHubLocalProvider.stableID(owner)
+        let ownerAccount = GitHubInstallationAccount(login: owner, id: ownerID, type: nil)
+        let repository = GitHubRepository(
+            id: GitHubLocalProvider.stableID(canonical),
+            fullName: canonical,
+            name: name,
+            owner: ownerAccount,
+            private: true,
+            defaultBranch: nil
+        )
+        if !installations.contains(where: { $0.id == ownerID }) {
+            installations.append(GitHubInstallation(
+                id: ownerID,
+                account: ownerAccount,
+                repositorySelection: nil
+            ))
+        }
+        if !(repositoriesByInstallation[ownerID]?.contains(where: { $0.id == repository.id }) ?? false) {
+            repositoriesByInstallation[ownerID, default: []].append(repository)
+        }
+        addedRepositoryInput = ""
+    }
+
     @ViewBuilder
     private func authorizationIssueAction(_ issue: AuthorizationIssue) -> some View {
         switch issue.kind {
@@ -1062,6 +1359,7 @@ struct SetupView: View {
         RepositoryWorkspacePolicyEditor(
             installations: installations,
             repositoriesByInstallation: repositoriesByInstallation,
+            accessMode: accessMode,
             drafts: $drafts,
             editedWorkspaces: $editedGitHubWorkspaces,
             disabled: isAuthorizing,
@@ -1425,22 +1723,50 @@ struct SetupView: View {
     }
 
     private func policyEntries(for draft: WorkspaceRepositoryDraft) -> [GitHubRepositoryPolicy] {
-        guard let installationID = draft.installationID,
-              let installation = installations.first(where: { $0.id == installationID }),
-              let repositories = repositoriesByInstallation[installationID] else { return [] }
-        let byID = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0) })
+        Self.repositoryPolicyEntries(
+            workspace: draft.workspace,
+            draft: draft,
+            installations: installations,
+            repositoriesByInstallation: repositoriesByInstallation,
+            accessMode: accessMode
+        )
+    }
+
+    /// Pure draft -> policy mapping used by `policyEntries(for:)` and
+    /// exercised directly by unit tests. Local mode spans ALL owners; connect
+    /// mode is scoped to the draft's single installation.
+    static func repositoryPolicyEntries(
+        workspace: Workspace.ID,
+        draft: WorkspaceRepositoryDraft,
+        installations: [GitHubInstallation],
+        repositoriesByInstallation: [Int: [GitHubRepository]],
+        accessMode: GitHubAccessMode
+    ) -> [GitHubRepositoryPolicy] {
+        // Canonical repository -> (repository, owner installation) lookup.
+        var byCanonical: [String: (GitHubRepository, GitHubInstallation)] = [:]
+        for installation in installations {
+            let repositories = repositoriesByInstallation[installation.id] ?? []
+            for repository in repositories {
+                let canonical = GitHubLocalProvider.canonicalize(repository.fullName)
+                byCanonical[canonical] = (repository, installation)
+            }
+        }
         var result: [GitHubRepositoryPolicy] = []
-        for (repositoryID, mode) in draft.repositoryModes {
-            guard let repository = byID[repositoryID] else { continue }
+        for (canonical, mode) in draft.repositoryModes {
+            guard let (repository, installation) = byCanonical[canonical] else { continue }
+            if accessMode == .connect, let scopedInstallationID = draft.installationID,
+               scopedInstallationID != installation.id {
+                continue
+            }
             result.append(GitHubRepositoryPolicy(
-                workspace: draft.workspace.rawValue,
+                workspace: workspace.rawValue,
                 repositoryID: repository.id,
                 fullName: repository.fullName,
                 installationID: installation.id,
                 ownerID: installation.account.id,
                 ownerLogin: installation.account.login,
                 ownerType: installation.account.type,
-                mode: mode
+                mode: repository.effectiveMode(mode)
             ))
         }
         return result
@@ -1453,6 +1779,10 @@ struct SetupView: View {
 
 
     private func beginAuthorization() {
+        if accessMode == .local {
+            loadLocalCatalog()
+            return
+        }
         if uiTestGitHubScenario == "unavailable" {
             authorizationIssue = AuthorizationIssue(
                 kind: .unavailable,
@@ -1559,6 +1889,239 @@ struct SetupView: View {
             }
         }
     }
+
+    /// Local mode: loads the repo catalog (policy read-back via the CLI) into
+    /// the existing picker models and prefills drafts from the policy file.
+    private func loadLocalCatalog() {
+        guard let provider else {
+            authorizationIssue = AuthorizationIssue(
+                kind: .unavailable,
+                message: "GitHub local access is unavailable in this build."
+            )
+            return
+        }
+        pauseAuthorization()
+        authorizationGeneration &+= 1
+        let generation = authorizationGeneration
+        isAuthorizing = true
+        authorizationMayCancel = false
+        isReviewing = false
+        authorizationIssue = nil
+        localCatalogIssue = nil
+        authorizationStatus = "Loading GitHub repositories…"
+        authorizationTask = Task {
+            do {
+                let catalog = try await provider.loadCatalog()
+                let policy = await provider.currentPolicy()
+                try Task.checkCancellation()
+                await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
+                    account = catalog.account
+                    installations = catalog.installations
+                    repositoriesByInstallation = catalog.repositoriesByInstallation
+                    githubInstallationURL = GitHubLocalStrings.manageRepositoriesURL
+                    authorizationSessionID = nil
+                    isAuthorizing = false
+                    authorizationMayCancel = false
+                    authorizationTask = nil
+                    githubSkipped = false
+                    if catalog.installations.isEmpty && catalog.repositoriesByInstallation.isEmpty {
+                        authorizationStatus = GitHubLocalStrings.noReposCopy
+                    } else {
+                        authorizationStatus = "Choose repository access, then review before applying."
+                    }
+                    prefillLocalRepositoryPolicyDrafts(policy: policy)
+                    if let account {
+                        prefillIdentity(from: account)
+                    }
+                }
+            } catch is CancellationError {
+                // Setup closed or the lifecycle was invalidated; no publication.
+            } catch {
+                await MainActor.run {
+                    guard authorizationGeneration == generation else { return }
+                    isAuthorizing = false
+                    authorizationMayCancel = false
+                    authorizationTask = nil
+                    let kind: LocalCatalogIssueKind
+                    if case .unavailable? = error as? GitHubCatalogError {
+                        kind = .unavailable
+                    } else {
+                        kind = .failed
+                    }
+                    localCatalogIssue = LocalCatalogIssue(
+                        kind: kind,
+                        message: error.localizedDescription
+                    )
+                    authorizationStatus = ""
+                }
+            }
+        }
+    }
+
+    /// Runs the CLI-owned host-credential flow. gh reuse completes
+    /// in-process. When the CLI reports gh is unauthenticated with no
+    /// device-flow client ID (MSW_HOST_OAUTH_NOT_CONFIGURED) the app
+    /// launches the installed gh web OAuth flow and then retries auth; when
+    /// the CLI reports the Device Flow is available
+    /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
+    /// in-app device sheet. Other typed remedies surface verbatim.
+    private func connectGitHubAccount() {
+        guard let provider, !isConnectingAccount else { return }
+        isConnectingAccount = true
+        authorizationIssue = nil
+        localCatalogIssue = nil
+        authorizationStatus = ""
+        Task {
+            do {
+                let account = try await provider.connectAccount()
+                isConnectingAccount = false
+                if let account {
+                    self.account = account
+                    authorizationStatus = "Connected as @\(account.login). Load repositories to review access."
+                } else {
+                    authorizationStatus = "GitHub account is connected on this Mac. Load repositories to review access."
+                }
+            } catch GitHubCatalogError.ghWebLoginRequired {
+                // gh is unauthenticated and no device-flow client ID is
+                // configured: launch the installed gh web OAuth flow, then
+                // retry the host-credential acquisition.
+                await launchGhWebLoginAndRetry()
+            } catch GitHubCatalogError.deviceFlowAvailable {
+                // The CLI reported the Device Flow is available (a client ID
+                // is explicitly configured); present the in-app device sheet.
+                await beginDeviceFlow()
+            } catch {
+                isConnectingAccount = false
+                localCatalogIssue = LocalCatalogIssue(
+                    kind: .unavailable,
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    /// Launches the installed gh web OAuth flow (`gh auth login --web`),
+    /// surfaces the waiting state, and retries `connectAccount()` once gh
+    /// reports the browser sign-in completed.
+    private func launchGhWebLoginAndRetry() async {
+        guard let provider else {
+            isConnectingAccount = false
+            return
+        }
+        authorizationStatus = "Waiting for GitHub sign-in in your browser…"
+        do {
+            try await provider.launchGhWebLogin()
+            // gh stored the token; retry the host-credential acquisition.
+            let account = try await provider.connectAccount()
+            isConnectingAccount = false
+            if let account {
+                self.account = account
+                authorizationStatus = "Connected as @\(account.login). Load repositories to review access."
+            } else {
+                authorizationStatus = "GitHub account is connected on this Mac. Load repositories to review access."
+            }
+        } catch GitHubCatalogError.ghWebLoginRequired {
+            isConnectingAccount = false
+            localCatalogIssue = LocalCatalogIssue(
+                kind: .unavailable,
+                message: "GitHub sign-in did not complete. Retry when ready."
+            )
+        } catch {
+            isConnectingAccount = false
+            localCatalogIssue = LocalCatalogIssue(
+                kind: .unavailable,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func beginDeviceFlow() async {
+        guard let provider else {
+            isConnectingAccount = false
+            return
+        }
+        let session = GitHubDeviceFlowSession(
+            startDeviceFlow: { try await provider.startDeviceFlow() },
+            pollDeviceFlow: { deviceId in try await provider.pollDeviceFlow(deviceId: deviceId) }
+        )
+        isConnectingAccount = false
+        deviceFlowSession = session
+        deviceFlowShown = true
+    }
+
+    /// Prefills draft selections from the policy file (local mode). Every
+    /// policy entry is preserved and keyed by canonical repository — owners
+    /// missing from the discovery catalog get a synthetic installation/repo
+    /// (like manual entry) so cross-owner entries stay visible and editable.
+    private func prefillLocalRepositoryPolicyDrafts(policy: GitHubPolicyFile?) {
+        guard retainedRepositoryPolicy.isEmpty, let policy else { return }
+        for workspace in Workspace.ID.allCases {
+            guard !editedGitHubWorkspaces.contains(workspace.rawValue),
+                  var draft = drafts[workspace.rawValue],
+                  draft.repositoryModes.isEmpty,
+                  let policyWorkspace = policy.workspaces[workspace.rawValue] else {
+                continue
+            }
+            let prefilled = Self.localPolicyPrefill(
+                policyWorkspace: policyWorkspace,
+                installations: installations,
+                repositoriesByInstallation: repositoriesByInstallation
+            )
+            if !prefilled.modes.isEmpty {
+                draft.installationID = nil
+                draft.repositoryModes = prefilled.modes
+                drafts[workspace.rawValue] = draft
+                installations = prefilled.installations
+                repositoriesByInstallation = prefilled.repositoriesByInstallation
+            }
+        }
+    }
+
+    /// Pure local-mode prefill used by `prefillLocalRepositoryPolicyDrafts`
+    /// and exercised directly by unit tests. Returns canonical-keyed modes
+    /// for EVERY policy entry plus the (possibly extended) catalog; owners
+    /// missing from the loaded catalog are synthesized so cross-owner policy
+    /// entries are never dropped.
+    static func localPolicyPrefill(
+        policyWorkspace: GitHubPolicyWorkspace,
+        installations: [GitHubInstallation],
+        repositoriesByInstallation: [Int: [GitHubRepository]]
+    ) -> (
+        modes: [String: GitHubRepositoryAccessMode],
+        installations: [GitHubInstallation],
+        repositoriesByInstallation: [Int: [GitHubRepository]]
+    ) {
+        var modes: [String: GitHubRepositoryAccessMode] = [:]
+        var updatedInstallations = installations
+        var updatedRepositories = repositoriesByInstallation
+        for entry in policyWorkspace.repos {
+            let canonical = entry.canonical
+            guard let (owner, name) = GitHubLocalProvider.splitCanonical(canonical) else { continue }
+            let ownerID = GitHubLocalProvider.stableID(owner)
+            let repositoryID = GitHubLocalProvider.stableID(canonical)
+            if !(updatedRepositories[ownerID]?.contains(where: { $0.id == repositoryID }) ?? false) {
+                if !updatedInstallations.contains(where: { $0.id == ownerID }) {
+                    updatedInstallations.append(GitHubInstallation(
+                        id: ownerID,
+                        account: GitHubInstallationAccount(login: owner, id: ownerID, type: nil),
+                        repositorySelection: nil
+                    ))
+                }
+                updatedRepositories[ownerID, default: []].append(GitHubRepository(
+                    id: repositoryID,
+                    fullName: canonical,
+                    name: name,
+                    owner: GitHubInstallationAccount(login: owner, id: ownerID, type: nil),
+                    private: true,
+                    defaultBranch: nil
+                ))
+            }
+            modes[canonical] = entry.mode
+        }
+        return (modes, updatedInstallations, updatedRepositories)
+    }
+
     private static let uiTestAuthorizationSessionID = UUID(uuidString: "E2E00000-0000-4000-8000-000000000001")!
     private static let uiTestAccount = GitHubAccount(
         login: "octocat",
@@ -1618,6 +2181,44 @@ struct SetupView: View {
         authorizationIssue = nil
         authorizationStatus = "Applying repository access…"
         authorizationTask?.cancel()
+
+        if accessMode == .local {
+            guard let provider else {
+                authorizationStatus = "GitHub local access is unavailable in this build."
+                isAuthorizing = false
+                return
+            }
+            authorizationTask = Task {
+                do {
+                    try await provider.commit(workspacePolicies)
+                    try Task.checkCancellation()
+                    await MainActor.run {
+                        guard authorizationGeneration == generation else { return }
+                        existingMetadata = []
+                        verificationResults = []
+                        isAuthorizing = false
+                        authorizationMayCancel = false
+                        authorizationTask = nil
+                        repositoryPolicyApplied = true
+                        authorizationSessionID = nil
+                        isReviewing = false
+                        authorizationStatus = "Applied repository access for \(workspacePolicies.count) workspace(s)."
+                    }
+                } catch is CancellationError {
+                    // The setup surface closed or the lifecycle was invalidated.
+                } catch {
+                    await MainActor.run {
+                        guard authorizationGeneration == generation else { return }
+                        isAuthorizing = false
+                        authorizationMayCancel = false
+                        authorizationTask = nil
+                        authorizationIssue = issue(for: error)
+                        authorizationStatus = ""
+                    }
+                }
+            }
+            return
+        }
 
         if uiTestGitHubScenario != nil {
             authorizationTask = Task {
@@ -1900,6 +2501,12 @@ struct SetupView: View {
         let startupLifecycle = setupLifecycle.generation
         restoreResumeState()
         loadPreflight()
+        if accessMode == .local {
+            // Local mode has no Connect session to restore; the catalog and
+            // policy prefill happen when the user loads repositories.
+            githubContextLoaded = true
+            return true
+        }
         await loadExistingMetadata(startupLifecycle: startupLifecycle)
         guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
         await restoreCachedAuthorization(startupLifecycle: startupLifecycle)
@@ -1961,7 +2568,8 @@ struct SetupView: View {
             } catch {
                 await MainActor.run {
                     isRunning = false
-                    if let clientError = error as? MSWClientError,
+                    if accessMode == .connect,
+                       let clientError = error as? MSWClientError,
                        case .protocolFailure(let protocolError) = clientError,
                        protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED" {
                         // No readiness warning: take the user straight to the
@@ -2035,6 +2643,11 @@ struct SetupView: View {
     }
 
     private var githubReviewSummary: String {
+        if accessMode == .local {
+            if githubSkipped { return "Skipped." }
+            if repositoryPolicyApplied { return "Configured." }
+            return "Not configured yet."
+        }
         if githubSkipped { return "Skipped." }
         if !verificationResults.isEmpty { return "Connected." }
         if !existingMetadata.isEmpty { return "Managed in Settings." }
@@ -2198,7 +2811,7 @@ struct SetupView: View {
             }
 
             let byID = Dictionary(uniqueKeysWithValues: availableRepositories.map { ($0.id, $0) })
-            var modes: [Int: GitHubRepositoryAccessMode] = [:]
+            var modes: [String: GitHubRepositoryAccessMode] = [:]
             var isCurrent = true
             for (repositoryID, repositoryName) in zip(guest.repositoryIDs, guest.repositoryNames) {
                 guard let repository = byID[repositoryID],
@@ -2206,7 +2819,7 @@ struct SetupView: View {
                     isCurrent = false
                     break
                 }
-                modes[repositoryID] = hostEntries.contains {
+                modes[GitHubLocalProvider.canonicalize(repository.fullName)] = hostEntries.contains {
                     $0.repositoryIDs.contains(repositoryID)
                 } ? .readWrite : .readOnly
             }
@@ -2258,12 +2871,20 @@ struct SetupView: View {
         repositoryPolicyApplied = resume.repositoryPolicyApplied
         for policy in resume.repositoryPolicy {
             guard let workspace = Workspace.ID(rawValue: policy.workspace) else { continue }
-            let installationIDs = Set(policy.repositories.map(\.installationID))
-            guard installationIDs.count <= 1 else { continue }
             var draft = drafts[policy.workspace] ?? .initial(workspace)
-            draft.installationID = installationIDs.first
+            let installationIDs = Set(policy.repositories.map(\.installationID))
+            if accessMode == .connect {
+                // Connect retains the one-installation-per-workspace rule.
+                guard installationIDs.count <= 1 else { continue }
+                draft.installationID = installationIDs.first
+            } else {
+                // Local mode spans owners; entries are canonical-keyed.
+                draft.installationID = nil
+            }
             draft.repositoryModes = Dictionary(
-                uniqueKeysWithValues: policy.repositories.map { ($0.repositoryID, $0.mode) }
+                uniqueKeysWithValues: policy.repositories.map {
+                    (GitHubLocalProvider.canonicalize($0.fullName), $0.mode)
+                }
             )
             drafts[policy.workspace] = draft
         }
@@ -2402,10 +3023,12 @@ struct SetupView: View {
 
 /// The one compact repository-policy editor used by setup and reached from
 /// Settings. A checkbox assigns a repository to one workspace; a selected
-/// repository starts Read-only and exposes its segmented access control.
+/// repository starts in Clone/pull (push from Mac) mode and exposes its
+/// segmented access control.
 private struct RepositoryWorkspacePolicyEditor: View {
     let installations: [GitHubInstallation]
     let repositoriesByInstallation: [Int: [GitHubRepository]]
+    let accessMode: GitHubAccessMode
     @Binding var drafts: [String: WorkspaceRepositoryDraft]
     @Binding var editedWorkspaces: Set<String>
     let disabled: Bool
@@ -2420,7 +3043,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Workspace access").font(.headline)
-            if sortedInstallations.count > 1 {
+            if accessMode == .connect && sortedInstallations.count > 1 {
                 Text("Each workspace can use repositories from one GitHub owner at a time.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2428,7 +3051,10 @@ private struct RepositoryWorkspacePolicyEditor: View {
             ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
                 workspaceSection(workspace)
             }
-            Text("Read & write lets MSW push changes. Your workspace never receives a write credential.")
+            Text(GitHubLocalStrings.pickerCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(GitHubRepositoryAccessMode.footnote)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -2476,6 +3102,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
         installation: GitHubInstallation
     ) -> some View {
         let selected = isSelected(workspace, repository: repository, installation: installation)
+        let writeBlocked = repository.canPush == false
         HStack(spacing: 8) {
             Toggle(repository.fullName, isOn: selectionBinding(
                 workspace,
@@ -2487,25 +3114,42 @@ private struct RepositoryWorkspacePolicyEditor: View {
             .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id)")
             Spacer(minLength: 8)
             if selected {
-                Picker(
-                    "Access for \(repository.fullName)",
-                    selection: modeBinding(
-                        workspace,
-                        repository: repository,
-                        installation: installation
-                    )
-                ) {
-                    ForEach(GitHubRepositoryAccessMode.allCases, id: \.rawValue) { mode in
-                        Text(mode.label).tag(mode)
+                if writeBlocked {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(GitHubRepositoryAccessMode.readOnly.label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Your GitHub account can't push to this repository.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).push-hint")
                     }
+                    .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Picker(
+                        "Access for \(repository.fullName)",
+                        selection: modeBinding(
+                            workspace,
+                            repository: repository,
+                            installation: installation
+                        )
+                    ) {
+                        ForEach(GitHubRepositoryAccessMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 220)
+                    .disabled(disabled)
+                    .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).mode")
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 220)
-                .disabled(disabled)
-                .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).mode")
             }
         }
+    }
+
+    private static func canonicalKey(_ repository: GitHubRepository) -> String {
+        GitHubLocalProvider.canonicalize(repository.fullName)
     }
 
     private func isSelected(
@@ -2514,11 +3158,17 @@ private struct RepositoryWorkspacePolicyEditor: View {
         installation: GitHubInstallation
     ) -> Bool {
         let draft = drafts[workspace.rawValue] ?? .initial(workspace)
-        return draft.installationID == installation.id && draft.repositoryModes[repository.id] != nil
+        guard draft.repositoryModes[Self.canonicalKey(repository)] != nil else { return false }
+        if accessMode == .connect {
+            return draft.installationID == installation.id
+        }
+        // Local mode spans owners: any selected canonical repo counts.
+        return true
     }
 
     private func selectionBlocked(_ workspace: Workspace.ID, installation: GitHubInstallation) -> Bool {
-        guard let selectedInstallation = drafts[workspace.rawValue]?.installationID else { return false }
+        guard accessMode == .connect,
+              let selectedInstallation = drafts[workspace.rawValue]?.installationID else { return false }
         return selectedInstallation != installation.id
     }
 
@@ -2532,11 +3182,13 @@ private struct RepositoryWorkspacePolicyEditor: View {
             set: { selected in
                 var draft = drafts[workspace.rawValue] ?? .initial(workspace)
                 if selected {
-                    guard draft.installationID == nil || draft.installationID == installation.id else { return }
-                    draft.installationID = installation.id
-                    draft.repositoryModes[repository.id] = .readOnly
-                } else if draft.installationID == installation.id {
-                    draft.repositoryModes.removeValue(forKey: repository.id)
+                    if accessMode == .connect {
+                        guard draft.installationID == nil || draft.installationID == installation.id else { return }
+                        draft.installationID = installation.id
+                    }
+                    draft.repositoryModes[Self.canonicalKey(repository)] = .readOnly
+                } else {
+                    draft.repositoryModes.removeValue(forKey: Self.canonicalKey(repository))
                     if draft.repositoryModes.isEmpty { draft.installationID = nil }
                 }
                 drafts[workspace.rawValue] = draft
@@ -2554,12 +3206,15 @@ private struct RepositoryWorkspacePolicyEditor: View {
         Binding(
             get: {
                 guard isSelected(workspace, repository: repository, installation: installation) else { return .readOnly }
-                return drafts[workspace.rawValue]?.repositoryModes[repository.id] ?? .readOnly
+                let mode = drafts[workspace.rawValue]?.repositoryModes[Self.canonicalKey(repository)] ?? .readOnly
+                return repository.effectiveMode(mode)
             },
             set: { mode in
-                guard var draft = drafts[workspace.rawValue], draft.installationID == installation.id,
-                      draft.repositoryModes[repository.id] != nil else { return }
-                draft.repositoryModes[repository.id] = mode
+                guard var draft = drafts[workspace.rawValue],
+                      draft.repositoryModes[Self.canonicalKey(repository)] != nil,
+                      repository.canPush != false else { return }
+                if accessMode == .connect, draft.installationID != installation.id { return }
+                draft.repositoryModes[Self.canonicalKey(repository)] = mode
                 drafts[workspace.rawValue] = draft
                 editedWorkspaces.insert(workspace.rawValue)
                 onEdit()

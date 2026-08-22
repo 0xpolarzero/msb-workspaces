@@ -40,7 +40,13 @@ if [[ "$TEST_MODE" != 1 ]]; then
   [[ "$(uname -m)" == arm64 ]] || fatal "an Apple Silicon Mac is required"
 fi
 
-mkdir -p "$HOME/.local/bin" "$HOME/.local/libexec" "$HOME/.config/msw" "$HOME/.local/share/msw/docs"
+# ~/.local/state/msw must exist (private) BEFORE the GitHub proxy and
+# port-forwarder launch agents are rendered/loaded: their launchd plists
+# point StandardOutPath/StandardErrorPath into it, and a missing directory
+# makes the jobs fail immediately on a clean home. setup.sh verifies every
+# loaded job stays alive before reporting success.
+mkdir -p "$HOME/.local/bin" "$HOME/.local/libexec" "$HOME/.config/msw" "$HOME/.local/share/msw/docs" "$HOME/.local/state/msw"
+chmod 0700 "$HOME/.local/state/msw"
 ensure_line 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zprofile"
 ensure_line 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc"
 export PATH="$HOME/.local/bin:$PATH"
@@ -57,7 +63,7 @@ if [[ "$TEST_MODE" != 1 ]]; then
   fi
   ensure_line 'eval "$(/opt/homebrew/bin/brew shellenv)"' "$HOME/.zprofile"
   eval "$(brew shellenv)"
-  brew install gnu-tar zstd git-lfs
+  brew install gnu-tar zstd git-lfs gh
 
   if ! command -v msb >/dev/null 2>&1; then
     if ! brew install superradcompany/tap/microsandbox; then
@@ -82,11 +88,110 @@ install -m 0755 "$SCRIPT_DIR/lib/bootstrap-base.sh" "$HOME/.config/msw/bootstrap
 install -m 0755 "$SCRIPT_DIR/bin/msw" "$HOME/.local/bin/msw"
 install -m 0755 "$SCRIPT_DIR/bin/msw-ssh-proxy" "$HOME/.local/bin/msw-ssh-proxy"
 install -m 0755 "$SCRIPT_DIR/bin/msw-git-askpass" "$HOME/.local/libexec/msw-git-askpass"
+install -m 0755 "$SCRIPT_DIR/bin/msw-github-host-token" "$HOME/.local/libexec/msw-github-host-token"
+install -m 0755 "$SCRIPT_DIR/bin/msw-keychain-bridge" "$HOME/.local/libexec/msw-keychain-bridge"
+install -m 0755 "$SCRIPT_DIR/lib/msw-github-relay.py" "$HOME/.local/libexec/msw-github-relay.py"
+install -m 0755 "$SCRIPT_DIR/lib/msw-github-shuttle.py" "$HOME/.local/libexec/msw-github-shuttle.py"
+install -m 0755 "$SCRIPT_DIR/lib/msw-port-forwarder.py" "$HOME/.local/libexec/msw-port-forwarder.py"
+# Path C §4 proxy stack: wrapper + core + upstream + vendored h11. The
+# wrapper resolves ../lib relative to its own location, so these exact
+# destinations keep it working unchanged.
+install -m 0755 "$SCRIPT_DIR/bin/msw-github-proxy" "$HOME/.local/bin/msw-github-proxy"
+install -d -m 0755 "$HOME/.local/lib"
+install -m 0644 "$SCRIPT_DIR/lib/proxycore.py" "$HOME/.local/lib/proxycore.py"
+install -m 0644 "$SCRIPT_DIR/lib/proxy-upstream.py" "$HOME/.local/lib/proxy-upstream.py"
+if [[ -d "$SCRIPT_DIR/lib/vendor/h11" ]]; then
+  # Replace the installed subtree atomically (never copy over it): a proxy
+  # import may have left __pycache__/*.pyc behind, which the vendored-h11
+  # hash gate rejects as unlisted files. Populate a fresh tree, then swap.
+  # Stage beside the destination so the final swap is a same-filesystem
+  # atomic rename (mktemp under TMPDIR can be a different volume).
+  h11_tmp="$HOME/.local/lib/.msw-h11.$$"
+  rm -rf "$h11_tmp"
+  mkdir -p "$h11_tmp" || fatal "could not stage the vendored h11 tree"
+  (
+    cd "$SCRIPT_DIR/lib/vendor/h11" || exit 1
+    find . -type d -exec mkdir -p "$h11_tmp/{}" \;
+    find . -type f -exec install -m 0644 "{}" "$h11_tmp/{}" \;
+  ) || { rm -rf "$h11_tmp"; fatal "could not stage the vendored h11 tree"; }
+  find "$h11_tmp" -type d -exec chmod 0755 {} \;
+  rm -rf "$HOME/.local/lib/vendor/h11"
+  mkdir -p "$HOME/.local/lib/vendor" || { rm -rf "$h11_tmp"; fatal "could not install the vendored h11 tree"; }
+  mv "$h11_tmp" "$HOME/.local/lib/vendor/h11" || { rm -rf "$h11_tmp"; fatal "could not install the vendored h11 tree"; }
+fi
+install -m 0644 "$SCRIPT_DIR/launchd/org.microsandbox.MSWMonitor.github-proxy.plist" "$HOME/.local/share/msw/github-proxy.plist"
 install -m 0644 "$SCRIPT_DIR/docs/"*.md "$HOME/.local/share/msw/docs/"
 install -m 0644 "$SCRIPT_DIR/README.md" "$HOME/.local/share/msw/README.md"
 
 # shellcheck source=/dev/null
 source "$HOME/.config/msw/config.sh"
+
+# Path C §1: mode defaults to local; validate before any workspace work.
+: "${MSW_GITHUB_MODE:=local}"
+: "${MSW_GITHUB_PROXY_PORT:=18446}"
+case "$MSW_GITHUB_MODE" in
+  local|connect) ;;
+  *) fatal "invalid MSW_GITHUB_MODE '$MSW_GITHUB_MODE' (expected local or connect)" ;;
+esac
+
+verify_installed_proxy_hashes() {
+  # Fail-closed: every installed proxy-stack file must match MANIFEST.txt.
+  local entry sha actual
+  for entry in bin/msw-github-proxy lib/proxycore.py lib/proxy-upstream.py; do
+    sha="$(awk -v p="$entry" '$2 == p {print $1}' "$SCRIPT_DIR/MANIFEST.txt")"
+    [[ -n "$sha" ]] || fatal "MANIFEST.txt is missing an entry for $entry"
+    actual="$("/usr/bin/shasum" -a 256 "$HOME/.local/$entry" 2>/dev/null | awk '{print $1}')"
+    [[ "$actual" == "$sha" ]] || fatal "installed $entry failed hash verification (manifest $sha, installed ${actual:-<unreadable>})"
+  done
+}
+
+launchd_job_pid() {
+  # usage: launchd_job_pid LABEL  → prints the job's pid ("" when idle/absent)
+  local label="$1" out
+  out="$(/bin/launchctl print "gui/$(id -u)/$label" 2>/dev/null)" || return 1
+  printf '%s\n' "$out" | awk '/^[[:space:]]*pid = / {print $3; exit}'
+}
+
+verify_launchd_job_alive() {
+  # usage: verify_launchd_job_alive LABEL [socket]
+  # Fail-closed post-bootstrap check: every launchd job must be loaded, and
+  # KeepAlive jobs (the per-workspace port forwarders) must be running AND
+  # stay alive across a short grace period — catching a crash-looping agent
+  # (e.g. one whose log directory never existed on a fresh home). Socket-
+  # activated agents (the GitHub proxy, Wait=false) are idle-valid: launchd
+  # owns the listener, so a loaded, registered job is a live job even while
+  # no process is running. Any failed check fails the install.
+  local label="$1" socket_mode="${2:-}" attempt pid1 pid2
+  for attempt in 1 2 3; do
+    if [[ "$socket_mode" == socket ]]; then
+      /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && return 0
+    else
+      pid1="$(launchd_job_pid "$label" 2>/dev/null || true)"
+      if [[ "$pid1" =~ ^[0-9]+$ ]]; then
+        sleep 2
+        pid2="$(launchd_job_pid "$label" 2>/dev/null || true)"
+        [[ -n "$pid2" && "$pid2" == "$pid1" ]] && return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+log "Verifying the installed proxy and vendored h11"
+verify_installed_proxy_hashes
+MSW_VENDOR_H11_DIR="$HOME/.local/lib/vendor/h11" MSW_MANIFEST_FILE="$SCRIPT_DIR/MANIFEST.txt" \
+  "$HOME/.local/bin/msw" __verify-vendored-h11 || fatal "installed vendored h11 failed verification"
+
+log "Rendering the GitHub proxy launch agent"
+"$HOME/.local/bin/msw" __proxy-plist-render || fatal "could not render the GitHub proxy launch agent plist"
+if [[ "$TEST_MODE" != 1 && "$MSW_GITHUB_MODE" == local ]]; then
+  "$HOME/.local/bin/msw" github proxy install || fatal "could not install the GitHub proxy launch agent"
+  # Socket-activated agent (Wait=false): a loaded, registered job owns the
+  # 127.0.0.1:18446 listener, so loaded == idle-valid and live.
+  verify_launchd_job_alive org.microsandbox.MSWMonitor.github-proxy socket \
+    || fatal "the GitHub proxy launch agent is not loaded; check ~/Library/Logs/MSWMonitor/github-proxy.log"
+fi
 
 log "Checking MicroSandbox"
 if ! "$MSB_BIN" doctor; then
@@ -115,7 +220,11 @@ workspace_msb() {
     return "$status"
   fi
   if [[ -f "$HOME/.config/msw/github/${box}.conf" || -f "$HOME/.config/msw/github/${box}.quarantine" ]]; then
-    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github setup $box OWNER/REPO"
+    if [[ "$MSW_GITHUB_MODE" == local ]]; then
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github migrate $box, then msw github auth (or connect GitHub in MSW Monitor)"
+    else
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
+    fi
   fi
   "$MSB_BIN" "$@"
 }
@@ -180,30 +289,10 @@ else
   [[ -f "$BASE_STAMP" ]] || printf '%s\n' "$MSW_VERSION" >"$BASE_STAMP"
 fi
 
-expand_ports_into_args() {
-  local bind_ip="$1" token start end current old_ifs="$IFS"
-  PORT_ARGS=()
-  IFS=','
-  for token in $MSW_PUBLISHED_PORTS; do
-    if [[ "$token" == *-* ]]; then start="${token%-*}"; end="${token#*-}"; else start="$token"; end="$token"; fi
-    for ((current=start; current<=end; current++)); do PORT_ARGS+=(--port "${bind_ip}:${current}:${current}"); done
-  done
-  IFS="$old_ifs"
-}
-
-check_port_conflicts() {
-  [[ "$TEST_MODE" == 1 ]] && return 0
-  local bind_ip="$1" workspace="$2" port conflicts=""
-  local token start end current old_ifs="$IFS"; IFS=','
-  for token in $MSW_PUBLISHED_PORTS; do
-    if [[ "$token" == *-* ]]; then start="${token%-*}"; end="${token#*-}"; else start="$token"; end="$token"; fi
-    for ((current=start; current<=end; current++)); do
-      /usr/bin/nc -z -G 1 "$bind_ip" "$current" >/dev/null 2>&1 && conflicts+=" $current"
-    done
-  done
-  IFS="$old_ifs"
-  [[ -z "$conflicts" ]] || fatal "$workspace cannot start because these ports are already used on $bind_ip:$conflicts"
-}
+# Published ports are NOT passed to msb (see create_workspace): they are
+# forwarded host-side over SSH by lib/msw-port-forwarder.py, which probes the
+# bind address at runtime and skips occupied ports with a warning instead of
+# ever failing or recreating a workspace.
 
 wait_for_guest_systemd() {
   local box="$1" attempt=0
@@ -217,9 +306,9 @@ wait_for_guest_systemd() {
 configure_workspace_guest() {
   local box="$1" browser_host="$2"
   wait_for_guest_systemd "$box"
-  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" <<'GUEST'
+  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" "$MSW_GITHUB_MODE" <<'GUEST'
 set -Eeuo pipefail
-workspace="$1"; browser_host="$2"
+workspace="$1"; browser_host="$2"; github_mode="$3"
 mkdir -p /workspace /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
 cat >/etc/profile.d/msw-workspace.sh <<PROFILE
 export MSW_WORKSPACE="$workspace"
@@ -240,6 +329,12 @@ MicroSandbox workspace: $workspace
   Runtimes:   mise use <tool>@<version>
   Python:     uv sync / uv run ...
 MOTD
+if [ "$github_mode" = local ]; then
+  cat >>/etc/motd <<'MOTD'
+  GitHub:     use git inside the workspace. GitHub API calls are not supported
+              here; run API operations from the Mac.
+MOTD
+fi
 systemctl daemon-reload
 systemctl enable containerd.service docker.service
 systemctl restart containerd.service docker.service
@@ -267,38 +362,47 @@ keychain_read_token() {
 
 create_workspace() {
   local box="$1" bind_ip="$2" browser_host="$3" cpus="$4" max_cpus="$5" memory="$6" max_memory="$7" workspace_size="$8" runtime_size="$9"
-  local effective_cpus effective_max token=""
+  local effective_cpus effective_max token="" run_args=()
   effective_cpus="$(cap_cpu "$cpus")"; effective_max="$(cap_cpu "$max_cpus")"
   (( effective_cpus > effective_max )) && effective_cpus="$effective_max"
 
   if sandbox_exists "$box" && [[ "$RECREATE_WORKSPACES" == 1 ]]; then
     warn "recreating $box root; its repository and Docker volumes are preserved"
     workspace_msb "$box" rm -f "$box"
+    # A recreated VM regenerates its host keys; drop the stale entry from the
+    # dedicated MSW known-hosts file (never ~/.ssh/known_hosts) so the next
+    # SSH connection accepts the new key. Only this box's entry is removed.
+    if [[ -f "$HOME/.ssh/msw_known_hosts" ]]; then
+      ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/msw_known_hosts" >/dev/null 2>&1 || true
+    fi
   fi
 
   if ! sandbox_exists "$box"; then
-    check_port_conflicts "$bind_ip" "$box"
-    expand_ports_into_args "$bind_ip"
     log "Creating workspace: $box"
-    "$MSB_BIN" run --detach \
-      --name "$box" --from-snapshot "$MSW_BASE_SNAPSHOT" \
-      --cpus "$effective_cpus" --max-cpus "$effective_max" \
-      --memory "$memory" --max-memory "$max_memory" \
-      --mount-named "msw-${box}-workspace:/workspace:kind=disk,size=${workspace_size}" \
-      --mount-named "msw-${box}-runtime:/var/lib/msw-runtime:kind=disk,size=${runtime_size}" \
-      --workdir /workspace --init auto --security default --net public --tls-intercept \
-      --label msw.managed=true --label "msw.workspace=${box}" \
-      --env "MSW_WORKSPACE=${box}" --env "MSW_BROWSER_HOST=${browser_host}" \
-      --env 'PATH=/root/.local/bin:/root/.local/share/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
-      --env SHELL=/usr/bin/zsh --env LANG=en_US.UTF-8 \
-      --env HOST=0.0.0.0 --env BIND_ADDRESS=0.0.0.0 \
-      --env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${browser_host}" \
-      "${PORT_ARGS[@]}" \
-      -- sleep infinity
+    run_args+=(--name "$box" --from-snapshot "$MSW_BASE_SNAPSHOT")
+    run_args+=(--cpus "$effective_cpus" --max-cpus "$effective_max")
+    run_args+=(--memory "$memory" --max-memory "$max_memory")
+    run_args+=(--mount-named "msw-${box}-workspace:/workspace:kind=disk,size=${workspace_size}")
+    run_args+=(--mount-named "msw-${box}-runtime:/var/lib/msw-runtime:kind=disk,size=${runtime_size}")
+    run_args+=(--workdir /workspace --init auto --security default --net public --tls-intercept)
+    run_args+=(--label "msw.managed=true" --label "msw.workspace=${box}")
+    run_args+=(--env "MSW_WORKSPACE=${box}" --env "MSW_BROWSER_HOST=${browser_host}")
+    run_args+=(--env 'PATH=/root/.local/bin:/root/.local/share/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
+    run_args+=(--env SHELL=/usr/bin/zsh --env LANG=en_US.UTF-8)
+    run_args+=(--env HOST=0.0.0.0 --env BIND_ADDRESS=0.0.0.0)
+    run_args+=(--env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${browser_host}")
+    run_args+=(-- sleep infinity)
+    # Ports are NOT passed to msb: published ports are forwarded host-side
+    # over SSH by lib/msw-port-forwarder.py, which skips occupied ports with
+    # a warning instead of ever failing or recreating the workspace.
+    "$MSB_BIN" run --detach "${run_args[@]}"
+    "$HOME/.local/bin/msw" __workspace-state-init "$box" || warn "could not record the workspace state for $box"
     configure_workspace_guest "$box" "$browser_host"
-    if token="$(keychain_read_token "$box" 2>/dev/null)"; then
-      workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
-      unset token
+    if [[ "$MSW_GITHUB_MODE" == connect ]]; then
+      if token="$(keychain_read_token "$box" 2>/dev/null)"; then
+        workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
+        unset token
+      fi
     fi
     workspace_msb "$box" stop -t 90 "$box"
   else
@@ -310,6 +414,18 @@ create_workspace dev "$MSW_DEV_IP" "$MSW_DEV_HOST" "$MSW_DEV_CPUS" "$MSW_DEV_MAX
 create_workspace playgrounds "$MSW_PLAYGROUNDS_IP" "$MSW_PLAYGROUNDS_HOST" "$MSW_PLAYGROUNDS_CPUS" "$MSW_PLAYGROUNDS_MAX_CPUS" "$MSW_PLAYGROUNDS_MEMORY" "$MSW_PLAYGROUNDS_MAX_MEMORY" "$MSW_PLAYGROUNDS_WORKSPACE_SIZE" "$MSW_PLAYGROUNDS_RUNTIME_SIZE"
 create_workspace personal "$MSW_PERSONAL_IP" "$MSW_PERSONAL_HOST" "$MSW_PERSONAL_CPUS" "$MSW_PERSONAL_MAX_CPUS" "$MSW_PERSONAL_MEMORY" "$MSW_PERSONAL_MAX_MEMORY" "$MSW_PERSONAL_WORKSPACE_SIZE" "$MSW_PERSONAL_RUNTIME_SIZE"
 
+if [[ "$TEST_MODE" != 1 ]]; then
+  log "Starting the host-managed published-port forwarders"
+  for box in dev playgrounds personal; do
+    "$HOME/.local/bin/msw" __port-forwarder-start "$box" || warn "could not start the port forwarder for $box"
+  done
+  log "Verifying the host-managed published-port forwarders"
+  for box in dev playgrounds personal; do
+    verify_launchd_job_alive "org.microsandbox.MSWMonitor.port-forwarder.$box" \
+      || fatal "the published-port forwarder for $box did not stay loaded and running; inspect $HOME/.local/state/msw/port-forwarder-$box.log"
+  done
+fi
+
 log "Running the complete local VM, Docker, SSH, internet, and browser-port test"
 "$HOME/.local/bin/msw" check --deep
 
@@ -320,10 +436,11 @@ Setup complete. The installer has already run the full local end-to-end test.
 Next:
   1. exec zsh -l
   2. msw identity "YOUR NAME" YOUR_EMAIL@example.com
-  3. Follow docs/GITHUB-SETUP.md, then run one command per workspace:
-       msw github setup dev OWNER/VERIFICATION-REPO
-       msw github setup playgrounds OWNER/VERIFICATION-REPO
-       msw github setup personal OWNER/VERIFICATION-REPO
+  3. Connect GitHub per workspace: open MSW Monitor -> GitHub -> Connect,
+     then tick the repositories each workspace may access. The installer
+     installs the `gh` CLI (Homebrew), so a clean Mac signs in with gh's web
+     OAuth flow and msw reuses the authenticated session automatically.
+     CLI fallbacks: msw github auth | msw github status
 
 Daily use:
   msw dev

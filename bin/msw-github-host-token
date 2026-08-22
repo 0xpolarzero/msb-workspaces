@@ -1,0 +1,325 @@
+#!/bin/sh
+# Path C §4/§5: emits the host GitHub credential accessToken on stdout for the
+# proxy (over an inherited pipe) and the git askpass helper. FAIL-CLOSED: on a
+# missing record, an invalid schema-v1 record, a rejected token kind (ghs_
+# installation tokens, ghr_ refresh tokens), OR a missing/inactive/mismatched
+# nonsecret activation record (github-host.json, §5/blocker 4) it prints
+# NOTHING to stdout and exits 1, so a caller can never mistake a broken or
+# revoked credential for a token.
+#
+# The implementation is Python stdlib (no jq dependency, reviewer blocker 2):
+# the Keychain record and the activation metadata are parsed in-process. The
+# token never appears in argv, env, logs, or files beyond the Keychain item
+# itself.
+#
+# Activation gate (§5/blocker 4): the nonsecret metadata file must exist with
+# schemaVersion 1, state "active", and generation/accountLogin EQUAL to the
+# Keychain record. A revoked/revocation-uncertain tombstone (written by
+# `msw github remove` BEFORE the Keychain deletion) or a generation/account
+# mismatch denies the credential GLOBALLY, so no other workspace can keep
+# using a credential whose revocation is unproven.
+#
+# Global deny marker (§5 re-review): `~/.config/msw/credential-disabled` (or
+# MSW_CREDENTIAL_DENY_MARKER) is checked FIRST — before the Keychain. The
+# revocation writes it before any mutation, so even a crash mid-revocation
+# leaves a global deny.
+#
+# Env (all optional, for tests and launchd):
+#   MSW_HOST_KEYCHAIN_SERVICE  Keychain service (default org.microsandbox.MSWMonitor.github-host)
+#   MSW_HOST_KEYCHAIN_ACCOUNT  Keychain account (default user)
+#   MSW_TEST_KEYCHAIN_DIR      File-backed keychain seam (tests)
+#   MSW_SECURITY_BIN           security(1) path
+#   MSW_HOST_KEYCHAIN_HOME     HOME passed to security(1) (login keychain)
+#   MSW_HOST_META_FILE         nonsecret activation metadata path (default:
+#                              $HOME/Library/Application Support/MSW Monitor/github-host.json)
+#   MSW_CREDENTIAL_DENY_MARKER global deny marker path (default:
+#                              $HOME/.config/msw/credential-disabled)
+#   MSW_PYTHON_BIN             python3 path (default /usr/bin/python3)
+set -eu
+export PYTHONDONTWRITEBYTECODE=1
+exec "${MSW_PYTHON_BIN:-/usr/bin/python3}" - "$@" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+
+_ALLOWED_PREFIXES = ("gho_", "ghp_", "github_pat_", "ghu_")
+_REJECTED_PREFIXES = ("ghs_", "ghr_")
+_GRAPH_MIN = 0x21
+_GRAPH_MAX = 0x7E
+
+
+def _fail(message: str = "") -> int:
+    if message:
+        sys.stderr.write("msw-github-host-token: %s\n" % message)
+    return 1
+
+
+def _is_str(value) -> bool:
+    return isinstance(value, str)
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _safe_component(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
+
+
+def _read_keychain(service: str, account: str, security_bin: str,
+                   keychain_home: str, test_keychain_dir: str) -> str | None:
+    if test_keychain_dir:
+        path = os.path.join(test_keychain_dir, "%s__%s" % (
+            _safe_component(service), _safe_component(account)))
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return None
+    # Production (re-review): read in-process via Security.framework (ctypes).
+    # The writer in bin/msw runs the same python binary, so the item's creator
+    # trust extends to this helper's SecItemCopyMatching — no security(1)
+    # prompts and no 128-byte prompted-stdin limit on the write side.
+    return _secitem_read(service, account)
+
+
+def _valid_token(token) -> bool:
+    if not _is_str(token) or not token:
+        return False
+    if len(token) > 4096:
+        return False
+    if not token.startswith(_ALLOWED_PREFIXES):
+        return False
+    if token.startswith(_REJECTED_PREFIXES):
+        return False
+    for ch in token:
+        code = ord(ch)
+        if code < _GRAPH_MIN or code > _GRAPH_MAX:
+            return False
+    return True
+
+
+def _record_valid(record) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if record.get("schemaVersion") != 1:
+        return False
+    if record.get("provider") not in ("gh-cli", "oauth-device-flow"):
+        return False
+    if record.get("tokenKind") not in ("oauth", "classic-pat", "fine-grained-pat"):
+        return False
+    if not _valid_token(record.get("accessToken")):
+        return False
+    if not _is_str(record.get("accountLogin")) or not record["accountLogin"]:
+        return False
+    if not _is_str(record.get("verifiedAt")) or not record["verifiedAt"]:
+        return False
+    if not _is_int(record.get("generation")) or record["generation"] < 1:
+        return False
+    if not _is_str(record.get("storedAt")) or not record["storedAt"]:
+        return False
+    return True
+
+
+def _meta_valid(meta, record) -> bool:
+    """Activation gate (§5/blocker 4): state active AND generation/accountLogin
+    equal to the Keychain record. A revoked/revocation-uncertain tombstone or a
+    generation/account mismatch denies the credential globally."""
+    if not isinstance(meta, dict):
+        return False
+    if meta.get("schemaVersion") != 1:
+        return False
+    if meta.get("state") != "active":
+        return False
+    if not _is_int(meta.get("generation")) or meta["generation"] < 1:
+        return False
+    if meta["generation"] != record.get("generation"):
+        return False
+    if not _is_str(meta.get("accountLogin")) or not meta["accountLogin"]:
+        return False
+    if meta["accountLogin"] != record.get("accountLogin"):
+        return False
+    if "provider" in meta and meta["provider"] not in ("gh-cli", "oauth-device-flow"):
+        return False
+    if "tokenKind" in meta and meta["tokenKind"] not in (
+            "oauth", "classic-pat", "fine-grained-pat"):
+        return False
+    for field in ("verifiedAt", "storedAt"):
+        if field in meta and (not _is_str(meta[field]) or not meta[field]):
+            return False
+    if "repoChecks" in meta and not isinstance(meta["repoChecks"], list):
+        return False
+    return True
+
+
+def _bridge_path() -> str:
+    configured = os.environ.get("MSW_KEYCHAIN_BRIDGE", "")
+    if configured:
+        return configured
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (
+        os.path.join(script_dir, "msw-keychain-bridge"),
+        os.path.expanduser("~/.local/libexec/msw-keychain-bridge"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+# Closure re-review: the host-token OUTER timeout must exceed the bridge's own
+# worker watchdog (bridge default 10s) and kill the whole bridge process group
+# (bridge parent + worker) so a wedged child can never survive the helper.
+OUTER_TIMEOUT_SECS = max(1, int(float(os.environ.get("MSW_HOST_TOKEN_TIMEOUT_SECS") or "15")))
+
+
+def _bridge_get(service: str, account: str) -> tuple[int, bytes] | None:
+    """Run the bridge `get` in a NEW process group with a hard outer timeout;
+    on timeout the whole group is killed. Returns (rc, stdout) or None on
+    timeout/OSError."""
+    bridge = _bridge_path()
+    if not bridge:
+        return None
+    python = os.environ.get("MSW_PYTHON_BIN", "/usr/bin/python3")
+    try:
+        proc = subprocess.Popen(
+            [python, bridge, "get", service, account],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    try:
+        out, _ = proc.communicate(timeout=OUTER_TIMEOUT_SECS)
+    except subprocess.TimeoutExpired:
+        # kill the whole process group (bridge parent AND its worker child)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return None
+    return proc.returncode, out
+
+
+def _secitem_read(service: str, account: str) -> str | None:
+    """Production read through the standalone keychain bridge (same python
+    binary as the writer, so the item's creator trust applies — no
+    security(1) prompts and no 128-byte prompted-stdin limit)."""
+    result = _bridge_get(service, account)
+    if result is None:
+        return None
+    rc, out = result
+    if rc != 0:
+        return None
+    return out.decode("utf-8", "replace")
+
+
+def _deny_item_present() -> bool:
+    """Closure re-review: the dedicated Keychain deny item (.v2.deny) is
+    queried BEFORE the activation record. The helper proceeds only on an
+    explicit item-not-found (rc 44); a present deny item OR any deny-query
+    error (including a timeout) denies globally (fail-closed). Honors the
+    MSW_TEST_KEYCHAIN_DIR file seam for tests."""
+    deny_service = os.environ.get(
+        "MSW_HOST_KEYCHAIN_DENY_SERVICE", "org.microsandbox.MSWMonitor.github-host.v2.deny")
+    deny_account = os.environ.get("MSW_HOST_KEYCHAIN_DENY_ACCOUNT", "user")
+    test_keychain_dir = os.environ.get("MSW_TEST_KEYCHAIN_DIR", "")
+    if test_keychain_dir:
+        path = os.path.join(test_keychain_dir, "%s__%s" % (
+            _safe_component(deny_service), _safe_component(deny_account)))
+        try:
+            return os.path.lexists(path)
+        except OSError:
+            return True  # unreadable deny state fails closed
+    result = _bridge_get(deny_service, deny_account)
+    if result is None:
+        return True  # deny-query error -> fail closed
+    rc, _ = result
+    return rc != 44
+
+
+def _deny_marker_present() -> bool:
+    marker = os.environ.get("MSW_CREDENTIAL_DENY_MARKER", "") or os.path.join(
+        os.path.expanduser("~"), ".config", "msw", "credential-disabled")
+    try:
+        return os.path.lexists(marker)
+    except OSError:
+        return True  # unreadable state fails closed
+
+
+def _global_quarantine_present() -> bool:
+    """Last-resort durable global deny for an unprovable revocation."""
+    path = os.environ.get("MSW_GLOBAL_CREDENTIAL_QUARANTINE", "") or os.path.join(
+        os.path.expanduser("~"), ".config", "msw", "github", "credential.quarantine")
+    try:
+        return os.path.lexists(path)
+    except OSError:
+        return True
+
+
+def main() -> int:
+    if _global_quarantine_present():
+        return _fail("credential globally quarantined after unproven revocation")
+    # Global deny gates FIRST (§5 closure re-review): the dedicated Keychain
+    # deny item is queried before the activation record (a present item or a
+    # query error denies), then the file marker. Both are recorded before any
+    # revocation mutation, so their presence denies even if the record or
+    # metadata is still intact.
+    if _deny_item_present():
+        return _fail("credential revoked (Keychain deny item present)")
+    if _deny_marker_present():
+        return _fail("credential revoked (global deny marker present)")
+
+    service = os.environ.get("MSW_HOST_KEYCHAIN_SERVICE",
+                             "org.microsandbox.MSWMonitor.github-host.v2")
+    account = os.environ.get("MSW_HOST_KEYCHAIN_ACCOUNT", "user")
+    security_bin = os.environ.get("MSW_SECURITY_BIN", "/usr/bin/security")
+    keychain_home = os.environ.get("MSW_HOST_KEYCHAIN_HOME", "")
+    test_keychain_dir = os.environ.get("MSW_TEST_KEYCHAIN_DIR", "")
+    meta_file = os.environ.get("MSW_HOST_META_FILE", "") or os.path.join(
+        os.path.expanduser("~"), "Library", "Application Support",
+        "MSW Monitor", "github-host.json")
+
+    raw = _read_keychain(service, account, security_bin, keychain_home,
+                         test_keychain_dir)
+    if raw is None:
+        return _fail("Keychain record missing")
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return _fail("Keychain record is not valid JSON")
+    if not _record_valid(record):
+        return _fail("Keychain record failed schema-v1 validation")
+
+    try:
+        if os.path.islink(meta_file):
+            return _fail("activation metadata must not be a symlink")
+        with open(meta_file, "r", encoding="utf-8") as fh:
+            meta_raw = fh.read()
+    except OSError:
+        return _fail("activation metadata missing")
+    try:
+        meta = json.loads(meta_raw)
+    except ValueError:
+        return _fail("activation metadata is not valid JSON")
+    if not _meta_valid(meta, record):
+        return _fail("activation metadata inactive or does not match the Keychain record")
+
+    sys.stdout.write(record["accessToken"] + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY

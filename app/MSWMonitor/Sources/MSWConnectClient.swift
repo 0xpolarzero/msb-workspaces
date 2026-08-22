@@ -408,6 +408,11 @@ struct GitHubRepository: Codable, Sendable, Equatable, Identifiable {
     let owner: GitHubInstallationAccount
     let `private`: Bool
     let defaultBranch: String?
+    /// Local mode only: whether the host credential may push to this repo
+    /// (GitHub `permissions.push`). Nil in Connect mode.
+    var canPush: Bool? = nil
+    /// Local mode only: whether the repo is already ticked in the policy file.
+    var inPolicy: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -416,6 +421,15 @@ struct GitHubRepository: Codable, Sendable, Equatable, Identifiable {
         case owner
         case `private`
         case defaultBranch = "default_branch"
+        case canPush = "can_push"
+        case inPolicy = "in_policy"
+    }
+
+    /// The effective access mode when the host credential cannot push to this
+    /// repository: write access is never offered or committed for
+    /// push-denied repos (nil = no restriction, e.g. Connect mode).
+    func effectiveMode(_ requested: GitHubRepositoryAccessMode) -> GitHubRepositoryAccessMode {
+        canPush == false ? .readOnly : requested
     }
 }
 

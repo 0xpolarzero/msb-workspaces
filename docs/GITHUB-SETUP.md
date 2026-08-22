@@ -1,78 +1,113 @@
 # GitHub access in MSW Monitor
 
-GitHub can be connected during setup or skipped.
+GitHub is optional. The default local mode (`MSW_GITHUB_MODE=local`) keeps the
+GitHub credential on this Mac: git inside a workspace reaches GitHub through a
+host-side proxy on `127.0.0.1:18446` that enforces a per-workspace capability
+(`X-MSW-Capability`) against the policy file
+(`~/Library/Application Support/MSW Monitor/github-policy.json`). No GitHub
+token is ever bound into a VM.
 
-## Current availability
+## First run
 
-**Connect GitHub** and **Skip GitHub** are the only choices in first-run
-setup. A configured MSW Connect service and trusted token-bound scope
-attestations are required to complete authorization. If connection cannot start,
-setup says so concisely and leaves both choices available; it does not expose
-release configuration, credential, or repository diagnostics. Settings shows the
-connection status when configuration or existing access needs attention.
+Open **MSW Monitor** → **Settings** → **GitHub** and connect the account on
+this Mac:
 
-## Scoped workspace grants with MSW Connect
+- The app reuses an authenticated `gh` CLI when one is present (verifying
+  `GET /user`, and `permissions.push` for every repository ticked for VM
+  push).
+- When configured for it, the app falls back to the OAuth Device Flow and
+  prints the code on screen.
+- The credential is stored as one versioned record in the login Keychain
+  (`org.microsandbox.MSWMonitor.github-host.v2`); the token never appears in
+  argv, logs, journals, or backups. A pre-v2 item is left dormant and unread.
 
-When the build is configured for MSW Connect, **Connect GitHub** opens the
-hosted browser authorization flow. After GitHub returns, MSW Monitor lists the
-repositories exposed by each GitHub App installation in one compact,
-workspace-first editor:
+The policy starts empty: until you tick repositories, no workspace can reach
+GitHub through the proxy.
 
-- Each workspace lists the repositories it may use.
-- Checking a repository assigns it to that workspace.
-- Every new assignment defaults to **Read-only**.
-- A selected repository shows exactly **Read-only** and **Read & write**.
-- A workspace can currently select repositories from one installation/owner at
-  a time. The MSW host protocol carries one credential per workspace and role,
-  so the editor blocks combinations that protocol cannot represent.
+## Selecting repositories
 
-Nothing changes until the policy is reviewed and applied. Each policy row
-carries the stable repository ID, full name, installation ID, owner ID/login,
-and access mode. Grant creation is partitioned by workspace and installation:
+The repository picker shows **paginated checkboxes grouped by owner**:
 
-- the guest read grant contains every selected repository;
-- the host write grant contains only repositories marked **Read & write**;
-- each generated role uses the first repository in deterministic name/ID order
-  that is eligible for that role as its verification repository.
+- Check a repository to assign it to the workspace being edited.
+- Every new assignment defaults to **Clone/pull (push from Mac)**.
+- Toggle **Clone/pull + Push from VM** only for repositories that must accept
+  pushes initiated inside the VM.
 
-MSW Connect must return short-lived installation credentials scoped to those
-exact repository sets with a token-bound signed scope attestation. The
-attestation binds the policy digest, grant ID, credential digest, generation,
-and issue/expiry timestamps. MSW Monitor rejects broader, mismatched, unsigned,
-or token-swapped responses, stores credentials in separate guest/host Keychain
-records, and persists only non-secret metadata. The guest capability is bound
-through MSW's verified workspace path; the host credential is used only for
-explicit host pushes.
+| Mode | Clone/pull | Local edit & commit | Host push (`msw push`, app Push) | Push from inside the VM |
+|---|---|---|---|---|
+| **Clone/pull (push from Mac)** (read-only) | yes | always works | yes | no |
+| **Clone/pull + Push from VM** (read-write) | yes | always works | yes | yes |
 
-Applying policy is journaled and transactional. Replacement grant revocation,
-local credential rollback, quarantine, cancellation, lifecycle restoration,
-session renewal, and reconnect recovery remain fail-closed.
+- **Local editing and commits always work**, in either mode.
+- **Host push is allowed for every selected repository** in either mode.
+- **Push from inside a VM is allowed only for repositories ticked
+  **Clone/pull + Push from VM****; the proxy's receive-pack rules enforce
+  this, so a workspace cannot write a repository it was not given.
+- Nothing changes until the policy is reviewed and applied. Policy writes are
+  journaled and transactional; the proxy re-reads the policy on every request,
+  so a mode flip applies on the next request without a restart. A missing,
+  malformed, or unknown policy entry denies access (fail-closed).
 
+## Daily use and recovery
 
-## Recovery and disconnect
+- `msw github status [WORKSPACE|all] [--format json|text]` — mode, capability,
+  ticked repositories, host credential, and shuttle state.
+- `msw github verify WORKSPACE [REPO]` — probes policy, capability, and host
+  credential without touching the VM.
+- `msw github auth --force` — rotates the host credential (generation+1).
+- `msw github capability rotate WORKSPACE` — mints a fresh capability; the old
+  one is denied immediately.
+- `msw github remove WORKSPACE` — revokes the host credential metadata-first,
+  then removes the Keychain record; if either step cannot be proven, the state
+  stays quarantined (fail-closed). The app never claims removal it cannot
+  verify.
+- Port warnings during setup/start are nonfatal: unavailable published ports
+  are recorded as `skippedPorts`/`portWarning` and never block the workspace.
 
-Settings summarizes a connected account once and lists the effective scoped
-workspace grants without displaying credentials. Actions have distinct
-meanings:
+## What works from a workspace (v1)
 
-- **Connect** appears only when the service is ready and there is no access.
-- **Edit** changes an already healthy repository scope.
-- **Retry** handles a temporary service/network or renewal outage and never
-  opens a browser.
-- **Reconnect _workspace_** replaces a proven revoked, missing, removed, or
-  scope-mismatched grant and names the affected workspace and reason.
-- **Remove** explicitly unbinds workspace access, revokes remote grants, and
-  cleans up local records only after those steps are proven.
+- `git clone`, `fetch`, `pull`, and `git push` for ticked repositories,
+  including Git LFS (batch and object endpoints through the proxy).
+- **GitHub API and GraphQL calls from inside a workspace are not supported**
+  in v1; use git, or run API operations from the Mac.
+- The guest git config sends the workspace capability only to the proxy
+  prefix; no credential leaves the Mac.
 
-Short-lived token expiry is normal and renews silently. A successful renewal
-stays Ready; a temporary renewal outage becomes Retry; revoked, missing, or
-mismatched grants become Reconnect. If revocation or cleanup cannot be proven,
-the old record remains visible and quarantined. The app never claims removal,
-and an unconfigured build cannot offer a destructive cleanup action it cannot
-verify.
+## Security properties
 
-The MSW Connect endpoint, client, installation URL, and token-bound
-scope-attestation public key are release inputs. No GitHub App private key
-belongs in the desktop app. This repository verifies the client-side contract;
-release remains blocked until the deployed Connect service issues and is
-integration-tested with matching token-bound attestations.
+- The VM has no GitHub credential of any kind — not in env, git config,
+  keychain, or backups. `msw check --deep` asserts the guest holds no
+  `GH_TOKEN`.
+- The proxy's identity gate is the per-workspace capability (constant-time
+  compare); enforcement is fail-closed for unknown workspaces, unknown
+  repositories, and any endpoint outside the GitHub git/LFS surface.
+- The host credential is used by the proxy (outbound leg) and by the explicit
+  `msw push` path only; the askpass helper emits a token only for `github.com`
+  prompts.
+- Deleting or corrupting the policy file denies all proxy and host-push access;
+  no repository remains selected.
+- Connect mode (`MSW_GITHUB_MODE=connect`) remains available as a rollback
+  alternative; local mode is the default and never reads or writes Connect
+  grants.
+
+## CLI fallback
+
+The same surface is available from the terminal (the app remains the
+recommended path):
+
+```bash
+msw github auth [--force] [--json]
+msw github repos [--owner OWNER] [--format json]   # picker repository list
+msw github status [WORKSPACE|all] [--format json|text]
+msw github verify WORKSPACE [OWNER/REPO]
+msw github remove WORKSPACE
+msw app github-policy-get [--workspace W] --format json
+msw app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear]
+```
+
+Advanced: `msw github proxy-configure [WORKSPACE]` installs/repairs the
+transport idempotently, `msw github capability rotate WORKSPACE` rotates a
+capability, and `msw github migrate [WORKSPACE|all]` retires legacy
+Connect-era state on first local-mode use (archives
+`~/.config/msw/github/<box>.conf` under `migrated-local/`, proves any old
+guest secret removed, and preserves pre-existing quarantine markers).

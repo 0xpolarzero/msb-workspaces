@@ -12,6 +12,9 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
     case missingResult(command: String)
     case protocolFailure(MSWProtocolError)
     case unavailable(String)
+    /// Typed error from a raw (non-app-protocol) CLI command that reports
+    /// `{"ok":false,"error":{code,message,remedies}}` on stdout.
+    case rawCLIError(code: String, message: String?)
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +29,7 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
         case .missingResult(let command): return "MSW returned no result for \(command)."
         case .protocolFailure(let error): return error.localizedDescription
         case .unavailable(let message): return message
+        case .rawCLIError(_, let message): return message ?? "The MSW operation failed."
         }
     }
 }

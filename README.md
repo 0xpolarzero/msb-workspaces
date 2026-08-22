@@ -27,18 +27,23 @@ Then set your commit identity:
 msw identity "Your Name" you@example.com
 ```
 
-GitHub is optional and is not available in the normal build yet: MSW Connect
-and its trusted scope attestations are not deployed release inputs. Setup shows
-this as a non-actionable availability notice and completes without inventing
-repository access. Do not paste tokens into the CLI.
+GitHub is optional. The default local mode (`MSW_GITHUB_MODE=local`) never
+binds a GitHub token into a workspace: git inside a workspace reaches GitHub
+through a host-side proxy on `127.0.0.1:18446` that enforces a per-workspace
+capability against a policy file. The Mac holds ONE host credential (reusing an
+authenticated `gh` CLI, or OAuth Device Flow when configured); no GitHub
+credential ever enters a VM.
 
-Once a future build ships those verified inputs, the intended flow is:
-
-1. Open `MSW Monitor` → **Settings** → **GitHub**.
-2. Choose **Connect GitHub** only when the app reports that the service is ready.
-3. In the repository-first editor, select each workspace that may use a repository and opt individual repositories into **Read & write** only when needed. New selections default to **Read-only**.
-
-The Connect service issues short-lived, workspace-scoped grants. The app stores only grant metadata and the scoped installation credentials required by the host/VM boundary; the guest receives a read-only capability and `msw push` uses the separate host-write capability. The CLI's former `msw github setup` token prompt is removed. See [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
+Set up access in **MSW Monitor** → **Settings** → **GitHub**: connect the
+account on this Mac, tick the repositories each workspace may use, and pick a
+mode per repository — **Clone/pull (push from Mac)** or **Clone/pull + Push
+from VM**. Local editing and commits always work; host push (`msw push` or the
+app's Push button) is allowed for every selected repository, while push from
+inside a VM is allowed only for repositories ticked for VM push. The policy
+starts empty, so no workspace can reach GitHub until you select repositories.
+Port warnings during setup are nonfatal. The CLI mirrors this surface:
+`msw github auth|repos|status|verify|remove`. See
+[`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
 
 ## Daily use
 
@@ -86,6 +91,6 @@ msw docs cheatsheet
 msw docs tests
 ```
 
-Every process and agent inside one workspace can access everything in that workspace. The three workspaces are separate from one another and no Mac folder, Mac Docker socket, or Mac SSH agent is mounted into them. GitHub grants are owner/repository scoped: the guest capability is read-only and host-held, while the host-write capability remains in macOS Keychain and is used only by the explicit `msw push` path.
+Every process and agent inside one workspace can access everything in that workspace. The three workspaces are separate from one another and no Mac folder, Mac Docker socket, or Mac SSH agent is mounted into them. GitHub access is owner/repository scoped: the proxy allows a workspace to reach only the repositories ticked for it (read-only by default), the host credential stays in macOS Keychain and is used only by the proxy and the explicit `msw push` path, and no GitHub credential exists inside any workspace.
 
-Full public internet access means an untrusted agent can still transmit files it can read to an unrelated internet service. This setup prevents direct access to your Mac and prevents GitHub pushes with the guest capability; it is not a data-loss-prevention system.
+Full public internet access means an untrusted agent can still transmit files it can read to an unrelated internet service. This setup prevents direct access to your Mac and gates GitHub pushes to the repositories each workspace is allowed to write; it is not a data-loss-prevention system.

@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""MSW Keychain bridge (Path C §5 hygiene, reviewer re-review).
+
+Security.framework generic-password store used for the versioned JSON host
+GitHub credential record. The `security` CLI's prompted `-w` stdin mode reads
+at most 128 bytes, so a >128-byte record cannot go through it, and passing the
+token in argv is forbidden.
+
+Architecture (parent watchdog + worker): the PUBLIC `put|get|delete SERVICE
+ACCOUNT` command is a parent process that reads the `put` record from NORMAL
+stdin and spawns the SAME helper as `--worker OP SERVICE ACCOUNT`, passing the
+secret bytes over the child's stdin (never argv, env, or files). The parent
+captures stdout/stderr and enforces a hard timeout
+(MSW_KEYCHAIN_TIMEOUT_SECS, default 10): a hidden keychain ACL prompt (e.g. a
+legacy security(1)-created item) can never hang the CLI — the watchdog
+terminates then kills the worker and reports a typed timeout. The WORKER mode
+alone loads Security.framework and performs the SecItem operation.
+`get`/`delete` carry no secret input.
+
+Commands:
+  put SERVICE ACCOUNT      parent: read the record from stdin, worker SecItemAdd
+                           (or SecItemUpdate when the item exists)
+  get SERVICE ACCOUNT      parent: worker reads the record to stdout
+                           (exit 44 when the item does not exist)
+  delete SERVICE ACCOUNT   parent: worker SecItemDelete + proof missing
+
+The writer (bin/msw) and readers (bin/msw-github-host-token, askpass) run the
+same python binary, so the item's creator trust extends to the worker's
+SecItemCopyMatching — no security(1) prompts. Service/account are strictly
+validated; OSStatus failures are typed errors on stderr with nonzero exit.
+"""
+from __future__ import annotations
+
+import ctypes
+import os
+import re
+import subprocess
+import sys
+import time
+
+cf = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+sec = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Security.framework/Security")
+
+c_CFTypeRef = ctypes.c_void_p
+OSStatus = ctypes.c_int32
+kCFStringEncodingUTF8 = 0x08000100
+ERR_ITEM_NOT_FOUND = -25300
+
+_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+TIMEOUT_SECS = max(1, int(float(os.environ.get("MSW_KEYCHAIN_TIMEOUT_SECS") or "10")))
+
+
+class CFDictionaryKeyCallBacks(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_long), ("retain", ctypes.c_void_p), ("release", ctypes.c_void_p),
+                ("copyDescription", ctypes.c_void_p), ("equal", ctypes.c_void_p), ("hash", ctypes.c_void_p)]
+
+
+class CFDictionaryValueCallBacks(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_long), ("retain", ctypes.c_void_p), ("release", ctypes.c_void_p),
+                ("copyDescription", ctypes.c_void_p), ("equal", ctypes.c_void_p)]
+
+
+class CFRange(ctypes.Structure):
+    _fields_ = [("location", ctypes.c_long), ("length", ctypes.c_long)]
+
+
+KEY_CB = CFDictionaryKeyCallBacks.in_dll(cf, "kCFTypeDictionaryKeyCallBacks")
+VAL_CB = CFDictionaryValueCallBacks.in_dll(cf, "kCFTypeDictionaryValueCallBacks")
+
+cf.CFStringCreateWithCString.restype = c_CFTypeRef
+cf.CFStringCreateWithCString.argtypes = [c_CFTypeRef, ctypes.c_char_p, ctypes.c_uint32]
+cf.CFDataCreate.restype = c_CFTypeRef
+cf.CFDataCreate.argtypes = [c_CFTypeRef, ctypes.c_void_p, ctypes.c_long]
+cf.CFDictionaryCreate.restype = c_CFTypeRef
+cf.CFDictionaryCreate.argtypes = [c_CFTypeRef, ctypes.POINTER(c_CFTypeRef), ctypes.POINTER(c_CFTypeRef),
+                                  ctypes.c_long, ctypes.POINTER(CFDictionaryKeyCallBacks), ctypes.POINTER(CFDictionaryValueCallBacks)]
+cf.CFDataGetLength.restype = ctypes.c_long
+cf.CFDataGetLength.argtypes = [c_CFTypeRef]
+cf.CFDataGetBytes.restype = None
+cf.CFDataGetBytes.argtypes = [c_CFTypeRef, CFRange, ctypes.c_void_p]
+sec.SecItemAdd.restype = OSStatus
+sec.SecItemAdd.argtypes = [c_CFTypeRef, ctypes.POINTER(c_CFTypeRef)]
+sec.SecItemUpdate.restype = OSStatus
+sec.SecItemUpdate.argtypes = [c_CFTypeRef, c_CFTypeRef]
+sec.SecItemDelete.restype = OSStatus
+sec.SecItemDelete.argtypes = [c_CFTypeRef]
+sec.SecItemCopyMatching.restype = OSStatus
+sec.SecItemCopyMatching.argtypes = [c_CFTypeRef, ctypes.POINTER(c_CFTypeRef)]
+
+CF_TRUE = c_CFTypeRef.in_dll(cf, "kCFBooleanTrue")
+_held = []
+
+
+def _fail(message: str) -> int:
+    sys.stderr.write("msw-keychain-bridge: %s\n" % message)
+    return 1
+
+
+def _cfstr(value: str) -> c_CFTypeRef:
+    ref = cf.CFStringCreateWithCString(None, value.encode("utf-8"), kCFStringEncodingUTF8)
+    if not ref:
+        raise RuntimeError("CFStringCreateWithCString failed")
+    _held.append(ref)
+    return ref
+
+
+def _dict(items) -> c_CFTypeRef:
+    keys = (c_CFTypeRef * len(items))()
+    vals = (c_CFTypeRef * len(items))()
+    for i, (k, v) in enumerate(items):
+        keys[i] = _cfstr(k)
+        vals[i] = v
+    return cf.CFDictionaryCreate(None, keys, vals, len(items),
+                                 ctypes.byref(KEY_CB), ctypes.byref(VAL_CB))
+
+
+def _cfdata(data: bytes) -> c_CFTypeRef:
+    buf = ctypes.create_string_buffer(data, len(data))
+    return cf.CFDataCreate(None, ctypes.cast(buf, ctypes.c_void_p), len(data))
+
+
+def _base(service: str, account: str):
+    return [("class", _cfstr("genp")), ("svce", _cfstr(service)), ("acct", _cfstr(account))]
+
+
+# ---------------------------------------------------------------------------
+# Worker mode: the SecItem operation itself (no parent logic, no watchdog).
+# MSW_FAKE_BRIDGE_HANG is honored HERE, before the call, so a test can prove
+# the parent watchdog bounds and kills a wedged worker.
+# ---------------------------------------------------------------------------
+
+
+def worker_put(service: str, account: str) -> int:
+    if os.environ.get("MSW_FAKE_BRIDGE_HANG") == "1":
+        time.sleep(60)  # seam: simulate a hidden ACL prompt hang
+    data = sys.stdin.buffer.read()
+    if not data:
+        return _fail("put requires the record on stdin")
+    data_ref = _cfdata(data)
+    query = _dict(_base(service, account))
+    update = _dict([("v_Data", data_ref)])
+    op = "update"
+    status = sec.SecItemUpdate(query, update)
+    if status == ERR_ITEM_NOT_FOUND:
+        attrs = _dict(_base(service, account) + [("v_Data", data_ref)])
+        result = c_CFTypeRef()
+        op = "add"
+        status = sec.SecItemAdd(attrs, ctypes.byref(result))
+    if status != 0:
+        return _fail("SecItem %s failed: OSStatus %d" % (op, status))
+    return 0
+
+
+def worker_get(service: str, account: str) -> int:
+    if os.environ.get("MSW_FAKE_BRIDGE_HANG") == "1":
+        time.sleep(60)
+    query = _dict(_base(service, account) + [("r_Data", CF_TRUE)])
+    result = c_CFTypeRef()
+    status = sec.SecItemCopyMatching(query, ctypes.byref(result))
+    if status == ERR_ITEM_NOT_FOUND:
+        return 44
+    if status != 0:
+        return _fail("SecItemCopyMatching failed: OSStatus %d" % status)
+    length = cf.CFDataGetLength(result)
+    buf = ctypes.create_string_buffer(length + 1)
+    cf.CFDataGetBytes(result, CFRange(0, length), buf)
+    sys.stdout.buffer.write(buf.raw[:length])
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def worker_delete(service: str, account: str) -> int:
+    if os.environ.get("MSW_FAKE_BRIDGE_HANG") == "1":
+        time.sleep(60)
+    if os.environ.get("MSW_FAKE_KC_DELETE_FAIL") == "1":
+        return _fail("Keychain delete failure injected")
+    query = _dict(_base(service, account))
+    status = sec.SecItemDelete(query)
+    if status != 0 and status != ERR_ITEM_NOT_FOUND:
+        return _fail("SecItemDelete failed: OSStatus %d" % status)
+    # PROVE removal: the item must no longer read back.
+    probe = _dict(_base(service, account) + [("r_Data", CF_TRUE)])
+    result = c_CFTypeRef()
+    status = sec.SecItemCopyMatching(probe, ctypes.byref(result))
+    if status == 0:
+        return _fail("Keychain item still exists after delete")
+    if status != ERR_ITEM_NOT_FOUND:
+        return _fail("could not verify Keychain item removal: OSStatus %d" % status)
+    return 0
+
+
+WORKERS = {"put": worker_put, "get": worker_get, "delete": worker_delete}
+
+
+# ---------------------------------------------------------------------------
+# Parent mode: watchdog. Reads the put record from stdin, spawns the worker
+# with the secret bytes over the child's stdin, and enforces the hard timeout.
+# ---------------------------------------------------------------------------
+
+
+def run_worker(op: str, service: str, account: str, secret: bytes | None) -> int:
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--worker", op, service, account],
+            input=secret or b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=TIMEOUT_SECS,
+        )
+    except subprocess.TimeoutExpired:
+        # subprocess.run already terminated (then killed) the wedged worker;
+        # report a typed timeout so no hidden ACL prompt can hang the CLI.
+        sys.stderr.write("msw-keychain-bridge: worker %s timed out after %ds "
+                         "(possible keychain ACL prompt); the child was killed\n"
+                         % (op, TIMEOUT_SECS))
+        return 124
+    if proc.stderr:
+        sys.stderr.write(proc.stderr.decode("utf-8", "replace"))
+    if proc.stdout:
+        sys.stdout.buffer.write(proc.stdout)
+        sys.stdout.buffer.flush()
+    return proc.returncode
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if len(args) == 4 and args[0] == "--worker":
+        op, service, account = args[1], args[2], args[3]
+        if not _COMPONENT_RE.fullmatch(service) or not _COMPONENT_RE.fullmatch(account):
+            return _fail("service/account must match [A-Za-z0-9_.-]{1,128}")
+        worker = WORKERS.get(op)
+        if worker is None:
+            return _fail("unknown action %r" % op)
+        try:
+            return worker(service, account)
+        except RuntimeError as exc:
+            return _fail(str(exc))
+    if len(args) != 3:
+        sys.stderr.write("usage: msw-keychain-bridge put|get|delete SERVICE ACCOUNT\n")
+        return 64
+    op, service, account = args[0], args[1], args[2]
+    if not _COMPONENT_RE.fullmatch(service) or not _COMPONENT_RE.fullmatch(account):
+        return _fail("service/account must match [A-Za-z0-9_.-]{1,128}")
+    if op == "put":
+        secret = sys.stdin.buffer.read()
+        if not secret:
+            return _fail("put requires the record on stdin")
+    elif op in ("get", "delete"):
+        secret = None
+    else:
+        return _fail("unknown action %r" % op)
+    return run_worker(op, service, account, secret)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

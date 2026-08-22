@@ -1,6 +1,6 @@
 # MSW 3.1.0 verification report
 
-Verification is split between the native MSW Monitor app and the portable `msw` release suite. The Connect authorization contract is exercised by the app's Swift unit tests; the portable suite covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
+Verification is split between the native MSW Monitor app and the portable `msw` release suite. Local mode (`MSW_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
 
 The token-prompt GitHub setup scenarios described in older release reports are historical. The legacy `msw github setup` surface is removed and must not be treated as a supported setup or rotation path.
 
@@ -38,7 +38,7 @@ The smoke flow proves the app bundle and status-item/popover UI. The app's works
   - `process == "MSWMonitor" AND (messageType == error OR messageType == fault)`
   No narrower wall-clock interval was recorded. These logs are framework diagnostics; the app has no intentional application-level logger.
 
-- Live-service limit: the configured MSW Connect endpoint was unavailable from this machine during probing (DNS resolution failed). Deterministic transport tests cover successful authorization, unavailable callback exchange, scope validation, and verified Connect-to-Apply rollback; no real GitHub account or credential was used.
+- Live-service limit: historical — the configured MSW Connect endpoint was unavailable from this machine during probing (DNS resolution failed), and Connect is dormant in the current build. Current GitHub verification is local mode: the proxy contract and integration suites run against `tests/fake_github.py`; no real GitHub account or credential was used.
 
 The native app values above are deterministic fixture values from the current scaffold, not live sandbox telemetry. The smoke test does not prove VM health, `msw` integration, lifecycle actions, telemetry, signing, notarization, or release readiness.
 
@@ -72,19 +72,46 @@ The native app values above are deterministic fixture values from the current sc
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub authorization and host-only push
+### GitHub proxy, transport, credential, and policy (local mode)
 
-- Connect authorization validates the callback state, session expiry, service issuer, client identity, redirect URI, and callback payload before accepting a grant.
-- Account, installation owner, repository IDs/names, role, expiry, and scope digest are verified before a workspace assignment is committed.
-- Guest-read and host-write capabilities remain distinct; a grant for one workspace cannot be reused for another workspace or repository set.
-- Assignment writes are transactional: a failed service commit, credential write, or scope validation leaves the previous usable state intact or marks the workspace for explicit recovery.
-- Reauthorization and expiry use explicit `Needs authorization`, `Needs restart`, `Revoked`, and `Quarantined` recovery states; the app never silently restarts a running VM.
-- Disconnect/revocation removes the VM-held secret before revoking the service grant and local metadata; if cleanup or revocation is uncertain, the workspace remains quarantined.
-- The legacy CLI token prompt reports the MSW Monitor migration path and never reads, stores, or forwards a pasted token.
-- Guest secret substitution remains limited to `github.com` and `api.github.com`; the guest sees only the MicroSandbox placeholder.
-- Host-only push still transfers only the current committed branch, enforces fast-forward or exact lease-protected force updates, and isolates host Git configuration.
-- Git LFS object IDs, file types, and SHA-256 contents are verified on the host.
-- Quarantined workspace access fails closed until the recovery state is resolved.
+Current acceptance — `GitHubProxyContractTests` (proxy direct) and
+`GitHubProxyTests` (CLI-driven integration, local mode), backed by
+`tests/fake_github.py` (stateful fake GitHub with git smart-HTTP, `/user`,
+`/repos/{o}/{r}` permissions, and LFS batch/object endpoints):
+
+- INGRESS-1: real >1 MiB git push, chunked end-to-end through the proxy.
+- INGRESS-2: ~100 MB Git LFS round-trip (batch and object endpoints).
+- INGRESS-3: a chunked body over the size cap is killed mid-stream, the
+  upstream is torn down, and the next request succeeds.
+- INGRESS-4: Content-Length + Transfer-Encoding, duplicate Content-Length,
+  stacked Transfer-Encoding, and unknown TE codings are rejected pre-auth with
+  the upstream untouched.
+- TIMEOUT-1: idle timeout and total deadline tear down both legs.
+- REGRESS-1: CVE-2025-43859 malformed post-chunk-CRLF payload classes (x3) are
+  rejected pre-auth with the upstream untouched.
+- REGRESS-2: the vendored h11 `__version__` is `>= 0.16.0` (read from the
+  module) and VENDORED.md records the advisory check.
+- SMUGGLE matrix (13 framing cases), policy matrix (read-only/read-write/
+  unticked/unknown-workspace/missing/malformed policy), identity spoofing
+  (workspace A's capability on workspace B), and canonicalization attacks
+  (case, `.git`, double-slash, percent-encoding, trailing dot, redirects).
+- No-credential-in-guest assertions (the guest holds no GitHub token at all)
+  and backup exclusion of the host-credential record.
+- Host-only push transfers only the current committed branch, enforces
+  fast-forward or exact lease-protected force updates, and isolates host Git
+  configuration; the privileged push process uses an empty environment,
+  temporary home, no custom hooks, no SSH agent, and no ambient GitHub token.
+- Git LFS object IDs, file types, and SHA-256 contents are verified on the
+  host.
+- Quarantined workspace access fails closed until the recovery state is
+  resolved.
+
+Historical (Connect-era, exercised by the app's Swift unit tests; Connect is
+dormant in this build): callback state/session/issuer/client/redirect
+validation, scoped assignment verification, distinct guest-read/host-write
+grants, transactional assignment writes, `Needs authorization`/`Needs
+restart`/`Revoked`/`Quarantined` recovery states, and the legacy CLI token
+prompt reporting the migration path without reading a pasted token.
 
 ### Backup and restore — 6 scenarios
 
@@ -103,12 +130,12 @@ The native app values above are deterministic fixture values from the current sc
 
 ## Security properties exercised
 
-- The guest receives only the selected read capability; the actual service-issued credential is absent from simulated VM state and the MicroSandbox placeholder is all the guest can inspect.
-- The host-write credential is retrieved only by the host push path from macOS Keychain, including when host Git runs with an isolated temporary `HOME`.
+- The guest holds no GitHub credential at all; its only identity is the per-workspace capability sent to the host proxy, and local mode asserts the guest has no token anywhere in VM state.
+- The host credential is retrieved from macOS Keychain only by the proxy's outbound leg and the host push path, including when host Git runs with an isolated temporary `HOME`.
 - The privileged push process uses an empty environment, temporary home, no system/global Git config, no custom hooks, no SSH agent, and no ambient GitHub token.
-- Assignment and push authorization require the workspace, role, owner, installation, repository set, expiry, and scope metadata to match.
-- Disconnect/revocation fails closed before any uncertain cleanup can leave a usable workspace authorization.
-- Failed grant commit or cleanup leaves explicit recovery state; it never silently restores an unvalidated credential.
+- Push authorization requires the canonical repository to be on the workspace's ticked list and the host credential to be available; VM-initiated push additionally requires the repository ticked as **read-write**, enforced by the proxy's receive-pack rules.
+- Credential revocation fails closed before any uncertain cleanup can leave a usable authorization.
+- Failed policy write or credential cleanup leaves explicit recovery state; it never silently restores an unvalidated credential.
 - Git bundles are verified and checked against the exact guest commit before push.
 - Git LFS object IDs, file types, and SHA-256 contents are verified on the host.
 - Keychain deletion accepts only an explicit missing-item result or confirmed removal; other failures abort the transaction.
@@ -123,7 +150,7 @@ The portable simulator suite cannot instantiate Apple's Virtualization framework
 
 ### Real macOS canary
 
-A prior real Apple Silicon macOS canary against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. This is historical evidence, not part of the current 2026-08-14 run; current verification used no GitHub credentials and the configured Connect endpoint was unavailable from this machine.
+A prior real Apple Silicon macOS canary against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. This is historical evidence, not part of the current run; current verification used no GitHub credentials (local mode; the Connect service is dormant).
 
 ## The only checks you need to run
 
@@ -139,13 +166,18 @@ The installer ends by running `msw check --deep`. Continue only when it reports:
 all live VM, Docker, SSH, internet, and published-port checks passed
 ```
 
-### 2. Connect each GitHub trust domain
+### 2. Configure GitHub in local mode
 
-Open **MSW Monitor** → **Settings** → **GitHub** → **Connect GitHub**. Complete authorization, select the owner and repositories, review the scoped guest-read/host-write grants, and apply them for each workspace that needs GitHub.
+Open **MSW Monitor** → **Settings** → **GitHub**, connect the account on this
+Mac, tick the repositories each workspace may use (new assignments default to
+**Clone/pull (push from Mac)**), and toggle **Clone/pull + Push from VM** only
+where VM-initiated push is needed. Local editing and commits always work; host
+push (`msw push` or the app's Push button) works for every selected
+repository, and no GitHub credential enters any workspace.
 
-Do not run `msw github setup`; the former token prompt is removed and the CLI reports the MSW Monitor migration path instead.
-
-The user-side verification set is the installer deep check plus the app build, Swift tests, and UI smoke test. The Connect flow must leave each assignment in an explicit `Ready`, `Needs authorization`, `Needs restart`, `Revoked`, or `Quarantined` state.
+The user-side verification set is the installer deep check plus the app build,
+Swift tests, and UI smoke test, and the proxy/transport/credential/policy
+contract suite passing (see the GitHub coverage section above).
 
 ## Re-running the portable test suite
 

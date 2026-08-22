@@ -104,6 +104,11 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
     let resources: MSWResourceSnapshot
     let network: MSWNetworkSnapshot
     let actionCapabilities: MSWActionCapabilities
+    /// Published ports skipped by the workspace proxy because they were
+    /// already in use ([] when none). Absent in older CLI output.
+    let skippedPorts: [Int]?
+    /// Human-readable warning about skipped published ports ("" when none).
+    let portWarning: String?
 
     init(
         id: String,
@@ -118,7 +123,9 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         statusObservedAt: Date? = nil,
         metricsObservedAt: Date? = nil,
         githubObservedAt: Date? = nil,
-        activityObservedAt: Date? = nil
+        activityObservedAt: Date? = nil,
+        skippedPorts: [Int]? = nil,
+        portWarning: String? = nil
     ) {
         self.id = id
         self.purpose = purpose
@@ -133,6 +140,8 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         self.resources = resources
         self.network = network
         self.actionCapabilities = actionCapabilities
+        self.skippedPorts = skippedPorts
+        self.portWarning = portWarning
     }
 
     init(from decoder: Decoder) throws {
@@ -150,11 +159,14 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         resources = try container.decode(MSWResourceSnapshot.self, forKey: .resources)
         network = try container.decode(MSWNetworkSnapshot.self, forKey: .network)
         actionCapabilities = try container.decode(MSWActionCapabilities.self, forKey: .actionCapabilities)
+        skippedPorts = try container.decodeIfPresent([Int].self, forKey: .skippedPorts)
+        portWarning = try container.decodeIfPresent(String.self, forKey: .portWarning)
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, purpose, lifecycle, freshness, statusObservedAt, metricsObservedAt
         case githubObservedAt, activityObservedAt, quarantine, credential, resources, network, actionCapabilities
+        case skippedPorts, portWarning
     }
 
     var identity: String { id }
@@ -380,8 +392,124 @@ struct MSWGitHubWorkspaceState: Codable, Identifiable, Sendable {
     let refreshExpiresAt: Date?
     let needsRestart: Bool
     let quarantined: Bool
+    /// Local-mode only: the ticked repositories for this workspace from the
+    /// policy file. Absent in Connect-mode CLI output.
+    let repos: [MSWGitHubPolicyRepo]?
+    let policyUpdatedAt: Date?
+    let hostCredential: String?
 
     var id: String { workspace }
+}
+
+/// A ticked repository as rendered from the local policy file.
+struct MSWGitHubPolicyRepo: Codable, Identifiable, Sendable, Equatable {
+    let canonical: String
+    let mode: GitHubRepositoryAccessMode
+
+    var id: String { canonical }
+    var modeLabel: String { mode.label }
+}
+
+/// `msw github status --format json` (local mode): top-level mode plus one
+/// entry per workspace with policy/capability/shuttle/credential presence.
+struct MSWGitHubStatusResponse: Codable, Sendable {
+    let mode: String
+    let workspaces: [MSWGitHubStatusWorkspace]
+}
+
+struct MSWGitHubStatusWorkspace: Codable, Sendable {
+    let workspace: String
+    let capability: String?
+    let repos: [MSWGitHubStatusRepo]?
+    let shuttle: String?
+    let hostCredential: String?
+}
+
+struct MSWGitHubStatusRepo: Codable, Sendable, Equatable {
+    let canonical: String
+    let mode: String
+}
+
+/// Nonsecret host-credential metadata from `msw github auth --json`. Never
+/// contains token bytes.
+struct MSWGitHubAuthMetadata: Codable, Sendable {
+    let provider: String?
+    let tokenKind: String?
+    let accountLogin: String?
+    let verifiedAt: Date?
+    let generation: Int?
+    let storedAt: Date?
+    let repoChecks: [MSWGitHubAuthRepoCheck]?
+}
+
+struct MSWGitHubAuthRepoCheck: Codable, Sendable {
+    let canonical: String?
+    let mode: String?
+    let push: Bool?
+    let checkedAt: Date?
+}
+
+/// `msw app github-policy-apply` request: the FULL desired policy file
+/// carried on stdin. Missing workspace keys are treated by the CLI as
+/// "clear this workspace", so the app always sends all three workspaces.
+struct MSWGitHubPolicyApplyRequest: Codable, Sendable {
+    let schemaVersion: Int
+    let workspaces: [String: GitHubPolicyWorkspace]
+}
+
+/// `msw app github-policy-apply` success result. The app marks the operation
+/// applied ONLY when `applied`, `provisioned`, and `committed` are all true.
+struct MSWGitHubPolicyApplyResult: Codable, Sendable {
+    let applied: Bool?
+    let provisioned: Bool?
+    let committed: Bool?
+    let workspaces: [MSWGitHubPolicyApplyWorkspace]?
+}
+
+struct MSWGitHubPolicyApplyWorkspace: Codable, Sendable {
+    let workspace: String
+    let capability: String?
+    let repos: [MSWGitHubStatusRepo]?
+}
+
+/// Repository discovery entry from `msw github repos --format json`.
+struct MSWGitHubDiscoveredRepo: Codable, Sendable, Equatable {
+    let canonical: String
+    let name: String
+    let owner: String
+    let `private`: Bool
+    let permissions: MSWGitHubRepoPermissions
+    let inPolicy: Bool
+}
+
+struct MSWGitHubRepoPermissions: Codable, Sendable, Equatable {
+    let pull: Bool
+    let push: Bool
+}
+
+/// Typed raw-CLI error document (non-app-protocol commands):
+/// `{"ok":false,"error":{"code":...,"message":...,"remedies":[...]}}`.
+struct MSWGitHubRawError: Codable, Sendable, Equatable {
+    let code: String?
+    let message: String?
+    let remedies: [String]?
+}
+
+/// Union-shaped JSON document for the raw `github` commands
+/// (`repos`, `auth --device`, `auth --device-complete`). All fields optional;
+/// callers validate the fields their command needs.
+struct MSWGitHubCLIResponse: Codable, Sendable {
+    let ok: Bool?
+    let mode: String?
+    let repos: [MSWGitHubDiscoveredRepo]?
+    let status: String?
+    let interval: Int?
+    let deviceId: String?
+    let code: String?
+    let verificationUri: String?
+    let expiresAt: Date?
+    let metadata: MSWGitHubAuthMetadata?
+    let error: MSWGitHubRawError?
 }
 
 struct MSWLifecyclePlan: Codable, Sendable, Equatable {

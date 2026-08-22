@@ -100,8 +100,8 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForExistence(timeout: 2)
         )
-        // First-run setup presents only the two user decisions, not release
-        // configuration or stale-access diagnostics.
+        // Local mode (default) presents the policy picker, never the Connect
+        // unavailable outcome.
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.unavailable"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.disconnected"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.attention"].exists)
@@ -109,18 +109,17 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["setup.github.retry.button"].exists)
         XCTAssertFalse(
             app.descendants(matching: .any)["github.workspace.dev.repository.1001.mode"].exists,
-            "Untrusted Connect configuration must not expose per-repository write controls."
+            "Repository write controls appear only after a catalog load and selection."
         )
-        let githubConnect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(githubConnect.waitForExistence(timeout: 2))
-        XCTAssertEqual(githubConnect.label, "Connect GitHub")
-        XCTAssertTrue(githubConnect.isEnabled)
-        githubConnect.click()
-        assertText(
-            "GitHub connection couldn’t start.",
-            identifier: "setup.github.issue.unavailable",
-            in: app
-        )
+        let load = app.buttons["setup.github.load.button"]
+        XCTAssertTrue(load.waitForExistence(timeout: 2))
+        XCTAssertEqual(load.label, "Load GitHub repositories")
+        XCTAssertTrue(load.isEnabled)
+        load.click()
+        XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3))
+        assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
+        let repository = app.descendants(matching: .any)["github.workspace.dev.repository.1001"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 2))
         let githubSkip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
         XCTAssertEqual(githubSkip.label, "Skip GitHub")
@@ -160,7 +159,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertNotEqual(app.state, .notRunning)
     }
 
-    func testGitHubAuthorizationAppliesAndVerifiesRepositoryAccess() {
+    func testGitHubLocalSuccessAppliesPolicyAndFinishesSetup() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -182,10 +181,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(primaryAction.waitForExistence(timeout: 2))
         primaryAction.click()
 
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertTrue(connect.isEnabled)
-        connect.click()
+        let load = app.buttons["setup.github.load.button"]
+        XCTAssertTrue(load.waitForExistence(timeout: 2))
+        XCTAssertTrue(load.isEnabled)
+        load.click()
 
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 2))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
@@ -195,8 +194,8 @@ final class MSWMonitorUITests: XCTestCase {
         repository.click()
         let mode = app.descendants(matching: .any)["github.workspace.dev.repository.1001.mode"]
         XCTAssertTrue(mode.waitForExistence(timeout: 2), "The mode selector appears only after selection.")
-        let readOnlyMode = mode.radioButtons["Read-only"]
-        let writeMode = mode.radioButtons["Read & write"]
+        let readOnlyMode = mode.radioButtons["Clone/pull (push from Mac)"]
+        let writeMode = mode.radioButtons["Clone/pull + Push from VM"]
         XCTAssertTrue(readOnlyMode.exists)
         XCTAssertTrue(writeMode.waitForExistence(timeout: 2))
         writeMode.click()
@@ -219,14 +218,16 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(apply.isEnabled)
         apply.click()
 
-        XCTAssertTrue(app.descendants(matching: .any)["setup.github.verifications"].waitForExistence(timeout: 2))
+        // Local mode writes the policy file; there are no verification
+        // results to render.
         XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.verification.dev.guest"]
-                .waitForExistence(timeout: 2)
+            app.descendants(matching: .any)["setup.github.verifications"]
+                .waitForNonExistence(timeout: 2)
         )
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.verification.dev.host"]
-                .waitForExistence(timeout: 2)
+        assertText(
+            "Applied repository access for 1 workspace(s).",
+            identifier: "setup.github.status",
+            in: app
         )
         let githubContinue = app.buttons["Continue"]
         XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
@@ -246,7 +247,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
     }
 
-    func testGitHubAuthorizationNoInstallationShowsStatusAndDoesNotHang() {
+    func testGitHubLocalEmptyCatalogShowsNoRepositories() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -266,25 +267,25 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         app.buttons["setup.primary-action"].click()
 
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertTrue(connect.isEnabled)
-        connect.click()
+        let load = app.buttons["setup.github.load.button"]
+        XCTAssertTrue(load.waitForExistence(timeout: 2))
+        XCTAssertTrue(load.isEnabled)
+        load.click()
 
-        // The fixture returns no installation; the success cleanup must still
-        // run so the wait ends and the status is shown instead of hanging.
+        // The account is connected but the catalog is empty; the no-repos
+        // status is shown and the load control re-enables instead of hanging.
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3)
         )
         assertText(
-            "No MSW App installation was found. Install the app, then connect GitHub again.",
+            "No repositories were found for your GitHub account. Grant access in GitHub, then load again.",
             identifier: "setup.github.status",
             in: app
         )
-        XCTAssertTrue(waitUntilEnabled(connect, timeout: 2))
+        XCTAssertTrue(waitUntilEnabled(load, timeout: 2))
     }
 
-    func testSetupGitHubReconnectUnlocksGitHubStepThenVerifiesThroughDone() {
+    func testSetupLocalGitHubStepUnlocksWhenSystemReadyThenVerifiesThroughDone() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -303,7 +304,7 @@ final class MSWMonitorUITests: XCTestCase {
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
 
-        // System-ready but bootstrap-incomplete: GitHub step starts locked.
+        // System-ready but bootstrap-incomplete: the GitHub step starts locked.
         let githubStep = app.descendants(matching: .any)["setup.step.github"]
         XCTAssertTrue(githubStep.waitForExistence(timeout: 2))
         XCTAssertFalse(githubStep.isEnabled)
@@ -313,17 +314,15 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(primaryAction.label, "Continue")
         primaryAction.click()
 
-        // The reconnect fixture follows the same compact GitHub entry point:
-        // the user sees Connect, not implementation-specific recovery details.
+        // Local mode unlocks the GitHub step as soon as preflight passes.
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 3)
         )
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.attention"].exists)
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertEqual(connect.label, "Connect GitHub")
-        XCTAssertTrue(connect.isEnabled)
-        connect.click()
+        let load = app.buttons["setup.github.load.button"]
+        XCTAssertTrue(load.waitForExistence(timeout: 2))
+        XCTAssertTrue(load.isEnabled)
+        load.click()
 
         XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 2))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
@@ -347,12 +346,11 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(apply.isEnabled)
         apply.click()
 
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.verification.dev.guest"]
-                .waitForExistence(timeout: 2)
+        assertText(
+            "Applied repository access for 1 workspace(s).",
+            identifier: "setup.github.status",
+            in: app
         )
-        // Only the successful commit for the attention workspace clears it.
-        XCTAssertFalse(app.staticTexts["setup.github.attention"].exists)
         let githubContinue = app.buttons["Continue"]
         XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
         XCTAssertTrue(waitUntilEnabled(githubContinue, timeout: 2))
@@ -365,14 +363,19 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(reviewSetup.waitForExistence(timeout: 2))
         reviewSetup.click()
 
-        // Verification has not passed yet: Done is blocked and the review step
-        // offers the re-verification action.
+        // Bootstrap is still incomplete: Done is blocked and the review step
+        // offers the workspace verification action.
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertFalse(done.isEnabled)
         let verify = app.buttons["setup.review.verify.button"]
         XCTAssertTrue(verify.waitForExistence(timeout: 2))
         XCTAssertTrue(verify.isEnabled)
+        verify.click()
+        // The reconnect fixture fails its first bootstrap run; a second run
+        // completes and unlocks Done.
+        XCTAssertTrue(verify.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntilEnabled(verify, timeout: 3))
         verify.click()
 
         XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
@@ -381,7 +384,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertNotEqual(app.state, .notRunning)
     }
 
-    func testGitHubAuthorizationCancelThenRetryUsesCurrentAttempt() {
+    func testGitHubLocalCatalogFailureThenRetrySucceeds() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -401,22 +404,25 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         app.buttons["setup.primary-action"].click()
 
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        connect.click()
+        let load = app.buttons["setup.github.load.button"]
+        XCTAssertTrue(load.waitForExistence(timeout: 2))
+        load.click()
 
-        let cancel = app.buttons["setup.github.cancel.button"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 2))
-        XCTAssertTrue(waitUntilHittable(cancel, timeout: 2))
-        cancel.click()
-
+        // The first catalog load fails with a retryable issue; the retry
+        // uses the current attempt and succeeds.
         XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.issue.cancelled"]
+            app.descendants(matching: .any)["setup.github.issue.failed"]
                 .waitForExistence(timeout: 2)
         )
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertTrue(connect.isEnabled)
-        connect.click()
+        assertText(
+            "GitHub could not be reached. Try again later.",
+            identifier: "setup.github.issue.failed",
+            in: app
+        )
+        let retry = app.buttons["setup.github.retry.button"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 2))
+        XCTAssertTrue(retry.isEnabled)
+        retry.click()
 
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github.account"]
@@ -424,13 +430,13 @@ final class MSWMonitorUITests: XCTestCase {
         )
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
         XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.issue.cancelled"]
+            app.descendants(matching: .any)["setup.github.issue.failed"]
                 .waitForNonExistence(timeout: 2)
         )
     }
 
 
-    func testGitHubAuthorizationUnavailableShowsConnectAndSkip() {
+    func testGitHubLocalCatalogUnavailableShowsIssueAndSkip() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -454,11 +460,11 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.unavailable"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.disconnected"].exists)
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertEqual(connect.label, "Connect GitHub")
-        XCTAssertTrue(connect.isEnabled)
-        connect.click()
+        let load = app.buttons["setup.github.load.button"]
+        XCTAssertTrue(load.waitForExistence(timeout: 2))
+        XCTAssertEqual(load.label, "Load GitHub repositories")
+        XCTAssertTrue(load.isEnabled)
+        load.click()
         assertText(
             "GitHub could not be reached. Try again later.",
             identifier: "setup.github.issue.unavailable",
@@ -470,55 +476,6 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(skip.isEnabled)
         skip.click()
         XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 2))
-    }
-
-    func testSetupReconnectUnavailableKeepsCompactGitHubChoices() {
-        let appURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appending(path: "build/MSWMonitor.app")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
-
-        let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
-        app.launchArguments = [
-            "--ui-test-setup",
-            "--ui-test-setup-reconnect",
-            "--ui-test-github-unavailable"
-        ]
-        app.launch()
-
-        let setup = app.windows["setup.window"]
-        XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.buttons["setup.primary-action"].click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 3)
-        )
-        XCTAssertFalse(app.descendants(matching: .any)["setup.github.attention"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["setup.github.unavailable"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["setup.github.disconnected"].exists)
-
-        let connect = app.buttons["setup.github.connect.button"]
-        XCTAssertTrue(connect.waitForExistence(timeout: 2))
-        XCTAssertEqual(connect.label, "Connect GitHub")
-        XCTAssertTrue(connect.isEnabled)
-        connect.click()
-        assertText(
-            "GitHub could not be reached. Try again later.",
-            identifier: "setup.github.issue.unavailable",
-            in: app
-        )
-
-        let skip = app.buttons["setup.github.skip.button"]
-        XCTAssertTrue(skip.waitForExistence(timeout: 2))
-        XCTAssertEqual(skip.label, "Skip GitHub")
-        XCTAssertTrue(skip.isEnabled)
-        skip.click()
-        XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 3))
     }
 
     func testSetupReviewExplainsCompletionState() {

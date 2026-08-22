@@ -13,8 +13,13 @@ config="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
   echo "msw: msw configuration is missing; rerun setup.sh" >&2
   exit 1
 }
+# Path C §1 (blocker 7): resolve MSW_GITHUB_MODE FIRST — it is the single
+# source of truth. The SSH proxy is invoked by ssh (not through the msw CLI),
+# so source config.sh to pick up the configured mode; config.sh honors an
+# environment override and defaults to local.
+# shellcheck source=/dev/null
+. "$config"
 
-app_credentials="${MSW_APP_CREDENTIALS_FILE:-$HOME/Library/Application Support/MSW Monitor/credentials.json}"
 security_bin="${MSW_SECURITY_BIN:-/usr/bin/security}"
 jq_bin="${MSW_JQ_BIN:-}"
 if [ -z "$jq_bin" ]; then
@@ -36,6 +41,8 @@ keychain_read() {
     "$security_bin" find-generic-password -w -s "$service" -a "$account" 2>/dev/null
   fi
 }
+
+app_credentials="${MSW_APP_CREDENTIALS_FILE:-$HOME/Library/Application Support/MSW Monitor/credentials.json}"
 
 metadata_value() {
   role="$1"
@@ -100,56 +107,80 @@ app_token() {
   printf '%s\n' "$raw" | "$jq_bin" -r '.accessToken'
 }
 
-app_mode=0
-if [ -f "$app_credentials" ] && [ ! -L "$app_credentials" ]; then
-  app_mode=1
-fi
-
-token=""
-if [ "$app_mode" -eq 1 ]; then
-  if [ -z "$jq_bin" ] || [ ! -x "$jq_bin" ]; then
-    echo "msw: jq is required to read MSW Monitor's scoped GitHub grant" >&2
-    exit 1
-  fi
-  if app_profile_present; then
-    recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
-    quarantined="$(metadata_value guest quarantined 2>/dev/null || true)"
-    if [ "$quarantined" = true ] || [ "$recovery_state" = quarantined ]; then
+mode="${MSW_GITHUB_MODE:-local}"
+case "$mode" in
+  local)
+    # Path C §1/§7 (blocker 7): local mode NEVER inspects credentials.json
+    # (Connect grants stay dormant) and NEVER exports GH_TOKEN into
+    # `msb ssh serve`. Legacy Connect/read-token state fails with a migration
+    # remedy instead of a live token; quarantined workspaces fail closed.
+    quarantine="$HOME/.config/msw/github/$box.quarantine"
+    if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
       echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
       exit 1
     fi
-    if ! token="$(app_token 2>/dev/null)"; then
-      echo "msw: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in MSW Monitor" >&2
+    if [ -f "$HOME/.config/msw/github/$box.conf" ] || [ -L "$HOME/.config/msw/github/$box.conf" ]; then
+      echo "msw: workspace '$box' still has legacy GitHub token metadata; run: msw github migrate $box (or complete MSW Monitor setup) to retire it" >&2
       exit 1
     fi
-    export GH_TOKEN="$token"
-    unset token
-  else
-    echo "msw: workspace '$box' has no scoped GitHub grant; connect GitHub in MSW Monitor" >&2
-    exit 1
-  fi
-else
-  quarantine="$HOME/.config/msw/github/$box.quarantine"
-  if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
-    echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
-    exit 1
-  fi
-  if [ "${MSW_TEST_MODE:-0}" = 1 ]; then
-    if token="$(keychain_read "msw.github.read" "$box" 2>/dev/null)"; then
-      export GH_TOKEN="$token"
-      unset token
-    elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
-      [ -L "$HOME/.config/msw/github/$box.conf" ]; then
-      echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
-      echo "run: msw github setup $box OWNER/REPO" >&2
-      exit 1
+    # token-free local path: no GH_TOKEN is exported.
+    ;;
+  connect)
+    app_mode=0
+    if [ -f "$app_credentials" ] && [ ! -L "$app_credentials" ]; then
+      app_mode=1
     fi
-  elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
-    [ -L "$HOME/.config/msw/github/$box.conf" ]; then
-    echo "msw: legacy GitHub token metadata for '$box' requires migration in MSW Monitor" >&2
+
+    if [ "$app_mode" -eq 1 ]; then
+      if [ -z "$jq_bin" ] || [ ! -x "$jq_bin" ]; then
+        echo "msw: jq is required to read MSW Monitor's scoped GitHub grant" >&2
+        exit 1
+      fi
+      if app_profile_present; then
+        recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
+        quarantined="$(metadata_value guest quarantined 2>/dev/null || true)"
+        if [ "$quarantined" = true ] || [ "$recovery_state" = quarantined ]; then
+          echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+          exit 1
+        fi
+        if ! token="$(app_token 2>/dev/null)"; then
+          echo "msw: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in MSW Monitor" >&2
+          exit 1
+        fi
+        export GH_TOKEN="$token"
+        unset token
+      else
+        echo "msw: workspace '$box' has no scoped GitHub grant; connect GitHub in MSW Monitor" >&2
+        exit 1
+      fi
+    else
+      quarantine="$HOME/.config/msw/github/$box.quarantine"
+      if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+        echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+        exit 1
+      fi
+      if [ "${MSW_TEST_MODE:-0}" = 1 ]; then
+        if token="$(keychain_read "msw.github.read" "$box" 2>/dev/null)"; then
+          export GH_TOKEN="$token"
+          unset token
+        elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
+          [ -L "$HOME/.config/msw/github/$box.conf" ]; then
+          echo "msw: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
+          echo "run: msw github setup $box OWNER/REPO" >&2
+          exit 1
+        fi
+      elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
+        [ -L "$HOME/.config/msw/github/$box.conf" ]; then
+        echo "msw: legacy GitHub token metadata for '$box' requires migration in MSW Monitor" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  *)
+    echo "msw: invalid MSW_GITHUB_MODE '$mode' (expected local or connect)" >&2
     exit 1
-  fi
-fi
+    ;;
+esac
 
 MSB="${MSW_MSB_BIN:-$HOME/.local/bin/msb}"
 if [ ! -x "$MSB" ]; then MSB="$(command -v msb 2>/dev/null || true)"; fi
@@ -159,6 +190,14 @@ if [ ! -x "$MSB" ]; then MSB="$(command -v msb 2>/dev/null || true)"; fi
 }
 
 if ! "$MSB" ping -q "$box" >/dev/null 2>&1; then
+  # The host-managed port forwarder (lib/msw-port-forwarder.py) must NEVER
+  # auto-start a stopped VM: it runs ssh through this proxy with
+  # MSW_SSH_PROXY_NO_START=1 so a stopped workspace fails the connection
+  # instead of booting.
+  if [ "${MSW_SSH_PROXY_NO_START:-0}" = 1 ]; then
+    echo "msw: workspace '$box' is not running; not auto-starting (port forwarder)" >&2
+    exit 1
+  fi
   if ! output="$("$MSB" start -q "$box" 2>&1)"; then
     sleep 1
     "$MSB" ping -q "$box" >/dev/null 2>&1 || {

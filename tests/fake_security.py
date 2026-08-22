@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Minimal security(1) simulator for Keychain deletion error-path tests."""
+"""Minimal security(1) simulator for Keychain tests.
+
+Supports the Path C §5 hygiene form `add-generic-password ... -w` with -w as
+the LAST option: security(1)'s prompted mode reads the password from stdin,
+so the simulator reads it from stdin too (never from argv). It records every
+invocation's argv to MSW_FAKE_SECURITY_ARGV_LOG when set, so tests can prove
+the token never appears in child argv.
+"""
 from __future__ import annotations
 
 import json
@@ -23,10 +30,21 @@ def option(args: list[str], name: str) -> str:
         raise SystemExit(f"missing {name}")
 
 
+def option_index(args: list[str], name: str) -> int:
+    try:
+        return args.index(name)
+    except ValueError:
+        return -1
+
+
 def main() -> int:
     state_path = Path(os.environ["MSW_FAKE_SECURITY_STATE"])
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     args = sys.argv[1:]
+    argv_log = os.environ.get("MSW_FAKE_SECURITY_ARGV_LOG")
+    if argv_log:
+        with open(argv_log, "a") as fh:
+            fh.write("|".join(args) + "\n")
     if not args:
         print("missing security command", file=sys.stderr)
         return 2
@@ -38,7 +56,18 @@ def main() -> int:
     mode = os.environ.get("MSW_FAKE_SECURITY_MODE", "normal")
 
     if command == "add-generic-password":
-        state[key] = option(args, "-w")
+        # -w LAST => read the password from stdin (prompted mode); -w VALUE
+        # (legacy Connect path) reads the following argv element.
+        w_idx = option_index(args, "-w")
+        if w_idx == -1:
+            return 2
+        if w_idx == len(args) - 1:
+            # security(1)'s prompted mode reads one line per prompt; the
+            # record is piped twice (password + retype), the first wins.
+            value = sys.stdin.readline().rstrip("\n")
+        else:
+            value = args[w_idx + 1]
+        state[key] = value
         state_path.write_text(json.dumps(state, sort_keys=True))
         return 0
 

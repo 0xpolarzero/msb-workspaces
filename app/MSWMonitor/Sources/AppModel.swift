@@ -50,6 +50,10 @@ struct Workspace: Identifiable, Equatable, Sendable {
     var canRestart: Bool
     var canOpenTerminal: Bool
     var canPush: Bool
+    /// Published ports skipped by the workspace proxy (already in use).
+    var skippedPorts: [Int]?
+    /// Human-readable warning about skipped published ports.
+    var portWarning: String?
 
     init(
         id: ID,
@@ -68,6 +72,8 @@ struct Workspace: Identifiable, Equatable, Sendable {
         canRestart: Bool = false,
         canOpenTerminal: Bool = false,
         canPush: Bool = false,
+        skippedPorts: [Int]? = nil,
+        portWarning: String? = nil,
         serverCapabilities: MSWActionCapabilities? = nil
     ) {
         self.id = id
@@ -95,6 +101,8 @@ struct Workspace: Identifiable, Equatable, Sendable {
         self.canRestart = canRestart
         self.canOpenTerminal = canOpenTerminal
         self.canPush = canPush
+        self.skippedPorts = skippedPorts
+        self.portWarning = portWarning
     }
 
     private static func defaultPurpose(for id: ID) -> String {
@@ -245,6 +253,8 @@ final class AppModel {
     private let operationCoordinator: MSWOperationCoordinator?
     private let operationService: MSWOperationService?
     private let diagnostics: MSWDiagnostics?
+    private let provider: (any GitHubProviding)?
+    let accessMode: GitHubAccessMode
     private let activityStore: MSWActivityStore
     private var pollingTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
@@ -267,6 +277,8 @@ final class AppModel {
         operationCoordinator: MSWOperationCoordinator? = nil,
         operationService: MSWOperationService? = nil,
         diagnostics: MSWDiagnostics? = nil,
+        provider: (any GitHubProviding)? = nil,
+        accessMode: GitHubAccessMode = .local,
         activityStore: MSWActivityStore = MSWActivityStore(),
         startupRecoveryBlockedReason: String? = nil,
         startupRecoveryRetry: (() -> Void)? = nil
@@ -275,6 +287,8 @@ final class AppModel {
         self.operationCoordinator = operationCoordinator
         self.operationService = operationService
         self.diagnostics = diagnostics
+        self.provider = provider
+        self.accessMode = accessMode
         self.activityStore = activityStore
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.startupRecoveryRetry = startupRecoveryRetry
@@ -809,6 +823,26 @@ final class AppModel {
     }
 
     func loadGitHubState() {
+        if accessMode == .local {
+            guard let provider else {
+                detailError = "GitHub state is unavailable in fixture mode."
+                return
+            }
+            let request = beginDetailRequest()
+            Task { [weak self] in
+                do {
+                    let catalog = try await provider.loadCatalog()
+                    let policy = await provider.currentPolicy()
+                    guard let self, request == self.detailRequestGeneration else { return }
+                    self.githubSnapshot = Self.localGitHubSnapshot(policy: policy, catalog: catalog)
+                } catch {
+                    guard let self, request == self.detailRequestGeneration else { return }
+                    self.detailError = error.localizedDescription
+                }
+                self?.finishDetailRequest(request)
+            }
+            return
+        }
         guard let operationService else { detailError = "GitHub state is unavailable in fixture mode."; return }
         let request = beginDetailRequest()
         Task { [weak self] in
@@ -822,6 +856,44 @@ final class AppModel {
             }
             self?.finishDetailRequest(request)
         }
+    }
+
+    /// Builds the Detail GitHub snapshot from the policy file (single source
+    /// of truth) plus the CLI-reported credential/account presence.
+    static func localGitHubSnapshot(
+        policy: GitHubPolicyFile?,
+        catalog: GitHubCatalog
+    ) -> MSWGitHubStateResponse {
+        let workspaces = Workspace.ID.allCases.map { id in
+            let workspace = policy?.workspaces[id.rawValue]
+            let repos = workspace?.repos ?? []
+            let hasWrite = repos.contains { $0.mode == .readWrite }
+            let accessMode: String
+            if hasWrite {
+                accessMode = "read-write"
+            } else if repos.isEmpty {
+                accessMode = "none"
+            } else {
+                accessMode = "read-only"
+            }
+            return MSWGitHubWorkspaceState(
+                workspace: id.rawValue,
+                provider: "local-policy",
+                configured: workspace != nil,
+                accessMode: accessMode,
+                verificationRepository: nil,
+                accountLogin: catalog.account?.login,
+                installationId: nil,
+                accessExpiresAt: nil,
+                refreshExpiresAt: nil,
+                needsRestart: false,
+                quarantined: false,
+                repos: repos.map { MSWGitHubPolicyRepo(canonical: $0.canonical, mode: $0.mode) },
+                policyUpdatedAt: policy?.updatedAt,
+                hostCredential: catalog.hostCredentialPresent ? "present" : "missing"
+            )
+        }
+        return MSWGitHubStateResponse(workspaces: workspaces)
     }
 
     func loadLogs(for id: Workspace.ID) {
@@ -1240,6 +1312,8 @@ final class AppModel {
                 canRestart: capabilities.canRestart,
                 canOpenTerminal: capabilities.canOpenTerminal,
                 canPush: capabilities.canPush,
+                skippedPorts: snapshot.skippedPorts,
+                portWarning: snapshot.portWarning,
                 serverCapabilities: snapshot.actionCapabilities
             )
         }

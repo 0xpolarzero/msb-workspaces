@@ -5,12 +5,18 @@ enum GitHubRepositoryAccessMode: String, Codable, Sendable, CaseIterable, Equata
     case readOnly = "read-only"
     case readWrite = "read-write"
 
+    /// Behavior-based user-facing labels (Path C §8). JSON schema values stay
+    /// read-only|read-write; only these strings change.
     var label: String {
         switch self {
-        case .readOnly: "Read-only"
-        case .readWrite: "Read & write"
+        case .readOnly: "Clone/pull (push from Mac)"
+        case .readWrite: "Clone/pull + Push from VM"
         }
     }
+
+    /// Footnote rendered wherever modes appear (§8): settings rows, detail
+    /// rows, and the picker editor.
+    static let footnote = "Local editing and commits always work."
 }
 
 /// Canonical non-secret repository policy. Repository identity is never
@@ -213,7 +219,7 @@ enum GitHubAuthorizationError: Error, LocalizedError, Sendable, Equatable {
             return "Your repository choices need review."
         case .invalidAppConfiguration:
             return GitHubFeatureAvailability.unavailableNotice
-        case .guestAuthorizationRequired: return "Choose Read-only access before enabling Read & write."
+        case .guestAuthorizationRequired: return "Choose Clone/pull (push from Mac) access before enabling Clone/pull + Push from VM."
         case .authorizationSessionExpired: return "The browser authorization expired. Choose Connect or Reconnect again."
         case .ownerNotInstalled: return "The selected repositories are not available yet. Manage repositories on GitHub, then reconnect."
         case .repositoryNotAllowed: return "One or more selected repositories are no longer available. Manage repositories on GitHub, then reconnect."

@@ -118,6 +118,106 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.observationText, "Not yet refreshed")
     }
 
+    // MARK: - Local-mode init never builds Connect dependencies (blocker 7)
+
+    func testAppDelegateLocalModeConstructsNoConnectDependencies() throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-local-init-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        // No trusted scope attestation => local mode.
+        let configuration = MSWConnectConfiguration()
+        XCTAssertFalse(configuration.hasTrustedScopeAttestation)
+        let policyStore = GitHubPolicyStore(policyURL: temporary.appendingPathComponent("github-policy.json"))
+
+        let delegate = AppDelegate(connectConfiguration: configuration, policyStore: policyStore)
+
+        XCTAssertEqual(delegate.accessMode, .local)
+        XCTAssertFalse(delegate.hasConnectDependencies,
+                       "Local init must not instantiate or pass broker/client/coordinator")
+        XCTAssertFalse(delegate.clientHasConnectDependencies,
+                       "Local-mode CLI client must not carry a Connect broker")
+        XCTAssertNotNil(delegate.provider, "Local mode must build the local provider")
+        XCTAssertNotNil(delegate.policyStore, "Local mode must build the policy store")
+    }
+
+    func testAppDelegateLocalModeDoesNotReadConnectStores() throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-local-no-connect-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        // A poisoned credentials.json at the real location must not be
+        // touched by local init. The AppDelegate seam takes an explicit
+        // policy store, so no Connect metadata path is ever consulted.
+        let configuration = MSWConnectConfiguration()
+        let delegate = AppDelegate(
+            connectConfiguration: configuration,
+            policyStore: GitHubPolicyStore(policyURL: temporary.appendingPathComponent("github-policy.json"))
+        )
+        XCTAssertEqual(delegate.accessMode, .local)
+        XCTAssertFalse(delegate.hasConnectDependencies)
+        XCTAssertFalse(delegate.clientHasConnectDependencies)
+    }
+
+    func testAppDelegateConnectModeStillBuildsConnectDependencies() throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-init-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        // A trusted scope attestation => connect mode keeps the Connect stack.
+        let signingKey = Curve25519.Signing.PrivateKey()
+        let configuration = testConnectConfiguration(
+            scopeAttestationPublicKey: signingKey.publicKey.rawRepresentation,
+            requiresScopeAttestation: true
+        )
+        XCTAssertTrue(configuration.hasTrustedScopeAttestation)
+
+        let delegate = AppDelegate(
+            connectConfiguration: configuration,
+            policyStore: GitHubPolicyStore(policyURL: temporary.appendingPathComponent("github-policy.json")),
+            makeBroker: {
+                try? CredentialBroker(
+                    keychain: InMemoryConnectKeychain(),
+                    metadataURL: temporary.appendingPathComponent("credentials.json")
+                )
+            }
+        )
+        XCTAssertEqual(delegate.accessMode, .connect)
+        XCTAssertTrue(delegate.hasConnectDependencies,
+                      "Connect mode keeps the dormant Connect stack compiling")
+        XCTAssertTrue(delegate.clientHasConnectDependencies,
+                      "Connect-mode CLI client carries the broker")
+        XCTAssertNil(delegate.provider)
+    }
+
+    func testSetupWindowControllerLocalModeNeverCreatesFallbackBroker() {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-fallback-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+
+        // Local mode must drop even a passed-in coordinator: never pass or
+        // instantiate the Connect coordinator in local mode.
+        XCTAssertNil(SetupWindowController.resolvedAuthorization(accessMode: .local, authorizationCoordinator: nil))
+        if let broker = try? CredentialBroker(
+            keychain: InMemoryConnectKeychain(),
+            metadataURL: temporary.appendingPathComponent("credentials.json")
+        ) {
+            let coordinator = GitHubAuthorizationCoordinator(broker: broker)
+            XCTAssertNil(SetupWindowController.resolvedAuthorization(
+                accessMode: .local,
+                authorizationCoordinator: coordinator
+            ))
+            // Connect mode passes the supplied coordinator through.
+            XCTAssertTrue(SetupWindowController.resolvedAuthorization(
+                accessMode: .connect,
+                authorizationCoordinator: coordinator
+            ) === coordinator)
+        }
+    }
+
     func testRefreshAdvancesVisibleObservationCounter() {
         let model = AppModel()
 
@@ -1927,6 +2027,8 @@ final class AppModelTests: XCTestCase {
         let view = SetupView(
             coordinator: nil,
             authorizationCoordinator: coordinator,
+            provider: nil,
+            accessMode: .connect,
             openSettings: { _ in },
             closeSetup: {},
             uiTestMode: false,
@@ -1972,8 +2074,10 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(decoded, policy)
         XCTAssertEqual(decoded.id, "dev.42.101")
         XCTAssertEqual(decoded.mode, .readOnly)
-        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Read-only")
-        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Read & write")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.label, "Clone/pull (push from Mac)")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.label, "Clone/pull + Push from VM")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readOnly.rawValue, "read-only")
+        XCTAssertEqual(GitHubRepositoryAccessMode.readWrite.rawValue, "read-write")
     }
 
 

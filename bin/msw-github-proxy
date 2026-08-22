@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+# MSW GitHub proxy entry point (Path C, section 4).
+#
+# Per-connection process: launchd spawns one instance per accepted socket on
+# 127.0.0.1:18446 (inetdCompatibility Wait:true) with the socket as
+# stdin/stdout. Manual stdin/stdout invocation works the same and is what the
+# proxy contract tests use via socketpair. `--listen [PORT]` adds a test-only
+# accept/fork loop (port 0 = ephemeral) that prints "PROXY_READY port=<n>".
+#
+# All ingress parsing is vendored h11 (lib/vendor/h11) via lib/proxycore.py;
+# this wrapper only locates the tree and hands off.
+proxy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Never write __pycache__ into the installed tree: reinstalls stay idempotent
+# and the vendored-h11 hash gate never sees unlisted bytecode files.
+export PYTHONDONTWRITEBYTECODE=1
+exec /usr/bin/python3 "$proxy_dir/../lib/proxycore.py" "$@"

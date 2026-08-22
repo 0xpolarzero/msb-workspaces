@@ -138,10 +138,17 @@ def git_env(state: dict[str, Any], box: str) -> dict[str, str]:
     env.update({
         "HOME": str(Path(sb["root"]) / "home"),
         "MSW_GUEST_WORKSPACE_ROOT": str(guest_workspace(state, box)),
-        "GH_TOKEN": r"$MSB_GH_TOKEN",
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "GIT_TERMINAL_PROMPT": "0",
+        # Isolate the guest "system" git config so guest-side
+        # `git config --system ...` (proxy-configure) never mutates the real
+        # host /etc/gitconfig.
+        "GIT_CONFIG_SYSTEM": str(Path(sb["root"]) / "gitconfig"),
     })
+    # Local mode must not expose GH_TOKEN inside the guest: only inject the
+    # placeholder when the sandbox actually carries the secret.
+    if "GH_TOKEN" in sb.get("secrets", {}):
+        env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
     if os.environ.get("MSW_FAKE_GUEST_PUSH_ALLOWED") != "1":
         env["MSW_GUEST_READ_ONLY"] = "1"
     if REMOTE_ROOT:
@@ -254,7 +261,7 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     box: str | None = None
     while i < len(args):
         arg = args[i]
-        if arg in ("--no-tty", "-t", "--tty", "-q", "--quiet"):
+        if arg in ("--no-tty", "-t", "--tty", "-q", "--quiet", "--stream"):
             i += 1
         elif arg in ("-w", "--workdir", "-u", "--user", "-e", "--env", "--timeout", "--rlimit"):
             if arg in ("-w", "--workdir"): workdir = args[i + 1]
@@ -329,6 +336,15 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             log_event(state, "docker", box=box, args=command[1:])
             save(state)
             return 0
+
+    # The guest relay (lib/msw-github-relay.py) is a REAL python script that
+    # would bind host 127.0.0.1:18446 and collide with the proxy's listener.
+    # Stub it as a bounded sleep so shuttle-spawned relay processes keep the
+    # exec stream alive without ever touching the proxy port; the frame
+    # protocol itself is exercised by the real relay in integration tests.
+    if command[0] == "python3" and len(command) >= 2 and command[1].endswith("msw-github-relay.py"):
+        return subprocess.run(["python3", "-c", "import time; time.sleep(600)"],
+                              cwd=mapped_workdir, env=env).returncode
 
     if command[0] in {"sync", "hostnamectl", "findmnt", "uname"}:
         if command[0] == "uname": print("aarch64")
@@ -475,9 +491,14 @@ def main() -> int:
                 return 1
             if "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
                 tls_enabled = "--tls-intercept" in state["sandboxes"][box].get("args", [])
+                # Secrets are exposed so the §11 migration can PROVE a legacy
+                # GH_TOKEN@... binding was removed via inspect.
                 print(json.dumps({
                     "active_config": {"network": {"tls": {"enabled": tls_enabled}}},
-                    "config": {"network": {"tls": {"enabled": tls_enabled}}},
+                    "config": {
+                        "network": {"tls": {"enabled": tls_enabled}},
+                        "secrets": state["sandboxes"][box].get("secrets", {}),
+                    },
                 }))
             return 0
         return fail(f"error: sandbox not found: {box}")

@@ -42,26 +42,33 @@ msw identity "Ada Lovelace" ada@example.com
 
 ## GitHub permissions
 
-GitHub setup presents **Connect GitHub** and **Skip GitHub**. Connecting requires configured MSW Connect and trusted scope attestations; existing scopes are managed from Settings.
-
-The legacy CLI token prompt was removed:
-
-```text
-msw github setup …       reports the MSW Monitor migration path
-```
-
-The retained commands inspect or verify scoped Connect grants:
+GitHub setup presents **Connect GitHub** and **Skip GitHub** in connect mode.
+Local mode (`MSW_GITHUB_MODE=local`, the default) never binds a token into a
+workspace: git reaches GitHub through a host proxy that enforces a per-workspace
+capability, and the Mac holds one host credential (`msw github auth`) that the
+proxy uses for every outbound request.
 
 ```bash
+msw github auth [--force] [--json]        # Provision/rotate the host credential
+msw github auth --device [--json]         # Start OAuth Device Flow (prints code once)
+msw github auth --device-complete CODE    # One device-flow exchange attempt
+msw github repos [--owner O] [--json]     # Discover GitHub repositories (picker)
+msw github migrate [WORKSPACE|all]        # Retire legacy GitHub state (local mode)
+msw github proxy-configure [WORKSPACE]    # Install the repo-aware proxy transport
+msw github capability rotate WORKSPACE    # Rotate that workspace's capability
 msw github verify WORKSPACE [OWNER/REPO]
 msw github status [WORKSPACE|all]
-msw github remove WORKSPACE
+msw github status [WORKSPACE|all] --format json
+msw github remove WORKSPACE               # Revoke the host credential (local mode)
+msw app github-policy-get [--workspace W] --format json
+msw app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear] --format json
 ```
 
-`msw github remove` refuses current Connect grants because revocation must be
-performed by MSW Monitor. Use the app's workspace removal or account
-disconnect action so the service grant and local credential state are updated
-together.
+`msw github remove` in local mode revokes the host credential (metadata first,
+fail-closed). In connect mode it refuses current Connect grants because
+revocation must be performed by MSW Monitor; use the app's workspace removal or
+account disconnect action so the service grant and local credential state are
+updated together.
 
 ## Push from the Mac
 
@@ -121,6 +128,12 @@ Prepublished TCP ports:
 ```
 
 Ports 24678 and 24679 are reserved for deep health checks.
+
+Published ports are forwarded host-side over SSH by a per-workspace manager
+(`lib/msw-port-forwarder.py`), so msb itself never binds them. A port that is
+already in use is skipped with a warning instead of failing; the port is
+forwarded again automatically once it is free. `msw app state` reports
+`skippedPorts` and a `portWarning` per workspace.
 
 ## Docker
 
