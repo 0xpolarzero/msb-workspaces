@@ -40,6 +40,10 @@ final class SetupWindowController {
                 retryStartupRecovery: retryStartupRecovery
             )
         )
+        // The setup window owns its size. Dynamic SwiftUI content (notably
+        // repository selections) must reflow or scroll instead of changing
+        // the surrounding onboarding window.
+        hosting.sizingOptions = []
         window = NSWindow(contentViewController: hosting)
         window.identifier = NSUserInterfaceItemIdentifier("setup.window")
         hosting.view.setAccessibilityIdentifier("setup.window")
@@ -266,7 +270,6 @@ struct SetupView: View {
     @State private var authorizationStatus = ""
     @State private var isAuthorizing = false
     @State private var authorizationMayCancel = false
-    @State private var isReviewing = false
     @State private var authorizationTask: Task<Void, Never>?
     @State private var authorizationGeneration = 0
     @State private var uiTestAuthorizationAttempts = 0
@@ -363,7 +366,7 @@ struct SetupView: View {
             Divider()
             stickyFooter
         }
-        .frame(minWidth: 560, idealWidth: 620, minHeight: 560, idealHeight: 700)
+        .frame(minWidth: 560, minHeight: 560)
         .task {
             if uiTestMode {
                 loadUITestState()
@@ -807,8 +810,7 @@ struct SetupView: View {
                 // from a stale or cancelled attempt.
                 guard !Task.isCancelled,
                       githubSkipGeneration == generation,
-                      activeStep == .github,
-                      !isReviewing else {
+                      activeStep == .github else {
                     isSkippingGitHub = false
                     githubSkipTask = nil
                     return
@@ -1006,7 +1008,7 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.github.connect.button")
                     Button("Skip GitHub") { skipGitHub() }
                         .buttonStyle(.bordered)
-                        .disabled(githubSkipped || isAuthorizing || isSkippingGitHub || isReviewing)
+                        .disabled(githubSkipped || isAuthorizing || isSkippingGitHub)
                         .accessibilityIdentifier("setup.github.skip.button")
                 }
             }
@@ -1040,9 +1042,6 @@ struct SetupView: View {
                 }
                 if !repositoriesByInstallation.isEmpty {
                     repositoryPolicyEditor
-                }
-                if isReviewing {
-                    reviewCard
                 }
                 Button("Manage Connected Account") { openSettings(.github) }
                     .disabled(isAuthorizing)
@@ -1136,7 +1135,7 @@ struct SetupView: View {
                         .accessibilityIdentifier("setup.github.connect-account.button")
                     Button("Skip GitHub") { skipGitHub() }
                         .buttonStyle(.bordered)
-                        .disabled(githubSkipped || isConnectingAccount || isSkippingGitHub || isReviewing)
+                        .disabled(githubSkipped || isConnectingAccount || isSkippingGitHub)
                         .accessibilityIdentifier("setup.github.skip.button")
                 }
             }
@@ -1180,9 +1179,6 @@ struct SetupView: View {
                 .accessibilityIdentifier("setup.github.manual-add")
                 if !repositoriesByInstallation.isEmpty {
                     repositoryPolicyEditor
-                }
-                if isReviewing {
-                    reviewCard
                 }
                 Button("Manage Connected Account") { openSettings(.github) }
                     .disabled(isAuthorizing)
@@ -1316,48 +1312,6 @@ struct SetupView: View {
             onEdit: { repositoryPolicyApplied = false }
         )
         .accessibilityIdentifier("setup.github.repository-policy")
-    }
-
-    private var reviewCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Review and apply").font(.headline)
-            Text("Review each repository-to-workspace choice. Your access is checked before it is applied.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
-                reviewLine(for: workspace)
-            }
-        }
-        .padding(12)
-        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityIdentifier("setup.github.review")
-    }
-
-    private func reviewLine(for workspace: Workspace.ID) -> some View {
-        let workspacePolicy = workspacePolicy.first { $0.workspace == workspace.rawValue }
-        let selected = workspacePolicy?.repositories ?? []
-        if workspacePolicy != nil, selected.isEmpty {
-            return AnyView(
-                Text("\(workspace.rawValue): Existing access will be removed")
-                    .font(.caption)
-                    .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
-            )
-        }
-        guard !selected.isEmpty else {
-            let hasExistingAccess = existingMetadata.contains { $0.workspace == workspace.rawValue }
-            return AnyView(
-                Text("\(workspace.rawValue): \(hasExistingAccess ? "Existing access remains unchanged" : "Not configured")")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
-            )
-        }
-        let access = selected.map { "\($0.fullName) — \($0.mode.label)" }.joined(separator: ", ")
-        return AnyView(
-            Text("\(workspace.rawValue): \(access)")
-                .font(.caption)
-                .accessibilityIdentifier("setup.github.review.\(workspace.rawValue)")
-        )
     }
 
     private var verificationResultsCard: some View {
@@ -1587,7 +1541,7 @@ struct SetupView: View {
 
     private var footerActions: some View {
         HStack(spacing: 10) {
-            if activeStep != .readiness && !(activeStep == .github && isReviewing) {
+            if activeStep != .readiness {
                 Button("Back", action: moveBack)
                     .keyboardShortcut(.cancelAction)
                     .disabled(isSkippingGitHub)
@@ -1621,21 +1575,12 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .github:
-                if isReviewing {
-                    Button("Back") { isReviewing = false }
-                        .keyboardShortcut(.cancelAction)
-                        .disabled(isSkippingGitHub)
+                if isGitHubConnected && !repositoryPolicyApplied && hasValidAssignments {
                     Button(isAuthorizing ? "Applying…" : "Apply repository access", action: commitPolicy)
                         .buttonStyle(.borderedProminent)
                         .disabled(isAuthorizing || !hasValidAssignments || isSkippingGitHub)
                         .accessibilityIdentifier("setup.github.apply.button")
                 } else {
-                    if account != nil {
-                        Button("Review workspace access") { isReviewing = true }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!hasValidAssignments || isAuthorizing || isSkippingGitHub)
-                            .accessibilityIdentifier("setup.github.review.button")
-                    }
                     Button("Continue", action: advanceFromGitHub)
                         .buttonStyle(.borderedProminent)
                         .disabled(!githubStepComplete || isAuthorizing || isSkippingGitHub || githubSkipIssue != nil)
@@ -1758,7 +1703,6 @@ struct SetupView: View {
         let generation = authorizationGeneration
         isAuthorizing = true
         authorizationMayCancel = true
-        isReviewing = false
         authorizationIssue = nil
         authorizationStatus = "Opening GitHub in your default browser…"
         uiTestAuthorizationAttempts += 1
@@ -1794,7 +1738,7 @@ struct SetupView: View {
                     githubSkipped = false
                     authorizationStatus = discovery.installations.isEmpty
                         ? "No MSW App installation was found. Install the app, then connect GitHub again."
-                        : "Choose repository access, then review before applying."
+                        : "Choose repository access, then apply it."
                     prefillIdentity(from: discovery.account)
                 }
             }
@@ -1827,7 +1771,7 @@ struct SetupView: View {
                     authorizationMayCancel = false
                     authorizationTask = nil
                     githubSkipped = false
-                    authorizationStatus = "Choose repository access, then review before applying."
+                    authorizationStatus = "Choose repository access, then apply it."
                     prefillIdentity(from: discovery.account)
                 }
             } catch {
@@ -1866,7 +1810,6 @@ struct SetupView: View {
         let generation = authorizationGeneration
         isAuthorizing = true
         authorizationMayCancel = false
-        isReviewing = false
         authorizationIssue = nil
         localCatalogIssue = nil
         authorizationStatus = "Loading GitHub repositories…"
@@ -2163,7 +2106,6 @@ struct SetupView: View {
                         authorizationTask = nil
                         repositoryPolicyApplied = true
                         authorizationSessionID = nil
-                        isReviewing = false
                         authorizationStatus = "Applied repository access for \(workspacePolicies.count) workspace(s)."
                     }
                 } catch is CancellationError {
@@ -2255,7 +2197,6 @@ struct SetupView: View {
                     }
                     repositoryPolicyApplied = true
                     authorizationSessionID = nil
-                    isReviewing = false
                     authorizationStatus = "Applied repository access for \(workspacePolicies.count) workspace(s)."
                 }
             }
@@ -2312,7 +2253,6 @@ struct SetupView: View {
                     }
                     repositoryPolicyApplied = true
                     authorizationSessionID = nil
-                    isReviewing = false
                 }
             } catch {
                 let retained = await authorizationCoordinator.verificationResults()
@@ -2994,6 +2934,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
     let onEdit: () -> Void
     @State private var openPicker: String?
     @State private var searchQueries: [String: String] = [:]
+    @State private var workspaceAccessHelpPresented = false
 
     private var sortedInstallations: [GitHubInstallation] {
         installations.sorted {
@@ -3004,11 +2945,36 @@ private struct RepositoryWorkspacePolicyEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 5) {
-                Text("Workspace access").font(.headline)
-                Image(systemName: "info.circle")
+                Text("Workspace Access").font(.headline)
+                Button {
+                    workspaceAccessHelpPresented.toggle()
+                } label: {
+                    Image(systemName: "info.circle")
+                }
+                    .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .help("When enabled, this VM may use the Mac-held GitHub credential to push. The credential stays on the Mac.")
-                    .accessibilityLabel("Repository push access information")
+                    .help("Show workspace access information")
+                    .keyboardShortcut("i", modifiers: .command)
+                    .accessibilityLabel("Workspace Access information")
+                    .accessibilityHint("Shows how repository access works")
+                    .accessibilityIdentifier("setup.github.workspace-access.info.button")
+                    .popover(isPresented: $workspaceAccessHelpPresented, arrowEdge: .top) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Workspace Access")
+                                .font(.headline)
+                            Text("When enabled, this VM may use the Mac-held GitHub credential to push. The credential stays on the Mac.")
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("setup.github.workspace-access.help")
+                            HStack {
+                                Spacer()
+                                Button("Done") { workspaceAccessHelpPresented = false }
+                                    .keyboardShortcut(.defaultAction)
+                                    .accessibilityIdentifier("setup.github.workspace-access.help.done")
+                            }
+                        }
+                        .padding(12)
+                        .frame(width: 320)
+                    }
             }
             ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
                 workspaceSection(workspace)

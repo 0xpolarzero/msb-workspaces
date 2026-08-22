@@ -44,7 +44,9 @@ final class StatusBarController {
             model: model,
             quit: { NSApplication.shared.terminate(nil) },
             openDetails: { [weak self] route in self?.showDetails(route: route) },
-            openSettings: { [weak self] in self?.showSettings(section: .general) },
+            openSettings: { [weak self] in
+                self?.showSettings(section: .general, dismissingSetup: true)
+            },
             openSetup: (bootstrapCoordinator != nil || startupRecoveryBlockedReason != nil)
                 ? { [weak self] in self?.showSetup() }
                 : nil
@@ -99,7 +101,9 @@ final class StatusBarController {
         if detailWindowController == nil {
             detailWindowController = DetailWindowController(
                 model: model,
-                openSettings: { [weak self] section in self?.showSettings(section: section) },
+                openSettings: { [weak self] section in
+                    self?.showSettings(section: section, dismissingSetup: true)
+                },
                 openSetup: { [weak self] in self?.showSetup() },
                 onClose: { [weak model] in model?.setPollingVisible(false) }
             )
@@ -121,16 +125,19 @@ final class StatusBarController {
         showDetails(route: route)
     }
 
-    private func showSettings(section: SettingsSection) {
+    private func showSettings(section: SettingsSection, dismissingSetup: Bool) {
         popover.performClose(nil)
         model.setPollingVisible(false)
         settingsNavigation.section = section
-        setupWindowController?.close()
-        setupWindowController = nil
+        if dismissingSetup {
+            setupWindowController?.close()
+            setupWindowController = nil
+        }
         NSApp.activate(ignoringOtherApps: true)
         // Use the Settings scene's real application-menu action. Dispatching
-        // after the setup window closes lets SwiftUI finish removing that
-        // window before it presents and selects the requested Settings pane.
+        // lets SwiftUI present and select the requested Settings pane after
+        // the navigation state changes. Setup-originated actions retain their
+        // window so onboarding can resume when Settings is closed.
         DispatchQueue.main.async {
             let settingsItem = NSApp.mainMenu?.items
                 .compactMap(\.submenu)
@@ -159,7 +166,9 @@ final class StatusBarController {
                 githubInstallationURL: githubInstallationURL,
                 provider: provider,
                 accessMode: accessMode,
-                openSettings: { [weak self] section in self?.showSettings(section: section) },
+                openSettings: { [weak self] section in
+                    self?.showSettings(section: section, dismissingSetup: false)
+                },
                 closeSetup: { [weak self] in self?.setupWindowController?.close() },
                 uiTestMode: arguments.contains("--ui-test-setup") ||
                     arguments.contains("--ui-test-setup-review") ||

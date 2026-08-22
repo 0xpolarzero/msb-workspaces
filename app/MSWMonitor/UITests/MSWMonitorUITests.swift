@@ -182,6 +182,27 @@ final class MSWMonitorUITests: XCTestCase {
         refreshCatalog.click()
         XCTAssertTrue(waitUntilEnabled(refreshCatalog, timeout: 2))
 
+        let initialSetupFrame = setup.frame
+        let accessInfo = app.buttons["setup.github.workspace-access.info.button"]
+        XCTAssertTrue(accessInfo.waitForExistence(timeout: 2))
+        XCTAssertEqual(accessInfo.label, "Workspace Access information")
+        XCTAssertTrue(accessInfo.isEnabled)
+        accessInfo.click()
+        assertText(
+            "When enabled, this VM may use the Mac-held GitHub credential to push. The credential stays on the Mac.",
+            identifier: "setup.github.workspace-access.help",
+            in: app
+        )
+        app.buttons["setup.github.workspace-access.help.done"].click()
+        XCTAssertTrue(
+            app.staticTexts["setup.github.workspace-access.help"].waitForNonExistence(timeout: 2)
+        )
+        app.typeKey("i", modifierFlags: .command)
+        XCTAssertTrue(
+            app.staticTexts["setup.github.workspace-access.help"].waitForExistence(timeout: 2)
+        )
+        app.buttons["setup.github.workspace-access.help.done"].click()
+
         let picker = app.buttons["github.workspace.dev.repository-picker.button"]
         XCTAssertTrue(picker.waitForExistence(timeout: 2))
         picker.click()
@@ -202,19 +223,14 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Owner installation"].exists)
         XCTAssertFalse(app.staticTexts["Verification repository"].exists)
         XCTAssertFalse(app.staticTexts["Access mode"].exists)
+        XCTAssertEqual(setup.frame, initialSetupFrame, "Repository selection must not resize setup")
 
-        let review = app.buttons["setup.github.review.button"]
-        XCTAssertTrue(review.waitForExistence(timeout: 2))
-        XCTAssertTrue(waitUntilEnabled(review, timeout: 2))
-        let scrollView = app.scrollViews.firstMatch
-        XCTAssertTrue(scrollView.waitForExistence(timeout: 2))
-        scrollView.swipeUp()
-        XCTAssertTrue(waitUntilHittable(review, timeout: 2))
-        review.click()
-
+        XCTAssertFalse(app.buttons["setup.github.review.button"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["setup.github.review"].exists)
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
+        XCTAssertFalse(app.buttons["Continue"].exists)
         apply.click()
 
         // Local mode writes the policy file; there are no verification
@@ -279,9 +295,12 @@ final class MSWMonitorUITests: XCTestCase {
         let manage = app.buttons["setup.github.manage-account.button"]
         XCTAssertTrue(manage.waitForExistence(timeout: 2))
         manage.click()
-        XCTAssertTrue(setup.waitForNonExistence(timeout: 2))
+        XCTAssertTrue(setup.waitForExistence(timeout: 2))
         XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.descendants(matching: .any)["settings.github.status"].waitForExistence(timeout: 3))
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(setup.waitForExistence(timeout: 2))
+        XCTAssertTrue(waitUntilHittable(app.buttons["github.workspace.dev.repository-picker.button"], timeout: 2))
     }
 
     func testGitHubLocalEmptyCatalogShowsNoRepositories() {
@@ -364,18 +383,11 @@ final class MSWMonitorUITests: XCTestCase {
         repository.click()
         app.typeKey(.escape, modifierFlags: [])
 
-        let review = app.buttons["setup.github.review.button"]
-        XCTAssertTrue(review.waitForExistence(timeout: 2))
-        XCTAssertTrue(waitUntilEnabled(review, timeout: 2))
-        let scrollView = app.scrollViews.firstMatch
-        XCTAssertTrue(scrollView.waitForExistence(timeout: 2))
-        scrollView.swipeUp()
-        XCTAssertTrue(waitUntilHittable(review, timeout: 2))
-        review.click()
-
+        XCTAssertFalse(app.buttons["setup.github.review.button"].exists)
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
+        XCTAssertFalse(app.buttons["Continue"].exists)
         apply.click()
 
         assertText(
