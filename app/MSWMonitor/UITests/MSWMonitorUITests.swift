@@ -116,9 +116,12 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(connect.waitForExistence(timeout: 3))
         XCTAssertEqual(connect.label, "Connect GitHub")
         let githubSkip = app.buttons["setup.github.skip.button"]
+        let githubBack = app.buttons["setup.back.button"]
         XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
-        XCTAssertEqual(githubSkip.label, "Skip GitHub")
-        assertAction(githubSkip, precedes: connect, in: app)
+        XCTAssertTrue(githubBack.waitForExistence(timeout: 2))
+        XCTAssertEqual(githubSkip.label, "Skip")
+        XCTAssertEqual(app.buttons.matching(identifier: "setup.github.skip.button").count, 1)
+        assertAction(githubSkip, precedes: githubBack, in: app)
         githubSkip.click()
 
         let identityName = app.textFields["setup.identity.name"]
@@ -197,19 +200,31 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(primaryAction.waitForExistence(timeout: 2))
         primaryAction.click()
 
-        XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3))
+        let githubTitle = app.staticTexts["setup.github.title"]
+        let githubAccount = app.descendants(matching: .any)["setup.github.account"]
+        let refreshCatalog = app.buttons["setup.github.refresh.button"]
+        let githubSkip = app.buttons["setup.github.skip.button"]
+        let githubBack = app.buttons["setup.back.button"]
+        XCTAssertTrue(githubTitle.waitForExistence(timeout: 2))
+        XCTAssertTrue(githubAccount.waitForExistence(timeout: 3))
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
         XCTAssertFalse(app.buttons["setup.github.connect-account.button"].exists)
-        let githubSkip = app.buttons["setup.github.skip.button"]
-        XCTAssertTrue(githubSkip.exists)
-        let refreshCatalog = app.buttons["setup.github.refresh.button"]
         XCTAssertTrue(refreshCatalog.waitForExistence(timeout: 2))
         XCTAssertEqual(refreshCatalog.label, "Refresh")
-        assertAction(githubSkip, precedes: refreshCatalog, in: app)
+        XCTAssertLessThan(githubTitle.frame.maxX, githubAccount.frame.minX)
+        XCTAssertLessThan(githubAccount.frame.maxX, refreshCatalog.frame.minX)
+        XCTAssertEqual(githubTitle.frame.midY, githubAccount.frame.midY, accuracy: 1)
+        XCTAssertEqual(githubAccount.frame.midY, refreshCatalog.frame.midY, accuracy: 1)
+        XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
+        XCTAssertTrue(githubBack.waitForExistence(timeout: 2))
+        XCTAssertEqual(githubSkip.label, "Skip")
+        XCTAssertEqual(app.buttons.matching(identifier: "setup.github.skip.button").count, 1)
+        assertAction(githubSkip, precedes: githubBack, in: app)
         refreshCatalog.click()
         XCTAssertTrue(waitUntilEnabled(refreshCatalog, timeout: 2))
 
         let initialSetupFrame = setup.frame
+        let workspaceAccessHelp = "Choose which repositories each workspace can access and whether it can push changes."
         let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
         let accessInfo = app.descendants(matching: .any)["setup.github.workspace-access.info"]
         XCTAssertTrue(accessInfo.waitForExistence(timeout: 2))
@@ -217,7 +232,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["setup.github.workspace-access.info.button"].exists)
         accessInfo.hover()
         assertText(
-            pushHelp,
+            workspaceAccessHelp,
             identifier: "setup.github.workspace-access.info.tooltip",
             in: app
         )
@@ -397,7 +412,7 @@ final class MSWMonitorUITests: XCTestCase {
         let refreshWidth = refresh.frame.width
         let applyWidth = apply.frame.width
         let pickerFrame = picker.frame
-        let statusFrame = app.staticTexts["setup.github.status"].frame
+        XCTAssertFalse(app.staticTexts["Repositories are up to date."].exists)
 
         refresh.click()
         XCTAssertEqual(refresh.label, "Refresh")
@@ -413,7 +428,6 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(apply.frame.width, applyWidth, accuracy: 0.5)
         XCTAssertEqual(picker.frame.width, pickerFrame.width, accuracy: 0.5)
         XCTAssertEqual(picker.frame.minY, pickerFrame.minY, accuracy: 0.5)
-        XCTAssertEqual(app.staticTexts["setup.github.status"].frame.height, statusFrame.height, accuracy: 0.5)
 
         apply.click()
         XCTAssertEqual(apply.value as? String, "Saving")
@@ -582,8 +596,12 @@ final class MSWMonitorUITests: XCTestCase {
         )
         let skip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(skip.waitForExistence(timeout: 2))
-        XCTAssertEqual(skip.label, "Skip GitHub")
+        XCTAssertEqual(skip.label, "Skip")
         XCTAssertTrue(skip.isEnabled)
+        let back = app.buttons["setup.back.button"]
+        XCTAssertTrue(back.waitForExistence(timeout: 2))
+        XCTAssertEqual(app.buttons.matching(identifier: "setup.github.skip.button").count, 1)
+        assertAction(skip, precedes: back, in: app)
         skip.click()
         XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 2))
     }

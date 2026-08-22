@@ -770,7 +770,7 @@ struct SetupView: View {
         activeStep = .identity
     }
 
-    /// "Skip GitHub" resolves reconnect-required grants before advancing.
+    /// "Skip" resolves reconnect-required grants before advancing.
     /// It clears only the verification blockers attributable to the disabled
     /// grant; genuinely remaining requirements continue to gate Review/Done.
     ///
@@ -875,21 +875,7 @@ struct SetupView: View {
     }
 
     private var skipGitHubButton: some View {
-        Button(action: skipGitHub) {
-            HStack(spacing: 7) {
-                ZStack {
-                    Image(systemName: "forward")
-                        .opacity(isSkippingGitHub ? 0 : 1)
-                        .accessibilityHidden(true)
-                    ProgressView()
-                        .controlSize(.small)
-                        .opacity(isSkippingGitHub ? 1 : 0)
-                        .accessibilityHidden(true)
-                }
-                .frame(width: 16, height: 16)
-                Text("Skip GitHub")
-            }
-        }
+        Button("Skip", action: skipGitHub)
         .buttonStyle(.bordered)
         .disabled(githubSkipped || isConnectingGitHub || isApplyingGitHub || isSkippingGitHub)
         .accessibilityValue(isSkippingGitHub ? "Skipping" : "Ready")
@@ -1034,7 +1020,9 @@ struct SetupView: View {
 
     private var connectGitHubBoundary: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("GitHub").font(.title3.weight(.semibold))
+            Text("GitHub")
+                .font(.title3.weight(.semibold))
+                .accessibilityIdentifier("setup.github.title")
 
             if let account {
                 Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
@@ -1043,9 +1031,6 @@ struct SetupView: View {
             }
 
             HStack(spacing: 12) {
-                if showsGitHubSkipAction {
-                    skipGitHubButton
-                }
                 if showsGitHubConnectAction {
                     Button(action: beginAuthorization) {
                         HStack(spacing: 7) {
@@ -1140,56 +1125,46 @@ struct SetupView: View {
 
     private var localGitHubBoundary: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("GitHub").font(.title3.weight(.semibold))
+            HStack(alignment: .center, spacing: 8) {
+                Text("GitHub")
+                    .font(.title3.weight(.semibold))
+                    .accessibilityIdentifier("setup.github.title")
+                Spacer()
 
-            if let account {
-                Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityIdentifier("setup.github.account")
-            } else if githubHostCredentialPresent {
-                Label("GitHub account connected on this Mac", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityIdentifier("setup.github.account")
-            }
-
-            HStack(spacing: 12) {
-                if showsGitHubSkipAction {
-                    skipGitHubButton
+                if let account {
+                    Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier("setup.github.account")
+                } else if githubHostCredentialPresent {
+                    Label("GitHub account connected on this Mac", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityIdentifier("setup.github.account")
                 }
-                if isGitHubConnected {
+
+                if isGitHubConnected || isRefreshingGitHub {
                     Button(action: { loadLocalCatalog(force: true) }) {
-                        HStack(spacing: 6) {
-                            ZStack {
-                                Image(systemName: "arrow.clockwise")
-                                    .opacity(isRefreshingGitHub ? 0 : 1)
-                                    .accessibilityHidden(true)
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .opacity(isRefreshingGitHub ? 1 : 0)
-                                    .accessibilityHidden(true)
-                            }
-                            .frame(width: 16, height: 16)
-                            Text("Refresh")
+                        ZStack {
+                            Image(systemName: "arrow.clockwise")
+                                .opacity(isRefreshingGitHub ? 0 : 1)
+                                .accessibilityHidden(true)
+                            ProgressView()
+                                .controlSize(.small)
+                                .opacity(isRefreshingGitHub ? 1 : 0)
+                                .accessibilityHidden(true)
                         }
+                        .frame(width: 16, height: 16)
                     }
                     .controlSize(.small)
                     .disabled(isRefreshingGitHub || isConnectingGitHub || provider == nil)
+                    .accessibilityLabel("Refresh")
                     .accessibilityValue(isRefreshingGitHub ? "Refreshing repositories" : "Ready")
                     .accessibilityIdentifier("setup.github.refresh.button")
-                } else if isRefreshingGitHub {
-                    Button(action: {}) {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                                .accessibilityHidden(true)
-                            Text("Refresh")
-                        }
-                    }
-                    .controlSize(.small)
-                    .disabled(true)
-                    .accessibilityValue("Refreshing repositories")
-                    .accessibilityIdentifier("setup.github.refresh.button")
-                } else if localCatalogAttempted {
+                }
+            }
+
+            if localCatalogAttempted && !isGitHubConnected && !isRefreshingGitHub {
+                HStack {
+                    Spacer()
                     Button(action: connectGitHubAccount) {
                         HStack(spacing: 7) {
                             ZStack {
@@ -1211,7 +1186,6 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.github.connect-account.button")
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
             if let localCatalogIssue {
                 VStack(alignment: .leading, spacing: 7) {
                     Label(localCatalogIssueTitle(localCatalogIssue.kind), systemImage: "wifi.exclamationmark")
@@ -1657,6 +1631,9 @@ struct SetupView: View {
 
     private var footerActions: some View {
         HStack(alignment: .center, spacing: 10) {
+            if activeStep == .github && showsGitHubSkipAction {
+                skipGitHubButton
+            }
             if activeStep != .readiness {
                 Button("Back", action: moveBack)
                     .buttonStyle(.bordered)
@@ -1967,8 +1944,6 @@ struct SetupView: View {
                         githubStatus = "Connect GitHub to choose repositories, or skip it for now."
                     } else if catalog.installations.isEmpty && catalog.repositoriesByInstallation.isEmpty {
                         githubStatus = "No repositories found. Add one manually, refresh, or skip GitHub."
-                    } else {
-                        githubStatus = "Repositories are up to date."
                     }
                     prefillLocalRepositoryPolicyDrafts(policy: policy)
                     if let account {
@@ -3014,7 +2989,6 @@ struct SetupView: View {
         identitySkipped = resume.identitySkipped
         verificationResults = resume.verificationResults
         disabledGitHubWorkspaces = resume.disabledGitHubWorkspaces ?? []
-        notice = "Resumed saved setup choices. Review them before continuing."
     }
     private func loadUITestState() {
         let now = Date()
@@ -3194,6 +3168,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
     @Binding var editedWorkspaces: Set<String>
     let disabled: Bool
     let onEdit: () -> Void
+    private static let workspaceAccessHelp = "Choose which repositories each workspace can access and whether it can push changes."
     private static let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
     private static let pushDeniedHelp = "GitHub does not grant push access to this repository. Neither the VM nor MSW Monitor can push until that access changes."
     @State private var openPicker: String?
@@ -3210,7 +3185,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
             HStack(spacing: 5) {
                 Text("Workspace Access").font(.headline)
                 InformationTooltip(
-                    text: Self.pushHelp,
+                    text: Self.workspaceAccessHelp,
                     accessibilityLabel: "Workspace Access information",
                     accessibilityIdentifier: "setup.github.workspace-access.info"
                 )
