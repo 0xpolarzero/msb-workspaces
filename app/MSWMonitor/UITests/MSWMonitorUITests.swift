@@ -82,6 +82,9 @@ final class MSWMonitorUITests: XCTestCase {
         ] {
             assertIdentifier(identifier, in: app)
         }
+        let gitStep = app.buttons["setup.step.identity"]
+        XCTAssertTrue(gitStep.label.contains("Git"))
+
 
         let preflight = app.descendants(matching: .any)["setup.preflight"]
         XCTAssertTrue(preflight.waitForExistence(timeout: 2))
@@ -135,37 +138,45 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForNonExistence(timeout: 2)
         )
-        let identityBack = app.buttons["setup.back.button"]
-        XCTAssertTrue(identityBack.waitForExistence(timeout: 2))
-        identityBack.click()
+        let gitSkip = app.buttons["setup.identity.skip.button"]
+        let gitBack = app.buttons["setup.back.button"]
+        let gitContinue = app.buttons["setup.identity.continue.button"]
+        XCTAssertTrue(gitSkip.waitForExistence(timeout: 2))
+        XCTAssertTrue(gitBack.waitForExistence(timeout: 2))
+        XCTAssertTrue(gitContinue.waitForExistence(timeout: 2))
+        XCTAssertEqual(gitSkip.label, "Skip")
+        XCTAssertEqual(gitBack.label, "Back")
+        XCTAssertEqual(gitContinue.label, "Continue")
+        assertAction(gitSkip, precedes: gitBack, in: app)
+        assertAction(gitBack, precedes: gitContinue, in: app)
+        assertActionsReachTrailingEdge(of: setup, in: app)
+        gitBack.click()
         let githubContinue = app.buttons["setup.github.continue.button"]
         XCTAssertTrue(githubContinue.waitForExistence(timeout: 2))
-        XCTAssertEqual(identityBack.frame.midY, githubContinue.frame.midY, accuracy: 0.5)
+        XCTAssertEqual(gitBack.frame.midY, githubContinue.frame.midY, accuracy: 0.5)
         assertActionsReachTrailingEdge(of: setup, in: app)
         githubContinue.click()
+        XCTAssertTrue(identityName.waitForExistence(timeout: 2))
+        gitSkip.click()
+        let finalReview = app.staticTexts["setup.final-review.title"]
+        XCTAssertTrue(finalReview.waitForExistence(timeout: 2))
+        gitBack.click()
         XCTAssertTrue(identityName.waitForExistence(timeout: 2))
         identityName.click()
         identityName.typeText("Taylor Example")
         identityEmail.click()
         identityEmail.typeText("taylor@example.com")
-        let saveIdentity = app.buttons["setup.identity.save.button"]
-        XCTAssertTrue(saveIdentity.waitForExistence(timeout: 2))
-        XCTAssertEqual(saveIdentity.label, "Save and review")
-        XCTAssertTrue(saveIdentity.isEnabled)
-        let identitySkip = app.buttons["setup.identity.skip.button"]
-        XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
-        assertAction(identitySkip, precedes: saveIdentity, in: app)
-        let saveIdentityWidth = saveIdentity.frame.width
-        saveIdentity.click()
-        XCTAssertEqual(saveIdentity.value as? String, "Saving")
-        XCTAssertEqual(saveIdentity.frame.width, saveIdentityWidth, accuracy: 0.5)
+        XCTAssertTrue(gitContinue.isEnabled)
+        let continueWidth = gitContinue.frame.width
+        gitContinue.click()
+        XCTAssertEqual(gitContinue.value as? String, "Saving")
+        XCTAssertEqual(gitContinue.frame.width, continueWidth, accuracy: 0.5)
         XCTAssertFalse(app.buttons["setup.review.button"].exists)
 
-        let finalReview = app.staticTexts["setup.final-review.title"]
         XCTAssertTrue(finalReview.waitForExistence(timeout: 2))
         assertText("Review setup", identifier: "setup.final-review.title", in: app)
         assertText(
-            "The GitHub and identity choices below are saved.",
+            "The GitHub and Git choices below are saved.",
             identifier: "setup.final-review.summary",
             in: app
         )
@@ -278,7 +289,7 @@ final class MSWMonitorUITests: XCTestCase {
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
-        XCTAssertEqual(apply.label, "Save and continue")
+        XCTAssertEqual(apply.label, "Continue")
         apply.click()
 
         let identitySkip = app.buttons["setup.identity.skip.button"]
@@ -417,7 +428,7 @@ final class MSWMonitorUITests: XCTestCase {
         refresh.click()
         XCTAssertEqual(refresh.label, "Refresh")
         XCTAssertEqual(refresh.value as? String, "Refreshing repositories")
-        XCTAssertEqual(apply.label, "Save and continue")
+        XCTAssertEqual(apply.label, "Continue")
         XCTAssertEqual(apply.value as? String, "Ready")
         XCTAssertTrue(apply.isEnabled, "Refresh must not disable the save action")
         XCTAssertTrue(picker.isEnabled, "Refresh must not disable repository selection")
@@ -489,7 +500,7 @@ final class MSWMonitorUITests: XCTestCase {
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
-        XCTAssertEqual(apply.label, "Save and continue")
+        XCTAssertEqual(apply.label, "Continue")
         apply.click()
 
         let identitySkip = app.buttons["setup.identity.skip.button"]
@@ -627,7 +638,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["setup.final-review.title"].waitForExistence(timeout: 2))
         assertText("Review setup", identifier: "setup.final-review.title", in: app)
         assertText(
-            "The GitHub and identity choices below are saved.",
+            "The GitHub and Git choices below are saved.",
             identifier: "setup.final-review.summary",
             in: app
         )

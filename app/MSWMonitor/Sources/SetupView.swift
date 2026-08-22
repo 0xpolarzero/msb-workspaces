@@ -192,7 +192,7 @@ private enum SetupStep: String, CaseIterable, Identifiable {
         switch self {
         case .readiness: return "Readiness"
         case .github: return "GitHub"
-        case .identity: return "Identity"
+        case .identity: return "Git"
         case .review: return "Review"
         }
     }
@@ -1387,14 +1387,6 @@ struct SetupView: View {
     private var identitySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Your name for Git changes").font(.title3.weight(.semibold))
-            Text("Choose the name and email shown on changes you make in these workspaces.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if !canFinishWithoutGitHub {
-                Label("You can enter these details now. Saving becomes available when workspace setup finishes.", systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
             TextField("Full name", text: identityNameBinding)
                 .textContentType(.name)
                 .textFieldStyle(.roundedBorder)
@@ -1414,40 +1406,9 @@ struct SetupView: View {
             .accessibilityIdentifier("setup.identity.target")
             Text(identityTarget == "all"
                 ? "Targets: dev, playgrounds, and personal."
-                : "Target: \(identityTarget) only. Other workspace identities remain unchanged.")
+                : "Target: \(identityTarget) only. Other workspace Git settings remain unchanged.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 12) {
-                Button("Skip identity for now") {
-                    identitySkipped = true
-                    identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
-                    activeStep = .review
-                }
-                .buttonStyle(.bordered)
-                .disabled(identitySkipped || isSavingIdentity)
-                .accessibilityIdentifier("setup.identity.skip.button")
-                Button(action: saveIdentity) {
-                    HStack(spacing: 7) {
-                        ZStack {
-                            Image(systemName: "checkmark")
-                                .opacity(isSavingIdentity ? 0 : 1)
-                                .accessibilityHidden(true)
-                            ProgressView()
-                                .controlSize(.small)
-                                .opacity(isSavingIdentity ? 1 : 0)
-                                .accessibilityHidden(true)
-                        }
-                        .frame(width: 16, height: 16)
-                        Text("Save and review")
-                    }
-                }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canSaveIdentity || isSavingIdentity)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityValue(isSavingIdentity ? "Saving" : "Ready")
-                    .accessibilityIdentifier("setup.identity.save.button")
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
             identityStatusSlot
             if !identityConfiguredWorkspaces.isEmpty && !identityHasUnverifiedEdits {
                 Label(
@@ -1489,7 +1450,7 @@ struct SetupView: View {
             Text("Review setup")
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("setup.final-review.title")
-            Text("The GitHub and identity choices below are saved.")
+            Text("The GitHub and Git choices below are saved.")
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("setup.final-review.summary")
             Text("Finish any remaining workspace setup, then choose Done to close onboarding.")
@@ -1560,79 +1521,30 @@ struct SetupView: View {
             } else if activeStep == .readiness && !blockingChecks.isEmpty {
                 Label("Resolve the highlighted checks to continue.", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-            } else {
-                Label(footerGuidance, systemImage: footerStatusSymbol)
-                    .foregroundStyle(activeStep == .review ? .green : .secondary)
             }
         }
         .font(.caption)
         .lineLimit(2)
-        .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("setup.status")
-        .accessibilityValue(error ?? notice ?? footerGuidance)
     }
 
-    private var footerGuidance: String {
-        switch activeStep {
-        case .readiness:
-            if !githubContextLoaded { return "Loading your saved setup choices before you continue." }
-            return canFinishWithoutGitHub
-                ? "System setup is finished. Continue to GitHub."
-                : "Continue prepares your workspaces, then returns them to their current state."
-        case .github:
-            if isRefreshingGitHub { return "Refreshing repositories. You can keep editing your choices." }
-            if isConnectingGitHub {
-                return accessMode == .connect
-                    ? "Finish GitHub sign-in in your browser, or cancel the connection."
-                    : "Finish GitHub sign-in in your browser to continue."
-            }
-            if isApplyingGitHub { return "Saving GitHub access. You will continue automatically." }
-            if isSkippingGitHub { return "Keeping GitHub optional. You will continue automatically." }
-            if githubSkipIssue != nil { return "Retry the GitHub action above before continuing." }
-            if githubStepComplete { return "Your GitHub choice is saved. Continue when ready." }
-            if isGitHubConnected && !hasValidAssignments {
-                return "Choose at least one repository, add one manually, or skip GitHub."
-            }
-            return "Connect GitHub or skip it for now."
-        case .identity:
-            if isSavingIdentity { return "Saving your name and email. Review will open automatically." }
-            if !canFinishWithoutGitHub { return "Workspace setup must finish before your name and email can be saved." }
-            if !uiTestMode && authorizationCoordinator == nil {
-                return "Workspace identity settings are unavailable. Try setup again."
-            }
-            if identityName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return "Enter your name, or skip identity for now."
-            }
-            if !identityEmail.contains("@") || identityEmail.contains(where: \.isWhitespace) {
-                return "Enter a valid email address, or skip identity for now."
-            }
-            return identityStepComplete
-                ? "Your identity choice is saved."
-                : "Save your name and email, or skip identity for now."
-        case .review:
-            if !githubContextLoaded { return "Loading your saved GitHub choice before setup can finish." }
-            if !canFinishWithoutGitHub { return "Finish workspace setup before choosing Done." }
-            if !githubDecisionMade { return "Go back and connect GitHub or skip it." }
-            if !identityDecisionMade { return "Go back and save your identity or skip it." }
-            if !verificationAllowsCompletion { return "GitHub access needs attention before setup can finish." }
-            return "Everything is finished. Choose Done to close onboarding."
-        }
-    }
-
-    private var footerStatusSymbol: String {
-        switch activeStep {
-        case .readiness: return canFinishWithoutGitHub ? "checkmark.circle.fill" : "info.circle.fill"
-        case .github: return githubStepComplete ? "checkmark.circle.fill" : "info.circle.fill"
-        case .identity: return identityStepComplete ? "checkmark.circle.fill" : "info.circle.fill"
-        case .review: return canCompleteReview ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
-        }
-    }
 
     private var footerActions: some View {
         HStack(alignment: .center, spacing: 10) {
             if activeStep == .github && showsGitHubSkipAction {
                 skipGitHubButton
+            }
+            if activeStep == .identity {
+                Button("Skip") {
+                    identitySkipped = true
+                    identityStatus = ""
+                    activeStep = .review
+                }
+                .buttonStyle(.bordered)
+                .disabled(isSavingIdentity)
+                .accessibilityIdentifier("setup.identity.skip.button")
             }
             if activeStep != .readiness {
                 Button("Back", action: moveBack)
@@ -1678,33 +1590,51 @@ struct SetupView: View {
                         .accessibilityIdentifier("setup.github.continue.button")
                 } else {
                     Button(action: commitPolicy) {
-                        HStack(spacing: 7) {
-                            ZStack {
-                                Image(systemName: "checkmark")
-                                    .opacity(isApplyingGitHub ? 0 : 1)
-                                    .accessibilityHidden(true)
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .opacity(isApplyingGitHub ? 1 : 0)
-                                    .accessibilityHidden(true)
-                            }
-                            .frame(width: 16, height: 16)
-                            Text("Save and continue")
+                        ZStack {
+                            Text("Continue")
+                                .opacity(isApplyingGitHub ? 0 : 1)
+                            ProgressView()
+                                .controlSize(.small)
+                                .opacity(isApplyingGitHub ? 1 : 0)
+                                .accessibilityHidden(true)
                         }
                     }
                         .buttonStyle(.borderedProminent)
                         .disabled(!isGitHubConnected || !hasValidAssignments || isApplyingGitHub || isSkippingGitHub || githubSkipIssue != nil)
                         .keyboardShortcut(.defaultAction)
+                        .accessibilityLabel("Continue")
                         .accessibilityValue(isApplyingGitHub ? "Saving" : "Ready")
                         .accessibilityIdentifier("setup.github.apply.button")
                 }
             case .identity:
-                if identityStepComplete {
-                    Button("Continue to review") { activeStep = .review }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
-                        .accessibilityIdentifier("setup.identity.continue.button")
+                Button {
+                    if identitySkipped {
+                        if canSaveIdentity {
+                            saveIdentity()
+                        } else {
+                            activeStep = .review
+                        }
+                    } else if identityStepComplete {
+                        activeStep = .review
+                    } else {
+                        saveIdentity()
+                    }
+                } label: {
+                    ZStack {
+                        Text("Continue")
+                            .opacity(isSavingIdentity ? 0 : 1)
+                        ProgressView()
+                            .controlSize(.small)
+                            .opacity(isSavingIdentity ? 1 : 0)
+                            .accessibilityHidden(true)
+                    }
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled((!identitySkipped && !identityStepComplete && !canSaveIdentity) || isSavingIdentity)
+                .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Continue")
+                .accessibilityValue(isSavingIdentity ? "Saving" : "Ready")
+                .accessibilityIdentifier("setup.identity.continue.button")
             case .review:
                     Button("Done", action: completeSetup)
                         .buttonStyle(.borderedProminent)
@@ -2669,7 +2599,7 @@ struct SetupView: View {
         }
         guard let authorizationCoordinator else {
             isSavingIdentity = false
-            identityStatus = "Workspace identity settings are unavailable. Try setup again."
+            identityStatus = "Workspace Git settings are unavailable. Try setup again."
             return
         }
         Task {
@@ -2748,19 +2678,14 @@ struct SetupView: View {
         )
         identityName = prefill.name
         identityEmail = prefill.email
-        if prefill.didPrefill {
-            identityStatus = "Name/email were prefilled from this Mac's Git configuration; review or edit them before saving."
-        }
     }
 
     private func prefillIdentity(from account: GitHubAccount) {
         if !identityNameWasEdited, identityName.isEmpty, let name = account.name, !name.isEmpty {
             identityName = name
-            identityStatus = "Name was prefilled from @\(account.login); review or edit it before saving."
         }
         if !identityEmailWasEdited, identityEmail.isEmpty, let email = account.email, !email.isEmpty {
             identityEmail = email
-            identityStatus = "Name/email were prefilled from @\(account.login); review or edit them before saving."
         }
     }
 
@@ -3018,7 +2943,7 @@ struct SetupView: View {
         if uiTestStartsInReview {
             githubSkipped = true
             identitySkipped = true
-            identityStatus = "Identity skipped by choice. Configure it later in Workspace Settings."
+            identityStatus = ""
             githubStatus = "GitHub skipped by choice. You can connect later from Settings."
             activeStep = .review
         } else {
@@ -3081,7 +3006,7 @@ struct SetupView: View {
         case .hostIntegration: return "System access"
         case .workspaces: return "Workspaces"
         case .github: return "GitHub"
-        case .identity: return "Identity"
+        case .identity: return "Git"
         case .complete: return "Final review"
         }
     }
