@@ -191,25 +191,18 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(waitUntilEnabled(refreshCatalog, timeout: 2))
 
         let initialSetupFrame = setup.frame
-        let accessInfo = app.buttons["setup.github.workspace-access.info.button"]
+        let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
+        let accessInfo = app.descendants(matching: .any)["setup.github.workspace-access.info"]
         XCTAssertTrue(accessInfo.waitForExistence(timeout: 2))
         XCTAssertEqual(accessInfo.label, "Workspace Access information")
-        XCTAssertTrue(accessInfo.isEnabled)
-        accessInfo.click()
+        XCTAssertFalse(app.buttons["setup.github.workspace-access.info.button"].exists)
+        accessInfo.hover()
         assertText(
-            "Allowing changes lets a workspace push updates to the selected repository. GitHub sign-in stays on this Mac.",
-            identifier: "setup.github.workspace-access.help",
+            pushHelp,
+            identifier: "setup.github.workspace-access.info.tooltip",
             in: app
         )
-        app.buttons["setup.github.workspace-access.help.done"].click()
-        XCTAssertTrue(
-            app.staticTexts["setup.github.workspace-access.help"].waitForNonExistence(timeout: 2)
-        )
-        app.typeKey("i", modifierFlags: .command)
-        XCTAssertTrue(
-            app.staticTexts["setup.github.workspace-access.help"].waitForExistence(timeout: 2)
-        )
-        app.buttons["setup.github.workspace-access.help.done"].click()
+        XCTAssertFalse(app.buttons["setup.github.workspace-access.help.done"].exists)
 
         let picker = app.buttons["github.workspace.dev.repository-picker.button"]
         XCTAssertTrue(picker.waitForExistence(timeout: 2))
@@ -232,7 +225,13 @@ final class MSWMonitorUITests: XCTestCase {
             accuracy: 0.5,
             "Repository picker width must remain stable after selection"
         )
-        XCTAssertEqual(push.label, "Allow changes from this workspace")
+        XCTAssertEqual(push.label, "Allow pushes")
+        push.hover()
+        assertText(
+            pushHelp,
+            identifier: "github.workspace.dev.repository.1001.allow-pushes.tooltip",
+            in: app
+        )
         push.click()
         XCTAssertFalse(app.checkBoxes["Assign"].exists)
         XCTAssertFalse(app.staticTexts["Owner installation"].exists)

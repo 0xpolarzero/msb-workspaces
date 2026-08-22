@@ -3092,6 +3092,52 @@ struct SetupView: View {
 }
 
 
+private struct HoverTooltipModifier: ViewModifier {
+    let text: String
+    let accessibilityIdentifier: String
+    @State private var isPresented = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { isPresented = $0 }
+            .popover(isPresented: $isPresented, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+                Text(text)
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(width: 300, alignment: .leading)
+                    .accessibilityIdentifier(accessibilityIdentifier)
+            }
+    }
+}
+
+
+private extension View {
+    func hoverTooltip(_ text: String, accessibilityIdentifier: String) -> some View {
+        modifier(HoverTooltipModifier(
+            text: text,
+            accessibilityIdentifier: accessibilityIdentifier
+        ))
+    }
+}
+
+
+private struct InformationTooltip: View {
+    let text: String
+    let accessibilityLabel: String
+    let accessibilityIdentifier: String
+
+    var body: some View {
+        Image(systemName: "info.circle")
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+            .hoverTooltip(text, accessibilityIdentifier: "\(accessibilityIdentifier).tooltip")
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityIdentifier(accessibilityIdentifier)
+    }
+}
+
+
 /// Compact, searchable multi-selection picker. The persisted modes remain the
 /// policy source of truth; the push toggle maps directly to read-only/read-write.
 private struct RepositoryWorkspacePolicyEditor: View {
@@ -3102,9 +3148,10 @@ private struct RepositoryWorkspacePolicyEditor: View {
     @Binding var editedWorkspaces: Set<String>
     let disabled: Bool
     let onEdit: () -> Void
+    private static let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
+    private static let pushDeniedHelp = "GitHub does not grant push access to this repository. Neither the VM nor MSW Monitor can push until that access changes."
     @State private var openPicker: String?
     @State private var searchQueries: [String: String] = [:]
-    @State private var workspaceAccessHelpPresented = false
 
     private var sortedInstallations: [GitHubInstallation] {
         installations.sorted {
@@ -3116,35 +3163,11 @@ private struct RepositoryWorkspacePolicyEditor: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 5) {
                 Text("Workspace Access").font(.headline)
-                Button {
-                    workspaceAccessHelpPresented.toggle()
-                } label: {
-                    Image(systemName: "info.circle")
-                }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help("Show workspace access information")
-                    .keyboardShortcut("i", modifiers: .command)
-                    .accessibilityLabel("Workspace Access information")
-                    .accessibilityHint("Shows how repository access works")
-                    .accessibilityIdentifier("setup.github.workspace-access.info.button")
-                    .popover(isPresented: $workspaceAccessHelpPresented, arrowEdge: .top) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Workspace Access")
-                                .font(.headline)
-                            Text("Allowing changes lets a workspace push updates to the selected repository. GitHub sign-in stays on this Mac.")
-                                .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityIdentifier("setup.github.workspace-access.help")
-                            HStack {
-                                Spacer()
-                                Button("Done") { workspaceAccessHelpPresented = false }
-                                    .keyboardShortcut(.defaultAction)
-                                    .accessibilityIdentifier("setup.github.workspace-access.help.done")
-                            }
-                        }
-                        .padding(12)
-                        .frame(width: 320)
-                    }
+                InformationTooltip(
+                    text: Self.pushHelp,
+                    accessibilityLabel: "Workspace Access information",
+                    accessibilityIdentifier: "setup.github.workspace-access.info"
+                )
             }
             ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
                 workspaceSection(workspace)
@@ -3244,18 +3267,19 @@ private struct RepositoryWorkspacePolicyEditor: View {
                 .accessibilityHidden(true)
             Text(repository.fullName).lineLimit(1)
             Spacer(minLength: 8)
-            Toggle("Allow changes from this workspace", isOn: pushBinding(
+            Toggle("Allow pushes", isOn: pushBinding(
                 workspace,
                 repository: repository,
                 installation: installation
             ))
             .toggleStyle(.switch)
-            .accessibilityLabel("Allow changes from this workspace")
+            .accessibilityLabel("Allow pushes")
             .controlSize(.small)
             .disabled(disabled || repository.canPush == false)
-            .help(repository.canPush == false
-                ? "GitHub does not grant push access to this repository."
-                : "Allow this workspace to push changes to this repository.")
+            .hoverTooltip(
+                repository.canPush == false ? Self.pushDeniedHelp : Self.pushHelp,
+                accessibilityIdentifier: "github.workspace.\(workspace.rawValue).repository.\(repository.id).allow-pushes.tooltip"
+            )
             .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).allow-pushes")
         }
         .padding(.leading, 4)
