@@ -87,7 +87,9 @@ struct GitHubApplyProgress: Sendable, Equatable {
         [.validating, .saving, .configuring, .restoring, .activating].contains(phase)
     }
 
-    var summary: String {
+    /// nil for terminal success: a finished apply is silent — the flow moves on
+    /// and failure/cancel states carry their own copy.
+    var summary: String? {
         let scope = workspace.map { " for \($0)" } ?? ""
         switch phase {
         case .validating: return "Validating GitHub access\(scope)…"
@@ -95,7 +97,7 @@ struct GitHubApplyProgress: Sendable, Equatable {
         case .configuring: return "Configuring GitHub transport\(scope)…"
         case .restoring: return "Restoring workspace lifecycle\(scope)…"
         case .activating: return "Applying your GitHub repository choices…"
-        case .completed: return "Your GitHub repository choices are active."
+        case .completed: return nil
         case .failed: return failure?.message ?? "GitHub reconciliation failed."
         case .cancelled: return "GitHub reconciliation was cancelled."
         }

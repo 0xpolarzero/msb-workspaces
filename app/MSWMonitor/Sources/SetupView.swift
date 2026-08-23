@@ -608,36 +608,16 @@ struct SetupView: View {
         return committedWorkspaces.contains(issueWorkspace)
     }
 
-    /// One-line transparency for the Workspaces apply step: what each timed
-    /// span of the last apply cost, so a greyed-out Continue is never opaque.
-    static func setupDurationsSummary(_ durations: [String: TimeInterval]?) -> String? {
-        let ordered: [(key: String, title: String)] = [
-            ("toolchain", "runtime check"),
-            ("preflight", "system checks"),
-            ("hostIntegration", "system records"),
-            ("workspaces", "workspace registration"),
-        ]
-        let parts = ordered.compactMap { entry in
-            durations?[entry.key].map { "\(entry.title) \(applyDurationText($0))" }
-        }
-        guard !parts.isEmpty else { return nil }
-        return "Last apply: " + parts.joined(separator: ", ")
-    }
-
-    static func applyDurationText(_ interval: TimeInterval) -> String {
-        interval >= 10 ? "\(Int(interval))s" : String(format: "%.1fs", interval)
-    }
-
     /// Plain-language status for the phase currently being applied while the
     /// Continue button is disabled and spinning.
     static func bootstrapPhaseProgress(for phase: MSWBootstrapState.Phase) -> String {
         switch phase {
-        case .welcome, .preflight: return "running system checks"
-        case .toolchain: return "checking the MSW runtime"
-        case .hostIntegration: return "updating system records"
-        case .workspaces: return "registering your workspaces"
-        case .github, .identity: return "saving access choices"
-        case .complete: return "finishing verification"
+        case .welcome, .preflight: return "Running system checks"
+        case .toolchain: return "Checking the MSW runtime"
+        case .hostIntegration: return "Updating system records"
+        case .workspaces: return "Registering your workspaces"
+        case .github, .identity: return "Saving access choices"
+        case .complete: return "Finishing verification"
         }
     }
 
@@ -1188,12 +1168,6 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.workspaces.approval-hint")
             }
 
-            if !isRunning, let summary = Self.setupDurationsSummary(state.phaseDurations) {
-                Label(summary, systemImage: "timer")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("setup.workspaces.durations")
-            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.workspaces")
@@ -1720,19 +1694,22 @@ struct SetupView: View {
 
     @ViewBuilder
     private var githubApplyProgressView: some View {
-        if accessMode == .local, let progress = githubApplyProgress {
+        // Terminal success stays silent: the step advances and the review
+        // screen carries the outcome. Only attention-worthy states render.
+        if accessMode == .local, let progress = githubApplyProgress,
+           !(progress.isTerminalSuccess && progress.failure == nil) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 7) {
                     if progress.isInFlight {
                         ProgressView().controlSize(.small).accessibilityHidden(true)
                     } else {
-                        Image(systemName: progress.isTerminalSuccess
-                            ? "checkmark.circle.fill"
-                            : "exclamationmark.triangle.fill")
-                            .foregroundStyle(progress.isTerminalSuccess ? .green : .orange)
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                             .accessibilityHidden(true)
                     }
-                    Text(progress.summary)
+                    if let summary = progress.summary {
+                        Text(summary)
+                    }
                 }
                 if let failure = progress.failure {
                     Text(failure.recovery).foregroundStyle(.secondary)
@@ -1746,7 +1723,7 @@ struct SetupView: View {
             .font(.caption)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("setup.github.apply.progress")
-            .accessibilityValue(progress.summary)
+            .accessibilityValue(progress.summary ?? "")
         }
     }
 
@@ -2051,9 +2028,10 @@ struct SetupView: View {
                 Label(notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             } else if isRunning, activeStep == .workspaces || activeStep == .review {
                 Label(
-                    "Applying workspace setup — \(Self.bootstrapPhaseProgress(for: state.phase))…",
+                    "\(Self.bootstrapPhaseProgress(for: state.phase))…",
                     systemImage: "ellipsis.circle"
                 )
+                .lineLimit(1)
                 .foregroundStyle(.secondary)
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")

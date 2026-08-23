@@ -2400,35 +2400,13 @@ final class AppModelTests: XCTestCase {
         ))
     }
 
-    func testSetupDurationsSummaryFormatsPhasesInOrder() {
-        XCTAssertEqual(
-            SetupView.setupDurationsSummary([
-                "toolchain": 0.42,
-                "preflight": 1.25,
-                "hostIntegration": 3,
-                "workspaces": 12.4,
-            ]),
-            "Last apply: runtime check 0.4s, system checks 1.2s, system records 3.0s, workspace registration 12s"
-        )
-    }
-
-    func testSetupDurationsSummaryOmitsMissingAndUnknownPhases() {
-        XCTAssertNil(SetupView.setupDurationsSummary(nil))
-        XCTAssertNil(SetupView.setupDurationsSummary([:]))
-        XCTAssertNil(SetupView.setupDurationsSummary(["unknown-phase": 1]))
-        XCTAssertEqual(
-            SetupView.setupDurationsSummary(["toolchain": 2.34, "workspaces": 8.9]),
-            "Last apply: runtime check 2.3s, workspace registration 8.9s"
-        )
-    }
-
     func testBootstrapPhaseProgressCoversEveryPhaseWithPlainLanguage() {
         for phase in MSWBootstrapState.Phase.allCases {
             XCTAssertFalse(SetupView.bootstrapPhaseProgress(for: phase).isEmpty)
         }
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .toolchain), "checking the MSW runtime")
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .hostIntegration), "updating system records")
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .workspaces), "registering your workspaces")
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .toolchain), "Checking the MSW runtime")
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .hostIntegration), "Updating system records")
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .workspaces), "Registering your workspaces")
     }
 
     func testBootstrapStateWithoutPhaseDurationsStillDecodes() throws {
