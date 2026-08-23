@@ -268,6 +268,7 @@ struct SetupView: View {
     @State private var state = MSWBootstrapState.initial
     @State private var isRunning = false
     @State private var isChecking = true
+    @State private var workspaceNamesNeedApproval = false
     @State private var lastPreflightAt: Date?
     @State private var passedChecksExpanded = false
     @State private var requirementsExpanded = false
@@ -326,8 +327,11 @@ struct SetupView: View {
     @State private var identityStatus = ""
     @State private var activeStep: SetupStep = .dependencies
     @State private var workspaceConfigurationAccepted = false
-    @State private var startupStateLoaded = false
     @State private var githubContextLoaded = false
+    /// Set once the setup context (resumed configuration, fixture state, or
+    /// freshly streamed preflight) is loaded. Only actions that run real
+    /// bootstrap work wait for it; pure navigation never does.
+    @State private var bootstrapInputReady = false
     @State private var localCatalogAttempted = false
     @State private var githubHostCredentialPresent = false
     @State private var githubAttentionWorkspace: String?
@@ -425,7 +429,10 @@ struct SetupView: View {
             if !uiTestMode { persistResumeState() }
         }
         .onChange(of: workspaceConfigurations) { _, _ in
-            if !uiTestMode { persistResumeState() }
+            if !uiTestMode {
+                persistResumeState()
+                refreshWorkspaceNameApprovalHint()
+            }
         }
         .onChange(of: editedGitHubWorkspaces) { _, _ in
             if !uiTestMode { persistResumeState() }
@@ -456,6 +463,7 @@ struct SetupView: View {
         }
         .onChange(of: activeStep) { _, step in
             loadLocalCatalogWhenNeeded(for: step)
+            if step == .workspaces { refreshWorkspaceNameApprovalHint() }
         }
         .sheet(isPresented: $deviceFlowShown) {
             if let session = deviceFlowSession {
@@ -805,7 +813,7 @@ struct SetupView: View {
         case .dependencies:
             return true
         case .workspaces:
-            return startupStateLoaded && !checks.isEmpty
+            return true
         case .github:
             return workspaceConfigurationAccepted && workspaceValidationMessage == nil &&
                 workspaceConfigurationIsApplied && githubContextLoaded &&
@@ -834,9 +842,7 @@ struct SetupView: View {
         case .dependencies:
             return "dependency checks are still loading"
         case .workspaces:
-            return startupStateLoaded && checks.isEmpty
-                ? "dependency checks have not finished yet"
-                : "dependency checks must pass first"
+            return "the Workspaces step follows Dependencies"
         case .github:
             return workspaceConfigurationAccepted && !workspaceConfigurationIsApplied
                 ? "the workspace configuration is not applied yet"
@@ -853,12 +859,14 @@ struct SetupView: View {
         guard canSelectStep(step) else { return }
         activeStep = step
     }
+    /// Onboarding never blocks on dependency checking: results stream into
+    /// the checklist while the user moves ahead, and real blockers are
+    /// enforced where they matter (workspace apply and final verification).
     private func advanceFromDependencies() {
-        guard startupStateLoaded, !checks.isEmpty else { return }
         activeStep = .workspaces
     }
     private func advanceFromWorkspaces() {
-        guard workspaceValidationMessage == nil, startupStateLoaded else { return }
+        guard workspaceValidationMessage == nil, bootstrapInputReady else { return }
         if uiTestMode, coordinator == nil {
             // Explicit fixture-only seam. Production always crosses the real
             // coordinator and operational read-back below.
@@ -1138,6 +1146,13 @@ struct SetupView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("setup.workspaces.validation")
+            }
+
+            if workspaceNamesNeedApproval {
+                Label("Saving will update these names on your Mac. macOS will ask for your administrator password once.", systemImage: "lock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.workspaces.approval-hint")
             }
         }
         .accessibilityElement(children: .contain)
@@ -1998,7 +2013,7 @@ struct SetupView: View {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
             } else if activeStep == .dependencies && !blockingChecks.isEmpty {
-                Label("Resolve the highlighted checks to continue.", systemImage: "exclamationmark.triangle.fill")
+                Label("Continuing will resolve these during setup.", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
             } else if activeStep == .workspaces, let workspaceValidationMessage {
                 Label(workspaceValidationMessage, systemImage: "exclamationmark.triangle.fill")
@@ -2038,7 +2053,7 @@ struct SetupView: View {
 
             switch activeStep {
             case .dependencies:
-                Button(isChecking ? "Checking…" : "Retry", action: loadPreflight)
+                Button("Retry", action: loadPreflight)
                     .buttonStyle(.bordered)
                     .disabled(isChecking || isRunning || coordinator == nil)
                     .accessibilityIdentifier("setup.retry.button")
@@ -2048,25 +2063,17 @@ struct SetupView: View {
                         .accessibilityIdentifier("setup.signed-build.required")
                 } else {
                     Button(
-                        isChecking
-                            ? "Checking…"
-                            : (canFinishWithoutGitHub ? "Continue" : (blockingChecks.isEmpty ? "Continue" : "Repair & Continue")),
+                        "Continue",
                         action: advanceFromDependencies
                     )
                     .buttonStyle(.borderedProminent)
-                    .disabled(
-                        isRunning ||
-                            isChecking ||
-                            checks.isEmpty ||
-                            !startupStateLoaded
-                    )
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .workspaces:
                 Button("Continue", action: advanceFromWorkspaces)
                     .buttonStyle(.borderedProminent)
-                    .disabled(workspaceValidationMessage != nil || isRunning || !startupStateLoaded)
+                    .disabled(workspaceValidationMessage != nil || isRunning || !bootstrapInputReady)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("setup.workspaces.continue.button")
             case .github:
@@ -3007,10 +3014,10 @@ struct SetupView: View {
     @discardableResult
     func loadSetupStartupState() async -> Bool {
         let startupLifecycle = setupLifecycle.generation
-        restoreResumeState()
+        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        bootstrapInputReady = true
         await refreshPreflightState()
         guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
-        startupStateLoaded = true
         guard workspaceConfigurationIsApplied else {
             githubContextLoaded = false
             return true
@@ -3079,12 +3086,25 @@ struct SetupView: View {
     private func refreshPreflightState() async {
         guard let coordinator else { return }
         isChecking = true
+        checks = []
         let savedState = await coordinator.state()
-        let result = await coordinator.preflight()
+        let result = await coordinator.preflight { check in
+            Task { @MainActor in self.upsertPreflightCheck(check) }
+        }
         state = savedState
         checks = result
         lastPreflightAt = Date()
         isChecking = false
+    }
+
+    /// Streams one finished dependency check into the checklist while the
+    /// remaining checks are still running.
+    private func upsertPreflightCheck(_ check: MSWPreflightCheck) {
+        if let index = checks.firstIndex(where: { $0.id == check.id }) {
+            checks[index] = check
+        } else {
+            checks.append(check)
+        }
     }
 
     private func openHostApprovalSettings() {
@@ -3506,6 +3526,20 @@ struct SetupView: View {
         UserDefaults.standard.set(data, forKey: Self.resumeStateKey)
     }
 
+    /// Live hint for the Workspaces step: tracks the draft names against what
+    /// is installed on this Mac so the administrator prompt at save is never
+    /// a surprise. Apply-time verification stays authoritative.
+    private func refreshWorkspaceNameApprovalHint() {
+        guard let coordinator else { return }
+        let configurations = workspaceConfigurations
+        Task {
+            let needed = await coordinator.workspaceNamesNeedApproval(
+                workspaceConfigurations: configurations
+            )
+            workspaceNamesNeedApproval = needed
+        }
+    }
+
     private func restoreResumeState() {
         guard let data = UserDefaults.standard.data(forKey: Self.resumeStateKey),
               let resume = try? JSONDecoder().decode(SetupResumeState.self, from: data) else {
@@ -3574,7 +3608,7 @@ struct SetupView: View {
             )
         lastPreflightAt = now
         isChecking = false
-        startupStateLoaded = true
+        bootstrapInputReady = true
         if uiTestStartsInReview {
             workspaceConfigurationAccepted = true
             githubSkipped = true

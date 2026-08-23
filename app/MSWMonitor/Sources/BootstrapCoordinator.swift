@@ -111,65 +111,27 @@ enum MSWHostServicePackagingStatus: Sendable, Equatable {
 @MainActor
 protocol MSWHostServiceControlling: AnyObject, Sendable {
     var status: MSWHostServiceStatus { get }
-    var packagingStatus: MSWHostServicePackagingStatus { get }
-    func registerIfNeeded() throws -> MSWHostServiceStatus
+    func packagingStatus() async -> MSWHostServicePackagingStatus
+    func registerIfNeeded() async throws -> MSWHostServiceStatus
     func openApprovalSettings()
 }
 
 extension MSWHostServiceControlling {
-    var packagingStatus: MSWHostServicePackagingStatus { .ready }
+    func packagingStatus() async -> MSWHostServicePackagingStatus { .ready }
 }
 
+/// Code-signature validation hashes every binary in the bundle and can take
+/// hundreds of milliseconds on large builds, so it must never run on the
+/// main actor. Callers on background executors invoke it directly.
 
-@MainActor
-final class MSWHostServiceController: MSWHostServiceControlling {
-    static let plistName = "org.microsandbox.MSWMonitor.host-agent.plist"
-    static let serviceName = "org.microsandbox.MSWMonitor.host-agent"
-    static let executablePath = "Contents/Resources/MSWHostAgent"
+enum MSWHostPackagingInspector {
+    /// The constants below mirror the launchd plist contract enforced by the
+    /// controller; keep them in sync with MSWHostServiceController.
+    private static let plistName = "org.microsandbox.MSWMonitor.host-agent.plist"
+    private static let serviceName = "org.microsandbox.MSWMonitor.host-agent"
+    private static let executablePath = "Contents/Resources/MSWHostAgent"
 
-    private let service: SMAppService
-
-    init() {
-        service = SMAppService.daemon(plistName: Self.plistName)
-    }
-
-    var status: MSWHostServiceStatus {
-        switch service.status {
-        case .enabled: return .enabled
-        case .requiresApproval: return .requiresApproval
-        case .notRegistered: return .notRegistered
-        case .notFound: return .notFound
-        @unknown default: return .unknown
-        }
-    }
-
-    var packagingStatus: MSWHostServicePackagingStatus {
-        Self.inspectPackaging(bundleURL: Bundle.main.bundleURL)
-    }
-
-    func registerIfNeeded() throws -> MSWHostServiceStatus {
-        guard packagingStatus == .ready else {
-            throw BootstrapCoordinatorError.hostRegistrationFailed(packagingStatus.detail)
-        }
-        switch status {
-        case .enabled, .requiresApproval, .notFound, .unknown:
-            return status
-        case .notRegistered:
-            try service.register()
-            return status
-        }
-    }
-
-    func unregister() throws {
-        guard status != .notRegistered else { return }
-        try service.unregister()
-    }
-
-    func openApprovalSettings() {
-        SMAppService.openSystemSettingsLoginItems()
-    }
-
-    static func inspectPackaging(bundleURL: URL) -> MSWHostServicePackagingStatus {
+    static func inspect(bundleURL: URL) -> MSWHostServicePackagingStatus {
         let propertyListURL = bundleURL
             .appending(path: "Contents/Library/LaunchDaemons", directoryHint: .isDirectory)
             .appending(path: plistName)
@@ -230,6 +192,59 @@ final class MSWHostServiceController: MSWHostServiceControlling {
     }
 }
 
+@MainActor
+final class MSWHostServiceController: MSWHostServiceControlling {
+    static let plistName = "org.microsandbox.MSWMonitor.host-agent.plist"
+    static let serviceName = "org.microsandbox.MSWMonitor.host-agent"
+    static let executablePath = "Contents/Resources/MSWHostAgent"
+
+    private let service: SMAppService
+
+    init() {
+        service = SMAppService.daemon(plistName: Self.plistName)
+    }
+
+    var status: MSWHostServiceStatus {
+        switch service.status {
+        case .enabled: return .enabled
+        case .requiresApproval: return .requiresApproval
+        case .notRegistered: return .notRegistered
+        case .notFound: return .notFound
+        @unknown default: return .unknown
+        }
+    }
+
+    /// Witnessed nonisolated so signature validation runs on the caller's
+    /// background executor instead of the main thread.
+    nonisolated func packagingStatus() async -> MSWHostServicePackagingStatus {
+        MSWHostPackagingInspector.inspect(bundleURL: Bundle.main.bundleURL)
+    }
+
+    func registerIfNeeded() async throws -> MSWHostServiceStatus {
+        let packaging = await packagingStatus()
+        guard packaging == .ready else {
+            throw BootstrapCoordinatorError.hostRegistrationFailed(packaging.detail)
+        }
+        switch status {
+        case .enabled, .requiresApproval, .notFound, .unknown:
+            return status
+        case .notRegistered:
+            try service.register()
+            return status
+        }
+    }
+
+    func unregister() throws {
+        guard status != .notRegistered else { return }
+        try service.unregister()
+    }
+
+    func openApprovalSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
+}
+
 actor BootstrapStateStore {
     private let url: URL
     private var value: MSWBootstrapState
@@ -249,7 +264,6 @@ actor BootstrapStateStore {
             value = .initial
         }
     }
-
     nonisolated static func persistedWorkspaceConfigurations() -> [SetupWorkspaceConfiguration] {
         let workspaceConfigurationURL: URL = {
             if let explicit = ProcessInfo.processInfo.environment["MSW_WORKSPACES_FILE"],
@@ -316,16 +330,32 @@ actor BootstrapStateStore {
 }
 protocol MSWBootstrapCoordinating: AnyObject, Sendable {
     func state() async -> MSWBootstrapState
-    func preflight() async -> [MSWPreflightCheck]
+    /// Runs every dependency check. When `onCheck` is provided it is invoked
+    /// once per finished check so callers can surface results progressively
+    /// while the remaining checks are still running.
+    func preflight(onCheck: (@Sendable (MSWPreflightCheck) -> Void)?) async -> [MSWPreflightCheck]
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
     ) async throws -> MSWBootstrapResult
+    /// True when saving these workspaces will require the one-time
+    /// administrator-approved hosts update (unsigned-build fallback whose
+    /// installed records differ from the desired names).
+    func workspaceNamesNeedApproval(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async -> Bool
     func openHostApprovalSettings() async
 }
 
 extension MSWBootstrapCoordinating {
     func run() async throws -> MSWBootstrapResult {
         try await run(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
+    }
+}
+
+extension MSWBootstrapCoordinating {
+    /// Non-streaming convenience for callers that only consume the final set.
+    func preflight() async -> [MSWPreflightCheck] {
+        await preflight(onCheck: nil)
     }
 }
 
@@ -340,6 +370,9 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     private let hostRepairAuthorization: any MSWHostRepairAuthorizing
     private let freeDiskBytes: @Sendable () -> Int64?
     private var running = false
+    /// Session cache for the expensive signature-validation query; packaging
+    /// does not change while the app runs.
+    private var cachedPackagingStatus: MSWHostServicePackagingStatus?
     init(
         client: MSWClient,
         runner: MSWCommandRunner,
@@ -377,8 +410,10 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     }
 
 
-    func preflight() async -> [MSWPreflightCheck] {
-        await preflight(workspaceConfigurations: nil)
+    func preflight(
+        onCheck: (@Sendable (MSWPreflightCheck) -> Void)? = nil
+    ) async -> [MSWPreflightCheck] {
+        await preflight(workspaceConfigurations: nil, onCheck: onCheck)
     }
 
     /// Host integration is workspace-scoped. During an onboarding run the
@@ -386,7 +421,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     /// and read it back, so post-repair verification must use the submitted
     /// boundary rather than the previously persisted/default boundary.
     private func preflight(
-        workspaceConfigurations: [SetupWorkspaceConfiguration]?
+        workspaceConfigurations: [SetupWorkspaceConfiguration]?,
+        onCheck: (@Sendable (MSWPreflightCheck) -> Void)? = nil
     ) async -> [MSWPreflightCheck] {
         let persistedWorkspaceConfigurations = (await stateStore.load()).workspaceConfigurations
         let targetWorkspaceConfigurations = workspaceConfigurations
@@ -427,10 +463,35 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             detail: "Detected \(memoryGiB) GiB physical memory.",
             remediation: memoryGiB >= 16 ? nil : "At least 16 GiB is recommended for the configured workspaces."
         ))
+
+        // Tool resolution and the MSW-runtime handshake wait on subprocesses
+        // while host integration waits on its own XPC chain. Running both
+        // tails concurrently bounds checking by the slower branch instead of
+        // the sum of both, and every finished check streams to `onCheck`.
+        async let runtimeChecks = runtimePreflight(report: onCheck)
+        async let hostChecks = hostIntegrationPreflight(
+            targetWorkspaceConfigurations,
+            report: onCheck
+        )
+        checks.append(contentsOf: await runtimeChecks)
+        checks.append(contentsOf: await hostChecks)
+        return checks
+    }
+
+    /// Tool availability plus the MSW runtime handshake. Each finished check
+    /// is reported immediately so setup can render results progressively.
+    private func runtimePreflight(
+        report: (@Sendable (MSWPreflightCheck) -> Void)?
+    ) async -> [MSWPreflightCheck] {
+        var checks: [MSWPreflightCheck] = []
+        func record(_ check: MSWPreflightCheck) {
+            checks.append(check)
+            report?(check)
+        }
         for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
             let resolved = await runner.resolveExecutable(named: name)
             let available = resolved != nil
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "tool-\(name)",
                 title: name,
                 status: available ? .pass : .needsAction,
@@ -441,22 +502,22 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         let mswResolution = await runner.mswResolution(forceRefresh: true)
         let canInstallToolchain = bundledToolchainConfigurationAvailable || sourceSetup.isAvailable
         let repairRuntimeAction = bundledToolchainConfigurationAvailable
-            ? "Choose Repair & Continue to install the signed MSW toolchain."
-            : "Choose Repair & Continue to run the local MSW setup installer."
+            ? "Continue to install the signed MSW toolchain during setup."
+            : "Continue to run the local MSW setup installer during setup."
         if mswResolution.selected == nil, !mswResolution.hasInstalledExecutable {
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "msw-runtime",
                 title: "MSW runtime",
                 status: canInstallToolchain ? .needsAction : .unavailable,
                 detail: canInstallToolchain
-                    ? "MSW is not installed yet. Repair & Continue will install it and verify the runtime."
+                    ? "MSW is not installed yet. Continuing will install it and verify the runtime."
                     : "No compatible MSW runtime is installed, and this build has no runtime installer.",
                 remediation: canInstallToolchain
                     ? repairRuntimeAction
                     : "Use an MSW Monitor build that bundles the runtime, or launch this app from the source checkout."
             ))
         } else if mswResolution.selected == nil {
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "msw-runtime",
                 title: "MSW runtime",
                 status: canInstallToolchain ? .needsAction : .unavailable,
@@ -464,17 +525,21 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                     ? "The installed MSW command is from an older release and does not support MSW Monitor."
                     : "The installed MSW command is incompatible, and this build has no runtime installer.",
                 remediation: canInstallToolchain
-                    ? "Choose Repair & Continue to replace it with a protocol-compatible runtime."
+                    ? "Continue to replace it with a protocol-compatible runtime."
                     : "Use an MSW Monitor build with a compatible runtime, or repair the MSW source checkout."
             ))
         } else {
-            do {
-                let envelope = try await client.handshake()
-                guard let handshake = envelope.result else {
-                    throw MSWClientError.missingResult(command: "handshake")
-                }
-                let ready = handshake.configurationAvailable && handshake.runtimeAvailable && handshake.capabilities.jq
-                checks.append(MSWPreflightCheck(
+            // Resolution already handshook the selected candidate; only fall
+            // back to a second spawn when that result is unavailable.
+            var handshake = await runner.handshakeForSelectedRuntime()
+            if handshake == nil {
+                handshake = (try? await client.handshake())?.result
+            }
+            if let handshake {
+                let ready =
+                    handshake.configurationAvailable && handshake.runtimeAvailable &&
+                    handshake.capabilities.jq
+                record(MSWPreflightCheck(
                     id: "msw-runtime",
                     title: "MSW runtime",
                     status: ready ? .pass : .needsAction,
@@ -487,8 +552,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                         ? repairRuntimeAction
                         : "Repair the MSW installation or use a build with a compatible runtime.")
                 ))
-            } catch {
-                checks.append(MSWPreflightCheck(
+            } else {
+                record(MSWPreflightCheck(
                     id: "msw-runtime",
                     title: "MSW runtime",
                     status: .needsAction,
@@ -499,37 +564,51 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 ))
             }
         }
-        let hostPackaging = await hostService.packagingStatus
+        return checks
+    }
+
+    /// Packaging, registration state, and helper reachability. Runs off the
+    /// main actor; code-signature validation never touches the UI thread.
+    private func hostIntegrationPreflight(
+        _ targetWorkspaceConfigurations: [SetupWorkspaceConfiguration],
+        report: (@Sendable (MSWPreflightCheck) -> Void)?
+    ) async -> [MSWPreflightCheck] {
+        var checks: [MSWPreflightCheck] = []
+        func record(_ check: MSWPreflightCheck) {
+            checks.append(check)
+            report?(check)
+        }
+        let hostPackaging = await hostService.packagingStatus()
         if hostPackaging == .signingUnavailable {
             let records = MSWWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
             let ready = await hostRepairVerifier.isReady(records: records)
-            let directRepairAvailable = sourceSetup.isAvailable
-            let status: MSWPreflightCheck.Status = ready
-                ? .pass
-                : (directRepairAvailable ? .needsAction : .unavailable)
-            let detail: String
-            let remediation: String?
             if ready {
-                detail = "Host networking is configured for this Mac."
-                remediation = nil
-            } else if directRepairAvailable {
-                detail = "Host networking needs one-time administrator approval on this Mac."
-                remediation = "Continue setup; macOS will ask for an administrator password once to configure host networking."
-            } else {
-                detail = hostPackaging.detail
-                remediation = hostPackaging.remediation
+                record(MSWPreflightCheck(
+                    id: "host-integration",
+                    title: "Host integration",
+                    status: .pass,
+                    detail: "Host networking is configured for this Mac.",
+                    remediation: nil
+                ))
+                return checks
             }
-            checks.append(MSWPreflightCheck(
+            if sourceSetup.isAvailable {
+                // Auto-fixed by the administrator prompt during the workspace
+                // apply phase. Not a dependency problem, so it does not appear
+                // here; the Workspaces step surfaces a save-time hint instead.
+                return checks
+            }
+            record(MSWPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
-                status: status,
-                detail: detail,
-                remediation: remediation
+                status: .unavailable,
+                detail: hostPackaging.detail,
+                remediation: hostPackaging.remediation
             ))
             return checks
         }
         if hostPackaging != .ready {
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .unavailable,
@@ -546,7 +625,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 let snapshot = try await hostAgent.inspect(records: records)
                 let expectedAliases = records.map(\.address)
                 let ready = snapshot.fixedAliases == expectedAliases && snapshot.hostsBlockInstalled
-                checks.append(MSWPreflightCheck(
+                record(MSWPreflightCheck(
                     id: "host-integration",
                     title: "Host integration",
                     status: ready ? .pass : .needsAction,
@@ -554,7 +633,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                     remediation: ready ? nil : "Continue setup to repair only the fixed MSW-owned host integration."
                 ))
             } catch {
-                checks.append(MSWPreflightCheck(
+                record(MSWPreflightCheck(
                     id: "host-integration",
                     title: "Host integration",
                     status: .needsAction,
@@ -563,7 +642,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 ))
             }
         case .notRegistered:
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .needsAction,
@@ -571,7 +650,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 remediation: "Continue setup to register the helper and request administrator approval."
             ))
         case .requiresApproval:
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .needsAction,
@@ -579,15 +658,33 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 remediation: "Open Login Items settings and approve the MSW Monitor host helper."
             ))
         case .notFound, .unknown:
-            checks.append(MSWPreflightCheck(
+            record(MSWPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .unavailable,
                 detail: "The bundled host helper is present and signed, but macOS could not load its registration state.",
-                remediation: "Choose Repair & Continue. If the problem remains, reinstall MSW Monitor."
+                remediation: "Continue setup. If the problem remains, reinstall MSW Monitor."
             ))
         }
         return checks
+    }
+
+    /// Cheap, keystroke-friendly check for the Workspaces step: packaging
+    /// state is cached (signature validation is expensive) and only the
+    /// hosts file is compared. The apply phase re-verifies aliases and the
+    /// daemon authoritatively before it repairs anything.
+    func workspaceNamesNeedApproval(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async -> Bool {
+        if let cachedPackagingStatus {
+            guard cachedPackagingStatus == .signingUnavailable else { return false }
+        } else {
+            let status = await hostService.packagingStatus()
+            cachedPackagingStatus = status
+            guard status == .signingUnavailable else { return false }
+        }
+        let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
+        return !MSWHostRepairVerifier.hostsFileMatches(records: records)
     }
     func installToolchain(
         manifestData: Data,
@@ -840,7 +937,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             throw BootstrapCoordinatorError.preflightBlocked
         }
 
-        let hostPackaging = await hostService.packagingStatus
+        let hostPackaging = await hostService.packagingStatus()
         if hostPackaging == .signingUnavailable {
             let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
             if !(await hostRepairVerifier.isReady(records: records)) {
@@ -1079,13 +1176,17 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
 
     func state() async -> MSWBootstrapState { current }
 
-    func preflight() async -> [MSWPreflightCheck] {
-        [
+    func preflight(
+        onCheck: (@Sendable (MSWPreflightCheck) -> Void)? = nil
+    ) async -> [MSWPreflightCheck] {
+        let checks: [MSWPreflightCheck] = [
             MSWPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
             MSWPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
             MSWPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
             MSWPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
         ]
+        checks.forEach { onCheck?($0) }
+        return checks
     }
 
     func run(
@@ -1127,4 +1228,8 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
     }
 
     func openHostApprovalSettings() async {}
+
+    func workspaceNamesNeedApproval(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async -> Bool { false }
 }

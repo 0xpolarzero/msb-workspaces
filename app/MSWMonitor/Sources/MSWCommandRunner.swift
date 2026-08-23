@@ -101,6 +101,7 @@ actor MSWCommandRunner {
     private var runningProcesses: [UUID: RunningProcess] = [:]
     private var cancelledOperations: Set<UUID> = []
     private var cachedMSWResolution: MSWExecutableResolution?
+    private var cachedSelectedHandshake: (url: URL, handshake: MSWHandshake)?
 
     init(configuration: Configuration = .init()) {
         self.configuration = configuration
@@ -227,13 +228,14 @@ actor MSWCommandRunner {
         let candidates = mswCandidates()
         var incompatibleCandidates: [URL] = []
         for candidate in candidates {
-            if await supportsAppProtocol(candidate) {
+            if let handshake = await handshakeIfCompatible(candidate) {
                 let resolution = MSWExecutableResolution(
                     selected: candidate,
                     candidates: candidates,
                     incompatibleCandidates: incompatibleCandidates
                 )
                 cachedMSWResolution = resolution
+                cachedSelectedHandshake = (url: candidate, handshake: handshake)
                 return resolution
             }
             // Cancellation can interrupt the handshake used for capability
@@ -258,8 +260,19 @@ actor MSWCommandRunner {
         return resolution
     }
 
+    /// Returns the handshake captured during the most recent resolution of the
+    /// currently selected runtime, so callers can reuse the spawn instead of
+    /// running an identical `msw app handshake` again.
+    func handshakeForSelectedRuntime() -> MSWHandshake? {
+        guard let selected = cachedMSWResolution?.selected,
+              let pair = cachedSelectedHandshake,
+              pair.url == selected else { return nil }
+        return pair.handshake
+    }
+
     func invalidateMSWResolution() {
         cachedMSWResolution = nil
+        cachedSelectedHandshake = nil
     }
 
     private func mswCandidates() -> [URL] {
@@ -282,7 +295,11 @@ actor MSWCommandRunner {
         }
     }
 
-    private func supportsAppProtocol(_ executable: URL) async -> Bool {
+    /// Runs the protocol handshake against one candidate and returns the
+    /// decoded handshake when the executable speaks the app-compatible
+    /// protocol, otherwise nil. The handshake is the same command the client
+    /// issues later, so callers can reuse it instead of spawning twice.
+    private func handshakeIfCompatible(_ executable: URL) async -> MSWHandshake? {
         struct HandshakeEnvelope: Decodable {
             let schemaVersion: Int
             let requestId: String
@@ -305,14 +322,18 @@ actor MSWCommandRunner {
                   envelope.command == "handshake",
                   !envelope.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   envelope.observedAt != nil else {
-                return false
+                return nil
             }
             if envelope.ok {
                 return output.status == 0 && envelope.error == nil && envelope.result?.protocolVersion == 1
+                    ? envelope.result
+                    : nil
             }
-            return output.status != 0 && envelope.result == nil && envelope.error != nil
+            // A protocol-aware but erroring envelope is incompatible too;
+            // only a clean ok envelope with protocolVersion 1 carries a result.
+            return nil
         } catch {
-            return false
+            return nil
         }
     }
 

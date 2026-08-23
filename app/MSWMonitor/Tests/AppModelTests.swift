@@ -1675,7 +1675,7 @@ final class AppModelTests: XCTestCase {
 
     func testUnsignedDevelopmentBundleExplainsHostServiceRegistrationFailure() {
         XCTAssertEqual(
-            MSWHostServiceController.inspectPackaging(bundleURL: Bundle.main.bundleURL),
+            MSWHostPackagingInspector.inspect(bundleURL: Bundle.main.bundleURL),
             .signingUnavailable
         )
     }

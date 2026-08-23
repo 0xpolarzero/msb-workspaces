@@ -21,6 +21,14 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
     }
 
     private func hostsFileIsReady(records: [MSWWorkspaceNetworkRecord]) -> Bool {
+        Self.hostsFileMatches(records: records)
+    }
+
+    /// Reads /etc/hosts and reports whether the managed block exactly matches
+    /// the desired records. Cheap enough for keystroke-frequency UI checks;
+    /// the authoritative pre-apply verification still covers aliases and the
+    /// daemon as well.
+    static func hostsFileMatches(records: [MSWWorkspaceNetworkRecord]) -> Bool {
         let url = URL(fileURLWithPath: "/etc/hosts")
         guard let data = try? Data(contentsOf: url), data.count <= 1_024 * 1_024 else {
             return false
