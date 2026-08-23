@@ -766,11 +766,12 @@ struct SetupView: View {
                 .contentShape(Rectangle())
                 .disabled(!canSelectStep(step))
                 .opacity(canSelectStep(step) ? 1 : 0.55)
+                .help(stepHelpText(step))
                 .accessibilityIdentifier(step.accessibilityIdentifier)
                 .accessibilityValue(
                     stepIsComplete(step)
                         ? "Complete"
-                        : (activeStep == step ? "Current step" : "Not available yet")
+                        : (activeStep == step ? "Current step" : stepLockedValue(step))
                 )
             }
         }
@@ -815,6 +816,39 @@ struct SetupView: View {
             return canCompleteReview
         }
     }
+    /// Greyed-out steps stay disabled until their prerequisites are proven;
+    /// the tooltip names the missing prerequisite so the lock is legible.
+    private func stepHelpText(_ step: SetupStep) -> String {
+        if canSelectStep(step) {
+            return stepIsComplete(step) ? "Completed" : "Current setup step"
+        }
+        return "Unavailable: \(stepLockReason(step))"
+    }
+
+    private func stepLockedValue(_ step: SetupStep) -> String {
+        "Not available yet: \(stepLockReason(step))"
+    }
+
+    private func stepLockReason(_ step: SetupStep) -> String {
+        switch step {
+        case .dependencies:
+            return "dependency checks are still loading"
+        case .workspaces:
+            return startupStateLoaded && checks.isEmpty
+                ? "dependency checks have not finished yet"
+                : "dependency checks must pass first"
+        case .github:
+            return workspaceConfigurationAccepted && !workspaceConfigurationIsApplied
+                ? "the workspace configuration is not applied yet"
+                : "the Workspaces step must be saved and verified first"
+        case .identity:
+            return githubStepComplete
+                ? "GitHub access must finish loading"
+                : "the GitHub step must be decided first"
+        case .review:
+            return "every earlier step must be complete and verified"
+        }
+    }
     private func selectStep(_ step: SetupStep) {
         guard canSelectStep(step) else { return }
         activeStep = step
@@ -825,16 +859,19 @@ struct SetupView: View {
     }
     private func advanceFromWorkspaces() {
         guard workspaceValidationMessage == nil, startupStateLoaded else { return }
-        workspaceConfigurationAccepted = true
         if uiTestMode, coordinator == nil {
             // Explicit fixture-only seam. Production always crosses the real
             // coordinator and operational read-back below.
+            workspaceConfigurationAccepted = true
             state.workspaceConfigurations = workspaceConfigurations
             rebuildWorkspaceScopedState()
             githubContextLoaded = true
             activeStep = .github
             return
         }
+        // Production acceptance is published only after the coordinator proves
+        // the boundary applied (runSetup success or verified reconnect), so a
+        // failed run can never leave this step looking complete.
         runSetup()
     }
     private func advanceFromGitHub() {
@@ -3111,6 +3148,7 @@ struct SetupView: View {
                     githubReconnectRequired = true
                     githubAttentionWorkspace = protocolError.workspace
                     githubSkipped = false
+                    workspaceConfigurationAccepted = true
                     activeStep = .github
                 } else {
                     self.error = setupError.localizedDescription

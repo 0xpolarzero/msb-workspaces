@@ -214,7 +214,14 @@ struct MSWProtocolError: Codable, Error, LocalizedError, Sendable, Equatable {
     let workspace: String?
     let retryable: Bool
 
-    var errorDescription: String? { message }
+    var errorDescription: String? {
+        var description = message
+        if let recovery, !recovery.isEmpty {
+            description += " \(recovery)"
+        }
+        description += " (MSW error code: \(code).)"
+        return description
+    }
 }
 
 struct MSWHandshake: Codable, Sendable {

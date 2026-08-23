@@ -45,6 +45,7 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
     case configurationInstallationFailed(String)
     case invalidWorkspaceConfiguration(String)
     case toolchainInstallationFailed(String)
+    case runtimeContractMismatch(installedVersion: String?)
     case hostRegistrationFailed(String)
 
     var errorDescription: String? {
@@ -59,6 +60,9 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
         case .invalidWorkspaceConfiguration(let detail): return "Workspace configuration is invalid: \(detail)"
         case .toolchainInstallationFailed(let detail): return "MSW runtime setup failed: \(detail)"
         case .hostRegistrationFailed(let detail): return "Host integration could not be completed: \(detail)"
+        case .runtimeContractMismatch(let installedVersion):
+            let runtime = installedVersion.map { " (\($0))" } ?? ""
+            return "The installed MSW command\(runtime) rejected this build's workspace setup command, so it predates MSW Monitor's workspace bootstrap contract. Update or reinstall the MSW runtime to match this build of MSW Monitor, then retry setup."
         }
     }
 }
@@ -955,6 +959,22 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         } catch {
             if let clientError = error as? MSWClientError,
                case .protocolFailure(let protocolError) = clientError,
+               protocolError.code == "MSW_INVALID_REQUEST" {
+                // A handshake-compatible runtime that rejects the typed
+                // bootstrap invocation means the installed command predates
+                // this build's workspace configuration contract. Name the
+                // detected version instead of surfacing a bare CLI message.
+                let installedVersion = try? await client.handshake()
+                let mismatch = BootstrapCoordinatorError.runtimeContractMismatch(
+                    installedVersion: installedVersion?.result?.mswVersion
+                )
+                current.lastError = mismatch.localizedDescription
+                current.updatedAt = Date()
+                try? await stateStore.save(current)
+                throw mismatch
+            }
+            if let clientError = error as? MSWClientError,
+               case .protocolFailure(let protocolError) = clientError,
                protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
                let installed = await runner.installedWorkspaceConfigurations(),
                MSWBootstrapConfiguration(installed) == MSWBootstrapConfiguration(workspaceConfigurations) {
@@ -967,7 +987,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 current.phase = .github
                 current.reconnectWorkspace = protocolError.workspace
             }
-            current.lastError = String(describing: error)
+            current.lastError = error.localizedDescription
             current.updatedAt = Date()
             try? await stateStore.save(current)
             throw error

@@ -1205,6 +1205,111 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(boundary.workspaces[1].workspaceStorageGiB, 80)
         XCTAssertEqual(boundary.workspaces[1].runtimeStorageGiB, 60)
     }
+    func testBootstrapInvalidRequestReportsRuntimeContractMismatch() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-bootstrap-mismatch-test-\(UUID().uuidString)", isDirectory: true)
+        let mswBin = temporary.appendingPathComponent("bin", isDirectory: true)
+        let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
+        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
+        try FileManager.default.createDirectory(at: mswBin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: toolBin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        try Data("# test configuration\n".utf8)
+            .write(to: configDirectory.appendingPathComponent("config.sh"))
+        for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
+            let tool = toolBin.appendingPathComponent(name)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: tool)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: tool.path
+            )
+        }
+
+        let invalidRequest = #"""
+        {"schemaVersion":1,"requestId":"bootstrap-invalid","ok":false,"command":"bootstrap","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_INVALID_REQUEST","message":"The requested MSW Monitor command has invalid arguments.","recovery":"See 'msw app help' for the typed command contract.","workspace":null,"retryable":false}}
+        """#
+        let handshakeURL = temporary.appendingPathComponent("handshake.json")
+        let invalidURL = temporary.appendingPathComponent("bootstrap-invalid.json")
+        try Data(protocolCompatibleHandshake.utf8).write(to: handshakeURL)
+        try Data(invalidRequest.utf8).write(to: invalidURL)
+
+        let executable = mswBin.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            /bin/cat "\(handshakeURL.path)"
+        elif [ "$1" = "app" ] && [ "$2" = "bootstrap" ]; then
+            /bin/cat "\(invalidURL.path)"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        ))
+        let coordinator = BootstrapCoordinator(
+            client: MSWClient(runner: runner),
+            runner: runner,
+            stateStore: BootstrapStateStore(
+                url: temporary.appendingPathComponent("bootstrap-state.json")
+            ),
+            hostAgent: RecordingHostAgent(),
+            hostService: EnabledHostService(),
+            sourceSetup: AvailableSourceSetup(),
+            freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
+        )
+
+        do {
+            _ = try await coordinator.run(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
+            XCTFail("Expected the stale runtime's MSW_INVALID_REQUEST to fail setup.")
+        } catch let error as BootstrapCoordinatorError {
+            XCTAssertEqual(error, .runtimeContractMismatch(installedVersion: "test"))
+            XCTAssertEqual(
+                error.localizedDescription,
+                BootstrapCoordinatorError.runtimeContractMismatch(installedVersion: "test").localizedDescription
+            )
+        } catch {
+            XCTFail("Unexpected bootstrap error: \(error)")
+        }
+
+        let finalState = await coordinator.state()
+        XCTAssertEqual(finalState.lastError, BootstrapCoordinatorError.runtimeContractMismatch(installedVersion: "test").localizedDescription)
+        XCTAssertNil(
+            finalState.workspaceConfigurations,
+            "A rejected bootstrap must not publish an unapplied configuration."
+        )
+    }
+
+    func testProtocolErrorDescriptionIncludesRecoveryAndCode() {
+        let error = MSWProtocolError(
+            code: "MSW_INVALID_REQUEST",
+            message: "The requested MSW Monitor command has invalid arguments.",
+            recovery: "See 'msw app help' for the typed command contract.",
+            workspace: nil,
+            retryable: false
+        )
+        let description = error.localizedDescription
+        XCTAssertTrue(description.contains("The requested MSW Monitor command has invalid arguments."))
+        XCTAssertTrue(description.contains("See 'msw app help' for the typed command contract."))
+        XCTAssertTrue(description.contains("MSW_INVALID_REQUEST"))
+        let withoutRecovery = MSWProtocolError(
+            code: "MSW_RUNTIME_UNAVAILABLE",
+            message: "runtime unavailable",
+            recovery: nil,
+            workspace: nil,
+            retryable: true
+        )
+        XCTAssertEqual(withoutRecovery.localizedDescription, "runtime unavailable (MSW error code: MSW_RUNTIME_UNAVAILABLE.)")
+    }
 
     func testRealBootstrapReconnectReadbackPrecedesGitHubEntry() async throws {
         let temporary = FileManager.default.temporaryDirectory
