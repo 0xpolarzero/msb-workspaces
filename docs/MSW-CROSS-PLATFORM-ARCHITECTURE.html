@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MSW — Cross-platform desktop architecture</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f6f8;
+      --surface: #ffffff;
+      --surface-2: #eef1f5;
+      --ink: #18202c;
+      --muted: #5f6b7a;
+      --line: #d8dee8;
+      --accent: #2563eb;
+      --accent-soft: #e8efff;
+      --green: #147a4a;
+      --green-soft: #e9f8ef;
+      --amber: #9a6700;
+      --amber-soft: #fff7df;
+      --red: #b42318;
+      --red-soft: #fff0ee;
+      --shadow: 0 10px 28px rgba(23, 35, 54, .08);
+      --radius: 14px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10141b;
+        --surface: #171d27;
+        --surface-2: #222a36;
+        --ink: #edf2f8;
+        --muted: #aeb8c6;
+        --line: #354152;
+        --accent: #8eb3ff;
+        --accent-soft: #1c3158;
+        --green: #75d6a4;
+        --green-soft: #173b2a;
+        --amber: #f4c866;
+        --amber-soft: #3a301b;
+        --red: #ff9c91;
+        --red-soft: #40211f;
+        --shadow: 0 12px 32px rgba(0, 0, 0, .24);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", sans-serif;
+    }
+    main { max-width: 1160px; margin: 0 auto; padding: 44px 24px 72px; }
+    h1, h2, h3 { line-height: 1.2; letter-spacing: -.02em; }
+    h1 { font-size: clamp(2rem, 4vw, 3.45rem); margin: 0 0 12px; max-width: 920px; }
+    h2 { font-size: 1.65rem; margin: 0 0 18px; }
+    h3 { font-size: 1.08rem; margin: 0 0 8px; }
+    p { margin: 0 0 12px; }
+    a { color: var(--accent); }
+    code { font: .88em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--surface-2); padding: 2px 5px; border-radius: 5px; }
+    .hero { padding: 26px 0 30px; }
+    .eyebrow { color: var(--accent); font-size: .78rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 12px; }
+    .lede { color: var(--muted); font-size: 1.15rem; max-width: 930px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+    .pill { border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; color: var(--muted); font-size: .82rem; background: var(--surface); }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px; }
+    .span-12 { grid-column: span 12; }
+    .span-8 { grid-column: span 8; }
+    .span-6 { grid-column: span 6; }
+    .span-4 { grid-column: span 4; }
+    .section { margin-top: 34px; }
+    .section-intro { color: var(--muted); max-width: 900px; margin-bottom: 16px; }
+    .verdict { border-left: 5px solid var(--green); background: linear-gradient(135deg, var(--surface), var(--green-soft)); }
+    .verdict strong { color: var(--green); }
+    .warning { border-left: 5px solid var(--amber); background: linear-gradient(135deg, var(--surface), var(--amber-soft)); }
+    .risk { border-left: 5px solid var(--red); background: linear-gradient(135deg, var(--surface), var(--red-soft)); }
+    .good { color: var(--green); }
+    .caution { color: var(--amber); }
+    .no { color: var(--red); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; vertical-align: top; padding: 11px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; }
+    td:first-child { width: 19%; font-weight: 650; }
+    ul, ol { margin: 8px 0 0; padding-left: 21px; }
+    li { margin: 6px 0; }
+    .architecture { display: grid; gap: 10px; margin-top: 18px; }
+    .layer { display: grid; grid-template-columns: 170px 1fr; gap: 12px; align-items: stretch; }
+    .layer-label { display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px; border-radius: 10px; background: var(--accent); color: white; font-weight: 750; }
+    .layer-body { padding: 15px 17px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+    .arrow { color: var(--accent); text-align: center; font-size: 1.3rem; line-height: 1; }
+    .adapter-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+    .adapter { border: 1px solid var(--line); border-radius: 9px; padding: 12px; background: var(--surface); }
+    .phase-list { counter-reset: phase; display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+    .phase-list li { counter-increment: phase; display: grid; grid-template-columns: 46px 1fr; gap: 12px; align-items: start; padding: 15px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; }
+    .phase-list li::before { content: counter(phase, decimal-leading-zero); display: grid; place-items: center; width: 38px; height: 38px; border-radius: 50%; background: var(--accent); color: white; font-weight: 800; }
+    .phase-list strong { display: block; margin-bottom: 3px; }
+    .small { color: var(--muted); font-size: .86rem; }
+    footer { margin-top: 38px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: .84rem; }
+    @media (max-width: 820px) {
+      .span-8, .span-6, .span-4 { grid-column: span 12; }
+      .layer { grid-template-columns: 1fr; }
+      .adapter-grid { grid-template-columns: 1fr; }
+      main { padding-inline: 16px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div class="eyebrow">MSW · Product and architecture recommendation</div>
+    <h1>Yes, a macOS, Linux, and Windows app is possible.</h1>
+    <p class="lede">MicroSandbox itself now supports local hosts on all three operating systems. The important constraint is that the current <strong>MSW product does not</strong>: its installer, CLI integrations, credential handling, background services, and SwiftUI application are deliberately macOS-specific. The right move is a new cross-platform shell over a portable core—not a line-by-line port of the current app.</p>
+    <div class="meta">
+      <span class="pill">Recommendation: Tauri 2</span>
+      <span class="pill">UI: React + TypeScript + Vite</span>
+      <span class="pill">Core: Rust</span>
+      <span class="pill">Windows: beta while MicroSandbox is preview</span>
+    </div>
+  </header>
+
+  <section class="grid">
+    <article class="card verdict span-8">
+      <h2>Executive decision</h2>
+      <p><strong>Build it, but separate “MicroSandbox support” from “MSW support.”</strong> MicroSandbox documents local operation on glibc Linux with KVM, Apple-Silicon macOS, and Windows 11 with Windows Hypervisor Platform. Windows is explicitly preview.</p>
+      <p>Use one Tauri desktop app and one portable Rust domain/runtime layer. Keep the browser-like UI unprivileged. Put all process execution, secrets, filesystem mutation, and host integration behind narrow typed Rust commands. Implement small OS adapters for the unavoidable differences.</p>
+    </article>
+    <article class="card warning span-4">
+      <h3>The release promise</h3>
+      <p><span class="good"><strong>macOS:</strong> supported</span>, Apple Silicon only for local MicroSandbox.</p>
+      <p><span class="good"><strong>Linux:</strong> supported</span>, glibc distribution and working KVM required.</p>
+      <p><span class="caution"><strong>Windows:</strong> beta</span>, Windows 11 + WHP; the underlying runtime is preview.</p>
+      <p class="small">Do not market Intel macOS or Windows GA until the runtime supports that promise.</p>
+    </article>
+  </section>
+
+  <section class="section">
+    <h2>What is supported today</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Host</th><th>MicroSandbox local runtime</th><th>Current MSW app/repository</th><th>Cross-platform product position</th></tr></thead>
+        <tbody>
+          <tr><td>macOS</td><td><span class="good">Yes</span> — Apple Silicon.</td><td><span class="good">Yes</span> — the current product targets macOS 26+ on Apple Silicon.</td><td>First-class supported release.</td></tr>
+          <tr><td>Linux</td><td><span class="good">Yes</span> — glibc Linux with KVM.</td><td><span class="no">No</span> — current setup hard-fails outside Darwin and relies on Homebrew, launchd, Keychain, <code>open</code>, and macOS networking.</td><td>First new platform after the portable core is proven.</td></tr>
+          <tr><td>Windows</td><td><span class="caution">Preview</span> — Windows 11 with Windows Hypervisor Platform.</td><td><span class="no">No</span> — the Bash/Python host stack and SwiftUI app do not run as a native Windows product.</td><td>Public beta with explicit diagnostics and no GA claim.</td></tr>
+          <tr><td>Cloud mode</td><td>MicroSandbox says the same CLI can drive MicroSandbox Cloud; some commands remain local-only.</td><td>Not the current MSW operating model.</td><td>Optional later fallback for unsupported or locked-down hosts, not a substitute for local parity.</td></tr>
+        </tbody>
+      </table>
+      <p class="small" style="margin-top:14px">Repository evidence: <code>README.md:3-11</code>, <code>setup.sh:39-40</code>, <code>bin/msw:55-57</code>, <code>bin/msw:846-850</code>, and <code>app/MSWMonitor/Sources/BootstrapCoordinator.swift:314-322</code>.</p>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Recommended stack</h2>
+    <div class="grid">
+      <article class="card span-8">
+        <h3>Tauri 2 + React/TypeScript + Vite</h3>
+        <ul>
+          <li><strong>Tauri 2</strong> supplies native windows, tray menus, packaging, signed updates, and a Rust boundary on macOS, Linux, and Windows.</li>
+          <li><strong>React + TypeScript + Vite</strong> is the boring, well-supported UI choice. Avoid Next.js: this desktop app does not need a server framework.</li>
+          <li><strong>Rust</strong> owns commands, lifecycle state, schema validation, process control, cancellation, filesystem access, credentials, and platform adapters.</li>
+          <li><strong>MicroSandbox <code>msb</code></strong> stays the VM runtime. Ship a pinned per-target binary as a Tauri sidecar when distribution rights and signing permit; otherwise download a signed artifact during setup and verify its manifest before use.</li>
+          <li><strong>Generated TypeScript types</strong> come from the Rust protocol schema. Do not maintain parallel handwritten Swift/Rust/TypeScript models.</li>
+        </ul>
+      </article>
+      <article class="card span-4">
+        <h3>Why not the obvious alternatives?</h3>
+        <p><strong>Electron:</strong> fastest for a JS-only prototype, but it ships Chromium/Node and expands footprint and process capability.</p>
+        <p><strong>Flutter:</strong> strong custom UI, but adds Dart and does not reduce the native host-integration work.</p>
+        <p><strong>Avalonia:</strong> credible if the team is already strong in C#/.NET; otherwise it introduces the same language transition with less alignment to the existing web ecosystem.</p>
+        <p><strong>Three native apps:</strong> best native feel, worst long-term duplication. Not justified here.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Architecture</h2>
+    <p class="section-intro">One UI and one domain model. Platform-specific code exists only at host boundaries. The existing typed <code>msw app … --format json</code> surface is a useful contract to preserve while the shell implementation is replaced.</p>
+    <div class="card">
+      <div class="architecture" aria-label="Recommended application architecture">
+        <div class="layer"><div class="layer-label">React UI</div><div class="layer-body"><strong>Setup, dashboard, workspace detail, logs, settings.</strong> Renders state and sends typed intents. No shell access, no credential access, no arbitrary path execution.</div></div>
+        <div class="arrow">↓ typed Tauri commands and events</div>
+        <div class="layer"><div class="layer-label">Tauri command API</div><div class="layer-body"><strong>Narrow allowlist:</strong> <code>doctor</code>, <code>list_workspaces</code>, <code>start</code>, <code>stop</code>, <code>inspect</code>, <code>stream_logs</code>, <code>open_workspace</code>, <code>configure_access</code>. Validate every ID, path, URL, and transition in Rust.</div></div>
+        <div class="arrow">↓ domain operations</div>
+        <div class="layer"><div class="layer-label">msw-core</div><div class="layer-body"><strong>Portable Rust library:</strong> lifecycle state machine, freshness semantics, action planning/confirmation, protocol envelopes, redaction, cancellation, resource policy, GitHub policy, and recovery rules.</div></div>
+        <div class="arrow">↓ traits, not conditionals spread through the app</div>
+        <div class="layer"><div class="layer-label">Host adapters</div><div class="layer-body">
+          <div class="adapter-grid">
+            <div class="adapter"><strong>macOS</strong><br>Keychain, launchd/ServiceManagement, native URL/file open, Apple-Silicon preflight.</div>
+            <div class="adapter"><strong>Linux</strong><br>Secret Service, systemd user services, <code>xdg-open</code>, KVM and group/device checks.</div>
+            <div class="adapter"><strong>Windows</strong><br>Credential Manager, WHP/firmware checks, Windows service or per-user startup task, ShellExecute, firewall guidance.</div>
+          </div>
+        </div></div>
+        <div class="arrow">↓ fixed argv + bounded JSON/JSONL</div>
+        <div class="layer"><div class="layer-label">MicroSandbox</div><div class="layer-body"><strong><code>msb</code> runtime.</strong> Pin and verify version/architecture; consume machine-readable output; never parse human tables; bind published ports to loopback by default.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Security boundary</h2>
+    <div class="grid">
+      <article class="card risk span-6">
+        <h3>Never give the webview a general shell</h3>
+        <p>Tauri can execute sidecars, but JavaScript should not receive the shell plugin or broad argument permissions. Rust constructs executable paths and argument arrays from validated typed inputs. This keeps a UI injection bug from becoming arbitrary host command execution.</p>
+      </article>
+      <article class="card span-6">
+        <h3>Keep the current trust semantics</h3>
+        <ul>
+          <li>Unknown or stale runtime state never becomes “Stopped.”</li>
+          <li>Destructive actions use plan → review → apply with expiring plan IDs.</li>
+          <li>Credentials remain in the host credential store and never enter logs, argv, preferences, or the webview.</li>
+          <li>Bounded JSON/JSONL, schema versions, output limits, and redaction remain mandatory.</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Build order</h2>
+    <p class="section-intro">Prove runtime parity before investing in pixel parity. Keep the current macOS app operational until the new app reaches its contract.</p>
+    <div class="card">
+      <ol class="phase-list">
+        <li><div><strong>Platform spike</strong>On one real host per OS, run <code>msb doctor</code>, create/start/inspect/stop a sandbox, publish a loopback port, stream bounded logs, and update the runtime. Record unsupported behavior. Windows remains beta if preview limitations surface.</div></li>
+        <li><div><strong>Freeze the app protocol</strong>Turn the current <code>msw app</code> JSON envelopes into versioned schemas and golden fixtures. Define capability flags so unsupported features are hidden or disabled honestly, never guessed from the OS name.</div></li>
+        <li><div><strong>Extract <code>msw-core</code></strong>Move state transitions, plans, validation, redaction, and MicroSandbox process control into portable Rust. Keep platform integrations behind traits. Do not keep growing the Bash CLI as the cross-platform core.</div></li>
+        <li><div><strong>Build the thin Tauri shell</strong>Ship Setup, Monitor, workspace detail, logs, Settings, tray actions, and one clear recovery surface. The UI consumes state; it does not own state.</div></li>
+        <li><div><strong>Implement adapters in risk order</strong>macOS parity first, Linux second, Windows third. Credential storage, background services, host networking, browser/terminal opening, and update/install flows each need native implementations.</div></li>
+        <li><div><strong>Package and sign per OS</strong>Build on native runners or machines. Produce macOS app/DMG with signing and notarization, Linux AppImage/deb/rpm as chosen from tested distributions, and signed Windows MSI/NSIS artifacts. Sign updater payloads independently.</div></li>
+        <li><div><strong>Promote by evidence</strong>Use unit tests with a fake <code>msb</code>, protocol contract tests, and semantic UI smoke tests on each OS. Add dedicated hardware canaries for KVM, Apple virtualization, and WHP; ordinary CI without nested virtualization cannot prove local VM behavior.</div></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>First shippable contract</h2>
+    <div class="grid">
+      <article class="card span-6">
+        <h3>Include</h3>
+        <ul>
+          <li>Prerequisite check and actionable repair instructions.</li>
+          <li>Create/import the three workspaces.</li>
+          <li>Truthful state, freshness, CPU/memory/disk, and published ports.</li>
+          <li>Start, stop, restart, open terminal, open browser port.</li>
+          <li>Bounded logs and redacted diagnostics.</li>
+          <li>Tray quick actions and signed app/runtime updates.</li>
+        </ul>
+      </article>
+      <article class="card span-6">
+        <h3>Defer until the base is proven</h3>
+        <ul>
+          <li>Cross-platform GitHub credential proxy parity.</li>
+          <li>Privileged automatic host repair on every distribution.</li>
+          <li>Backup/restore across OS families.</li>
+          <li>Embedded terminal emulation.</li>
+          <li>Cloud/local seamless migration.</li>
+          <li>Windows GA while MicroSandbox itself remains preview.</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Interaction model</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Surface</th><th>Rule</th><th>Reason</th></tr></thead>
+        <tbody>
+          <tr><td>Setup</td><td>One requirement at a time: detect → explain → repair → recheck. Separate required virtualization from optional GitHub access.</td><td>Users understand the blocker and never have to infer which platform setting matters.</td></tr>
+          <tr><td>Dashboard</td><td>One health headline, last-observed time, and best next action. Workspace cards expose Start/Open/Stop without hidden side effects.</td><td>Daily use remains fast while state stays truthful.</td></tr>
+          <tr><td>Detail</td><td>Tabs for Overview, Repositories, Ports, Logs, and Recovery. Preserve workspace scope in every window and dialog.</td><td>Dense information without ambiguous targets.</td></tr>
+          <tr><td>Tray</td><td>Show global health and quick actions; open the full window for setup, review, destructive actions, or errors.</td><td>Convenient without forcing complex workflows into tiny transient popovers.</td></tr>
+          <tr><td>Errors</td><td>State what failed, what remains unchanged, and one safe recovery action. Keep technical detail copyable but collapsed.</td><td>Recovery becomes deterministic rather than terminal archaeology.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="card verdict">
+      <h2>Bottom line</h2>
+      <p><strong>The project is viable.</strong> MicroSandbox has the necessary host coverage. The clean path is Tauri 2, a React/TypeScript UI, a Rust core, and three narrow host adapters. Treat Linux as a supported target after its real-host canary passes. Treat Windows as beta while MicroSandbox calls Windows support preview.</p>
+      <p>The first engineering action should be the three-host runtime spike and protocol freeze—not a UI rewrite. If those pass, the architecture above gives one convenient codebase without pretending that credentials, services, virtualization setup, packaging, and networking are identical across operating systems.</p>
+    </div>
+  </section>
+
+  <footer>
+    <strong>Sources</strong>
+    <ul>
+      <li><a href="https://github.com/superradcompany/microsandbox/blob/main/docs/cli/overview.mdx">MicroSandbox CLI overview</a> — install paths, host requirements, Windows preview, and cloud/local command distinction.</li>
+      <li><a href="https://github.com/superradcompany/microsandbox/blob/main/docs/troubleshooting/windows.mdx">MicroSandbox Windows troubleshooting</a> — Windows 11 tested path and Windows Hypervisor Platform requirement.</li>
+      <li><a href="https://v2.tauri.app/develop/sidecar/">Tauri 2 sidecars</a> — architecture-specific external binaries and capability-scoped execution.</li>
+      <li><a href="https://v2.tauri.app/learn/system-tray/">Tauri 2 system tray</a> — cross-platform tray icon, menu, and event APIs.</li>
+      <li><a href="https://v2.tauri.app/security/capabilities/">Tauri 2 capabilities</a> — platform/window-specific permission boundaries.</li>
+      <li><a href="https://v2.tauri.app/plugin/updater/">Tauri 2 updater</a> — signed update configuration.</li>
+    </ul>
+    <p>Local code evidence was read from the current repository. Static recommendations are architecture decisions, not claims that Linux or Windows MSW integrations already exist.</p>
+  </footer>
+</main>
+</body>
+</html>
