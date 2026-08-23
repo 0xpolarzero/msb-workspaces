@@ -2078,7 +2078,7 @@ struct SetupView: View {
                 } else {
                     Button(action: commitPolicy) {
                         ZStack {
-                            Text(accessMode == .local ? "Save and continue" : "Continue")
+                            Text("Continue")
                                 .opacity(isApplyingGitHub ? 0 : 1)
                             ProgressView()
                                 .controlSize(.small)
@@ -2089,7 +2089,7 @@ struct SetupView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!isGitHubConnected || !hasValidAssignments || isApplyingGitHub || isSkippingGitHub || githubSkipIssue != nil)
                         .keyboardShortcut(.defaultAction)
-                        .accessibilityLabel(accessMode == .local ? "Save and continue" : "Continue")
+                        .accessibilityLabel("Continue")
                         .accessibilityValue(isApplyingGitHub ? "Saving" : "Ready")
                         .accessibilityIdentifier("setup.github.apply.button")
                 }
