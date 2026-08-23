@@ -890,10 +890,12 @@ struct SetupView: View {
             activeStep = .github
             return
         }
-        // Production acceptance is published only after the coordinator proves
-        // the boundary applied (runSetup success or verified reconnect), so a
-        // failed run can never leave this step looking complete.
+        // Production navigation never waits on the apply: the boundary proof,
+        // acceptance publication, and GitHub-context load continue in the
+        // background while the footer reports the phase. Review stays gated
+        // on the proven result, so a failed run can never look complete.
         runSetup()
+        activeStep = .github
     }
     private func advanceFromGitHub() {
         guard githubStepComplete, !isSkippingGitHub, githubSkipIssue == nil else { return }
@@ -2023,13 +2025,23 @@ struct SetupView: View {
                 Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
             } else if let notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            } else if isRunning, activeStep == .workspaces || activeStep == .review {
+            } else if isRunning {
+                // The apply is backgrounded after the Workspaces step; the
+                // phase stays visible from every step until it settles.
                 Label(
                     "\(Self.bootstrapPhaseProgress(for: state.phase))…",
                     systemImage: "ellipsis.circle"
                 )
                 .lineLimit(1)
                 .foregroundStyle(.secondary)
+            } else if isApplyingGitHub {
+                Label("Saving your GitHub choices…", systemImage: "ellipsis.circle")
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+            } else if isSavingIdentity {
+                Label("Saving your Git name and email…", systemImage: "ellipsis.circle")
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
@@ -2675,6 +2687,7 @@ struct SetupView: View {
         let generation = githubApplyGeneration
         isApplyingGitHub = true
         authorizationIssue = nil
+        error = nil
         githubStatus = ""
         githubApplyTask?.cancel()
 
@@ -2684,6 +2697,10 @@ struct SetupView: View {
                 isApplyingGitHub = false
                 return
             }
+            // Navigation never waits on the provider: the apply continues in
+            // the background and its progress is reported by the footer;
+            // Review stays gated on the outcome.
+            activeStep = .identity
             githubApplyTask = Task {
                 do {
                     let progress = try await provider.beginPolicyApply(workspacePolicies)
@@ -2700,7 +2717,6 @@ struct SetupView: View {
                         authorizationSessionID = nil
                         githubApplyProgress = progress
                         githubStatus = "GitHub choices saved. Reconciliation continues in the background."
-                        activeStep = .identity
                         monitorLocalPolicyApply(generation: generation)
                     }
                 } catch is CancellationError {
@@ -2711,6 +2727,7 @@ struct SetupView: View {
                         isApplyingGitHub = false
                         githubApplyTask = nil
                         authorizationIssue = issue(for: error)
+                        self.error = error.localizedDescription
                         githubStatus = ""
                     }
                 }
@@ -2803,6 +2820,10 @@ struct SetupView: View {
             isApplyingGitHub = false
             return
         }
+        // Navigation never waits on the commit: verification continues in the
+        // background while the footer reports progress; Review stays gated on
+        // the verified result.
+        activeStep = .identity
         githubApplyTask = Task {
             do {
                 let result = try await authorizationCoordinator.commitPolicyWithVerification(
@@ -2847,7 +2868,6 @@ struct SetupView: View {
                     repositoryPolicyApplied = true
                     authorizationSessionID = nil
                     githubStatus = "GitHub access saved for \(workspacePolicies.count) workspace(s)."
-                    activeStep = .identity
                 }
             } catch {
                 let retained = await authorizationCoordinator.verificationResults()
@@ -2859,6 +2879,7 @@ struct SetupView: View {
                     isApplyingGitHub = false
                     githubApplyTask = nil
                     authorizationIssue = issue(for: error)
+                    self.error = error.localizedDescription
                     githubStatus = ""
                 }
             }
@@ -3161,7 +3182,7 @@ struct SetupView: View {
     }
 
     private func runSetup() {
-        guard let coordinator else { return }
+        guard let coordinator, !isRunning else { return }
         guard workspaceValidationMessage == nil else { return }
         let submittedWorkspaceConfigurations = workspaceConfigurations
         isRunning = true
@@ -3193,12 +3214,23 @@ struct SetupView: View {
                         ? "Allow MSW Monitor in Login Items, then choose Retry."
                         : result.message)
                     : nil
+                // Navigation is user-driven: the apply was backgrounded when
+                // the step advanced. Publish acceptance wherever the user is;
+                // only a still-matching configuration proves this run's
+                // boundary.
                 if result.phase == MSWBootstrapState.Phase.complete.rawValue,
                    submittedWorkspaceConfigurations == workspaceConfigurations,
                    workspaceConfigurationIsApplied {
                     workspaceConfigurationAccepted = true
-                    if await loadAppliedWorkspaceContext(), activeStep == .workspaces {
-                        activeStep = .github
+                    // The GitHub context chain is built once per proven
+                    // boundary (first entry into the GitHub step). A later
+                    // completing run — a retry from Review or a reconnect
+                    // resume — must not rebuild it: rebuilding resets decided
+                    // state such as the applied-policy flag and the repository
+                    // catalog, which providers without durable apply progress
+                    // cannot restore.
+                    if !githubContextLoaded {
+                        await loadAppliedWorkspaceContext()
                     }
                 }
             } catch let setupError {
@@ -3250,18 +3282,20 @@ struct SetupView: View {
     }
 
     private var canSaveIdentity: Bool {
-        Self.allowsIdentitySave(
-            clientAvailable: uiTestMode ||
-                (accessMode == .local ? provider != nil : authorizationCoordinator != nil),
-            systemReady: canFinishWithoutGitHub,
-            name: identityName,
-            email: identityEmail
-        )
+        // Bootstrap readiness is deliberately not part of this gate: the Git
+        // step must never block on the backgrounded workspace registration.
+        // The save task itself waits for the proven boundary before writing
+        // identity into the configured workspaces.
+        (uiTestMode ||
+            (accessMode == .local ? provider != nil : authorizationCoordinator != nil)) &&
+            !identityName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            identityEmail.contains("@") &&
+            !identityEmail.contains(where: \.isWhitespace)
     }
 
     private func saveIdentity() {
         guard canSaveIdentity else {
-            identityStatus = "Your name and email can be saved after workspace setup finishes."
+            identityStatus = "Enter a name and a valid email, then save."
             return
         }
         isSavingIdentity = true
@@ -3288,8 +3322,24 @@ struct SetupView: View {
             }
             return
         }
+        // Navigation never waits on the save, and the save does not wait on
+        // the step either: Review renders immediately while this task first
+        // waits for the backgrounded workspace registration to prove through
+        // (identity is written into workspaces that must exist), then writes.
+        activeStep = .review
         identitySaveTask?.cancel()
         identitySaveTask = Task {
+            while !canFinishWithoutGitHub {
+                guard !Task.isCancelled else { return }
+                guard isRunning else {
+                    isSavingIdentity = false
+                    identitySaveTask = nil
+                    identityStatus = "Workspace setup did not finish, so your name and email were not saved. Finish workspace setup, then save again."
+                    self.error = "Your Git name and email were not saved: workspace setup did not finish."
+                    return
+                }
+                try? await Task.sleep(for: .seconds(0.5))
+            }
             do {
                 let result: MSWIdentityResult
                 if accessMode == .local, let provider {
@@ -3311,7 +3361,6 @@ struct SetupView: View {
                     isSavingIdentity = false
                     identitySaveTask = nil
                     identityStatus = "Saved \(result.name) <\(result.email)> for \(result.workspaces.joined(separator: ", "))."
-                    activeStep = .review
                 }
             } catch is CancellationError {
                 // Setup teardown owns cancellation; publish nothing after the
@@ -3321,6 +3370,7 @@ struct SetupView: View {
                     isSavingIdentity = false
                     identitySaveTask = nil
                     identityStatus = "Your name and email were not changed: \(error.localizedDescription) Try again after workspace setup is available."
+                    self.error = "Your Git name and email were not saved: \(error.localizedDescription)"
                 }
             }
         }

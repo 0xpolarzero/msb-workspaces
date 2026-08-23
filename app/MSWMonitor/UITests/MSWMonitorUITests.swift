@@ -537,12 +537,9 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(picker.frame.minY, pickerFrame.minY, accuracy: 0.5)
 
         apply.click()
-        XCTAssertEqual(apply.value as? String, "Saving")
-        XCTAssertEqual(apply.frame.width, applyWidth, accuracy: 0.5)
-        XCTAssertTrue(refresh.isEnabled, "Saving must not make Refresh report progress")
-        XCTAssertEqual(refresh.value as? String, "Ready")
-        XCTAssertTrue(manage.isEnabled)
-        XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 3))
+        // Saving no longer blocks the step: navigation is immediate while the
+        // save continues in the background, reported from the footer.
+        XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 2))
     }
 
     func testSetupLocalGitHubStepUnlocksWhenSystemReadyThenVerifiesThroughDone() {
@@ -612,12 +609,8 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(verify.waitForExistence(timeout: 2))
         XCTAssertTrue(verify.isEnabled)
         verify.click()
-        // The reconnect fixture fails its first bootstrap run; a second run
-        // completes and unlocks Done.
-        XCTAssertTrue(verify.waitForExistence(timeout: 3))
-        XCTAssertTrue(waitUntilEnabled(verify, timeout: 3))
-        verify.click()
-
+        // The failing first bootstrap attempt already ran when the Workspaces
+        // step advanced; this retry completes and unlocks Done.
         XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
         done.click()
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
