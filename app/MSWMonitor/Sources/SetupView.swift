@@ -608,6 +608,39 @@ struct SetupView: View {
         return committedWorkspaces.contains(issueWorkspace)
     }
 
+    /// One-line transparency for the Workspaces apply step: what each timed
+    /// span of the last apply cost, so a greyed-out Continue is never opaque.
+    static func setupDurationsSummary(_ durations: [String: TimeInterval]?) -> String? {
+        let ordered: [(key: String, title: String)] = [
+            ("toolchain", "runtime check"),
+            ("preflight", "system checks"),
+            ("hostIntegration", "system records"),
+            ("workspaces", "workspace registration"),
+        ]
+        let parts = ordered.compactMap { entry in
+            durations?[entry.key].map { "\(entry.title) \(applyDurationText($0))" }
+        }
+        guard !parts.isEmpty else { return nil }
+        return "Last apply: " + parts.joined(separator: ", ")
+    }
+
+    static func applyDurationText(_ interval: TimeInterval) -> String {
+        interval >= 10 ? "\(Int(interval))s" : String(format: "%.1fs", interval)
+    }
+
+    /// Plain-language status for the phase currently being applied while the
+    /// Continue button is disabled and spinning.
+    static func bootstrapPhaseProgress(for phase: MSWBootstrapState.Phase) -> String {
+        switch phase {
+        case .welcome, .preflight: return "running system checks"
+        case .toolchain: return "checking the MSW runtime"
+        case .hostIntegration: return "updating system records"
+        case .workspaces: return "registering your workspaces"
+        case .github, .identity: return "saving access choices"
+        case .complete: return "finishing verification"
+        }
+    }
+
 
 
     private var showsGitHubConnectAction: Bool {
@@ -1153,6 +1186,13 @@ struct SetupView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("setup.workspaces.approval-hint")
+            }
+
+            if !isRunning, let summary = Self.setupDurationsSummary(state.phaseDurations) {
+                Label(summary, systemImage: "timer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.workspaces.durations")
             }
         }
         .accessibilityElement(children: .contain)
@@ -2009,6 +2049,12 @@ struct SetupView: View {
                 Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
             } else if let notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            } else if isRunning, activeStep == .workspaces || activeStep == .review {
+                Label(
+                    "Applying workspace setup — \(Self.bootstrapPhaseProgress(for: state.phase))…",
+                    systemImage: "ellipsis.circle"
+                )
+                .foregroundStyle(.secondary)
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
@@ -2068,11 +2114,22 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .workspaces:
-                Button("Continue", action: advanceFromWorkspaces)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(workspaceValidationMessage != nil || isRunning || !bootstrapInputReady)
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("setup.workspaces.continue.button")
+                Button(action: advanceFromWorkspaces) {
+                    ZStack {
+                        Text("Continue")
+                            .opacity(isRunning ? 0 : 1)
+                        ProgressView()
+                            .controlSize(.small)
+                            .opacity(isRunning ? 1 : 0)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(workspaceValidationMessage != nil || isRunning || !bootstrapInputReady)
+                .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Continue")
+                .accessibilityValue(isRunning ? "Applying" : "Ready")
+                .accessibilityIdentifier("setup.workspaces.continue.button")
             case .github:
                 if githubStepComplete {
                     Button("Continue", action: advanceFromGitHub)
@@ -3140,7 +3197,7 @@ struct SetupView: View {
                 while !Task.isCancelled {
                     let latest = await coordinator.state()
                     await MainActor.run { state = latest }
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: .seconds(0.3))
                 }
             }
             defer { progressTask.cancel() }

@@ -31,9 +31,20 @@ struct MSWBootstrapState: Codable, Sendable, Equatable {
     var completedPhases: Set<Phase>
     var workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil
     var reconnectWorkspace: String? = nil
+    /// Wall-clock seconds per phase for the most recent `run()`, keyed by
+    /// `Phase.rawValue`; `preflight` accumulates both read-only passes.
+    /// Optional so state persisted by older builds still decodes.
+    var phaseDurations: [String: TimeInterval]? = nil
 
     static var initial: Self {
         Self(phase: .welcome, startedAt: nil, updatedAt: Date(), lastError: nil, completedPhases: [])
+    }
+
+    /// Adds elapsed wall-clock time for one timed span into `phaseDurations`.
+    mutating func recordPhaseDuration(_ key: String, from start: Date) {
+        var durations = phaseDurations ?? [:]
+        durations[key, default: 0] += max(0, Date().timeIntervalSince(start))
+        phaseDurations = durations
     }
 }
 enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
@@ -895,6 +906,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         try await stateStore.save(current)
         current.phase = .toolchain
         try await stateStore.save(current)
+        let toolchainStartedAt = Date()
         do {
             try await installDefaultConfigurationIfNeeded()
             let resolution = await runner.mswResolution(forceRefresh: true)
@@ -912,6 +924,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             current.completedPhases.insert(.toolchain)
             current.phase = .hostIntegration
             current.updatedAt = Date()
+            current.recordPhaseDuration(MSWBootstrapState.Phase.toolchain.rawValue, from: toolchainStartedAt)
             try await stateStore.save(current)
         } catch {
             let failure = (error as? BootstrapCoordinatorError)
@@ -926,6 +939,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         // Read-only preflight must pass before the helper is registered or
         // any host-owned files are changed. Advisory checks such as memory
         // remain visible but do not block setup.
+        let initialPreflightStartedAt = Date()
         let initialChecks = await preflight()
         guard initialChecks
             .filter({ $0.id != "host-integration" })
@@ -937,6 +951,11 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             throw BootstrapCoordinatorError.preflightBlocked
         }
 
+        current.recordPhaseDuration(
+            MSWBootstrapState.Phase.preflight.rawValue,
+            from: initialPreflightStartedAt
+        )
+        let hostIntegrationStartedAt = Date()
         let hostPackaging = await hostService.packagingStatus()
         if hostPackaging == .signingUnavailable {
             let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
@@ -1024,6 +1043,11 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             }
         }
 
+        current.recordPhaseDuration(
+            MSWBootstrapState.Phase.hostIntegration.rawValue,
+            from: hostIntegrationStartedAt
+        )
+        let finalPreflightStartedAt = Date()
         let checks = await preflight(workspaceConfigurations: workspaceConfigurations)
         guard checks.allSatisfy(isPassingOrAdvisory) else {
             current.phase = .preflight
@@ -1032,9 +1056,14 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             throw BootstrapCoordinatorError.preflightBlocked
         }
 
+        current.recordPhaseDuration(
+            MSWBootstrapState.Phase.preflight.rawValue,
+            from: finalPreflightStartedAt
+        )
         current.phase = .workspaces
         try await stateStore.save(current)
         do {
+            let workspacesStartedAt = Date()
             let response = try await client.bootstrap(workspaceConfigurations: workspaceConfigurations)
             guard let result = response.result else { throw MSWClientError.missingResult(command: "bootstrap") }
             guard let installed = await runner.installedWorkspaceConfigurations(),
@@ -1051,6 +1080,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 current.completedPhases.insert(.preflight)
             }
             current.updatedAt = Date()
+            current.recordPhaseDuration(MSWBootstrapState.Phase.workspaces.rawValue, from: workspacesStartedAt)
             try await stateStore.save(current)
             return result
         } catch {

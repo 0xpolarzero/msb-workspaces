@@ -1194,6 +1194,21 @@ final class AppModelTests: XCTestCase {
                 .split(whereSeparator: \.isNewline).map(String.init),
             ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json"]
         )
+        let durations = try XCTUnwrap(finalState.phaseDurations)
+        XCTAssertEqual(
+            Set(durations.keys),
+            ["toolchain", "preflight", "hostIntegration", "workspaces"]
+        )
+        XCTAssertTrue(durations.values.allSatisfy { $0.isFinite && $0 >= 0 })
+        let persistedStore = BootstrapStateStore(
+            url: temporary.appendingPathComponent("bootstrap-state.json")
+        )
+        let persisted = await persistedStore.load()
+        XCTAssertEqual(
+            Set((persisted.phaseDurations ?? [:]).keys),
+            Set(durations.keys),
+            "Per-phase timings must survive persistence so a resumed setup can show them."
+        )
         let boundary = try JSONDecoder().decode(
             MSWBootstrapConfiguration.self,
             from: Data(contentsOf: bootstrapInputURL)
@@ -2383,6 +2398,52 @@ final class AppModelTests: XCTestCase {
             issueWorkspace: "dev",
             committedWorkspaces: ["playgrounds", "dev"]
         ))
+    }
+
+    func testSetupDurationsSummaryFormatsPhasesInOrder() {
+        XCTAssertEqual(
+            SetupView.setupDurationsSummary([
+                "toolchain": 0.42,
+                "preflight": 1.25,
+                "hostIntegration": 3,
+                "workspaces": 12.4,
+            ]),
+            "Last apply: runtime check 0.4s, system checks 1.2s, system records 3.0s, workspace registration 12s"
+        )
+    }
+
+    func testSetupDurationsSummaryOmitsMissingAndUnknownPhases() {
+        XCTAssertNil(SetupView.setupDurationsSummary(nil))
+        XCTAssertNil(SetupView.setupDurationsSummary([:]))
+        XCTAssertNil(SetupView.setupDurationsSummary(["unknown-phase": 1]))
+        XCTAssertEqual(
+            SetupView.setupDurationsSummary(["toolchain": 2.34, "workspaces": 8.9]),
+            "Last apply: runtime check 2.3s, workspace registration 8.9s"
+        )
+    }
+
+    func testBootstrapPhaseProgressCoversEveryPhaseWithPlainLanguage() {
+        for phase in MSWBootstrapState.Phase.allCases {
+            XCTAssertFalse(SetupView.bootstrapPhaseProgress(for: phase).isEmpty)
+        }
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .toolchain), "checking the MSW runtime")
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .hostIntegration), "updating system records")
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .workspaces), "registering your workspaces")
+    }
+
+    func testBootstrapStateWithoutPhaseDurationsStillDecodes() throws {
+        var state = MSWBootstrapState.initial
+        state.updatedAt = Date(timeIntervalSince1970: 0)
+        let data = try JSONEncoder().encode(state)
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        object.removeValue(forKey: "phaseDurations")
+        let legacy = try JSONDecoder().decode(
+            MSWBootstrapState.self,
+            from: try JSONSerialization.data(withJSONObject: object)
+        )
+        XCTAssertNil(legacy.phaseDurations)
     }
 
     func testSetupLifecycleIsCurrentOnlyWhileUntouched() {
