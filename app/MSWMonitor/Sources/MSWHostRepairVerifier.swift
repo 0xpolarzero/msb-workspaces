@@ -25,20 +25,50 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
         guard let data = try? Data(contentsOf: url), data.count <= 1_024 * 1_024 else {
             return false
         }
-        let lines = String(decoding: data, as: UTF8.self)
+        return Self.managedHostsMatch(String(decoding: data, as: UTF8.self), expected: records)
+    }
+
+    /// Managed `/etc/hosts` block dialects. The administrator repair script
+    /// strips both spellings and rewrites the managed form; verification
+    /// accepts either single complete block so machines configured by earlier
+    /// releases or the msw CLI are not flagged for repair when the records
+    /// already match.
+    private static let managedMarkers = (
+        begin: "# BEGIN MSW MONITOR MANAGED HOSTS",
+        end: "# END MSW MONITOR MANAGED HOSTS"
+    )
+    private static let legacyMarkers = (
+        begin: "# BEGIN MSW WORKSPACES",
+        end: "# END MSW WORKSPACES"
+    )
+
+    static func managedHostsMatch(_ text: String, expected records: [MSWWorkspaceNetworkRecord]) -> Bool {
+        let lines = text
             .split(whereSeparator: \.isNewline)
             .map(String.init)
-        let managedStart = "# BEGIN MSW MONITOR MANAGED HOSTS"
-        let managedEnd = "# END MSW MONITOR MANAGED HOSTS"
-        let starts = lines.indices.filter { lines[$0] == managedStart }
-        let ends = lines.indices.filter { lines[$0] == managedEnd }
-        guard starts.count == 1, ends.count == 1,
-              let start = starts.first, let end = ends.first,
-              start < end else { return false }
-        let actual = lines[(start + 1)..<end].map { line in
-            line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+
+        func soleIndex(of line: String) -> Int? {
+            let found = lines.indices.filter { lines[$0] == line }
+            return found.count == 1 ? found[0] : nil
         }
-        return actual == records.map { [$0.address, $0.hostname] }
+
+        for (markers, other) in [(Self.managedMarkers, Self.legacyMarkers), (Self.legacyMarkers, Self.managedMarkers)] {
+            guard let start = soleIndex(of: markers.begin),
+                  let end = soleIndex(of: markers.end),
+                  start < end else {
+                continue
+            }
+            // Exactly one unambiguous managed block may exist: any trace of
+            // the other dialect means the file needs a real repair pass.
+            guard !lines.contains(other.begin), !lines.contains(other.end) else {
+                return false
+            }
+            let actual = lines[(start + 1)..<end].map { line in
+                line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            }
+            return actual == records.map { [$0.address, $0.hostname] }
+        }
+        return false
     }
 
     private func loopbackAliasesAreReady(records: [MSWWorkspaceNetworkRecord]) async -> Bool {

@@ -510,7 +510,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 remediation = nil
             } else if directRepairAvailable {
                 detail = "Host networking needs one-time administrator approval on this Mac."
-                remediation = "Choose Repair & Continue to configure the fixed aliases and host records."
+                remediation = "Continue setup; macOS will ask for an administrator password once to configure host networking."
             } else {
                 detail = hostPackaging.detail
                 remediation = hostPackaging.remediation

@@ -6723,3 +6723,100 @@ private func testJSON<Value: Encodable>(_ value: Value) throws -> Data {
     return try encoder.encode(value)
 }
 
+final class MSWHostRepairVerifierHostsParsingTests: XCTestCase {
+    private let expected: [MSWWorkspaceNetworkRecord] = [
+        MSWWorkspaceNetworkRecord(address: "127.0.0.10", hostname: "dev.msw.test"),
+        MSWWorkspaceNetworkRecord(address: "127.0.0.11", hostname: "playgrounds.msw.test"),
+        MSWWorkspaceNetworkRecord(address: "127.0.0.12", hostname: "personal.msw.test")
+    ]
+
+    func testManagedBlockMatches() {
+        let text = """
+        127.0.0.1 localhost
+        # BEGIN MSW MONITOR MANAGED HOSTS
+        127.0.0.10 dev.msw.test
+        127.0.0.11 playgrounds.msw.test
+        127.0.0.12 personal.msw.test
+        # END MSW MONITOR MANAGED HOSTS
+        """
+        XCTAssertTrue(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testLegacyBlockMatches() {
+        let text = """
+        127.0.0.1 localhost
+        # BEGIN MSW WORKSPACES
+        127.0.0.10 dev.msw.test
+        127.0.0.11 playgrounds.msw.test
+        127.0.0.12 personal.msw.test
+        # END MSW WORKSPACES
+        """
+        XCTAssertTrue(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testMissingBlockFails() {
+        let text = """
+        127.0.0.1 localhost
+        127.0.0.10 dev.msw.test
+        """
+        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testMismatchedRecordsFail() {
+        let text = """
+        # BEGIN MSW WORKSPACES
+        127.0.0.10 dev.msw.test
+        127.0.0.11 playgrounds.msw.local
+        127.0.0.12 personal.msw.test
+        # END MSW WORKSPACES
+        """
+        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testReorderedRecordsFail() {
+        let text = """
+        # BEGIN MSW MONITOR MANAGED HOSTS
+        127.0.0.12 personal.msw.test
+        127.0.0.10 dev.msw.test
+        127.0.0.11 playgrounds.msw.test
+        # END MSW MONITOR MANAGED HOSTS
+        """
+        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testMixedDialectsFail() {
+        let text = """
+        # BEGIN MSW MONITOR MANAGED HOSTS
+        127.0.0.10 dev.msw.test
+        # END MSW MONITOR MANAGED HOSTS
+        # BEGIN MSW WORKSPACES
+        127.0.0.11 playgrounds.msw.test
+        # END MSW WORKSPACES
+        """
+        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testDuplicateManagedBlocksFail() {
+        let text = """
+        # BEGIN MSW MONITOR MANAGED HOSTS
+        127.0.0.10 dev.msw.test
+        # END MSW MONITOR MANAGED HOSTS
+        # BEGIN MSW MONITOR MANAGED HOSTS
+        127.0.0.11 playgrounds.msw.test
+        # END MSW MONITOR MANAGED HOSTS
+        """
+        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+
+    func testStrayForeignMarkerFails() {
+        let text = """
+        # BEGIN MSW MONITOR MANAGED HOSTS
+        127.0.0.10 dev.msw.test
+        127.0.0.11 playgrounds.msw.test
+        127.0.0.12 personal.msw.test
+        # END MSW MONITOR MANAGED HOSTS
+        # END MSW WORKSPACES
+        """
+        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+    }
+}
