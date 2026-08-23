@@ -91,11 +91,11 @@ struct GitHubApplyProgress: Sendable, Equatable {
         let scope = workspace.map { " for \($0)" } ?? ""
         switch phase {
         case .validating: return "Validating GitHub access\(scope)…"
-        case .saving: return "Saving desired GitHub policy generation \(generation)…"
+        case .saving: return "Saving your GitHub repository choices…"
         case .configuring: return "Configuring GitHub transport\(scope)…"
         case .restoring: return "Restoring workspace lifecycle\(scope)…"
-        case .activating: return "Activating GitHub policy generation \(generation)…"
-        case .completed: return "GitHub policy generation \(generation) is active."
+        case .activating: return "Applying your GitHub repository choices…"
+        case .completed: return "Your GitHub repository choices are active."
         case .failed: return failure?.message ?? "GitHub reconciliation failed."
         case .cancelled: return "GitHub reconciliation was cancelled."
         }

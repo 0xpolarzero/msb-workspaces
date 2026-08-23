@@ -1706,7 +1706,7 @@ struct SetupView: View {
             .font(.caption)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("setup.github.apply.progress")
-            .accessibilityValue("Generation \(progress.generation), \(progress.phase.rawValue)")
+            .accessibilityValue(progress.summary)
         }
     }
 
@@ -2008,12 +2008,9 @@ struct SetupView: View {
             if let error {
                 Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
             } else if let notice {
-                Label(notice, systemImage: "info.circle.fill").foregroundStyle(.secondary)
+                Label(notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")
-                    .foregroundStyle(.orange)
-            } else if activeStep == .dependencies && !blockingChecks.isEmpty {
-                Label("Continuing will resolve these during setup.", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
             } else if activeStep == .workspaces, let workspaceValidationMessage {
                 Label(workspaceValidationMessage, systemImage: "exclamationmark.triangle.fill")
@@ -2854,7 +2851,17 @@ struct SetupView: View {
 
     private func refreshLocalApplyProgress() async {
         guard workspaceConfigurationIsApplied, githubContextLoaded,
-              accessMode == .local, let provider,
+              accessMode == .local, provider != nil else { return }
+        await syncLocalApplyProgress()
+    }
+
+    /// Reads the provider's durable apply intent into the step state without
+    /// requiring the catalog/context chain to have finished. Runs after
+    /// `rebuildWorkspaceScopedState`, which resets `repositoryPolicyApplied`
+    /// from the empty per-session retained policy and would otherwise mask a
+    /// policy that a previous session durably completed.
+    private func syncLocalApplyProgress() async {
+        guard accessMode == .local, let provider,
               let progress = await provider.currentPolicyApplyProgress() else { return }
         githubApplyProgress = progress
         repositoryPolicyApplied = progress.phase != .cancelled
@@ -3053,7 +3060,16 @@ struct SetupView: View {
         }
         rebuildWorkspaceScopedState()
         await prefillIdentityFromLocalGit()
-        return await loadGitHubStartupContext()
+        let loaded = await loadGitHubStartupContext()
+        if loaded {
+            // The rebuild above resets repositoryPolicyApplied from the
+            // per-session retained policy, which starts empty; re-read the
+            // durable intent so a policy completed in an earlier session
+            // keeps this step decided instead of dead-ending on a disabled
+            // Continue.
+            await syncLocalApplyProgress()
+        }
+        return loaded
     }
 
     /// The post-application GitHub-context chain. Every awaited publication
@@ -3138,11 +3154,13 @@ struct SetupView: View {
                 checks = refreshedChecks
                 lastPreflightAt = Date()
                 isRunning = false
+                // Only approval blockers persist in the footer slot; success
+                // messages would linger into later steps as stale captions.
                 notice = result.requiresApproval
                     ? (result.phase == MSWBootstrapState.Phase.hostIntegration.rawValue
                         ? "Allow MSW Monitor in Login Items, then choose Retry."
                         : result.message)
-                    : result.message
+                    : nil
                 if result.phase == MSWBootstrapState.Phase.complete.rawValue,
                    submittedWorkspaceConfigurations == workspaceConfigurations,
                    workspaceConfigurationIsApplied {
