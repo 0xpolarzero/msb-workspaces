@@ -75,13 +75,15 @@ final class MSWMonitorUITests: XCTestCase {
         let stepper = app.descendants(matching: .any)["setup.stepper"]
         XCTAssertTrue(stepper.waitForExistence(timeout: 2))
         for identifier in [
-            "setup.step.readiness",
+            "setup.step.dependencies",
+            "setup.step.workspaces",
             "setup.step.github",
             "setup.step.identity",
             "setup.step.review"
         ] {
             assertIdentifier(identifier, in: app)
         }
+        XCTAssertTrue(app.buttons["setup.step.dependencies"].label.contains("Dependencies"))
         let gitStep = app.buttons["setup.step.identity"]
         XCTAssertTrue(gitStep.label.contains("Git"))
 
@@ -96,12 +98,89 @@ final class MSWMonitorUITests: XCTestCase {
         let primaryAction = app.buttons["setup.primary-action"]
         XCTAssertTrue(primaryAction.waitForExistence(timeout: 2))
         XCTAssertEqual(primaryAction.label, "Continue")
-        XCTAssertTrue(primaryAction.isEnabled)
+        XCTAssertTrue(waitUntilEnabled(primaryAction, timeout: 5))
         let retry = app.buttons["setup.retry.button"]
         XCTAssertTrue(retry.waitForExistence(timeout: 2))
         XCTAssertEqual(retry.frame.midY, primaryAction.frame.midY, accuracy: 0.5)
         assertActionsReachTrailingEdge(of: setup, in: app)
         primaryAction.click()
+
+        XCTAssertTrue(app.descendants(matching: .any)["setup.workspaces"].waitForExistence(timeout: 2))
+        assertText("Configure workspaces", identifier: "setup.workspaces.title", in: app)
+        XCTAssertEqual(app.textFields["setup.workspaces.row.0.name"].value as? String, "dev")
+        XCTAssertEqual(app.textFields["setup.workspaces.row.1.name"].value as? String, "playgrounds")
+        XCTAssertEqual(app.textFields["setup.workspaces.row.2.name"].value as? String, "personal")
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.0.memory"].value as? String,
+            "32 GB"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.2.max-memory"].value as? String,
+            "32 GB"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.0.cpus"].value as? String,
+            "8 CPU"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.0.max-cpus"].value as? String,
+            "12 CPU"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.0.workspace-storage"].value as? String,
+            "120 GB"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.0.runtime-storage"].value as? String,
+            "100 GB"
+        )
+
+        let devName = app.textFields["setup.workspaces.row.0.name"]
+        devName.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("development")
+        XCTAssertEqual(devName.value as? String, "development")
+
+        let playgroundsName = app.textFields["setup.workspaces.row.1.name"]
+        playgroundsName.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("development")
+        let workspaceValidation = app.staticTexts["setup.workspaces.validation"]
+        XCTAssertTrue(workspaceValidation.waitForExistence(timeout: 2))
+        XCTAssertEqual(workspaceValidation.value as? String, "Workspace names must be unique.")
+        XCTAssertFalse(app.buttons["setup.workspaces.continue.button"].isEnabled)
+        playgroundsName.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("playgrounds")
+        XCTAssertTrue(workspaceValidation.waitForNonExistence(timeout: 2))
+
+        let devMemory = app.descendants(matching: .any)["setup.workspaces.row.0.memory"]
+        devMemory.click()
+        XCTAssertTrue(app.menuItems["16 GB"].waitForExistence(timeout: 2))
+        app.menuItems["16 GB"].click()
+        XCTAssertEqual(devMemory.value as? String, "16 GB")
+
+        let addWorkspace = app.buttons["setup.workspaces.add.button"]
+        XCTAssertTrue(addWorkspace.waitForExistence(timeout: 2))
+        addWorkspace.click()
+        let addedName = app.textFields["setup.workspaces.row.0.name"]
+        XCTAssertTrue(addedName.waitForExistence(timeout: 2))
+        addedName.click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText("lab")
+        XCTAssertEqual(addedName.value as? String, "lab")
+        let removeAdded = app.buttons["setup.workspaces.row.0.remove.button"]
+        XCTAssertTrue(removeAdded.waitForExistence(timeout: 2))
+        removeAdded.click()
+        let restoredFirstName = app.textFields["setup.workspaces.row.0.name"]
+        XCTAssertTrue(restoredFirstName.waitForExistence(timeout: 2))
+        XCTAssertEqual(restoredFirstName.value as? String, "development")
+        XCTAssertFalse(app.textFields["setup.workspaces.row.3.name"].exists)
+
+        let workspaceContinue = app.buttons["setup.workspaces.continue.button"]
+        XCTAssertTrue(workspaceContinue.waitForExistence(timeout: 2))
+        XCTAssertTrue(workspaceContinue.isEnabled)
+        workspaceContinue.click()
 
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github-boundary"]
@@ -115,6 +194,16 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["setup.github.reconnect.button"].exists)
         XCTAssertFalse(app.buttons["setup.github.retry.button"].exists)
         XCTAssertFalse(app.buttons["setup.github.refresh.button"].exists)
+        let workspaceBack = app.buttons["setup.back.button"]
+        XCTAssertTrue(workspaceBack.waitForExistence(timeout: 2))
+        workspaceBack.click()
+        XCTAssertTrue(app.descendants(matching: .any)["setup.workspaces"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.textFields["setup.workspaces.row.0.name"].value as? String, "development")
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.workspaces.row.0.memory"].value as? String,
+            "16 GB"
+        )
+        app.buttons["setup.workspaces.continue.button"].click()
         let connect = app.buttons["setup.github.connect-account.button"]
         XCTAssertTrue(connect.waitForExistence(timeout: 3))
         XCTAssertEqual(connect.label, "Connect GitHub")
@@ -138,6 +227,7 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForNonExistence(timeout: 2)
         )
+        XCTAssertTrue(app.staticTexts["Targets: development, playgrounds, personal."].exists)
         let gitSkip = app.buttons["setup.identity.skip.button"]
         let gitBack = app.buttons["setup.back.button"]
         let gitContinue = app.buttons["setup.identity.continue.button"]
@@ -176,6 +266,16 @@ final class MSWMonitorUITests: XCTestCase {
 
         XCTAssertTrue(finalReview.waitForExistence(timeout: 2))
         assertText("Review setup", identifier: "setup.final-review.title", in: app)
+        let workspaceReview = app.descendants(matching: .any)["setup.final-review.workspaces"]
+        XCTAssertTrue(workspaceReview.waitForExistence(timeout: 2))
+        XCTAssertEqual(workspaceReview.label, "Configured workspaces")
+        XCTAssertEqual(
+            workspaceReview.value as? String,
+            "development: 8/12 CPU, 16/48 GB memory, 120 GB workspace storage, " +
+            "100 GB runtime storage; playgrounds: 4/12 CPU, 32/48 GB memory, " +
+            "60 GB workspace storage, 60 GB runtime storage; personal: 6/12 CPU, " +
+            "16/32 GB memory, 100 GB workspace storage, 80 GB runtime storage"
+        )
         assertText(
             "The GitHub and Git choices below are saved.",
             identifier: "setup.final-review.summary",
@@ -210,7 +310,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         let primaryAction = app.buttons["setup.primary-action"]
         XCTAssertTrue(primaryAction.waitForExistence(timeout: 2))
-        primaryAction.click()
+        advanceFromDependenciesToGitHub(in: app)
 
         let githubTitle = app.staticTexts["setup.github.title"]
         let githubAccount = app.descendants(matching: .any)["setup.github.account"]
@@ -319,7 +419,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.buttons["setup.primary-action"].click()
+        advanceFromDependenciesToGitHub(in: app)
 
         let connect = app.buttons["setup.github.connect-account.button"]
         XCTAssertTrue(connect.waitForExistence(timeout: 3))
@@ -370,7 +470,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.buttons["setup.primary-action"].click()
+        advanceFromDependenciesToGitHub(in: app)
 
         // The account is connected but the catalog is empty; the no-repos
         // status is shown and the refresh control re-enables instead of hanging.
@@ -405,7 +505,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.buttons["setup.primary-action"].click()
+        advanceFromDependenciesToGitHub(in: app)
 
         let picker = app.buttons["github.workspace.dev.repository-picker.button"]
         XCTAssertTrue(picker.waitForExistence(timeout: 3))
@@ -469,16 +569,16 @@ final class MSWMonitorUITests: XCTestCase {
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
 
-        // Local mode can be configured as soon as preflight passes, even while
-        // bootstrap is still creating workspaces.
+        // Workspace configuration is the required step between dependencies
+        // and GitHub, even while bootstrap is still creating workspaces.
         let githubStep = app.descendants(matching: .any)["setup.step.github"]
         XCTAssertTrue(githubStep.waitForExistence(timeout: 2))
-        XCTAssertTrue(githubStep.isEnabled)
+        XCTAssertFalse(githubStep.isEnabled)
 
         let primaryAction = app.buttons["setup.primary-action"]
         XCTAssertTrue(primaryAction.waitForExistence(timeout: 2))
         XCTAssertEqual(primaryAction.label, "Continue")
-        primaryAction.click()
+        advanceFromDependenciesToGitHub(in: app)
 
         // Local mode unlocks the GitHub step as soon as preflight passes.
         XCTAssertTrue(
@@ -547,7 +647,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.buttons["setup.primary-action"].click()
+        advanceFromDependenciesToGitHub(in: app)
 
         // The first catalog load reports a retryable unavailability; the retry
         // uses the current attempt and succeeds.
@@ -595,7 +695,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.buttons["setup.primary-action"].click()
+        advanceFromDependenciesToGitHub(in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 2)
         )
@@ -645,6 +745,17 @@ final class MSWMonitorUITests: XCTestCase {
         )
     }
 
+
+    private func advanceFromDependenciesToGitHub(in app: XCUIApplication) {
+        let dependenciesContinue = app.buttons["setup.primary-action"]
+        XCTAssertTrue(dependenciesContinue.waitForExistence(timeout: 2))
+        XCTAssertTrue(waitUntilEnabled(dependenciesContinue, timeout: 5))
+        dependenciesContinue.click()
+        let workspaceContinue = app.buttons["setup.workspaces.continue.button"]
+        XCTAssertTrue(workspaceContinue.waitForExistence(timeout: 2))
+        XCTAssertTrue(waitUntilEnabled(workspaceContinue, timeout: 5))
+        workspaceContinue.click()
+    }
 
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(

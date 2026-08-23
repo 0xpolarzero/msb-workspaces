@@ -32,28 +32,30 @@ private final class EnabledHostService: MSWHostServiceControlling {
 private actor RecordingHostAgent: MSWHostAgentControlling {
     private(set) var ensureAliasInvocationCount = 0
     private(set) var installRecordsInvocationCount = 0
+    private(set) var inspectRequests: [[MSWWorkspaceNetworkRecord]] = []
 
-    func inspect() async throws -> MSWHostRecordSnapshot {
-        snapshot()
+    func inspect(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+        inspectRequests.append(records)
+        return snapshot(records: records)
     }
 
-    func ensureFixedLoopbackAliases() async throws -> MSWHostRecordSnapshot {
+    func ensureFixedLoopbackAliases(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
         ensureAliasInvocationCount += 1
-        return snapshot()
+        return snapshot(records: records)
     }
 
-    func installFixedHostRecords() async throws -> MSWHostRecordSnapshot {
+    func installFixedHostRecords(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
         installRecordsInvocationCount += 1
-        return snapshot()
+        return snapshot(records: records)
     }
 
-    func uninstall() async throws -> MSWHostRecordSnapshot {
-        snapshot()
+    func uninstall(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+        snapshot(records: records)
     }
 
-    private func snapshot() -> MSWHostRecordSnapshot {
+    private func snapshot(records: [MSWWorkspaceNetworkRecord]) -> MSWHostRecordSnapshot {
         MSWHostRecordSnapshot(
-            fixedAliases: MSWWorkspaceNetwork.addresses,
+            fixedAliases: records.map(\.address),
             hostsBlockInstalled: true,
             launchDaemonRegistered: true
         )
@@ -554,7 +556,7 @@ final class AppModelTests: XCTestCase {
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let snapshots = Workspace.ID.allCases.map { id in
+        let snapshots = Workspace.ID.fixtureDefaults.map { id in
             let isUnknownQuarantine = id == .dev
             return MSWWorkspaceSnapshot(
                 id: id.rawValue,
@@ -1070,6 +1072,14 @@ final class AppModelTests: XCTestCase {
         let finalState = await coordinator.state()
         XCTAssertEqual(finalState.phase, .preflight)
         XCTAssertEqual(finalState.lastError, BootstrapCoordinatorError.preflightBlocked.localizedDescription)
+        XCTAssertNil(
+            finalState.workspaceConfigurations,
+            "A failed setup must not publish an unapplied configuration or unlock GitHub."
+        )
+        XCTAssertFalse(SetupView.workspaceConfigurationIsApplied(
+            SetupWorkspaceConfiguration.defaults,
+            persisted: finalState.workspaceConfigurations
+        ))
     }
 
 
@@ -1096,6 +1106,8 @@ final class AppModelTests: XCTestCase {
         }
 
         let bootstrapURL = temporary.appendingPathComponent("bootstrap.json")
+        let bootstrapArgumentsURL = temporary.appendingPathComponent("bootstrap-arguments.txt")
+        let bootstrapInputURL = temporary.appendingPathComponent("bootstrap-input.json")
         let bootstrapResponse = #"""
         {"schemaVersion":1,"requestId":"bootstrap-success","ok":true,"command":"bootstrap","observedAt":"2026-08-08T00:00:00Z","result":{"resumed":false,"phase":"complete","requiresApproval":false,"vmsStarted":false,"message":"Setup complete."},"warnings":[],"error":null}
         """#
@@ -1107,6 +1119,8 @@ final class AppModelTests: XCTestCase {
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
             printf '%s\\n' '\(protocolCompatibleHandshake)'
         elif [ "$1" = "app" ] && [ "$2" = "bootstrap" ]; then
+            printf '%s\\n' "$@" > "\(bootstrapArgumentsURL.path)"
+            /usr/bin/tee "\(bootstrapInputURL.path)" > "\(configDirectory.appendingPathComponent("workspaces.json").path)"
             /bin/cat "\(bootstrapURL.path)"
         else
             exit 64
@@ -1136,17 +1150,232 @@ final class AppModelTests: XCTestCase {
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
 
-        let result = try await coordinator.run()
+        let defaults = SetupWorkspaceConfiguration.defaults
+        let configurations = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 12, maxCPUs: 12,
+                memoryGiB: 48, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration(
+                name: defaults[2].name, cpus: 4, maxCPUs: 8,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 80, runtimeStorageGiB: 60
+            ),
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 6, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 100, runtimeStorageGiB: 80
+            )
+        ]
+        let result = try await coordinator.run(workspaceConfigurations: configurations)
 
         XCTAssertEqual(result.phase, MSWBootstrapState.Phase.complete.rawValue)
         let ensureAliasCount = await hostAgent.ensureAliasInvocationCount
         let installRecordsCount = await hostAgent.installRecordsInvocationCount
+        let inspectRequests = await hostAgent.inspectRequests
         XCTAssertEqual(ensureAliasCount, 1)
         XCTAssertEqual(installRecordsCount, 1)
+        XCTAssertEqual(
+            inspectRequests.last?.map(\.hostname),
+            ["development.msw.test", "personal.msw.test", "lab.msw.test"],
+            "Post-repair verification must inspect the selected configuration before bootstrap can unlock GitHub."
+        )
         let finalState = await coordinator.state()
         XCTAssertEqual(finalState.phase, .complete)
         XCTAssertTrue(finalState.completedPhases.contains(.hostIntegration))
         XCTAssertTrue(finalState.completedPhases.contains(.workspaces))
+        XCTAssertEqual(
+            finalState.workspaceConfigurations?.map(\.name),
+            ["development", "personal", "lab"]
+        )
+        XCTAssertEqual(
+            try String(contentsOf: bootstrapArgumentsURL, encoding: .utf8)
+                .split(whereSeparator: \.isNewline).map(String.init),
+            ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json"]
+        )
+        let boundary = try JSONDecoder().decode(
+            MSWBootstrapConfiguration.self,
+            from: Data(contentsOf: bootstrapInputURL)
+        )
+        XCTAssertEqual(boundary, MSWBootstrapConfiguration(configurations))
+        XCTAssertEqual(boundary.workspaces.map(\.name), ["development", "personal", "lab"])
+        XCTAssertEqual(boundary.workspaces[1].cpu, 4)
+        XCTAssertEqual(boundary.workspaces[1].cpuCeiling, 8)
+        XCTAssertEqual(boundary.workspaces[1].workspaceStorageGiB, 80)
+        XCTAssertEqual(boundary.workspaces[1].runtimeStorageGiB, 60)
+    }
+
+    func testRealBootstrapReconnectReadbackPrecedesGitHubEntry() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-bootstrap-reconnect-test-\(UUID().uuidString)", isDirectory: true)
+        let mswBin = temporary.appendingPathComponent("bin", isDirectory: true)
+        let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
+        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
+        try FileManager.default.createDirectory(at: mswBin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: toolBin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        try Data("# test configuration\n".utf8)
+            .write(to: configDirectory.appendingPathComponent("config.sh"))
+        for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
+            let tool = toolBin.appendingPathComponent(name)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: tool)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: tool.path
+            )
+        }
+
+        let reconnectResponse = #"{"schemaVersion":1,"requestId":"bootstrap-reconnect","ok":false,"command":"bootstrap","observedAt":"2026-08-23T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_GITHUB_RECONNECT_REQUIRED","message":"GitHub is configured for development, but its credential is unavailable.","recovery":"Reconnect development.","workspace":"development","retryable":true}}"#
+        let executable = mswBin.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "bootstrap" ]; then
+            /bin/cat > "\(configDirectory.appendingPathComponent("workspaces.json").path)"
+            printf '%s\\n' '\(reconnectResponse)'
+            exit 69
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        ))
+        let coordinator = BootstrapCoordinator(
+            client: MSWClient(runner: runner),
+            runner: runner,
+            stateStore: BootstrapStateStore(
+                url: temporary.appendingPathComponent("bootstrap-state.json")
+            ),
+            hostAgent: RecordingHostAgent(),
+            hostService: EnabledHostService(),
+            sourceSetup: AvailableSourceSetup(),
+            freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
+        )
+        let selected = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 8, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration.defaults[2],
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 4, maxCPUs: 12,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 60, runtimeStorageGiB: 60
+            )
+        ]
+
+        do {
+            _ = try await coordinator.run(workspaceConfigurations: selected)
+            XCTFail("Expected reconnect to interrupt deep verification.")
+        } catch let error as MSWClientError {
+            guard case .protocolFailure(let protocolError) = error else {
+                return XCTFail("Expected typed reconnect, got \(error).")
+            }
+            XCTAssertEqual(protocolError.workspace, "development")
+        }
+
+        let state = await coordinator.state()
+        XCTAssertEqual(state.phase, .github)
+        XCTAssertEqual(state.reconnectWorkspace, "development")
+        XCTAssertEqual(state.workspaceConfigurations?.map(\.name), ["development", "personal", "lab"])
+        XCTAssertTrue(SetupView.workspaceConfigurationIsApplied(
+            selected,
+            persisted: state.workspaceConfigurations
+        ))
+    }
+
+    @MainActor
+    func testReconnectPublishesAppliedConfigurationBeforeGitHubEntry() async throws {
+        let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")
+        var configurations = SetupWorkspaceConfiguration.defaults
+        configurations[0].name = "development"
+        configurations[0].memoryGiB = 16
+
+        do {
+            _ = try await coordinator.run(workspaceConfigurations: configurations)
+            XCTFail("Expected reconnect to interrupt deep bootstrap verification.")
+        } catch let error as MSWClientError {
+            guard case .protocolFailure(let protocolError) = error else {
+                return XCTFail("Expected a typed reconnect error, got \(error).")
+            }
+            XCTAssertEqual(protocolError.code, "MSW_GITHUB_RECONNECT_REQUIRED")
+        }
+        let state = await coordinator.state()
+
+        XCTAssertEqual(state.phase, .github)
+        XCTAssertEqual(state.reconnectWorkspace, "dev")
+        XCTAssertEqual(state.workspaceConfigurations, configurations)
+        XCTAssertTrue(SetupView.workspaceConfigurationIsApplied(
+            configurations,
+            persisted: state.workspaceConfigurations
+        ))
+    }
+
+    func testConnectCoordinatorReloadScopesRetainedTargetsToAppliedConfiguration() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-connect-target-reload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let broker = try CredentialBroker(
+            keychain: InMemoryConnectKeychain(),
+            metadataURL: temporary.appendingPathComponent("credentials.json"),
+            keychainService: "test-target-reload-\(UUID().uuidString)"
+        )
+        for workspace in ["dev", "personal"] {
+            try await broker.storeScopedCredential(
+                ScopedInstallationCredential(
+                    grantID: UUID(),
+                    accessToken: "ghs_target_reload_\(workspace)",
+                    accessExpiresAt: Date().addingTimeInterval(1_800),
+                    generation: 1
+                ),
+                workspace: workspace,
+                accessMode: "read-only",
+                verificationRepository: "acme/one",
+                installationID: 42,
+                role: .guest,
+                accountLogin: "octocat",
+                owner: "acme",
+                repositoryIDs: [7],
+                repositoryNames: ["acme/one"]
+            )
+        }
+        let coordinator = GitHubAuthorizationCoordinator(
+            broker: broker,
+            journalURL: temporary.appendingPathComponent("authorization-journal.json")
+        )
+        let selected = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 8, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration.defaults[2],
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 4, maxCPUs: 12,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 60, runtimeStorageGiB: 60
+            )
+        ]
+
+        try await coordinator.reloadWorkspaceConfiguration(selected)
+        let visible = await coordinator.retainedMetadata()
+
+        XCTAssertEqual(visible.map(\.workspace), ["personal"])
+        XCTAssertFalse(visible.contains { ["dev", "playgrounds"].contains($0.workspace) })
     }
 
     func testJSONLFramerSplitsChunksAndFinishesPendingData() throws {
@@ -1357,7 +1586,7 @@ final class AppModelTests: XCTestCase {
             )
         }
 
-        try await authorization.repair()
+        try await authorization.repair(records: MSWWorkspaceNetwork.fixtureRecords)
 
         let recordedCommand = await recorder.command
         let command = try XCTUnwrap(recordedCommand)
@@ -1482,11 +1711,13 @@ final class AppModelTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
         let runtimeMarker = root.appendingPathComponent("runtime-marker")
+        let runtimeArgumentsMarker = root.appendingPathComponent("runtime-arguments-marker")
         let hostRepairMarker = root.appendingPathComponent("host-repair-marker")
         let setup = """
         #!/bin/sh
         set -eu
         printf '%s\\n' "${MSW_SKIP_HOST_REPAIR:-unset}" > "\(runtimeMarker.path)"
+        printf '%s\\n' "$@" > "\(runtimeArgumentsMarker.path)"
         """
         let launcher = """
         #!/bin/sh
@@ -1510,6 +1741,10 @@ final class AppModelTests: XCTestCase {
         try await service.installRuntime()
         try await service.configureUserIntegrationIfAvailable()
         XCTAssertEqual(try String(contentsOf: runtimeMarker, encoding: .utf8), "1\n")
+        XCTAssertEqual(
+            try String(contentsOf: runtimeArgumentsMarker, encoding: .utf8),
+            "--skip-workspaces\n"
+        )
         XCTAssertEqual(try String(contentsOf: hostRepairMarker, encoding: .utf8), "host repair 1\n")
     }
 
@@ -1763,7 +1998,7 @@ final class AppModelTests: XCTestCase {
         devLifecycle: MSWLifecycle,
         devQuarantine: MSWQuarantineSnapshot.State
     ) -> MSWEnvelope<MSWStateResponse> {
-        let snapshots = Workspace.ID.allCases.map { id in
+        let snapshots = Workspace.ID.fixtureDefaults.map { id in
             let quarantine = id == .dev ? devQuarantine : .clear
             return MSWWorkspaceSnapshot(
                 id: id.rawValue,
@@ -2116,7 +2351,7 @@ final class AppModelTests: XCTestCase {
             provider: nil,
             accessMode: .connect,
             openSettings: { _ in },
-            closeSetup: {},
+            closeSetup: { _ in },
             uiTestMode: false,
             uiTestStartsInReview: false,
             uiTestGitHubScenario: nil,
@@ -2125,7 +2360,10 @@ final class AppModelTests: XCTestCase {
             retryStartupRecovery: {}
         )
 
-        let startupTask = Task { await view.loadGitHubStartupContext() }
+        let lifecycle = view.setupLifecycle.generation
+        let startupTask = Task {
+            await view.restoreCachedAuthorization(startupLifecycle: lifecycle) != nil
+        }
         await restoreTransport.waitUntilSendStarted()
         view.setupLifecycle.invalidate()
         await restoreTransport.resumeSend()
@@ -2199,7 +2437,7 @@ final class AppModelTests: XCTestCase {
         ))
     }
 
-    func testIdentityContinueRequiresClientReadinessAndValidIdentity() {
+    func testIdentityContinueRequiresClientAvailabilityAndValidIdentity() {
         XCTAssertTrue(SetupView.allowsIdentitySave(
             clientAvailable: true,
             systemReady: true,
@@ -2230,6 +2468,217 @@ final class AppModelTests: XCTestCase {
             name: "Taylor Example",
             email: "taylor @example.com"
         ))
+    }
+
+    func testSetupWorkspaceDefaultsMatchRepositoryConfiguration() {
+        let configurations = SetupWorkspaceConfiguration.defaults
+        XCTAssertEqual(configurations.map(\.name), ["dev", "playgrounds", "personal"])
+        XCTAssertEqual(
+            configurations.map {
+                [$0.cpus, $0.maxCPUs, $0.memoryGiB, $0.maxMemoryGiB,
+                 $0.workspaceStorageGiB, $0.runtimeStorageGiB]
+            },
+            [
+                [8, 12, 32, 48, 120, 100],
+                [4, 12, 32, 48, 60, 60],
+                [6, 12, 16, 32, 100, 80]
+            ]
+        )
+        XCTAssertNil(SetupWorkspaceConfiguration.validationMessage(for: configurations))
+    }
+
+    func testWorkspaceResourceEditInvalidatesPreviouslyAppliedSetup() {
+        let applied = SetupWorkspaceConfiguration.defaults
+        var edited = applied
+        edited[0].cpus = 12
+
+        XCTAssertTrue(SetupView.workspaceConfigurationIsApplied(applied, persisted: applied))
+        XCTAssertFalse(SetupView.workspaceConfigurationIsApplied(edited, persisted: applied))
+        XCTAssertFalse(SetupView.workspaceConfigurationIsApplied(applied, persisted: nil))
+    }
+
+    func testStrictBootstrapConfigurationDecoderRejectsUnknownFields() throws {
+        let valid = try JSONEncoder().encode(
+            MSWBootstrapConfiguration(SetupWorkspaceConfiguration.defaults)
+        )
+        XCTAssertNotNil(MSWBootstrapConfiguration.decodeValidated(from: valid))
+
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: valid) as? [String: Any]
+        )
+        var workspaces = try XCTUnwrap(object["workspaces"] as? [[String: Any]])
+        workspaces[0]["host"] = "$(touch should-never-run)"
+        object["workspaces"] = workspaces
+        let unknownWorkspaceField = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertNil(MSWBootstrapConfiguration.decodeValidated(from: unknownWorkspaceField))
+
+        object["unexpected"] = true
+        let unknownRootField = try JSONSerialization.data(withJSONObject: object)
+        XCTAssertNil(MSWBootstrapConfiguration.decodeValidated(from: unknownRootField))
+    }
+
+    @MainActor
+    func testAppModelDiscoversConfiguredWorkspaceListInsteadOfFixtureDefaults() {
+        let configurations = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 12, maxCPUs: 12,
+                memoryGiB: 48, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration(
+                name: "personal", cpus: 4, maxCPUs: 8,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 80, runtimeStorageGiB: 60
+            ),
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 6, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 100, runtimeStorageGiB: 80
+            )
+        ]
+
+        let model = AppModel(workspaceConfigurations: configurations)
+
+        XCTAssertEqual(model.workspaces.map(\.id.rawValue), ["development", "personal", "lab"])
+        XCTAssertFalse(model.workspaces.contains { $0.id.rawValue == "dev" })
+        XCTAssertFalse(model.workspaces.contains { $0.id.rawValue == "playgrounds" })
+    }
+
+    @MainActor
+    func testAppModelDoesNotReplaceAnExplicitEmptyConfigurationWithFixtures() {
+        let model = AppModel(workspaceConfigurations: [])
+
+        XCTAssertTrue(model.workspaces.isEmpty)
+    }
+
+    @MainActor
+    func testAppModelReloadsAppliedWorkspaceTargetsWithoutStaleFixtureNames() {
+        let model = AppModel(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
+        let selected = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 8, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration.defaults[2],
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 4, maxCPUs: 12,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 60, runtimeStorageGiB: 60
+            )
+        ]
+
+        model.reloadWorkspaceConfiguration(selected)
+
+        XCTAssertEqual(model.workspaces.map(\.id.rawValue), ["development", "personal", "lab"])
+        XCTAssertFalse(model.workspaces.contains { ["dev", "playgrounds"].contains($0.id.rawValue) })
+    }
+
+    @MainActor
+    func testAppModelRejectsAnOldWorkspaceSnapshotAfterAppliedTargetReload() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-model-target-reload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let stateLine = String(decoding: try testJSON(makeTestStateEnvelope(
+            devLifecycle: .stopped,
+            devQuarantine: .clear
+        )), as: UTF8.self)
+        let executable = temporary.appendingPathComponent("msw")
+        try Data("#!/bin/sh\nprintf '%s\\n' '\(stateLine)'\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client)
+        let selected = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 8, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration.defaults[2],
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 4, maxCPUs: 12,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 60, runtimeStorageGiB: 60
+            )
+        ]
+
+        model.reloadWorkspaceConfiguration(selected)
+        await model.refreshRemote()
+
+        XCTAssertEqual(model.workspaces.map(\.id.rawValue), ["development", "personal", "lab"])
+        XCTAssertTrue(model.workspaces.allSatisfy { $0.state == .unknown })
+    }
+
+    func testSetupWorkspaceValidationRejectsMissingDuplicateAndUnsupportedValues() {
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: []),
+            "Add at least one workspace."
+        )
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(
+                for: (0...64).map {
+                    SetupWorkspaceConfiguration(
+                        name: "workspace-\($0)", cpus: 4, maxCPUs: 4,
+                        memoryGiB: 16, maxMemoryGiB: 16,
+                        workspaceStorageGiB: 60, runtimeStorageGiB: 60
+                    )
+                }
+            ),
+            "Configure no more than 64 workspaces."
+        )
+        var configurations = SetupWorkspaceConfiguration.defaults
+        configurations[0].name = "  "
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: configurations),
+            "Every workspace needs a name."
+        )
+        configurations = SetupWorkspaceConfiguration.defaults
+        configurations[0].name = " dev"
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: configurations),
+            "Workspace names cannot begin or end with spaces."
+        )
+        configurations = SetupWorkspaceConfiguration.defaults
+        configurations[1].name = "DEV"
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: configurations),
+            "Workspace names must be unique."
+        )
+        configurations = SetupWorkspaceConfiguration.defaults
+        configurations[0].cpus = 16
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: configurations),
+            "Choose supported CPU, memory, and storage values."
+        )
+        configurations = SetupWorkspaceConfiguration.defaults
+        configurations[0].cpus = 12
+        configurations[0].maxCPUs = 8
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: configurations),
+            "A workspace CPU limit cannot exceed its resize ceiling."
+        )
+        configurations = SetupWorkspaceConfiguration.defaults
+        configurations[0].memoryGiB = 48
+        configurations[0].maxMemoryGiB = 32
+        XCTAssertEqual(
+            SetupWorkspaceConfiguration.validationMessage(for: configurations),
+            "A workspace memory limit cannot exceed its resize ceiling."
+        )
+    }
+
+    func testSetupWorkspaceDraftConstructionToleratesInvalidPersistedNames() {
+        var configurations = SetupWorkspaceConfiguration.defaults
+        configurations[1].name = "dev"
+        configurations[2].name = "  "
+
+        let drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(for: configurations)
+
+        XCTAssertEqual(Set(drafts.keys), ["dev"])
+        XCTAssertEqual(drafts["dev"]?.workspace, "dev")
     }
 
     func testMSWConnectSessionSurvivesRestoreFromAnotherConfiguration() async throws {
@@ -6273,3 +6722,4 @@ private func testJSON<Value: Encodable>(_ value: Value) throws -> Data {
     encoder.dateEncodingStrategy = .iso8601
     return try encoder.encode(value)
 }
+

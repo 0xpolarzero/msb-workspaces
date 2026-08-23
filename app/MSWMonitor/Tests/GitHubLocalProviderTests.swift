@@ -475,7 +475,10 @@ final class GitHubLocalProviderTests: XCTestCase {
             MSWProtocolDecoder.decoder().decode(MSWGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
         )
         XCTAssertEqual(payload.schemaVersion, 1)
-        XCTAssertEqual(Set(payload.workspaces.keys), Set(WorkspaceID.all))
+        XCTAssertEqual(
+            Set(payload.workspaces.keys),
+            Set(SetupWorkspaceConfiguration.defaults.map(\.name))
+        )
         let dev = try XCTUnwrap(payload.workspaces["dev"])
         XCTAssertEqual(dev.repos.map(\.canonical), ["acme/one", "acme/two"])
         XCTAssertEqual(dev.repos.first { $0.canonical == "acme/one" }?.mode, .readWrite)
@@ -794,10 +797,87 @@ final class GitHubLocalProviderTests: XCTestCase {
         let payload = try XCTUnwrap(
             MSWProtocolDecoder.decoder().decode(MSWGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
         )
-        for workspace in WorkspaceID.all {
+        for workspace in SetupWorkspaceConfiguration.defaults.map(\.name) {
             let entry = try XCTUnwrap(payload.workspaces[workspace])
             XCTAssertTrue(entry.repos.isEmpty, "\(workspace) must be emptied")
         }
+    }
+
+    func testReloadedWorkspaceConfigurationScopesPolicyAndAllWorkspaceIdentity() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: """
+        {"schemaVersion":1,"workspaces":{"dev":{"capability":"old","repos":[{"canonical":"acme/old","mode":"read-only"}]},"personal":{"capability":"keep","repos":[]}}}
+        """)
+        let identity = #"{"schemaVersion":1,"requestId":"identity","ok":true,"command":"identity","observedAt":"2026-08-21T00:00:00Z","result":{"target":"all","name":"Ada","email":"ada@example.test","workspaces":["development","personal","lab"]},"warnings":[],"error":null}"#
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"old","repos":[],"shuttle":"stopped","hostCredential":"present"}]}"#,
+            applyJSON: Self.policyApplyLine,
+            identityJSON: identity
+        )
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: directory,
+            configuredExecutable: executable
+        ))
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: runner),
+            policyStore: GitHubPolicyStore(policyURL: policyURL),
+            workspaceConfigurations: SetupWorkspaceConfiguration.defaults
+        )
+        let selected = [
+            SetupWorkspaceConfiguration(
+                name: "development", cpus: 8, maxCPUs: 12,
+                memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            SetupWorkspaceConfiguration.defaults[2],
+            SetupWorkspaceConfiguration(
+                name: "lab", cpus: 4, maxCPUs: 12,
+                memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 60, runtimeStorageGiB: 60
+            )
+        ]
+
+        try await provider.reloadWorkspaceConfiguration(selected)
+        let currentPolicy = await provider.currentPolicy()
+        let scopedPolicy = try XCTUnwrap(currentPolicy)
+        XCTAssertEqual(Set(scopedPolicy.workspaces.keys), ["development", "personal", "lab"])
+        XCTAssertNil(scopedPolicy.workspaces["dev"])
+        XCTAssertNil(scopedPolicy.workspaces["playgrounds"])
+        let scopedCatalog = try await provider.loadCatalog()
+        XCTAssertFalse(
+            scopedCatalog.hostCredentialPresent,
+            "A credential belonging only to a removed workspace must not make the applied target set look connected."
+        )
+        try await provider.commit([
+            GitHubWorkspacePolicy(
+                workspace: "development",
+                repositories: [repositoryPolicy(
+                    workspace: "development",
+                    fullName: "acme/one",
+                    mode: .readOnly
+                )]
+            ),
+            GitHubWorkspacePolicy(workspace: "personal", repositories: []),
+            GitHubWorkspacePolicy(workspace: "lab", repositories: [])
+        ])
+
+        let request = try MSWProtocolDecoder.decoder().decode(
+            MSWGitHubPolicyApplyRequest.self,
+            from: Data(readApplyStdin(directory).utf8)
+        )
+        XCTAssertEqual(Set(request.workspaces.keys), ["development", "personal", "lab"])
+        XCTAssertNil(request.workspaces["dev"])
+        XCTAssertNil(request.workspaces["playgrounds"])
+
+        let result = try await provider.setIdentity(
+            name: "Ada",
+            email: "ada@example.test",
+            workspace: nil
+        )
+        XCTAssertEqual(result.workspaces, ["development", "personal", "lab"])
+        XCTAssertTrue(readLog(directory).contains("identity app identity --name Ada --email ada@example.test --format json"))
     }
 
     // MARK: - Provider account connection
@@ -1290,11 +1370,11 @@ final class GitHubLocalProviderTests: XCTestCase {
             repositorySelection: nil
         )
         // Local mode: a draft may select repositories from BOTH owners.
-        var draft = WorkspaceRepositoryDraft.initial(.dev)
+        var draft = WorkspaceRepositoryDraft.initial("dev")
         draft.repositoryModes = ["acme/one": .readOnly, "org/two": .readWrite]
 
         let localEntries = SetupView.repositoryPolicyEntries(
-            workspace: .dev,
+            workspace: "dev",
             draft: draft,
             installations: [acme, org],
             repositoriesByInstallation: [
@@ -1323,7 +1403,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         // Connect mode retains the one-installation rule.
         draft.installationID = acmeID
         let connectEntries = SetupView.repositoryPolicyEntries(
-            workspace: .dev,
+            workspace: "dev",
             draft: draft,
             installations: [acme, org],
             repositoriesByInstallation: [

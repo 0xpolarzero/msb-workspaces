@@ -233,6 +233,7 @@ def parse_create(args: list[str], state: dict[str, Any]) -> int:
         "bootstrapped": False,
         "port_content": {},
         "args": args,
+        "mounts": {},
     }
     for mount in mounts:
         parts = mount.split(":", 2)
@@ -243,6 +244,7 @@ def parse_create(args: list[str], state: dict[str, Any]) -> int:
             p = STATE_ROOT / "volumes" / vol
             p.mkdir(parents=True, exist_ok=True)
             state["volumes"][vol] = {"path": str(p), "size": size_match.group(1) if size_match else ""}
+        sb["mounts"][dest] = vol
         if dest == "/workspace": sb["workspace_volume"] = vol
         if dest == "/var/lib/msw-runtime": sb["runtime_volume"] = vol
     state["sandboxes"][name] = sb
@@ -301,6 +303,23 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             save(state)
             return 0
         if "findmnt -n -o FSTYPE /workspace" in text and "docker buildx version" in text:
+            return 0
+        if "MSW named-volume migration" in text:
+            source_name = sb.get("mounts", {}).get("/source")
+            destination_name = sb.get("mounts", {}).get("/destination")
+            if not source_name or not destination_name:
+                return fail("volume migration mounts missing")
+            source = Path(state["volumes"][source_name]["path"])
+            destination = Path(state["volumes"][destination_name]["path"])
+            for child in source.iterdir():
+                target = destination / child.name
+                if child.is_dir() and not child.is_symlink():
+                    shutil.copytree(child, target, dirs_exist_ok=True, symlinks=True)
+                elif child.is_symlink():
+                    target.unlink(missing_ok=True)
+                    target.symlink_to(os.readlink(child))
+                else:
+                    shutil.copy2(child, target)
             return 0
 
     # Simulate systemd-published direct web process.
@@ -544,6 +563,17 @@ def main() -> int:
         sub = rest[0]
         name = rest[1] if len(rest) > 1 else ""
         if sub == "inspect": return 0 if name in state["volumes"] else 1
+        if sub == "create":
+            if not name or name in state["volumes"]:
+                return 1
+            size = ""
+            if "--size" in rest and rest.index("--size") + 1 < len(rest):
+                size = rest[rest.index("--size") + 1]
+            path = STATE_ROOT / "volumes" / name
+            path.mkdir(parents=True, exist_ok=True)
+            state["volumes"][name] = {"path": str(path), "size": size}
+            save(state)
+            return 0
         if sub == "rm":
             entry = state["volumes"].pop(name, None)
             if entry: shutil.rmtree(entry["path"], ignore_errors=True)

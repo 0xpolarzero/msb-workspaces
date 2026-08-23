@@ -101,7 +101,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.authorizationCoordinator = nil
             let store = policyStore ?? GitHubPolicyStore.standard()
             self.policyStore = store
-            self.provider = GitHubLocalProvider(client: self.client, policyStore: store)
+            self.provider = GitHubLocalProvider(
+                client: self.client,
+                policyStore: store,
+                workspaceConfigurations: BootstrapStateStore.persistedWorkspaceConfigurations()
+            )
             store.startWatching()
         }
         super.init()
@@ -223,6 +227,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? GitHubFixtureProvider(scenario: uiTestGitHubScenario)
             : nil
         let model: AppModel
+        let configuredWorkspaces = fixtureMode
+            ? SetupWorkspaceConfiguration.defaults
+            : BootstrapStateStore.persistedWorkspaceConfigurations()
         let operationCoordinator: MSWOperationCoordinator?
         let startupRecoveryRetry: (() -> Void)? = startupRecoveryBlockedReason == nil
             ? nil
@@ -231,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model = AppModel(
                 provider: fixtureProvider ?? provider,
                 accessMode: accessMode,
+                workspaceConfigurations: configuredWorkspaces,
                 startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
                 startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry
             )
@@ -245,7 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 operationService: service,
                 diagnostics: diagnostics,
                 provider: provider,
-                accessMode: accessMode
+                accessMode: accessMode,
+                workspaceConfigurations: configuredWorkspaces
             )
         }
         let bootstrap: (any MSWBootstrapCoordinating)?

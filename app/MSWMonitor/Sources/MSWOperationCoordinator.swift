@@ -85,9 +85,13 @@ actor MSWOperationCoordinator {
 }
 
 enum WorkspaceID {
-    static let all = ["dev", "playgrounds", "personal"]
+    static var all: [String] {
+        BootstrapStateStore.persistedWorkspaceConfigurations().map(\.name)
+    }
 
-    static func isValid(_ value: String) -> Bool { all.contains(value) }
+    static func isValid(_ value: String) -> Bool {
+        value.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) != nil
+    }
 }
 
 actor MSWActivityStore {

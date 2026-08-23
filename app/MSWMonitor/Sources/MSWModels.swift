@@ -1,5 +1,163 @@
 import Foundation
 
+struct SetupWorkspaceConfiguration: Codable, Equatable, Identifiable, Sendable {
+    let id: UUID
+    var name: String
+    var cpus: Int
+    var maxCPUs: Int
+    var memoryGiB: Int
+    var maxMemoryGiB: Int
+    var workspaceStorageGiB: Int
+    var runtimeStorageGiB: Int
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        cpus: Int,
+        maxCPUs: Int,
+        memoryGiB: Int,
+        maxMemoryGiB: Int,
+        workspaceStorageGiB: Int,
+        runtimeStorageGiB: Int
+    ) {
+        self.id = id
+        self.name = name
+        self.cpus = cpus
+        self.maxCPUs = maxCPUs
+        self.memoryGiB = memoryGiB
+        self.maxMemoryGiB = maxMemoryGiB
+        self.workspaceStorageGiB = workspaceStorageGiB
+        self.runtimeStorageGiB = runtimeStorageGiB
+    }
+
+    static let supportedCPUs = [4, 6, 8, 12]
+    static let supportedMemoryGiB = [16, 32, 48]
+    static let supportedStorageGiB = [60, 80, 100, 120]
+
+    static var defaults: [Self] {
+        [
+            Self(
+                name: "dev", cpus: 8, maxCPUs: 12, memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 120, runtimeStorageGiB: 100
+            ),
+            Self(
+                name: "playgrounds", cpus: 4, maxCPUs: 12, memoryGiB: 32, maxMemoryGiB: 48,
+                workspaceStorageGiB: 60, runtimeStorageGiB: 60
+            ),
+            Self(
+                name: "personal", cpus: 6, maxCPUs: 12, memoryGiB: 16, maxMemoryGiB: 32,
+                workspaceStorageGiB: 100, runtimeStorageGiB: 80
+            )
+        ]
+    }
+
+    static func validationMessage(for configurations: [Self]) -> String? {
+        guard !configurations.isEmpty else { return "Add at least one workspace." }
+        guard configurations.count <= 64 else { return "Configure no more than 64 workspaces." }
+        let names = configurations.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if names.contains(where: \.isEmpty) {
+            return "Every workspace needs a name."
+        }
+        if zip(configurations, names).contains(where: { $0.name != $1 }) {
+            return "Workspace names cannot begin or end with spaces."
+        }
+        let normalized = names.map { $0.lowercased() }
+        if Set(normalized).count != normalized.count {
+            return "Workspace names must be unique."
+        }
+        if names.contains(where: { name in
+            name.range(of: #"^[a-z][a-z0-9-]{0,31}$"#, options: .regularExpression) == nil
+        }) {
+            return "Workspace names must start with a lowercase letter and contain only lowercase letters, numbers, or hyphens (32 characters maximum)."
+        }
+        for configuration in configurations {
+            guard supportedCPUs.contains(configuration.cpus),
+                  supportedCPUs.contains(configuration.maxCPUs),
+                  supportedMemoryGiB.contains(configuration.memoryGiB),
+                  supportedMemoryGiB.contains(configuration.maxMemoryGiB),
+                  supportedStorageGiB.contains(configuration.workspaceStorageGiB),
+                  supportedStorageGiB.contains(configuration.runtimeStorageGiB) else {
+                return "Choose supported CPU, memory, and storage values."
+            }
+            if configuration.cpus > configuration.maxCPUs {
+                return "A workspace CPU limit cannot exceed its resize ceiling."
+            }
+            if configuration.memoryGiB > configuration.maxMemoryGiB {
+                return "A workspace memory limit cannot exceed its resize ceiling."
+            }
+        }
+        return nil
+    }
+}
+
+struct MSWBootstrapConfiguration: Codable, Equatable, Sendable {
+    private static let rootKeys: Set<String> = ["schemaVersion", "workspaces"]
+    private static let workspaceKeys: Set<String> = [
+        "name", "cpu", "cpuCeiling", "memoryGiB", "memoryCeilingGiB",
+        "workspaceStorageGiB", "runtimeStorageGiB"
+    ]
+
+    let schemaVersion: Int
+    let workspaces: [Workspace]
+
+    struct Workspace: Codable, Equatable, Sendable {
+        let name: String
+        let cpu: Int
+        let cpuCeiling: Int
+        let memoryGiB: Int
+        let memoryCeilingGiB: Int
+        let workspaceStorageGiB: Int
+        let runtimeStorageGiB: Int
+    }
+
+    init(_ configurations: [SetupWorkspaceConfiguration]) {
+        schemaVersion = 1
+        workspaces = configurations.map {
+            Workspace(
+                name: $0.name,
+                cpu: $0.cpus,
+                cpuCeiling: $0.maxCPUs,
+                memoryGiB: $0.memoryGiB,
+                memoryCeilingGiB: $0.maxMemoryGiB,
+                workspaceStorageGiB: $0.workspaceStorageGiB,
+                runtimeStorageGiB: $0.runtimeStorageGiB
+            )
+        }
+    }
+
+    var setupConfigurations: [SetupWorkspaceConfiguration] {
+        workspaces.map {
+            SetupWorkspaceConfiguration(
+                name: $0.name,
+                cpus: $0.cpu,
+                maxCPUs: $0.cpuCeiling,
+                memoryGiB: $0.memoryGiB,
+                maxMemoryGiB: $0.memoryCeilingGiB,
+                workspaceStorageGiB: $0.workspaceStorageGiB,
+                runtimeStorageGiB: $0.runtimeStorageGiB
+            )
+        }
+    }
+
+    /// Strict external-file decoder. `JSONDecoder` intentionally ignores
+    /// unknown keys, which is useful for many app payloads but unsafe for this
+    /// versioned configuration boundary: every downstream consumer must agree
+    /// on exactly the same fields.
+    static func decodeValidated(from data: Data) -> Self? {
+        guard data.count <= 256 * 1_024,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(root.keys) == rootKeys,
+              let workspaceObjects = root["workspaces"] as? [[String: Any]],
+              workspaceObjects.allSatisfy({ Set($0.keys) == workspaceKeys }),
+              let decoded = try? JSONDecoder().decode(Self.self, from: data),
+              decoded.schemaVersion == 1,
+              SetupWorkspaceConfiguration.validationMessage(for: decoded.setupConfigurations) == nil else {
+            return nil
+        }
+        return decoded
+    }
+}
+
 // MARK: - Machine-readable MSW contract
 
 struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
@@ -451,7 +609,7 @@ struct MSWGitHubAuthRepoCheck: Codable, Sendable {
 
 /// `msw app github-policy-apply` request: the FULL desired policy file
 /// carried on stdin. Missing workspace keys are treated by the CLI as
-/// "clear this workspace", so the app always sends all three workspaces.
+/// "clear this workspace", so the app always sends every configured workspace.
 struct MSWGitHubPolicyApplyRequest: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let workspaces: [String: GitHubPolicyWorkspace]

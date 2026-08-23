@@ -1,7 +1,7 @@
 import Foundation
 
 protocol MSWHostRepairAuthorizing: Sendable {
-    func repair() async throws
+    func repair(records: [MSWWorkspaceNetworkRecord]) async throws
 }
 
 struct MSWHostRepairAuthorization: MSWHostRepairAuthorizing, Sendable {
@@ -36,12 +36,24 @@ struct MSWHostRepairAuthorization: MSWHostRepairAuthorizing, Sendable {
         self.command = command
     }
 
-    func repair() async throws {
+    func repair(records: [MSWWorkspaceNetworkRecord]) async throws {
+        guard !records.isEmpty,
+              records.count <= 64,
+              records.enumerated().allSatisfy({ index, record in
+                  record.address == "127.0.0.\(10 + index)" &&
+                    record.hostname.range(
+                        of: #"^[a-z][a-z0-9-]{0,31}\.msw\.test$"#,
+                        options: .regularExpression
+                    ) != nil
+              }),
+              Set(records.map(\.hostname)).count == records.count else {
+            throw Failure.failed("The host integration request contained invalid workspace records.")
+        }
         let result: MSWCommandResult
         do {
             result = try await command(MSWCommand(
                 executable: URL(fileURLWithPath: "/usr/bin/osascript"),
-                arguments: ["-e", Self.appleScript],
+                arguments: ["-e", Self.appleScript(records: records)],
                 timeout: .seconds(90),
                 captureLimit: 256 * 1024
             ))
@@ -66,20 +78,31 @@ struct MSWHostRepairAuthorization: MSWHostRepairAuthorizing, Sendable {
         }
     }
 
-    private static let appleScript = "do shell script \(appleScriptString(rootRepairScript)) with administrator privileges with prompt \(appleScriptString(prompt))"
-    static var appleScriptForTesting: String { appleScript }
+    static var appleScriptForTesting: String { appleScript(records: MSWWorkspaceNetwork.fixtureRecords) }
 
     private static let prompt = "MSW Monitor needs administrator approval to configure workspace hostnames and local network aliases."
 
-    private static var rootRepairScript: String {
-        let addresses = MSWWorkspaceNetwork.records.map(\.address)
-        let hostRecords = MSWWorkspaceNetwork.records
+    private static func appleScript(records: [MSWWorkspaceNetworkRecord]) -> String {
+        "do shell script \(appleScriptString(rootRepairScript(records: records))) with administrator privileges with prompt \(appleScriptString(prompt))"
+    }
+
+    private static func rootRepairScript(records: [MSWWorkspaceNetworkRecord]) -> String {
+        let addresses = records.map(\.address)
+        let hostRecords = records
             .map { "\($0.address) \($0.hostname)" }
             .joined(separator: "\n")
         let shellAddresses = addresses.map { "\"\($0)\"" }.joined(separator: " ")
 
         return """
         set -eu
+        desired_addresses=" \(addresses.joined(separator: " ")) "
+        for suffix in $(/usr/bin/seq 10 73); do
+            address="127.0.0.${suffix}"
+            case "$desired_addresses" in
+                *" $address "*) ;;
+                *) /sbin/ifconfig lo0 | /usr/bin/grep -q "inet ${address} " && /sbin/ifconfig lo0 -alias "${address}" || true ;;
+            esac
+        done
         for address in \(shellAddresses); do
             /sbin/ifconfig lo0 | /usr/bin/grep -q "inet ${address} " || /sbin/ifconfig lo0 alias "${address}" up
         done
@@ -90,6 +113,14 @@ struct MSWHostRepairAuthorization: MSWHostRepairAuthorizing, Sendable {
         /bin/cat >"$loop_script" <<'MSW_LOOPBACK'
         #!/bin/sh
         set -eu
+        desired_addresses=" \(addresses.joined(separator: " ")) "
+        for suffix in $(/usr/bin/seq 10 73); do
+            address="127.0.0.${suffix}"
+            case "$desired_addresses" in
+                *" $address "*) ;;
+                *) /sbin/ifconfig lo0 | /usr/bin/grep -q "inet ${address} " && /sbin/ifconfig lo0 -alias "${address}" || true ;;
+            esac
+        done
         for address in \(shellAddresses); do
             /sbin/ifconfig lo0 | /usr/bin/grep -q "inet ${address} " || /sbin/ifconfig lo0 alias "${address}" up
         done
@@ -97,12 +128,12 @@ struct MSWHostRepairAuthorization: MSWHostRepairAuthorizing, Sendable {
         /usr/bin/install -o root -g wheel -m 0755 "$loop_script" /usr/local/libexec/msw-loopback-aliases
 
         hosts_tmp="$(/usr/bin/mktemp /tmp/msw-hosts.XXXXXX)"
-        /usr/bin/awk '/^# BEGIN MSW WORKSPACES$/{skip=1;next}/^# END MSW WORKSPACES$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
+        /usr/bin/awk '/^# BEGIN MSW WORKSPACES$|^# BEGIN MSW MONITOR MANAGED HOSTS$/{skip=1;next}/^# END MSW WORKSPACES$|^# END MSW MONITOR MANAGED HOSTS$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
         /bin/cat >>"$hosts_tmp" <<'MSW_HOSTS'
 
-        # BEGIN MSW WORKSPACES
+        # BEGIN MSW MONITOR MANAGED HOSTS
         \(hostRecords)
-        # END MSW WORKSPACES
+        # END MSW MONITOR MANAGED HOSTS
         MSW_HOSTS
         /usr/bin/install -o root -g wheel -m 0644 "$hosts_tmp" /etc/hosts
         /bin/rm -f "$hosts_tmp"

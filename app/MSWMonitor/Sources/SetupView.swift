@@ -13,7 +13,7 @@ final class SetupWindowController {
         accessMode: GitHubAccessMode = .local,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
         openSettings: @escaping (SettingsSection) -> Void,
-        closeSetup: @escaping () -> Void = {},
+        closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void = { _ in },
         uiTestMode: Bool = false,
         uiTestStartsInReview: Bool = false,
         uiTestGitHubScenario: String? = nil,
@@ -79,8 +79,20 @@ final class SetupWindowController {
     }
 }
 
+extension SetupWorkspaceConfiguration {
+    static func initialRepositoryDrafts(
+        for configurations: [Self]
+    ) -> [String: WorkspaceRepositoryDraft] {
+        configurations.reduce(into: [:]) { result, configuration in
+            let name = configuration.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, result[name] == nil else { return }
+            result[name] = .initial(name)
+        }
+    }
+}
+
 struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
-    let workspace: Workspace.ID
+    let workspace: String
     /// Connect mode only: the single installation scoping this workspace's
     /// selections (one-installation rule). Local mode leaves this nil so a
     /// workspace may select repositories from MULTIPLE owners.
@@ -89,9 +101,9 @@ struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
     /// spans owners; connect mode is scoped to `installationID`.
     var repositoryModes: [String: GitHubRepositoryAccessMode]
 
-    var id: Workspace.ID { workspace }
+    var id: String { workspace }
 
-    static func initial(_ workspace: Workspace.ID) -> Self {
+    static func initial(_ workspace: String) -> Self {
         Self(
             workspace: workspace,
             installationID: nil,
@@ -101,6 +113,7 @@ struct WorkspaceRepositoryDraft: Codable, Equatable, Identifiable {
 }
 
 private struct SetupResumeState: Codable {
+    var workspaceConfigurations: [SetupWorkspaceConfiguration]?
     var repositoryPolicy: [GitHubWorkspacePolicy]
     var repositoryPolicyApplied: Bool
     var githubSkipped: Bool
@@ -181,7 +194,8 @@ private struct LocalCatalogIssue: Identifiable {
 }
 
 private enum SetupStep: String, CaseIterable, Identifiable {
-    case readiness
+    case dependencies
+    case workspaces
     case github
     case identity
     case review
@@ -190,7 +204,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .readiness: return "Readiness"
+        case .dependencies: return "Dependencies"
+        case .workspaces: return "Workspaces"
         case .github: return "GitHub"
         case .identity: return "Git"
         case .review: return "Review"
@@ -199,7 +214,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .readiness: return "checkmark.shield"
+        case .dependencies: return "checkmark.shield"
+        case .workspaces: return "server.rack"
         case .github: return "person.crop.circle.badge.checkmark"
         case .identity: return "person.text.rectangle"
         case .review: return "checkmark.circle"
@@ -208,7 +224,8 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 
     var accessibilityIdentifier: String {
         switch self {
-        case .readiness: return "setup.step.readiness"
+        case .dependencies: return "setup.step.dependencies"
+        case .workspaces: return "setup.step.workspaces"
         case .github: return "setup.step.github"
         case .identity: return "setup.step.identity"
         case .review: return "setup.step.review"
@@ -239,7 +256,7 @@ struct SetupView: View {
     let accessMode: GitHubAccessMode
     let commandRunner: MSWCommandRunner
     let openSettings: (SettingsSection) -> Void
-    let closeSetup: () -> Void
+    let closeSetup: ([SetupWorkspaceConfiguration]) -> Void
     let uiTestMode: Bool
     let uiTestStartsInReview: Bool
     let uiTestGitHubScenario: String?
@@ -262,9 +279,10 @@ struct SetupView: View {
     @State private var installations: [GitHubInstallation] = []
     @State private var githubInstallationURL: URL?
     @State private var repositoriesByInstallation: [Int: [GitHubRepository]] = [:]
-    @State private var drafts = Dictionary(uniqueKeysWithValues: Workspace.ID.allCases.map {
-        ($0.rawValue, WorkspaceRepositoryDraft.initial($0))
-    })
+    @State private var workspaceConfigurations = SetupWorkspaceConfiguration.defaults
+    @State private var drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(
+        for: SetupWorkspaceConfiguration.defaults
+    )
     @State private var editedGitHubWorkspaces: Set<String> = []
     @State private var repositoryPolicyApplied = false
     @State private var retainedRepositoryPolicy: [GitHubWorkspacePolicy] = []
@@ -306,7 +324,9 @@ struct SetupView: View {
     @State private var isSavingIdentity = false
     @State private var identitySaveTask: Task<Void, Never>?
     @State private var identityStatus = ""
-    @State private var activeStep: SetupStep = .readiness
+    @State private var activeStep: SetupStep = .dependencies
+    @State private var workspaceConfigurationAccepted = false
+    @State private var startupStateLoaded = false
     @State private var githubContextLoaded = false
     @State private var localCatalogAttempted = false
     @State private var githubHostCredentialPresent = false
@@ -329,7 +349,7 @@ struct SetupView: View {
         accessMode: GitHubAccessMode,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
         openSettings: @escaping (SettingsSection) -> Void,
-        closeSetup: @escaping () -> Void,
+        closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void,
         uiTestMode: Bool,
         uiTestStartsInReview: Bool,
         uiTestGitHubScenario: String?,
@@ -391,7 +411,7 @@ struct SetupView: View {
             if uiTestMode {
                 loadUITestState()
             } else {
-                await loadGitHubStartupContext()
+                await loadSetupStartupState()
                 await refreshLocalApplyProgress()
             }
         }
@@ -402,6 +422,9 @@ struct SetupView: View {
             handleSetupWindowWillClose(notification)
         }
         .onChange(of: drafts) { _, _ in
+            if !uiTestMode { persistResumeState() }
+        }
+        .onChange(of: workspaceConfigurations) { _, _ in
             if !uiTestMode { persistResumeState() }
         }
         .onChange(of: editedGitHubWorkspaces) { _, _ in
@@ -523,7 +546,30 @@ struct SetupView: View {
     }
 
     private var canFinishWithoutGitHub: Bool {
-        systemReady && state.phase == .complete
+        systemReady && state.phase == .complete && workspaceConfigurationIsApplied
+    }
+
+    private var workspaceConfigurationIsApplied: Bool {
+        Self.workspaceConfigurationIsApplied(
+            workspaceConfigurations,
+            persisted: state.workspaceConfigurations
+        )
+    }
+
+    static func workspaceConfigurationIsApplied(
+        _ current: [SetupWorkspaceConfiguration],
+        persisted: [SetupWorkspaceConfiguration]?
+    ) -> Bool {
+        guard let persisted else { return false }
+        return MSWBootstrapConfiguration(persisted) == MSWBootstrapConfiguration(current)
+    }
+
+    private var workspaceValidationMessage: String? {
+        SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations)
+    }
+
+    private var configuredWorkspaceNames: [String] {
+        workspaceConfigurations.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
     private var setupPhases: [MSWBootstrapState.Phase] {
@@ -581,7 +627,7 @@ struct SetupView: View {
 
     private var identityDecisionMade: Bool {
         identitySkipped || SetupIdentityVerification.isComplete(
-            requiredWorkspaces: Set(Workspace.ID.allCases.map(\.rawValue)),
+            requiredWorkspaces: Set(configuredWorkspaceNames),
             configuredWorkspaces: identityConfiguredWorkspaces,
             verifiedByWorkspace: verifiedIdentityByWorkspace,
             target: identityTarget,
@@ -631,7 +677,7 @@ struct SetupView: View {
     }
 
     private var canCompleteReview: Bool {
-        Self.allowsReviewCompletion(
+        workspaceValidationMessage == nil && Self.allowsReviewCompletion(
             contextLoaded: githubContextLoaded,
             systemReady: canFinishWithoutGitHub,
             githubDecided: githubDecisionMade,
@@ -650,9 +696,11 @@ struct SetupView: View {
             startupRecoveryBlockedContent(startupRecoveryBlockedReason)
         } else {
             switch activeStep {
-            case .readiness:
+            case .dependencies:
                 requirementsCard
                 preflight
+            case .workspaces:
+                workspaceConfigurationStep
             case .github:
                 githubBoundary
             case .identity:
@@ -692,7 +740,7 @@ struct SetupView: View {
     private var setupStepper: some View {
         HStack(spacing: 0) {
             ForEach(SetupStep.allCases) { step in
-                if step != .readiness {
+                if step != .dependencies {
                     Rectangle()
                         .fill(.quaternary)
                         .frame(width: 22, height: 1)
@@ -743,7 +791,8 @@ struct SetupView: View {
 
     private func stepIsComplete(_ step: SetupStep) -> Bool {
         switch step {
-        case .readiness: return canFinishWithoutGitHub
+        case .dependencies: return systemReady
+        case .workspaces: return workspaceConfigurationAccepted && workspaceValidationMessage == nil
         case .github: return githubStepComplete
         case .identity: return identityStepComplete
         case .review: return canCompleteReview
@@ -752,15 +801,14 @@ struct SetupView: View {
 
     private func canSelectStep(_ step: SetupStep) -> Bool {
         switch step {
-        case .readiness:
+        case .dependencies:
             return true
+        case .workspaces:
+            return startupStateLoaded && !checks.isEmpty
         case .github:
-            // Local mode has no Connect recovery gate: the policy can be
-            // configured as soon as preflight passes, even while bootstrap
-            // finishes creating workspaces.
-            return githubContextLoaded &&
-                (canFinishWithoutGitHub ||
-                 (systemReady && (githubReconnectRequired || accessMode == .local)))
+            return workspaceConfigurationAccepted && workspaceValidationMessage == nil &&
+                workspaceConfigurationIsApplied && githubContextLoaded &&
+                (canFinishWithoutGitHub || githubReconnectRequired)
         case .identity:
             return githubContextLoaded && canFinishWithoutGitHub && githubStepComplete
         case .review:
@@ -771,14 +819,23 @@ struct SetupView: View {
         guard canSelectStep(step) else { return }
         activeStep = step
     }
-    private func advanceFromReadiness() {
-        guard githubContextLoaded else { return }
-        if canFinishWithoutGitHub || githubReconnectRequired ||
-            (accessMode == .local && systemReady) {
+    private func advanceFromDependencies() {
+        guard startupStateLoaded, !checks.isEmpty else { return }
+        activeStep = .workspaces
+    }
+    private func advanceFromWorkspaces() {
+        guard workspaceValidationMessage == nil, startupStateLoaded else { return }
+        workspaceConfigurationAccepted = true
+        if uiTestMode, coordinator == nil {
+            // Explicit fixture-only seam. Production always crosses the real
+            // coordinator and operational read-back below.
+            state.workspaceConfigurations = workspaceConfigurations
+            rebuildWorkspaceScopedState()
+            githubContextLoaded = true
             activeStep = .github
-        } else {
-            runSetup()
+            return
         }
+        runSetup()
     }
     private func advanceFromGitHub() {
         guard githubStepComplete, !isSkippingGitHub, githubSkipIssue == nil else { return }
@@ -794,8 +851,36 @@ struct SetupView: View {
     private func skipGitHub() {
         guard !githubSkipped, !isConnectingGitHub, !isApplyingGitHub, !isSkippingGitHub else { return }
         if accessMode == .local {
-            // Local mode has no Connect grants to disable; skipping just
-            // marks the step decided.
+            if githubReconnectRequired {
+                guard let provider else {
+                    githubSkipIssue = "GitHub access could not be disabled because the local provider is unavailable. Retry before continuing."
+                    return
+                }
+                isSkippingGitHub = true
+                githubSkipTask?.cancel()
+                githubSkipTask = Task {
+                    do {
+                        try await provider.removeAllAccess()
+                        guard !Task.isCancelled else { return }
+                        isSkippingGitHub = false
+                        githubSkipTask = nil
+                        githubSkipped = true
+                        githubReconnectRequired = false
+                        githubAttentionWorkspace = nil
+                        repositoryPolicyApplied = false
+                        githubSkipIssue = nil
+                        githubStatus = "GitHub skipped. Finishing workspace verification…"
+                        activeStep = .identity
+                        runSetup()
+                    } catch {
+                        isSkippingGitHub = false
+                        githubSkipTask = nil
+                        githubSkipIssue = "GitHub access was not disabled: \(error.localizedDescription) Retry before continuing."
+                        githubSkipIssueWorkspace = githubAttentionWorkspace
+                    }
+                }
+                return
+            }
             githubSkipped = true
             authorizationIssue = nil
             localCatalogIssue = nil
@@ -899,10 +984,12 @@ struct SetupView: View {
 
     private func moveBack() {
         switch activeStep {
-        case .readiness:
+        case .dependencies:
             break
+        case .workspaces:
+            activeStep = .dependencies
         case .github:
-            activeStep = .readiness
+            activeStep = .workspaces
         case .identity:
             activeStep = .github
         case .review:
@@ -928,7 +1015,7 @@ struct SetupView: View {
     private var preflight: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("System readiness").font(.title3.weight(.semibold))
+                Text("Dependency checks").font(.title3.weight(.semibold))
                 Spacer()
                 if isChecking { ProgressView().controlSize(.small) }
                 if let lastPreflightAt {
@@ -983,6 +1070,261 @@ struct SetupView: View {
             }
         }
         .accessibilityIdentifier("setup.preflight")
+    }
+
+    private var workspaceConfigurationStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Configure workspaces")
+                .font(.title3.weight(.semibold))
+                .accessibilityIdentifier("setup.workspaces.title")
+            Text("Choose the workspaces and resource limits MSW Monitor will carry through setup.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button {
+                    addWorkspaceConfiguration()
+                } label: {
+                    Label("Add workspace", systemImage: "plus")
+                }
+                .keyboardShortcut("n", modifiers: .command)
+                .accessibilityIdentifier("setup.workspaces.add.button")
+                Spacer()
+            }
+
+            ForEach(Array(workspaceConfigurations.enumerated()), id: \.element.id) { index, configuration in
+                workspaceConfigurationRow(configuration, at: index)
+            }
+
+            if let workspaceValidationMessage {
+                Label(workspaceValidationMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("setup.workspaces.validation")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.workspaces")
+    }
+
+    private func workspaceConfigurationRow(
+        _ configuration: SetupWorkspaceConfiguration,
+        at index: Int
+    ) -> some View {
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    TextField("Workspace name", text: workspaceNameBinding(for: configuration.id))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Workspace name")
+                        .accessibilityIdentifier("setup.workspaces.row.\(index).name")
+                    Button(role: .destructive) {
+                        removeWorkspaceConfiguration(id: configuration.id)
+                    } label: {
+                        Label("Remove", systemImage: "minus.circle")
+                    }
+                    .accessibilityLabel("Remove \(configuration.name.isEmpty ? "workspace" : configuration.name)")
+                    .accessibilityIdentifier("setup.workspaces.row.\(index).remove.button")
+                }
+
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+                    GridRow {
+                        resourcePicker(
+                            "CPU limit", selection: workspaceBinding(for: configuration, \.cpus),
+                            values: SetupWorkspaceConfiguration.supportedCPUs,
+                            suffix: "CPU", identifier: "setup.workspaces.row.\(index).cpus"
+                        )
+                        resourcePicker(
+                            "CPU ceiling", selection: workspaceBinding(for: configuration, \.maxCPUs),
+                            values: SetupWorkspaceConfiguration.supportedCPUs,
+                            suffix: "CPU", identifier: "setup.workspaces.row.\(index).max-cpus"
+                        )
+                    }
+                    GridRow {
+                        resourcePicker(
+                            "Memory limit", selection: workspaceBinding(for: configuration, \.memoryGiB),
+                            values: SetupWorkspaceConfiguration.supportedMemoryGiB,
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).memory"
+                        )
+                        resourcePicker(
+                            "Memory ceiling", selection: workspaceBinding(for: configuration, \.maxMemoryGiB),
+                            values: SetupWorkspaceConfiguration.supportedMemoryGiB,
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).max-memory"
+                        )
+                    }
+                    GridRow {
+                        resourcePicker(
+                            "Workspace storage", selection: workspaceBinding(for: configuration, \.workspaceStorageGiB),
+                            values: SetupWorkspaceConfiguration.supportedStorageGiB,
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).workspace-storage"
+                        )
+                        resourcePicker(
+                            "Runtime storage", selection: workspaceBinding(for: configuration, \.runtimeStorageGiB),
+                            values: SetupWorkspaceConfiguration.supportedStorageGiB,
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).runtime-storage"
+                        )
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+        } label: {
+            Text(configuration.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Unnamed workspace" : configuration.name)
+                .font(.headline)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.workspaces.row.\(index)")
+    }
+
+    private func resourcePicker(
+        _ title: String,
+        selection: Binding<Int>,
+        values: [Int],
+        suffix: String,
+        identifier: String
+    ) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(values, id: \.self) { value in
+                Text("\(value) \(suffix)").tag(value)
+            }
+        }
+        .pickerStyle(.menu)
+        .accessibilityValue("\(selection.wrappedValue) \(suffix)")
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func workspaceBinding<Value>(
+        for configuration: SetupWorkspaceConfiguration,
+        _ keyPath: WritableKeyPath<SetupWorkspaceConfiguration, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: {
+                workspaceConfigurations.first(where: { $0.id == configuration.id })?[keyPath: keyPath]
+                    ?? configuration[keyPath: keyPath]
+            },
+            set: { value in
+                guard let index = workspaceConfigurations.firstIndex(where: { $0.id == configuration.id }) else {
+                    return
+                }
+                workspaceConfigurations[index][keyPath: keyPath] = value
+                workspaceConfigurationAccepted = false
+            }
+        )
+    }
+
+    private func addWorkspaceConfiguration() {
+        let existing = Set(configuredWorkspaceNames.map { $0.lowercased() })
+        var suffix = workspaceConfigurations.count + 1
+        var name = "workspace-\(suffix)"
+        while existing.contains(name) {
+            suffix += 1
+            name = "workspace-\(suffix)"
+        }
+        var configuration = SetupWorkspaceConfiguration.defaults[0]
+        configuration = SetupWorkspaceConfiguration(
+            name: name,
+            cpus: configuration.cpus,
+            maxCPUs: configuration.maxCPUs,
+            memoryGiB: configuration.memoryGiB,
+            maxMemoryGiB: configuration.maxMemoryGiB,
+            workspaceStorageGiB: configuration.workspaceStorageGiB,
+            runtimeStorageGiB: configuration.runtimeStorageGiB
+        )
+        // Put the new row where it is immediately visible and focusable in
+        // the setup window; the row's UUID keeps SwiftUI identity stable.
+        workspaceConfigurations.insert(configuration, at: 0)
+        resetWorkspaceDependentState()
+    }
+
+    private func removeWorkspaceConfiguration(id: UUID) {
+        guard let index = workspaceConfigurations.firstIndex(where: { $0.id == id }) else { return }
+        workspaceConfigurations.remove(at: index)
+        resetWorkspaceDependentState()
+    }
+
+    private func workspaceNameBinding(for id: UUID) -> Binding<String> {
+        Binding(
+            get: { workspaceConfigurations.first(where: { $0.id == id })?.name ?? "" },
+            set: { newName in
+                guard let index = workspaceConfigurations.firstIndex(where: { $0.id == id }),
+                      workspaceConfigurations[index].name != newName else { return }
+                workspaceConfigurations[index].name = newName
+                resetWorkspaceDependentState()
+            }
+        )
+    }
+
+    /// Workspace names scope every later GitHub and Git choice. A structural
+    /// edit invalidates those choices so no policy or verification can remain
+    /// silently attached to a removed or renamed VM.
+    private func resetWorkspaceDependentState() {
+        workspaceConfigurationAccepted = false
+        githubContextLoaded = false
+        drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(for: workspaceConfigurations)
+        editedGitHubWorkspaces.removeAll()
+        retainedRepositoryPolicy.removeAll()
+        repositoryPolicyApplied = false
+        githubSkipped = false
+        verificationResults.removeAll()
+        disabledGitHubWorkspaces.removeAll()
+        githubApplyProgress = nil
+        githubReconnectRequired = false
+        githubAttentionWorkspace = nil
+        localCatalogAttempted = false
+        identityTarget = "all"
+        identityConfiguredWorkspaces.removeAll()
+        verifiedIdentityByWorkspace.removeAll()
+        identitySkipped = false
+        identityStatus = ""
+    }
+
+    /// Rebuilds all downstream state from the configuration that bootstrap
+    /// just applied. Stale names from resume data or a prior provider
+    /// generation are discarded rather than silently following a rename.
+    private func rebuildWorkspaceScopedState() {
+        let names = configuredWorkspaceNames
+        let configured = Set(names)
+        let retainedByWorkspace = Dictionary(
+            uniqueKeysWithValues: retainedRepositoryPolicy
+                .filter { configured.contains($0.workspace) }
+                .map { ($0.workspace, $0) }
+        )
+        retainedRepositoryPolicy = names.compactMap { retainedByWorkspace[$0] }
+        editedGitHubWorkspaces.formIntersection(configured)
+
+        var rebuiltDrafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(
+            for: workspaceConfigurations
+        )
+        for policy in retainedRepositoryPolicy {
+            var draft = rebuiltDrafts[policy.workspace] ?? .initial(policy.workspace)
+            let installationIDs = Set(policy.repositories.map(\.installationID))
+            draft.installationID = accessMode == .connect ? installationIDs.first : nil
+            draft.repositoryModes = Dictionary(uniqueKeysWithValues: policy.repositories.map {
+                (GitHubLocalProvider.canonicalize($0.fullName), $0.mode)
+            })
+            rebuiltDrafts[policy.workspace] = draft
+        }
+        drafts = rebuiltDrafts
+
+        if !githubSkipped,
+           Set(retainedRepositoryPolicy.map(\.workspace)) != configured {
+            repositoryPolicyApplied = false
+        }
+        verificationResults.removeAll { !configured.contains($0.workspace) }
+        existingMetadata.removeAll { !configured.contains($0.workspace) }
+        disabledGitHubWorkspaces.removeAll { !configured.contains($0) }
+        identityConfiguredWorkspaces.formIntersection(configured)
+        verifiedIdentityByWorkspace = verifiedIdentityByWorkspace.filter {
+            configured.contains($0.key)
+        }
+        if identityTarget != "all", !configured.contains(identityTarget) {
+            identityTarget = "all"
+        }
+        localCatalogAttempted = false
+        githubHostCredentialPresent = false
+        account = nil
+        installations = []
+        repositoriesByInstallation = [:]
     }
 
     @ViewBuilder
@@ -1380,6 +1722,7 @@ struct SetupView: View {
 
     private var repositoryPolicyEditor: some View {
         RepositoryWorkspacePolicyEditor(
+            workspaces: configuredWorkspaceNames,
             installations: installations,
             repositoriesByInstallation: repositoriesByInstallation,
             accessMode: accessMode,
@@ -1446,14 +1789,14 @@ struct SetupView: View {
                 .accessibilityLabel("Git author email")
                 .accessibilityIdentifier("setup.identity.email")
             Picker("Apply to", selection: $identityTarget) {
-                Text("All three workspaces").tag("all")
-                ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
-                    Text(workspace.rawValue).tag(workspace.rawValue)
+                Text("All configured workspaces").tag("all")
+                ForEach(configuredWorkspaceNames, id: \.self) { workspace in
+                    Text(workspace).tag(workspace)
                 }
             }
             .accessibilityIdentifier("setup.identity.target")
             Text(identityTarget == "all"
-                ? "Targets: dev, playgrounds, and personal."
+                ? "Targets: \(configuredWorkspaceNames.joined(separator: ", "))."
                 : "Target: \(identityTarget) only. Other workspace Git settings remain unchanged.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1501,6 +1844,12 @@ struct SetupView: View {
             Text("The GitHub and Git choices below are saved.")
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("setup.final-review.summary")
+            reviewStatusLine(
+                title: "Configured workspaces",
+                value: workspaceConfigurationReviewSummary,
+                ready: workspaceValidationMessage == nil,
+                accessibilityIdentifier: "setup.final-review.workspaces"
+            )
             Text("Finish any remaining workspace setup, then choose Done to close onboarding.")
                 .foregroundStyle(.secondary)
             reviewStatusLine(
@@ -1531,8 +1880,23 @@ struct SetupView: View {
         .padding(14)
         .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
-    private func reviewStatusLine(title: String, value: String, ready: Bool) -> some View {
-        HStack(alignment: .top, spacing: 9) {
+
+    private var workspaceConfigurationReviewSummary: String {
+        workspaceConfigurations.map { configuration in
+            "\(configuration.name): \(configuration.cpus)/\(configuration.maxCPUs) CPU, " +
+                "\(configuration.memoryGiB)/\(configuration.maxMemoryGiB) GB memory, " +
+                "\(configuration.workspaceStorageGiB) GB workspace storage, " +
+                "\(configuration.runtimeStorageGiB) GB runtime storage"
+        }.joined(separator: "; ")
+    }
+    @ViewBuilder
+    private func reviewStatusLine(
+        title: String,
+        value: String,
+        ready: Bool,
+        accessibilityIdentifier: String? = nil
+    ) -> some View {
+        let line = HStack(alignment: .top, spacing: 9) {
             Image(systemName: ready ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(ready ? .green : .orange)
                 .accessibilityHidden(true)
@@ -1542,6 +1906,14 @@ struct SetupView: View {
             }
         }
         .accessibilityElement(children: .combine)
+        if let accessibilityIdentifier {
+            line
+                .accessibilityLabel(title)
+                .accessibilityValue(value)
+                .accessibilityIdentifier(accessibilityIdentifier)
+        } else {
+            line
+        }
     }
 
     @ViewBuilder
@@ -1567,8 +1939,11 @@ struct SetupView: View {
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed MSW Monitor build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
-            } else if activeStep == .readiness && !blockingChecks.isEmpty {
+            } else if activeStep == .dependencies && !blockingChecks.isEmpty {
                 Label("Resolve the highlighted checks to continue.", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            } else if activeStep == .workspaces, let workspaceValidationMessage {
+                Label(workspaceValidationMessage, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
             }
         }
@@ -1595,7 +1970,7 @@ struct SetupView: View {
                 .disabled(isSavingIdentity)
                 .accessibilityIdentifier("setup.identity.skip.button")
             }
-            if activeStep != .readiness {
+            if activeStep != .dependencies {
                 Button("Back", action: moveBack)
                     .buttonStyle(.bordered)
                     .keyboardShortcut(.cancelAction)
@@ -1604,7 +1979,7 @@ struct SetupView: View {
             }
 
             switch activeStep {
-            case .readiness:
+            case .dependencies:
                 Button(isChecking ? "Checking…" : "Retry", action: loadPreflight)
                     .buttonStyle(.bordered)
                     .disabled(isChecking || isRunning || coordinator == nil)
@@ -1618,19 +1993,24 @@ struct SetupView: View {
                         isChecking
                             ? "Checking…"
                             : (canFinishWithoutGitHub ? "Continue" : (blockingChecks.isEmpty ? "Continue" : "Repair & Continue")),
-                        action: advanceFromReadiness
+                        action: advanceFromDependencies
                     )
                     .buttonStyle(.borderedProminent)
                     .disabled(
                         isRunning ||
                             isChecking ||
                             checks.isEmpty ||
-                            !githubContextLoaded ||
-                            (!canFinishWithoutGitHub && coordinator == nil)
+                            !startupStateLoaded
                     )
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("setup.primary-action")
                 }
+            case .workspaces:
+                Button("Continue", action: advanceFromWorkspaces)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(workspaceValidationMessage != nil || isRunning || !startupStateLoaded)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("setup.workspaces.continue.button")
             case .github:
                 if githubStepComplete {
                     Button("Continue", action: advanceFromGitHub)
@@ -1699,11 +2079,11 @@ struct SetupView: View {
     /// Only workspaces the user edited are replaced. An edited workspace with
     /// no entries deliberately removes all of its existing repository access.
     private var workspacePolicy: [GitHubWorkspacePolicy] {
-        Workspace.ID.allCases.compactMap { workspace in
-            guard editedGitHubWorkspaces.contains(workspace.rawValue) else { return nil }
-            let draft = drafts[workspace.rawValue] ?? .initial(workspace)
+        configuredWorkspaceNames.compactMap { workspace in
+            guard editedGitHubWorkspaces.contains(workspace) else { return nil }
+            let draft = drafts[workspace] ?? .initial(workspace)
             return GitHubWorkspacePolicy(
-                workspace: workspace.rawValue,
+                workspace: workspace,
                 repositories: policyEntries(for: draft)
             )
         }
@@ -1723,7 +2103,7 @@ struct SetupView: View {
     /// exercised directly by unit tests. Local mode spans ALL owners; connect
     /// mode is scoped to the draft's single installation.
     static func repositoryPolicyEntries(
-        workspace: Workspace.ID,
+        workspace: String,
         draft: WorkspaceRepositoryDraft,
         installations: [GitHubInstallation],
         repositoriesByInstallation: [Int: [GitHubRepository]],
@@ -1746,7 +2126,7 @@ struct SetupView: View {
                 continue
             }
             result.append(GitHubRepositoryPolicy(
-                workspace: workspace.rawValue,
+                workspace: workspace,
                 repositoryID: repository.id,
                 fullName: repository.fullName,
                 installationID: installation.id,
@@ -1766,6 +2146,7 @@ struct SetupView: View {
 
 
     private func beginAuthorization() {
+        guard workspaceConfigurationIsApplied, githubContextLoaded else { return }
         if accessMode == .local {
             // This path is now used only for explicit recovery actions. The
             // first load is automatic when the GitHub step appears, so a
@@ -1887,6 +2268,7 @@ struct SetupView: View {
     }
 
     private func loadLocalCatalog(force: Bool = false) {
+        guard workspaceConfigurationIsApplied, githubContextLoaded else { return }
         guard force || !localCatalogAttempted else { return }
         guard !isRefreshingGitHub else { return }
         guard let provider else {
@@ -1960,7 +2342,8 @@ struct SetupView: View {
     /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
     /// in-app device sheet. Other typed remedies surface verbatim.
     private func connectGitHubAccount() {
-        guard let provider, !isConnectingGitHub else { return }
+        guard workspaceConfigurationIsApplied, githubContextLoaded,
+              let provider, !isConnectingGitHub else { return }
         githubConnectionGeneration &+= 1
         let generation = githubConnectionGeneration
         githubConnectionTask?.cancel()
@@ -2075,11 +2458,11 @@ struct SetupView: View {
     /// (like manual entry) so cross-owner entries stay visible and editable.
     private func prefillLocalRepositoryPolicyDrafts(policy: GitHubPolicyFile?) {
         guard retainedRepositoryPolicy.isEmpty, let policy else { return }
-        for workspace in Workspace.ID.allCases {
-            guard !editedGitHubWorkspaces.contains(workspace.rawValue),
-                  var draft = drafts[workspace.rawValue],
+        for workspace in configuredWorkspaceNames {
+            guard !editedGitHubWorkspaces.contains(workspace),
+                  var draft = drafts[workspace],
                   draft.repositoryModes.isEmpty,
-                  let policyWorkspace = policy.workspaces[workspace.rawValue] else {
+                  let policyWorkspace = policy.workspaces[workspace] else {
                 continue
             }
             let prefilled = Self.localPolicyPrefill(
@@ -2090,7 +2473,7 @@ struct SetupView: View {
             if !prefilled.modes.isEmpty {
                 draft.installationID = nil
                 draft.repositoryModes = prefilled.modes
-                drafts[workspace.rawValue] = draft
+                drafts[workspace] = draft
                 installations = prefilled.installations
                 repositoriesByInstallation = prefilled.repositoriesByInstallation
             }
@@ -2186,6 +2569,7 @@ struct SetupView: View {
     }
 
     private func commitPolicy() {
+        guard workspaceConfigurationIsApplied, githubContextLoaded else { return }
         let workspacePolicies = workspacePolicy
         guard !workspacePolicies.isEmpty else {
             githubStatus = "Choose at least one repository, or skip GitHub."
@@ -2404,7 +2788,8 @@ struct SetupView: View {
     }
 
     private func refreshLocalApplyProgress() async {
-        guard accessMode == .local, let provider,
+        guard workspaceConfigurationIsApplied, githubContextLoaded,
+              accessMode == .local, let provider,
               let progress = await provider.currentPolicyApplyProgress() else { return }
         githubApplyProgress = progress
         repositoryPolicyApplied = progress.phase != .cancelled
@@ -2558,17 +2943,66 @@ struct SetupView: View {
         }
     }
 
-    /// The startup GitHub-context chain, driven by the outermost `.task` and
-    /// Loads persisted setup and the cached Connect session before enabling
-    /// review. Every awaited publication is guarded against setup teardown.
+    /// Loads the non-GitHub startup boundary first. GitHub authorization,
+    /// repository state, and host Git identity remain untouched until the
+    /// selected workspace configuration is proven applied.
     @discardableResult
-    func loadGitHubStartupContext() async -> Bool {
+    func loadSetupStartupState() async -> Bool {
         let startupLifecycle = setupLifecycle.generation
         restoreResumeState()
-        loadPreflight()
+        await refreshPreflightState()
+        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        startupStateLoaded = true
+        guard workspaceConfigurationIsApplied else {
+            githubContextLoaded = false
+            return true
+        }
+        workspaceConfigurationAccepted = true
+        githubReconnectRequired = state.phase == .github
+        let loaded = await loadAppliedWorkspaceContext()
+        if loaded, githubReconnectRequired {
+            githubAttentionWorkspace = state.reconnectWorkspace ?? firstReconnectWorkspace
+        }
+        return loaded
+    }
+
+    /// Recreates every workspace-scoped GitHub and Git target from the
+    /// validated, applied configuration before any provider/catalog,
+    /// authorization, or Git identity read is allowed.
+    @discardableResult
+    private func loadAppliedWorkspaceContext() async -> Bool {
+        guard workspaceConfigurationIsApplied else {
+            githubContextLoaded = false
+            return false
+        }
+        do {
+            if accessMode == .local, let provider {
+                try await provider.reloadWorkspaceConfiguration(workspaceConfigurations)
+            } else if let authorizationCoordinator {
+                try await authorizationCoordinator.reloadWorkspaceConfiguration(workspaceConfigurations)
+            }
+        } catch {
+            self.error = error.localizedDescription
+            githubContextLoaded = false
+            return false
+        }
+        rebuildWorkspaceScopedState()
         await prefillIdentityFromLocalGit()
+        return await loadGitHubStartupContext()
+    }
+
+    /// The post-application GitHub-context chain. Every awaited publication
+    /// is guarded against setup teardown.
+    @discardableResult
+    private func loadGitHubStartupContext() async -> Bool {
+        guard workspaceConfigurationIsApplied else {
+            githubContextLoaded = false
+            return false
+        }
+        let startupLifecycle = setupLifecycle.generation
         if accessMode == .local {
             githubContextLoaded = true
+            localCatalogAttempted = false
             loadLocalCatalogWhenNeeded(for: activeStep)
             return true
         }
@@ -2580,20 +3014,19 @@ struct SetupView: View {
         return true
     }
 
-
     private func loadPreflight() {
+        Task { await refreshPreflightState() }
+    }
+
+    private func refreshPreflightState() async {
         guard let coordinator else { return }
         isChecking = true
-        Task {
-            let savedState = await coordinator.state()
-            let result = await coordinator.preflight()
-            await MainActor.run {
-                state = savedState
-                checks = result
-                lastPreflightAt = Date()
-                isChecking = false
-            }
-        }
+        let savedState = await coordinator.state()
+        let result = await coordinator.preflight()
+        state = savedState
+        checks = result
+        lastPreflightAt = Date()
+        isChecking = false
     }
 
     private func openHostApprovalSettings() {
@@ -2603,6 +3036,8 @@ struct SetupView: View {
 
     private func runSetup() {
         guard let coordinator else { return }
+        guard workspaceValidationMessage == nil else { return }
+        let submittedWorkspaceConfigurations = workspaceConfigurations
         isRunning = true
         error = nil
         notice = nil
@@ -2616,40 +3051,48 @@ struct SetupView: View {
             }
             defer { progressTask.cancel() }
             do {
-                let result = try await coordinator.run()
+                let result = try await coordinator.run(
+                    workspaceConfigurations: submittedWorkspaceConfigurations
+                )
                 let savedState = await coordinator.state()
                 let refreshedChecks = await coordinator.preflight()
-                await MainActor.run {
-                    state = savedState
-                    checks = refreshedChecks
-                    lastPreflightAt = Date()
-                    isRunning = false
-                    notice = result.requiresApproval
-                        ? (result.phase == MSWBootstrapState.Phase.hostIntegration.rawValue
-                            ? "Allow MSW Monitor in Login Items, then choose Retry."
-                            : result.message)
-                        : result.message
-                }
-            } catch {
-                await MainActor.run {
-                    isRunning = false
-                    if accessMode == .connect,
-                       let clientError = error as? MSWClientError,
-                       case .protocolFailure(let protocolError) = clientError,
-                       protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED" {
-                        // No readiness warning: take the user straight to the
-                        // GitHub step, where the attention state lives.
-                        githubReconnectRequired = true
-                        githubAttentionWorkspace = protocolError.workspace
-                        // Each reconnect visit is a fresh decision cycle: a
-                        // bootstrap that still fails for another workspace must
-                        // re-offer the skip control instead of being blocked by
-                        // a previously completed skip.
-                        githubSkipped = false
+                state = savedState
+                checks = refreshedChecks
+                lastPreflightAt = Date()
+                isRunning = false
+                notice = result.requiresApproval
+                    ? (result.phase == MSWBootstrapState.Phase.hostIntegration.rawValue
+                        ? "Allow MSW Monitor in Login Items, then choose Retry."
+                        : result.message)
+                    : result.message
+                if result.phase == MSWBootstrapState.Phase.complete.rawValue,
+                   submittedWorkspaceConfigurations == workspaceConfigurations,
+                   workspaceConfigurationIsApplied {
+                    workspaceConfigurationAccepted = true
+                    if await loadAppliedWorkspaceContext(), activeStep == .workspaces {
                         activeStep = .github
-                    } else {
-                        self.error = error.localizedDescription
                     }
+                }
+            } catch let setupError {
+                isRunning = false
+                let savedState = await coordinator.state()
+                state = savedState
+                if let clientError = setupError as? MSWClientError,
+                   case .protocolFailure(let protocolError) = clientError,
+                   protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
+                   submittedWorkspaceConfigurations == workspaceConfigurations,
+                   workspaceConfigurationIsApplied,
+                   await loadAppliedWorkspaceContext() {
+                    // The coordinator publishes this boundary only after
+                    // reading back the exact configuration installed by the
+                    // CLI. Reconnect therefore follows the same ordering gate
+                    // as default setup and back/edit flows.
+                    githubReconnectRequired = true
+                    githubAttentionWorkspace = protocolError.workspace
+                    githubSkipped = false
+                    activeStep = .github
+                } else {
+                    self.error = setupError.localizedDescription
                 }
             }
         }
@@ -2661,7 +3104,7 @@ struct SetupView: View {
             UserDefaults.standard.set(true, forKey: "setupCompleted")
             UserDefaults.standard.removeObject(forKey: Self.resumeStateKey)
         }
-        closeSetup()
+        closeSetup(workspaceConfigurations)
     }
 
     static func allowsIdentitySave(
@@ -2703,7 +3146,7 @@ struct SetupView: View {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    let workspaces = target.map { [$0] } ?? Workspace.ID.allCases.map(\.rawValue)
+                    let workspaces = target.map { [$0] } ?? configuredWorkspaceNames
                     let savedIdentity = SetupVerifiedIdentity(name: name, email: email)
                     for workspace in workspaces {
                         verifiedIdentityByWorkspace[workspace] = savedIdentity
@@ -2924,13 +3367,13 @@ struct SetupView: View {
     private func prefillRepositoryPolicyDrafts() {
         guard retainedRepositoryPolicy.isEmpty else { return }
 
-        for workspace in Workspace.ID.allCases {
-            guard !editedGitHubWorkspaces.contains(workspace.rawValue),
-                  var draft = drafts[workspace.rawValue],
+        for workspace in configuredWorkspaceNames {
+            guard !editedGitHubWorkspaces.contains(workspace),
+                  var draft = drafts[workspace],
                   draft.repositoryModes.isEmpty else {
                 continue
             }
-            let entries = existingMetadata.filter { $0.workspace == workspace.rawValue }
+            let entries = existingMetadata.filter { $0.workspace == workspace }
             guard let guest = entries.first(where: { $0.role == .guest }),
                   let installationID = guest.installationID,
                   let installation = installations.first(where: { $0.id == installationID }),
@@ -2939,7 +3382,7 @@ struct SetupView: View {
                   let availableRepositories = repositoriesByInstallation[installationID],
                   guest.repositoryIDs.count == guest.repositoryNames.count,
                   guest.repositoryIDs.count == Set(guest.repositoryIDs).count else {
-                if !entries.isEmpty { presentUnavailableExistingRepositoryPolicy(workspace: workspace.rawValue) }
+                if !entries.isEmpty { presentUnavailableExistingRepositoryPolicy(workspace: workspace) }
                 continue
             }
 
@@ -2949,7 +3392,7 @@ struct SetupView: View {
                 $0.installationID == installationID &&
                     Set($0.repositoryIDs).isSubset(of: guestRepositoryIDs)
             }) else {
-                presentUnavailableExistingRepositoryPolicy(workspace: workspace.rawValue)
+                presentUnavailableExistingRepositoryPolicy(workspace: workspace)
                 continue
             }
 
@@ -2967,13 +3410,13 @@ struct SetupView: View {
                 } ? .readWrite : .readOnly
             }
             guard isCurrent else {
-                presentUnavailableExistingRepositoryPolicy(workspace: workspace.rawValue)
+                presentUnavailableExistingRepositoryPolicy(workspace: workspace)
                 continue
             }
 
             draft.installationID = installationID
             draft.repositoryModes = modes
-            drafts[workspace.rawValue] = draft
+            drafts[workspace] = draft
         }
     }
 
@@ -2987,6 +3430,7 @@ struct SetupView: View {
 
     private func persistResumeState() {
         let resume = SetupResumeState(
+            workspaceConfigurations: workspaceConfigurations,
             repositoryPolicy: workspacePolicy,
             repositoryPolicyApplied: repositoryPolicyApplied,
             githubSkipped: githubSkipped,
@@ -3005,16 +3449,19 @@ struct SetupView: View {
 
     private func restoreResumeState() {
         guard let data = UserDefaults.standard.data(forKey: Self.resumeStateKey),
-              let resume = try? JSONDecoder().decode(SetupResumeState.self, from: data) else { return }
+              let resume = try? JSONDecoder().decode(SetupResumeState.self, from: data) else {
+            workspaceConfigurations = BootstrapStateStore.persistedWorkspaceConfigurations()
+            drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(for: workspaceConfigurations)
+            return
+        }
         retainedRepositoryPolicy = resume.repositoryPolicy
-        drafts = Dictionary(uniqueKeysWithValues: Workspace.ID.allCases.map {
-            ($0.rawValue, WorkspaceRepositoryDraft.initial($0))
-        })
+        workspaceConfigurations = resume.workspaceConfigurations ?? SetupWorkspaceConfiguration.defaults
+        drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(for: workspaceConfigurations)
         editedGitHubWorkspaces = Set(resume.repositoryPolicy.map(\.workspace))
         repositoryPolicyApplied = resume.repositoryPolicyApplied
         for policy in resume.repositoryPolicy {
-            guard let workspace = Workspace.ID(rawValue: policy.workspace) else { continue }
-            var draft = drafts[policy.workspace] ?? .initial(workspace)
+            guard configuredWorkspaceNames.contains(policy.workspace) else { continue }
+            var draft = drafts[policy.workspace] ?? .initial(policy.workspace)
             let installationIDs = Set(policy.repositories.map(\.installationID))
             if accessMode == .connect {
                 // Connect retains the one-installation-per-workspace rule.
@@ -3055,18 +3502,22 @@ struct SetupView: View {
                 startedAt: now,
                 updatedAt: now,
                 lastError: nil,
-                completedPhases: [.preflight, .toolchain, .hostIntegration]
+                completedPhases: [.preflight, .toolchain, .hostIntegration],
+                workspaceConfigurations: workspaceConfigurations
             )
             : MSWBootstrapState(
                 phase: .complete,
                 startedAt: now,
                 updatedAt: now,
                 lastError: nil,
-                completedPhases: Set(MSWBootstrapState.Phase.allCases)
+                completedPhases: Set(MSWBootstrapState.Phase.allCases),
+                workspaceConfigurations: workspaceConfigurations
             )
         lastPreflightAt = now
         isChecking = false
+        startupStateLoaded = true
         if uiTestStartsInReview {
+            workspaceConfigurationAccepted = true
             githubSkipped = true
             identitySkipped = true
             identityStatus = ""
@@ -3076,7 +3527,7 @@ struct SetupView: View {
             githubSkipped = false
             identitySkipped = false
             identityStatus = ""
-            activeStep = .readiness
+            activeStep = .dependencies
         }
         githubContextLoaded = true
     }
@@ -3212,6 +3663,7 @@ private struct InformationTooltip: View {
 /// Compact, searchable multi-selection picker. The persisted modes remain the
 /// policy source of truth; the push toggle maps directly to read-only/read-write.
 private struct RepositoryWorkspacePolicyEditor: View {
+    let workspaces: [String]
     let installations: [GitHubInstallation]
     let repositoriesByInstallation: [Int: [GitHubRepository]]
     let accessMode: GitHubAccessMode
@@ -3241,7 +3693,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
                     accessibilityIdentifier: "setup.github.workspace-access.info"
                 )
             }
-            ForEach(Workspace.ID.allCases, id: \.rawValue) { workspace in
+            ForEach(workspaces, id: \.self) { workspace in
                 workspaceSection(workspace)
             }
         }
@@ -3251,22 +3703,22 @@ private struct RepositoryWorkspacePolicyEditor: View {
     }
 
     @ViewBuilder
-    private func workspaceSection(_ workspace: Workspace.ID) -> some View {
+    private func workspaceSection(_ workspace: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(workspace.rawValue).font(.callout.weight(.semibold))
+                Text(workspace).font(.callout.weight(.semibold))
                 Spacer()
                 Button {
-                    searchQueries[workspace.rawValue] = ""
-                    openPicker = workspace.rawValue
+                    searchQueries[workspace] = ""
+                    openPicker = workspace
                 } label: {
                     Label(selectionTitle(for: workspace), systemImage: "chevron.up.chevron.down")
                         .frame(width: 142, alignment: .leading)
                 }
                 .disabled(disabled)
-                .accessibilityLabel("Choose repositories for \(workspace.rawValue)")
+                .accessibilityLabel("Choose repositories for \(workspace)")
                 .accessibilityValue(selectionTitle(for: workspace))
-                .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository-picker.button")
+                .accessibilityIdentifier("github.workspace.\(workspace).repository-picker.button")
                 .popover(isPresented: pickerPresented(for: workspace), arrowEdge: .bottom) {
                     repositoryPicker(for: workspace)
                 }
@@ -3292,18 +3744,18 @@ private struct RepositoryWorkspacePolicyEditor: View {
     }
 
     @ViewBuilder
-    private func repositoryPicker(for workspace: Workspace.ID) -> some View {
+    private func repositoryPicker(for workspace: String) -> some View {
         let matches = filteredRepositories(for: workspace)
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search repositories", text: searchBinding(for: workspace))
                 .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository-picker.search")
+                .accessibilityIdentifier("github.workspace.\(workspace).repository-picker.search")
             if matches.isEmpty {
-                Text(searchQueries[workspace.rawValue, default: ""].isEmpty
+                Text(searchQueries[workspace, default: ""].isEmpty
                     ? "No repositories" : "No matches")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 44)
-                    .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository-picker.empty")
+                    .accessibilityIdentifier("github.workspace.\(workspace).repository-picker.empty")
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -3316,7 +3768,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
                             .toggleStyle(.checkbox)
                             .padding(.vertical, 4)
                             .disabled(disabled || selectionBlocked(workspace, installation: entry.installation))
-                            .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(entry.repository.id)")
+                            .accessibilityIdentifier("github.workspace.\(workspace).repository.\(entry.repository.id)")
                         }
                     }
                 }
@@ -3329,7 +3781,7 @@ private struct RepositoryWorkspacePolicyEditor: View {
 
     @ViewBuilder
     private func selectedRepositoryRow(
-        _ workspace: Workspace.ID,
+        _ workspace: String,
         repository: GitHubRepository,
         installation: GitHubInstallation
     ) -> some View {
@@ -3350,13 +3802,13 @@ private struct RepositoryWorkspacePolicyEditor: View {
             .disabled(disabled || repository.canPush == false)
             .hoverTooltip(
                 repository.canPush == false ? Self.pushDeniedHelp : Self.pushHelp,
-                accessibilityIdentifier: "github.workspace.\(workspace.rawValue).repository.\(repository.id).allow-pushes.tooltip"
+                accessibilityIdentifier: "github.workspace.\(workspace).repository.\(repository.id).allow-pushes.tooltip"
             )
-            .accessibilityIdentifier("github.workspace.\(workspace.rawValue).repository.\(repository.id).allow-pushes")
+            .accessibilityIdentifier("github.workspace.\(workspace).repository.\(repository.id).allow-pushes")
         }
         .padding(.leading, 4)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("github.workspace.\(workspace.rawValue).selection.\(repository.id)")
+        .accessibilityIdentifier("github.workspace.\(workspace).selection.\(repository.id)")
     }
 
     private typealias RepositoryEntry = (repository: GitHubRepository, installation: GitHubInstallation)
@@ -3369,33 +3821,33 @@ private struct RepositoryWorkspacePolicyEditor: View {
         }
     }
 
-    private func filteredRepositories(for workspace: Workspace.ID) -> [RepositoryEntry] {
-        let query = searchQueries[workspace.rawValue, default: ""]
+    private func filteredRepositories(for workspace: String) -> [RepositoryEntry] {
+        let query = searchQueries[workspace, default: ""]
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return allRepositories }
         return allRepositories.filter { $0.repository.fullName.localizedCaseInsensitiveContains(query) }
     }
 
-    private func selectedRepositories(for workspace: Workspace.ID) -> [RepositoryEntry] {
+    private func selectedRepositories(for workspace: String) -> [RepositoryEntry] {
         allRepositories.filter { isSelected(workspace, repository: $0.repository, installation: $0.installation) }
     }
 
-    private func selectionTitle(for workspace: Workspace.ID) -> String {
+    private func selectionTitle(for workspace: String) -> String {
         let count = selectedRepositories(for: workspace).count
         return count == 0 ? "Choose repositories" : "\(count) selected"
     }
 
-    private func pickerPresented(for workspace: Workspace.ID) -> Binding<Bool> {
+    private func pickerPresented(for workspace: String) -> Binding<Bool> {
         Binding(
-            get: { openPicker == workspace.rawValue },
+            get: { openPicker == workspace },
             set: { if !$0 { openPicker = nil } }
         )
     }
 
-    private func searchBinding(for workspace: Workspace.ID) -> Binding<String> {
+    private func searchBinding(for workspace: String) -> Binding<String> {
         Binding(
-            get: { searchQueries[workspace.rawValue, default: ""] },
-            set: { searchQueries[workspace.rawValue] = $0 }
+            get: { searchQueries[workspace, default: ""] },
+            set: { searchQueries[workspace] = $0 }
         )
     }
 
@@ -3404,11 +3856,11 @@ private struct RepositoryWorkspacePolicyEditor: View {
     }
 
     private func isSelected(
-        _ workspace: Workspace.ID,
+        _ workspace: String,
         repository: GitHubRepository,
         installation: GitHubInstallation
     ) -> Bool {
-        let draft = drafts[workspace.rawValue] ?? .initial(workspace)
+        let draft = drafts[workspace] ?? .initial(workspace)
         guard draft.repositoryModes[Self.canonicalKey(repository)] != nil else { return false }
         if accessMode == .connect {
             return draft.installationID == installation.id
@@ -3417,21 +3869,21 @@ private struct RepositoryWorkspacePolicyEditor: View {
         return true
     }
 
-    private func selectionBlocked(_ workspace: Workspace.ID, installation: GitHubInstallation) -> Bool {
+    private func selectionBlocked(_ workspace: String, installation: GitHubInstallation) -> Bool {
         guard accessMode == .connect,
-              let selectedInstallation = drafts[workspace.rawValue]?.installationID else { return false }
+              let selectedInstallation = drafts[workspace]?.installationID else { return false }
         return selectedInstallation != installation.id
     }
 
     private func selectionBinding(
-        _ workspace: Workspace.ID,
+        _ workspace: String,
         repository: GitHubRepository,
         installation: GitHubInstallation
     ) -> Binding<Bool> {
         Binding(
             get: { isSelected(workspace, repository: repository, installation: installation) },
             set: { selected in
-                var draft = drafts[workspace.rawValue] ?? .initial(workspace)
+                var draft = drafts[workspace] ?? .initial(workspace)
                 if selected {
                     if accessMode == .connect {
                         guard draft.installationID == nil || draft.installationID == installation.id else { return }
@@ -3442,32 +3894,32 @@ private struct RepositoryWorkspacePolicyEditor: View {
                     draft.repositoryModes.removeValue(forKey: Self.canonicalKey(repository))
                     if draft.repositoryModes.isEmpty { draft.installationID = nil }
                 }
-                drafts[workspace.rawValue] = draft
-                editedWorkspaces.insert(workspace.rawValue)
+                drafts[workspace] = draft
+                editedWorkspaces.insert(workspace)
                 onEdit()
             }
         )
     }
 
     private func pushBinding(
-        _ workspace: Workspace.ID,
+        _ workspace: String,
         repository: GitHubRepository,
         installation: GitHubInstallation
     ) -> Binding<Bool> {
         Binding(
             get: {
                 guard isSelected(workspace, repository: repository, installation: installation) else { return false }
-                let mode = drafts[workspace.rawValue]?.repositoryModes[Self.canonicalKey(repository)] ?? .readOnly
+                let mode = drafts[workspace]?.repositoryModes[Self.canonicalKey(repository)] ?? .readOnly
                 return repository.effectiveMode(mode) == .readWrite
             },
             set: { allowsPushes in
-                guard var draft = drafts[workspace.rawValue],
+                guard var draft = drafts[workspace],
                       draft.repositoryModes[Self.canonicalKey(repository)] != nil,
                       repository.canPush != false else { return }
                 if accessMode == .connect, draft.installationID != installation.id { return }
                 draft.repositoryModes[Self.canonicalKey(repository)] = allowsPushes ? .readWrite : .readOnly
-                drafts[workspace.rawValue] = draft
-                editedWorkspaces.insert(workspace.rawValue)
+                drafts[workspace] = draft
+                editedWorkspaces.insert(workspace)
                 onEdit()
             }
         )

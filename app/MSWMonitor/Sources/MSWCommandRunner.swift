@@ -195,6 +195,27 @@ actor MSWCommandRunner {
         configuration.homeDirectory
     }
 
+    /// Reads back the workspace configuration installed for this runner's
+    /// deterministic HOME. Bootstrap uses this as the operational boundary:
+    /// selected workspaces are not published as applied until the CLI-owned
+    /// reconciliation has written the exact validated configuration.
+    func installedWorkspaceConfigurations() -> [SetupWorkspaceConfiguration]? {
+        let url = configuration.homeDirectory
+            .appending(path: ".config/msw/workspaces.json")
+        guard let values = try? url.resourceValues(forKeys: [
+                  .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey
+              ]),
+              values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              let fileSize = values.fileSize,
+              fileSize <= 256 * 1_024,
+              let data = try? Data(contentsOf: url),
+              let boundary = MSWBootstrapConfiguration.decodeValidated(from: data) else {
+            return nil
+        }
+        return boundary.setupConfigurations
+    }
+
     func resolveMSW() -> URL? {
         mswCandidates().first
     }

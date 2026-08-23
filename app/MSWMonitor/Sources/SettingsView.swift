@@ -368,7 +368,8 @@ struct SettingsView: View {
 
     private var localGitHubAccessSection: some View {
         Section("Repository access") {
-            let workspaces = Workspace.ID.allCases.filter { localPolicy?.workspaces[$0.rawValue] != nil }
+            let workspaceNames = localPolicy.map { Array($0.workspaces.keys) } ?? []
+            let workspaces = workspaceNames.sorted().compactMap(Workspace.ID.init(rawValue:))
             if workspaces.isEmpty {
                 ContentUnavailableView(
                     "No repository access",

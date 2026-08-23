@@ -21,14 +21,9 @@ fi
 # App protocol commands must be able to report a typed configuration error
 # without requiring a shell profile or a live MicroSandbox installation.
 : "${MSW_PUBLISHED_PORTS:=3000,5173,8080}"
-: "${MSW_DEV_IP:=127.0.0.10}"
-: "${MSW_PLAYGROUNDS_IP:=127.0.0.11}"
-: "${MSW_PERSONAL_IP:=127.0.0.12}"
-: "${MSW_DEV_HOST:=dev.msw.test}"
-: "${MSW_PLAYGROUNDS_HOST:=playgrounds.msw.test}"
-: "${MSW_PERSONAL_HOST:=personal.msw.test}"
+: "${MSW_WORKSPACES_FILE:=$(dirname "$CONFIG_FILE")/workspaces.json}"
 
-readonly WORKSPACES=(dev playgrounds personal)
+WORKSPACES=()
 readonly READ_KEYCHAIN_SERVICE="msw.github.read"
 readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/msw/github"
@@ -87,6 +82,49 @@ ZSTD_BIN="${MSW_ZSTD_BIN:-$(command -v zstd 2>/dev/null || true)}"
 SHASUM_BIN="${MSW_SHASUM_BIN:-$(command -v shasum 2>/dev/null || true)}"
 LOCKF_BIN="${MSW_LOCKF_BIN:-$(command -v lockf 2>/dev/null || true)}"
 GH_BIN="${MSW_GH_BIN:-$(command -v gh 2>/dev/null || true)}"
+
+fatal() { printf 'msw: %s\n' "$*" >&2; exit 1; }
+
+load_workspace_configuration() {
+  local value
+  if [[ ! -e "$MSW_WORKSPACES_FILE" && ! -L "$MSW_WORKSPACES_FILE" ]]; then
+    (( MSW_CONFIG_AVAILABLE == 0 )) && return 0
+    fatal "missing workspace configuration: $MSW_WORKSPACES_FILE"
+  fi
+  [[ -f "$MSW_WORKSPACES_FILE" && ! -L "$MSW_WORKSPACES_FILE" ]] || fatal "invalid workspace configuration file"
+  [[ $(wc -c <"$MSW_WORKSPACES_FILE") -le 262144 ]] || fatal "workspace configuration is too large"
+  [[ -n "$JQ_BIN" && -x "$JQ_BIN" ]] || return 0
+  "$JQ_BIN" -e '
+    type == "object" and
+    (keys | sort) == ["schemaVersion", "workspaces"] and
+    .schemaVersion == 1 and
+    (.workspaces | type == "array" and length > 0 and length <= 64) and
+    ([.workspaces[].name] | length == (unique | length)) and
+    all(.workspaces[]; . as $w |
+      ($w | type == "object") and
+      ($w | keys | sort) == ["cpu", "cpuCeiling", "memoryCeilingGiB", "memoryGiB", "name", "runtimeStorageGiB", "workspaceStorageGiB"] and
+      ($w.name | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) and
+      ([4,6,8,12] | index($w.cpu)) != null and
+      ([4,6,8,12] | index($w.cpuCeiling)) != null and
+      $w.cpu <= $w.cpuCeiling and
+      ([16,32,48] | index($w.memoryGiB)) != null and
+      ([16,32,48] | index($w.memoryCeilingGiB)) != null and
+      $w.memoryGiB <= $w.memoryCeilingGiB and
+      ([60,80,100,120] | index($w.workspaceStorageGiB)) != null and
+      ([60,80,100,120] | index($w.runtimeStorageGiB)) != null)
+  ' "$MSW_WORKSPACES_FILE" >/dev/null 2>&1 || fatal "invalid workspace configuration: $MSW_WORKSPACES_FILE"
+  WORKSPACES=()
+  while IFS= read -r value; do WORKSPACES+=("$value"); done < <("$JQ_BIN" -r '.workspaces[].name' "$MSW_WORKSPACES_FILE")
+}
+
+workspace_configuration_value() {
+  local box="$1" field="$2"
+  [[ -f "$MSW_WORKSPACES_FILE" && -n "$JQ_BIN" && -x "$JQ_BIN" ]] || return 1
+  "$JQ_BIN" -er --arg box "$box" --arg field "$field" \
+    '.workspaces[] | select(.name == $box) | .[$field] // empty' "$MSW_WORKSPACES_FILE"
+}
+
+load_workspace_configuration
 HOST_TOKEN_BIN="${MSW_HOST_TOKEN_BIN:-}"
 if [[ -z "$HOST_TOKEN_BIN" ]]; then
   if [[ -x "$MSW_SCRIPT_ROOT/msw-github-host-token" ]]; then
@@ -104,7 +142,6 @@ if [[ -z "$MSW_KEYCHAIN_BRIDGE" ]]; then
   fi
 fi
 
-fatal() { printf 'msw: %s\n' "$*" >&2; exit 1; }
 note() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mwarning: %s\033[0m\n' "$*" >&2; }
 ok() { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
@@ -115,11 +152,14 @@ require_command_path() {
 }
 
 is_workspace() {
-  case "${1:-}" in dev|playgrounds|personal) return 0 ;; *) return 1 ;; esac
+  local candidate="${1:-}" box
+  [[ "$candidate" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || return 1
+  for box in "${WORKSPACES[@]}"; do [[ "$candidate" == "$box" ]] && return 0; done
+  return 1
 }
 
 validate_workspace() {
-  is_workspace "${1:-}" || fatal "workspace must be dev, playgrounds, or personal"
+  is_workspace "${1:-}" || fatal "workspace is not configured"
 }
 
 for_targets() {
@@ -133,19 +173,17 @@ for_targets() {
 }
 
 workspace_ip() {
-  case "$1" in
-    dev) printf '%s\n' "$MSW_DEV_IP" ;;
-    playgrounds) printf '%s\n' "$MSW_PLAYGROUNDS_IP" ;;
-    personal) printf '%s\n' "$MSW_PERSONAL_IP" ;;
-  esac
+  local index=10 box
+  for box in "${WORKSPACES[@]}"; do
+    [[ "$box" == "$1" ]] && { printf '127.0.0.%s\n' "$index"; return; }
+    index=$((index + 1))
+  done
+  return 1
 }
 
 workspace_host() {
-  case "$1" in
-    dev) printf '%s\n' "$MSW_DEV_HOST" ;;
-    playgrounds) printf '%s\n' "$MSW_PLAYGROUNDS_HOST" ;;
-    personal) printf '%s\n' "$MSW_PERSONAL_HOST" ;;
-  esac
+  if is_workspace "$1"; then printf '%s.msw.test\n' "$1"; return; fi
+  return 1
 }
 
 workspace_ssh_host() { printf '%s.msb\n' "$1"; }
@@ -438,12 +476,13 @@ policy_file() { printf '%s' "${MSW_POLICY_FILE:-$HOME/Library/Application Suppor
 # target grammar), no .git/query/trailing slash, valid modes only, and
 # duplicate canonicals are rejected.
 policy_json_valid() {
-  local payload="$1"
+  local payload="$1" configured
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
-  printf '%s\n' "$payload" | "$JQ_BIN" -e '
+  configured="$(printf '%s\n' "${WORKSPACES[@]}" | "$JQ_BIN" -Rsc 'split("\n")[:-1]')" || return 1
+  printf '%s\n' "$payload" | "$JQ_BIN" -e --argjson configured "$configured" '
     .schemaVersion == 1 and
     (.workspaces | type == "object") and
-    (([.workspaces | keys[] | select(. == "dev" or . == "playgrounds" or . == "personal")] | length) == (.workspaces | keys | length)) and
+    ((([.workspaces | keys[]] - $configured) | length) == 0) and
     ([.workspaces[] |
       (.capability | type == "string" and ((test("[\\r\\n]")) | not) and test("^[0-9a-f]{48}$")) and
       (.repos | type == "array") and
@@ -1678,6 +1717,7 @@ port_forwarder_stop_launchd() {
   local box="$1" plist label
   plist="$(port_forwarder_plist "$box")"; label="$(port_forwarder_label "$box")"
   /bin/launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || /bin/launchctl unload -w "$plist" 2>/dev/null || true
+  rm -f "$plist"
 }
 
 port_forwarder_launchd_start() {
@@ -1942,17 +1982,21 @@ cmd_tunnel() {
 }
 
 cmd_host_repair_test() {
-  local root="$HOME/.config/msw/test-host"
+  local root="$HOME/.config/msw/test-host" box ip host
   mkdir -p "$root" "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
-  printf '%s\n%s\n%s\n' "$MSW_DEV_IP $MSW_DEV_HOST" "$MSW_PLAYGROUNDS_IP $MSW_PLAYGROUNDS_HOST" "$MSW_PERSONAL_IP $MSW_PERSONAL_HOST" >"$root/hosts"
-  printf '%s\n%s\n%s\n' "$MSW_DEV_IP" "$MSW_PLAYGROUNDS_IP" "$MSW_PERSONAL_IP" >"$root/loopback"
+  : >"$root/hosts"; : >"$root/loopback"
+  for box in "${WORKSPACES[@]}"; do
+    ip="$(workspace_ip "$box")"; host="$(workspace_host "$box")"
+    printf '%s %s\n' "$ip" "$host" >>"$root/hosts"
+    printf '%s\n' "$ip" >>"$root/loopback"
+  done
   if [[ ! -f "$HOME/.ssh/msw_ed25519" ]]; then
     printf 'fake-private-key\n' >"$HOME/.ssh/msw_ed25519"
     printf 'ssh-ed25519 AAAATEST microsandbox-workspaces\n' >"$HOME/.ssh/msw_ed25519.pub"
   fi
   cat "$HOME/.ssh/msw_ed25519.pub" >"$HOME/.microsandbox/ssh/authorized_keys"
   cat >"$HOME/.ssh/config.d/msw.conf" <<SSH
-Host dev.msb playgrounds.msb personal.msb
+Host *.msb
   User root
   IdentityFile $HOME/.ssh/msw_ed25519
   IdentitiesOnly yes
@@ -1970,15 +2014,28 @@ cmd_host_repair() {
   note "Configuring local browser addresses"
   if [[ "${MSW_SKIP_HOST_REPAIR:-0}" != 1 ]]; then
   sudo -v
-  local loop_script loop_plist hosts_tmp
+  local loop_script loop_plist hosts_tmp box ip host
   loop_script="$(mktemp "${TMPDIR:-/tmp}/msw-loopback.XXXXXX")"
-  cat >"$loop_script" <<LOOP
+  cat >"$loop_script" <<'LOOP'
 #!/bin/sh
 set -eu
-for ip in "$MSW_DEV_IP" "$MSW_PLAYGROUNDS_IP" "$MSW_PERSONAL_IP"; do
-  /sbin/ifconfig lo0 | /usr/bin/grep -q "inet \${ip} " || /sbin/ifconfig lo0 alias "\${ip}" up
+LOOP
+  local desired_addresses=" "
+  for box in "${WORKSPACES[@]}"; do desired_addresses+="$(workspace_ip "$box") "; done
+  printf 'desired_addresses=%q\n' "$desired_addresses" >>"$loop_script"
+  cat >>"$loop_script" <<'LOOP'
+for suffix in $(/usr/bin/seq 10 73); do
+  address="127.0.0.${suffix}"
+  case "$desired_addresses" in
+    *" $address "*) ;;
+    *) /sbin/ifconfig lo0 | /usr/bin/grep -q "inet ${address} " && /sbin/ifconfig lo0 -alias "$address" || true ;;
+  esac
 done
 LOOP
+  for box in "${WORKSPACES[@]}"; do
+    ip="$(workspace_ip "$box")"
+    printf '/sbin/ifconfig lo0 | /usr/bin/grep -q %q || /sbin/ifconfig lo0 alias %q up\n' "inet $ip " "$ip" >>"$loop_script"
+  done
   sudo /usr/bin/install -d -o root -g wheel -m 0755 /usr/local/libexec
   sudo /usr/bin/install -o root -g wheel -m 0755 "$loop_script" /usr/local/libexec/msw-loopback-aliases
   rm -f "$loop_script"
@@ -2001,15 +2058,12 @@ PLIST
   sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/dev.msw.loopback-aliases.plist
 
   hosts_tmp="$(mktemp "${TMPDIR:-/tmp}/msw-hosts.XXXXXX")"
-  /usr/bin/awk '/^# BEGIN MSW WORKSPACES$/{skip=1;next}/^# END MSW WORKSPACES$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
-  cat >>"$hosts_tmp" <<HOSTS
-
-# BEGIN MSW WORKSPACES
-$MSW_DEV_IP $MSW_DEV_HOST
-$MSW_PLAYGROUNDS_IP $MSW_PLAYGROUNDS_HOST
-$MSW_PERSONAL_IP $MSW_PERSONAL_HOST
-# END MSW WORKSPACES
-HOSTS
+  /usr/bin/awk '/^# BEGIN MSW WORKSPACES$|^# BEGIN MSW MONITOR MANAGED HOSTS$/{skip=1;next}/^# END MSW WORKSPACES$|^# END MSW MONITOR MANAGED HOSTS$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
+  printf '\n# BEGIN MSW MONITOR MANAGED HOSTS\n' >>"$hosts_tmp"
+  for box in "${WORKSPACES[@]}"; do
+    printf '%s %s\n' "$(workspace_ip "$box")" "$(workspace_host "$box")" >>"$hosts_tmp"
+  done
+  printf '# END MSW MONITOR MANAGED HOSTS\n' >>"$hosts_tmp"
   sudo /usr/bin/install -o root -g wheel -m 0644 "$hosts_tmp" /etc/hosts
   rm -f "$hosts_tmp"
   sudo /usr/bin/dscacheutil -flushcache
@@ -2033,7 +2087,7 @@ HOSTS
     "$MSB_BIN" ssh authorize --file "$HOME/.ssh/msw_ed25519.pub"
   fi
   cat >"$HOME/.ssh/config.d/msw.conf" <<SSH
-Host dev.msb playgrounds.msb personal.msb
+Host *.msb
   User root
   IdentityFile $HOME/.ssh/msw_ed25519
   IdentitiesOnly yes
@@ -2166,12 +2220,16 @@ cmd_clean() {
   local target="all" remove_volumes=0 arg box
   for arg in "$@"; do
     case "$arg" in
-      dev|playgrounds|personal|all)
+      all)
         [[ "$target" == all ]] || fatal "only one cleanup target may be specified"
         target="$arg"
         ;;
       --volumes) remove_volumes=1 ;;
-      *) fatal "usage: msw clean [WORKSPACE|all] [--volumes]" ;;
+      *)
+        is_workspace "$arg" || fatal "usage: msw clean [WORKSPACE|all] [--volumes]"
+        [[ "$target" == all ]] || fatal "only one cleanup target may be specified"
+        target="$arg"
+        ;;
     esac
   done
   while IFS= read -r box; do
@@ -2810,8 +2868,11 @@ cmd_github_status() {
       --format)
         (( $# >= 2 )) || fatal "usage: msw github status [WORKSPACE|all] [--format json|text]"
         format="$2"; shift 2 ;;
-      dev|playgrounds|personal|all) target="$1"; shift ;;
-      *) fatal "usage: msw github status [WORKSPACE|all] [--format json|text]" ;;
+      all) target="$1"; shift ;;
+      *)
+        is_workspace "$1" || fatal "usage: msw github status [WORKSPACE|all] [--format json|text]"
+        target="$1"; shift
+        ;;
     esac
   done
   case "$format" in json|text) ;; *) fatal "status format must be json or text" ;; esac
@@ -3694,10 +3755,7 @@ cmd_github_proxy_configure() {
   if [[ "$MSW_GITHUB_MODE" != local ]]; then
     fatal "msw github proxy-configure is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow"
   fi
-  case "$target" in
-    dev|playgrounds|personal|all) ;;
-    *) fatal "usage: msw github proxy-configure [WORKSPACE]" ;;
-  esac
+  [[ "$target" == all ]] || is_workspace "$target" || fatal "usage: msw github proxy-configure [WORKSPACE]"
   require_command_path jq "$JQ_BIN"
   require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
   require_command_path python3 "$(command -v python3 2>/dev/null || true)"
@@ -4047,7 +4105,7 @@ migrate_workspace_local() {
 
 cmd_github_migrate() {
   local target="${1:-all}" box
-  case "$target" in dev|playgrounds|personal|all) ;; *) fatal "usage: msw github migrate [WORKSPACE|all]" ;; esac
+  [[ "$target" == all ]] || is_workspace "$target" || fatal "usage: msw github migrate [WORKSPACE|all]"
   if [[ "$MSW_GITHUB_MODE" != local ]]; then
     fatal "msw github migrate is a local-mode command; legacy state retirement only runs in local mode"
   fi
@@ -4696,15 +4754,24 @@ app_workspace_purpose() {
     dev) printf 'Primary software development workspace' ;;
     playgrounds) printf 'Experiments and disposable prototypes' ;;
     personal) printf 'Personal projects and services' ;;
+    *) printf 'Configured MSW workspace' ;;
   esac
 }
 
 app_workspace_resource() {
-  local box="$1" field="$2" upper var value
-  upper="$(printf '%s' "$box" | tr '[:lower:]' '[:upper:]')"
-  var="MSW_${upper}_${field}"
-  value="${!var-}"
-  printf '%s' "$value"
+  local box="$1" field="$2" value json_field
+  case "$field" in
+    CPUS) json_field=cpu ;;
+    MAX_CPUS) json_field=cpuCeiling ;;
+    MEMORY) json_field=memoryGiB ;;
+    MAX_MEMORY) json_field=memoryCeilingGiB ;;
+    WORKSPACE_SIZE) json_field=workspaceStorageGiB ;;
+    RUNTIME_SIZE) json_field=runtimeStorageGiB ;;
+    *) json_field="" ;;
+  esac
+  [[ -n "$json_field" ]] || return 1
+  value="$(workspace_configuration_value "$box" "$json_field")" || return
+  case "$field" in MEMORY|MAX_MEMORY|WORKSPACE_SIZE|RUNTIME_SIZE) printf '%sG' "$value" ;; *) printf '%s' "$value" ;; esac
 }
 
 app_status_for_workspace() {
@@ -5009,7 +5076,7 @@ app_cmd_url() {
       *) app_usage_error url "unknown url option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error url "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error url "workspace must be one of the configured workspaces"
   app_require_config url
   [[ "$port" =~ ^[0-9]+$ ]] || app_usage_error url "port must be an integer from 1 to 65535"
   (( 10#$port >= 1 && 10#$port <= 65535 )) || app_usage_error url "port must be an integer from 1 to 65535"
@@ -5030,7 +5097,7 @@ app_cmd_clone() {
       *) app_usage_error clone "unknown clone option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error clone "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error clone "workspace must be one of the configured workspaces"
   app_valid_repository "$repository" || app_usage_error clone "repository must be OWNER/REPOSITORY"
   if [[ -n "$destination" ]]; then
     app_valid_relative_path "$destination" || app_usage_error clone "destination must be relative to /workspace"
@@ -5056,7 +5123,7 @@ app_cmd_pull() {
       *) app_usage_error pull "unknown pull option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error pull "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error pull "workspace must be one of the configured workspaces"
   [[ "$path" == all ]] || app_valid_relative_path "$path" || app_usage_error pull "path must be relative to /workspace"
   app_require_config pull
   app_require_runtime pull
@@ -5079,7 +5146,7 @@ app_cmd_identity() {
   done
   [[ -n "$name" && -n "$email" && ${#name} -le 256 && ${#email} -le 320 ]] || app_usage_error identity "name and email are required"
   app_valid_control_free "$name" && app_valid_control_free "$email" || app_usage_error identity "identity fields contain a control character"
-  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error identity "workspace must be dev, playgrounds, or personal"
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error identity "workspace must be one of the configured workspaces"
   app_require_config identity
   app_require_runtime identity
   if ! output="$(cmd_identity "$name" "$email" "$target" 2>/dev/null)"; then
@@ -5097,7 +5164,7 @@ app_cmd_disk() {
       *) app_usage_error disk "unknown disk option '$1'" ;;
     esac
   done
-  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error disk "workspace must be dev, playgrounds, or personal"
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error disk "workspace must be one of the configured workspaces"
   app_require_config disk
   app_require_runtime disk
   if ! output="$(cmd_disk "$target" 2>/dev/null)"; then
@@ -5117,7 +5184,7 @@ app_cmd_resize() {
       *) app_usage_error resize "unknown resize option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error resize "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error resize "workspace must be one of the configured workspaces"
   [[ "$memory" =~ ^[0-9]+([KMGTP]i?B?)$ ]] || app_usage_error resize "memory must use an explicit size such as 8GiB"
   [[ -z "$cpus" || "$cpus" =~ ^[0-9]+([.][0-9]+)?$ ]] || app_usage_error resize "cpus must be numeric"
   app_require_config resize
@@ -5139,7 +5206,7 @@ app_cmd_clean() {
       *) app_usage_error clean "unknown clean option '$1'" ;;
     esac
   done
-  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error clean "workspace must be dev, playgrounds, or personal"
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error clean "workspace must be one of the configured workspaces"
   expected="$([[ "$volumes" == 1 ]] && printf 'DELETE VOLUMES %s' "$target" || printf 'CLEAN %s' "$target")"
   app_read_confirmation "$fd" "$expected" || app_emit_error clean "MSW_CONFIRMATION_MISMATCH" "The cleanup confirmation did not match the reviewed action." "Review the cleanup effect and confirm the exact phrase." "$target" false 77
   app_require_config clean
@@ -5164,7 +5231,7 @@ app_cmd_upgrade() {
       *) app_usage_error upgrade "unknown upgrade option '$1'" ;;
     esac
   done
-  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error upgrade "workspace must be dev, playgrounds, or personal"
+  [[ "$target" == all ]] || is_workspace "$target" || app_usage_error upgrade "workspace must be one of the configured workspaces"
   app_read_confirmation "$fd" "UPGRADE $target" || app_emit_error upgrade "MSW_CONFIRMATION_MISMATCH" "The upgrade confirmation did not match the reviewed action." "Review the upgrade effect and confirm the exact phrase." "$target" false 77
   app_require_config upgrade
   app_require_runtime upgrade
@@ -5281,7 +5348,7 @@ app_cmd_handshake() {
   (( MSW_CONFIG_AVAILABLE == 1 )) && config_available=true
   [[ -n "${MSB_BIN:-}" && -x "${MSB_BIN:-}" ]] && runtime_available=true
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] && jq_available=true
-  app_emit_success handshake "{\"protocolVersion\":1,\"mswVersion\":$(app_json_string "${MSW_VERSION:-unknown}"),\"platform\":{\"os\":$(app_json_string "$(uname -s)"),\"architecture\":$(app_json_string "$(uname -m)")},\"configurationAvailable\":$config_available,\"runtimeAvailable\":$runtime_available,\"capabilities\":{\"jsonState\":true,\"jsonMetrics\":true,\"jsonLogs\":true,\"plans\":true,\"bootstrapEvents\":true,\"jq\":$jq_available,\"workspaceCount\":3},\"exitCodes\":{\"success\":0,\"operationFailed\":1,\"usage\":64,\"dependencyUnavailable\":69,\"lockConflict\":73,\"authorizationDenied\":77,\"configurationRequired\":78,\"cancelled\":130}}"
+  app_emit_success handshake "{\"protocolVersion\":1,\"mswVersion\":$(app_json_string "${MSW_VERSION:-unknown}"),\"platform\":{\"os\":$(app_json_string "$(uname -s)"),\"architecture\":$(app_json_string "$(uname -m)")},\"configurationAvailable\":$config_available,\"runtimeAvailable\":$runtime_available,\"capabilities\":{\"jsonState\":true,\"jsonMetrics\":true,\"jsonLogs\":true,\"plans\":true,\"bootstrapEvents\":true,\"jq\":$jq_available,\"workspaceCount\":${#WORKSPACES[@]}},\"exitCodes\":{\"success\":0,\"operationFailed\":1,\"usage\":64,\"dependencyUnavailable\":69,\"lockConflict\":73,\"authorizationDenied\":77,\"configurationRequired\":78,\"cancelled\":130}}"
 }
 
 app_cmd_state() {
@@ -5308,7 +5375,7 @@ app_cmd_state() {
       fi
     done
   else
-    is_workspace "$target" || app_usage_error state "workspace must be dev, playgrounds, or personal"
+    is_workspace "$target" || app_usage_error state "workspace must be one of the configured workspaces"
     if lifecycle="$(app_status_for_workspace "$target" 2>/dev/null)"; then
       observed_at="$(app_now)"
       state_json="$(app_workspace_json "$target" "$lifecycle" fresh "$observed_at")"
@@ -5333,7 +5400,7 @@ app_cmd_metrics() {
     esac
   done
   [[ -n "$box" ]] || app_usage_error metrics "--workspace is required"
-  is_workspace "$box" || app_usage_error metrics "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error metrics "workspace must be one of the configured workspaces"
   (( once + follow == 1 )) || app_usage_error metrics "metrics requires exactly one of --once or --follow"
   app_require_config metrics
   app_require_runtime metrics
@@ -5398,7 +5465,7 @@ app_cmd_ports() {
     esac
   done
   if [[ "$target" != all ]]; then
-    is_workspace "$target" || app_usage_error ports "workspace must be dev, playgrounds, or personal"
+    is_workspace "$target" || app_usage_error ports "workspace must be one of the configured workspaces"
   fi
   app_require_config ports
   while IFS= read -r port; do
@@ -5419,7 +5486,7 @@ app_cmd_github_state() {
     esac
   done
   if [[ "$target" != all ]]; then
-    is_workspace "$target" || app_usage_error github-state "workspace must be dev, playgrounds, or personal"
+    is_workspace "$target" || app_usage_error github-state "workspace must be one of the configured workspaces"
   fi
   for box in "${WORKSPACES[@]}"; do
     [[ "$target" == all || "$target" == "$box" ]] || continue
@@ -5502,7 +5569,7 @@ app_cmd_github_policy_get() {
     esac
   done
   if [[ "$target" != all ]]; then
-    is_workspace "$target" || app_usage_error github-policy-get "workspace must be dev, playgrounds, or personal"
+    is_workspace "$target" || app_usage_error github-policy-get "workspace must be one of the configured workspaces"
   fi
   if ! policy_validate; then
     app_emit_error github-policy-get "MSW_POLICY_MISSING" "The GitHub policy file is missing or malformed." "Run 'msw github proxy-configure' or 'msw github migrate' to initialize it." "" false 78
@@ -5531,7 +5598,7 @@ app_cmd_github_policy_set() {
       *) app_usage_error github-policy-set "unknown github-policy-set option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error github-policy-set "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error github-policy-set "workspace must be one of the configured workspaces"
   case "$action" in
     set)
       app_valid_repository "$repo" || app_usage_error github-policy-set "repository must be OWNER/REPOSITORY"
@@ -5657,15 +5724,13 @@ app_apply_cancel_trap() {
 }
 
 app_apply_release_all() {
-  local box fd
+  local lock_entry fd
   # bash 3.2 + set -u: a declared-but-empty array is still "set", so the
   # ${arr[@]+...} guard does NOT protect the expansion; check the length
   # (the EXIT trap always calls this, including on error paths).
   if (( ${#MSW_APPLY_LOCKED[@]} > 0 )); then
-    for box in "${MSW_APPLY_LOCKED[@]}"; do
-      case "$box" in
-        dev) fd=5 ;; playgrounds) fd=6 ;; personal) fd=7 ;;
-      esac
+    for lock_entry in "${MSW_APPLY_LOCKED[@]}"; do
+      fd="${lock_entry##*:}"
       eval "exec ${fd}>&-" 2>/dev/null || true
     done
   fi
@@ -5676,22 +5741,19 @@ app_apply_release_all() {
   fi
 }
 
-# Acquire the per-workspace GitHub locks for ALL THREE workspaces in the
-# fixed order dev < playgrounds < personal (no deadlock), because the apply
+# Acquire every configured workspace's GitHub lock in configuration order
+# (the same stable order in every process, so no deadlock), because the apply
 # replaces the FULL workspaces object — omitted workspaces are cleared, so a
 # concurrent per-repo edit of any workspace must serialize against the apply.
-# Uses fds 5-7 so several workspace locks can be held at once (fd 9 is the
-# single-workspace lock used elsewhere).
+# Uses a distinct descriptor starting at 10 for each configured workspace
+# (fd 9 is the single-workspace lock used elsewhere).
 app_apply_lock_all() {
-  local request="$1" box fd lock
+  local request="$1" box fd=10 lock
   MSW_APPLY_LOCKED=()
   [[ -n "${LOCKF_BIN:-}" && -x "${LOCKF_BIN:-}" ]] || return 1
   mkdir -p "$GITHUB_META_DIR" || return 1
   chmod 700 "$GITHUB_META_DIR" || return 1
   for box in "${WORKSPACES[@]}"; do
-    case "$box" in
-      dev) fd=5 ;; playgrounds) fd=6 ;; personal) fd=7 ;;
-    esac
     lock="$(github_lock_file "$box")"
     if [[ -d "$lock" ]]; then
       if ! github_lock_reclaim_legacy "$lock"; then
@@ -5706,7 +5768,8 @@ app_apply_lock_all() {
       return 1
     fi
     printf '%s\n' "$$" >"$lock"
-    MSW_APPLY_LOCKED+=("$box")
+    MSW_APPLY_LOCKED+=("${box}:${fd}")
+    fd=$((fd + 1))
   done
   return 0
 }
@@ -5799,13 +5862,14 @@ app_apply_verify_transport() {
 # capability. Runs inside a command substitution so any fatal() (quarantine /
 # start failure) converts to a typed error instead of aborting the envelope.
 app_apply_provision_transport() {
-  local box="$1" capability="$2"
-  # The parent holds the workspace locks on fds 5-7. The shuttle spawned here
+  local box="$1" capability="$2" lock_entry lock_fd
+  # The parent holds every configured workspace lock. The shuttle spawned here
   # must NOT inherit them: an inherited fd would pin the flock for the
   # shuttle's lifetime and deadlock the next apply.
-  exec 5>&- 2>/dev/null || true
-  exec 6>&- 2>/dev/null || true
-  exec 7>&- 2>/dev/null || true
+  for lock_entry in "${MSW_APPLY_LOCKED[@]}"; do
+    lock_fd="${lock_entry##*:}"
+    eval "exec ${lock_fd}>&-" 2>/dev/null || true
+  done
   if app_workspace_quarantined "$box"; then
     printf 'msw: workspace %s is quarantined\n' "$box" >&2
     return 1
@@ -5880,10 +5944,12 @@ app_cmd_github_policy_apply() {
   request="$(cat 2>/dev/null || true)"
   # Strict request validation (capabilities optional; the CLI preserves or
   # mints them). A workspace key missing from the request is cleared.
-  if ! printf '%s\n' "$request" | "$JQ_BIN" -e '
+  local configured
+  configured="$(printf '%s\n' "${WORKSPACES[@]}" | "$JQ_BIN" -Rsc 'split("\n")[:-1]')"
+  if ! printf '%s\n' "$request" | "$JQ_BIN" -e --argjson configured "$configured" '
       .schemaVersion == 1 and
       (.workspaces | type == "object") and
-      (([.workspaces | keys[] | select(. == "dev" or . == "playgrounds" or . == "personal")] | length) == (.workspaces | keys | length)) and
+      ((([.workspaces | keys[]] - $configured) | length) == 0) and
       ([.workspaces[] |
         ((.capability // "") == "" or (.capability | type == "string" and test("^[0-9a-f]{48}$"))) and
         (.repos | type == "array") and
@@ -5904,7 +5970,7 @@ app_cmd_github_policy_apply() {
 
   policy_journal all apply started
 
-  # Lock ALL THREE workspaces FIRST (the apply replaces the full workspaces
+  # Lock every configured workspace first (the apply replaces the full workspaces
   # object, so no concurrent per-repo edit may interleave), then snapshot the
   # policy byte-exactly (cp, preserving the trailing newline) under the locks.
   if ! app_apply_lock_all "$request"; then
@@ -6150,7 +6216,7 @@ app_cmd_github_bind() {
       *) app_usage_error github-bind "unknown github-bind option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error github-bind "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error github-bind "workspace must be one of the configured workspaces"
   app_valid_repository "$repo" || app_usage_error github-bind "repository must be OWNER/REPOSITORY"
   [[ "$mode" == host-write || "$mode" == read-only ]] ||
     app_usage_error github-bind "mode must be host-write or read-only"
@@ -6226,7 +6292,7 @@ app_cmd_github_quarantine() {
       *) app_usage_error github-quarantine "unknown github-quarantine option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error github-quarantine "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error github-quarantine "workspace must be one of the configured workspaces"
   app_require_config github-quarantine
   app_require_runtime github-quarantine
   if ! github_lock_acquire "$box"; then
@@ -6246,7 +6312,7 @@ app_cmd_github_unbind() {
       *) app_usage_error github-unbind "unknown github-unbind option '$1'" ;;
     esac
   done
-  is_workspace "$box" || app_usage_error github-unbind "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error github-unbind "workspace must be one of the configured workspaces"
   # Path C §1: local mode refuses the Connect unbind flow with a typed
   # mode-mismatch error; local mode never binds GitHub secrets.
   if [[ "$MSW_GITHUB_MODE" == local ]]; then
@@ -6490,7 +6556,7 @@ app_cmd_repositories() {
     esac
   done
   [[ -n "$box" ]] || app_usage_error repositories "--workspace is required"
-  is_workspace "$box" || app_usage_error repositories "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error repositories "workspace must be one of the configured workspaces"
   app_require_config repositories
   app_require_runtime repositories
   if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
@@ -6532,7 +6598,7 @@ app_cmd_logs() {
     esac
   done
   [[ -n "$box" ]] || app_usage_error logs "--workspace is required"
-  is_workspace "$box" || app_usage_error logs "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error logs "workspace must be one of the configured workspaces"
   app_require_config logs
   app_require_runtime logs
   if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
@@ -6579,7 +6645,7 @@ app_cmd_plan() {
   done
   [[ "$action" == start || "$action" == stop || "$action" == restart ]] || app_usage_error plan "only start, stop, and restart plans are available"
   [[ -n "$box" ]] || app_usage_error plan "--workspace is required"
-  is_workspace "$box" || app_usage_error plan "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error plan "workspace must be one of the configured workspaces"
   app_require_config plan
   app_require_runtime plan
   if ! expected="$(app_status_for_workspace "$box" 2>/dev/null)"; then
@@ -6623,7 +6689,7 @@ app_cmd_push_plan() {
     esac
   done
   [[ -n "$box" ]] || app_usage_error push-plan "--workspace is required"
-  is_workspace "$box" || app_usage_error push-plan "workspace must be dev, playgrounds, or personal"
+  is_workspace "$box" || app_usage_error push-plan "workspace must be one of the configured workspaces"
   ((${#repositories[@]} == 1)) || app_usage_error push-plan "exactly one repository path is required per push plan"
   path="${repositories[0]}"
   app_valid_relative_path "$path" || app_usage_error push-plan "repository path must be relative to /workspace"
@@ -6827,21 +6893,252 @@ app_cmd_apply() {
   esac
 }
 
+app_workspace_configuration_valid() {
+  "$JQ_BIN" -e '
+    type == "object" and
+    (keys | sort) == ["schemaVersion", "workspaces"] and
+    .schemaVersion == 1 and
+    (.workspaces | type == "array" and length > 0 and length <= 64) and
+    ([.workspaces[].name] | length == (unique | length)) and
+    all(.workspaces[]; . as $w |
+      ($w | type == "object") and
+      ($w | keys | sort) == ["cpu", "cpuCeiling", "memoryCeilingGiB", "memoryGiB", "name", "runtimeStorageGiB", "workspaceStorageGiB"] and
+      ($w.name | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) and
+      ([4,6,8,12] | index($w.cpu)) != null and
+      ([4,6,8,12] | index($w.cpuCeiling)) != null and $w.cpu <= $w.cpuCeiling and
+      ([16,32,48] | index($w.memoryGiB)) != null and
+      ([16,32,48] | index($w.memoryCeilingGiB)) != null and $w.memoryGiB <= $w.memoryCeilingGiB and
+      ([60,80,100,120] | index($w.workspaceStorageGiB)) != null and
+      ([60,80,100,120] | index($w.runtimeStorageGiB)) != null)
+  ' "$1" >/dev/null 2>&1
+}
+
+app_workspace_configuration_changed() {
+  local old_file="$1" new_file="$2" box="$3"
+  [[ -f "$old_file" ]] || return 0
+  ! "$JQ_BIN" -e --arg box "$box" --slurpfile desired "$new_file" '
+    (.workspaces[] | select(.name == $box)) ==
+    ($desired[0].workspaces[] | select(.name == $box))
+  ' "$old_file" >/dev/null 2>&1
+}
+
+app_create_configured_workspace() {
+  local box="$1" cpu cpu_ceiling memory memory_ceiling workspace_storage runtime_storage host
+  cpu="$(workspace_configuration_value "$box" cpu)"
+  cpu_ceiling="$(workspace_configuration_value "$box" cpuCeiling)"
+  memory="$(workspace_configuration_value "$box" memoryGiB)G"
+  memory_ceiling="$(workspace_configuration_value "$box" memoryCeilingGiB)G"
+  workspace_storage="$(workspace_configuration_value "$box" workspaceStorageGiB)G"
+  runtime_storage="$(workspace_configuration_value "$box" runtimeStorageGiB)G"
+  host="$(workspace_host "$box")"
+  workspace_msb "$box" run --detach \
+    --name "$box" --from-snapshot "$MSW_BASE_SNAPSHOT" \
+    --cpus "$cpu" --max-cpus "$cpu_ceiling" --memory "$memory" --max-memory "$memory_ceiling" \
+    --mount-named "msw-${box}-workspace:/workspace:kind=disk,size=${workspace_storage}" \
+    --mount-named "msw-${box}-runtime:/var/lib/msw-runtime:kind=disk,size=${runtime_storage}" \
+    --workdir /workspace --init auto --security default --net public --tls-intercept \
+    --label msw.managed=true --label "msw.workspace=${box}" \
+    --env "MSW_WORKSPACE=${box}" --env "MSW_BROWSER_HOST=${host}" \
+    --env 'PATH=/root/.local/bin:/root/.local/share/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
+    --env SHELL=/usr/bin/zsh --env LANG=en_US.UTF-8 --env HOST=0.0.0.0 --env BIND_ADDRESS=0.0.0.0 \
+    --env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${host}" -- sleep infinity >/dev/null || return
+  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$host" <<'GUEST' || return
+set -Eeuo pipefail
+workspace="$1"; browser_host="$2"
+mkdir -p /workspace /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
+printf 'export MSW_WORKSPACE=%q\nexport MSW_BROWSER_HOST=%q\nexport HOST=%q\nexport BIND_ADDRESS=%q\nexport __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=%q\n' \
+  "$workspace" "$browser_host" "0.0.0.0" "0.0.0.0" "$browser_host" \
+  >/etc/profile.d/msw-workspace.sh
+hostnamectl set-hostname "msw-$workspace"
+printf '%s\n' "$workspace" >/workspace/.msw-workspace
+systemctl daemon-reload
+systemctl enable containerd.service docker.service
+systemctl restart containerd.service docker.service
+mkdir -p /workspace/.msw-docker-smoke
+rm -rf /workspace/.msw-docker-smoke
+GUEST
+  __workspace_state_init "$box" || true
+  workspace_msb "$box" stop -q -t 90 "$box" >/dev/null
+}
+
+app_workspace_volume_requires_reconcile() {
+  local old_file="$1" new_file="$2" box="$3" field="$4" volume="$5" old_value new_value
+  volume_exists "$volume" || return 1
+  new_value="$($JQ_BIN -er --arg box "$box" --arg field "$field" \
+    '.workspaces[] | select(.name == $box) | .[$field]' "$new_file")" || return 1
+  if [[ ! -s "$old_file" ]]; then return 0; fi
+  old_value="$($JQ_BIN -er --arg box "$box" --arg field "$field" \
+    '.workspaces[] | select(.name == $box) | .[$field]' "$old_file" 2>/dev/null || true)"
+  [[ -z "$old_value" || "$old_value" != "$new_value" ]]
+}
+
+# MicroSandbox cannot resize an existing named disk volume in place. Copy its
+# complete contents through a private temporary disk, recreate the exact named
+# volume at the requested size, then copy back. A failed restore deliberately
+# retains the temporary volume and refuses a later automatic retry so recovery
+# data can never be overwritten silently.
+app_copy_named_volume() {
+  local source="$1" destination="$2" helper="$3"
+  "$MSB_BIN" run --detach --name "$helper" --from-snapshot "$MSW_BASE_SNAPSHOT" \
+    --mount-named "$source:/source:kind=disk" \
+    --mount-named "$destination:/destination:kind=disk" \
+    --init auto --security default --net public -- sleep infinity >/dev/null || return 1
+  if ! "$MSB_BIN" exec --no-tty "$helper" -- bash -s <<'GUEST'
+set -Eeuo pipefail
+# MSW named-volume migration: copy dotfiles, metadata, links, and empty trees.
+cp -a /source/. /destination/
+sync
+GUEST
+  then
+    "$MSB_BIN" rm -f "$helper" >/dev/null 2>&1 || true
+    return 1
+  fi
+  "$MSB_BIN" rm -f "$helper" >/dev/null || return 1
+}
+
+app_reconcile_named_volume_capacity() {
+  local volume="$1" size="$2" temp helper="msw-volume-copy-$$"
+  temp="${volume}-resize"
+  if volume_exists "$temp"; then
+    warn "retained recovery volume '$temp' blocks automatic resize of '$volume'"
+    return 1
+  fi
+  "$MSB_BIN" volume create "$temp" --kind disk --size "${size}G" -q >/dev/null || return 1
+  if ! app_copy_named_volume "$volume" "$temp" "$helper"; then
+    "$MSB_BIN" volume rm "$temp" >/dev/null 2>&1 || true
+    return 1
+  fi
+  "$MSB_BIN" volume rm "$volume" >/dev/null || return 1
+  if ! "$MSB_BIN" volume create "$volume" --kind disk --size "${size}G" -q >/dev/null; then
+    warn "workspace data remains recoverable in '$temp'"
+    return 1
+  fi
+  if ! app_copy_named_volume "$temp" "$volume" "$helper"; then
+    warn "workspace data remains recoverable in '$temp'"
+    return 1
+  fi
+  "$MSB_BIN" volume rm "$temp" >/dev/null || return 1
+}
+
+app_reconcile_workspace_configuration() {
+  local fd="$1" input old_copy config_dir box desired old_box policy policy_tmp ssh_config ssh_tmp
+  local workspace_volume_name runtime_volume_name workspace_size runtime_size
+  config_dir="$(dirname "$MSW_WORKSPACES_FILE")"
+  mkdir -p "$config_dir" || return
+  chmod 700 "$config_dir" || return
+  input="$(mktemp "$config_dir/.workspaces-input.XXXXXX")" || return
+  old_copy="$(mktemp "$config_dir/.workspaces-old.XXXXXX")" || { rm -f "$input"; return 1; }
+  dd bs=262145 count=1 <&"$fd" >"$input" 2>/dev/null || { rm -f "$input" "$old_copy"; return 1; }
+  [[ $(wc -c <"$input") -le 262144 ]] || { rm -f "$input" "$old_copy"; return 1; }
+  app_workspace_configuration_valid "$input" || { rm -f "$input" "$old_copy"; return 1; }
+  if [[ -f "$MSW_WORKSPACES_FILE" ]]; then cp -p "$MSW_WORKSPACES_FILE" "$old_copy" || return; else : >"$old_copy"; fi
+
+  # Removed and renamed workspaces stop being managed resources. Persistent
+  # named volumes are deliberately retained so an accidental removal remains
+  # recoverable; only the VM root is removed.
+  if [[ -s "$old_copy" ]]; then
+    while IFS= read -r old_box; do
+      desired="$($JQ_BIN -r --arg box "$old_box" '[.workspaces[].name] | index($box) != null' "$input")"
+      if [[ "$desired" != true ]]; then
+        port_forwarder_stop "$old_box"
+        port_forwarder_stop_launchd "$old_box"
+        if sandbox_exists "$old_box"; then
+          workspace_msb "$old_box" rm -f "$old_box" >/dev/null || return
+        fi
+        if [[ -f "$HOME/.ssh/msw_known_hosts" ]] && command -v ssh-keygen >/dev/null 2>&1; then
+          ssh-keygen -R "${old_box}.msb" -f "$HOME/.ssh/msw_known_hosts" >/dev/null 2>&1 || true
+        fi
+      fi
+    done < <("$JQ_BIN" -r '.workspaces[].name' "$old_copy")
+  fi
+
+  chmod 600 "$input" || return
+  mv "$input" "$MSW_WORKSPACES_FILE" || return
+  WORKSPACES=()
+  while IFS= read -r box; do WORKSPACES+=("$box"); done < <("$JQ_BIN" -r '.workspaces[].name' "$MSW_WORKSPACES_FILE")
+
+  # A full policy may still contain a removed workspace. Prune only those
+  # keys atomically so remaining grants stay usable; malformed policy remains
+  # untouched and therefore fail-closed.
+  policy="$(policy_file)"
+  if [[ -f "$policy" && ! -L "$policy" ]] &&
+     "$JQ_BIN" -e '.schemaVersion == 1 and (.workspaces | type == "object")' "$policy" >/dev/null 2>&1; then
+    policy_tmp="$policy.reconcile.$$"
+    if "$JQ_BIN" --argjson configured "$(printf '%s\n' "${WORKSPACES[@]}" | "$JQ_BIN" -Rsc 'split("\n")[:-1]')" \
+      '.workspaces |= with_entries(select(.key as $key | $configured | index($key)))' \
+      "$policy" >"$policy_tmp" && policy_json_valid "$(cat "$policy_tmp")"; then
+      chmod 600 "$policy_tmp" && mv "$policy_tmp" "$policy"
+    else
+      rm -f "$policy_tmp"
+    fi
+  fi
+
+  # The SSH proxy validates the requested host against workspaces.json, so a
+  # wildcard host stanza is both safe and durable across add/remove/rename.
+  ssh_config="$HOME/.ssh/config.d/msw.conf"
+  if [[ -f "$ssh_config" && ! -L "$ssh_config" ]]; then
+    ssh_tmp="$ssh_config.reconcile.$$"
+    if /usr/bin/awk 'BEGIN { replaced=0 } !replaced && /^Host / { print "Host *.msb"; replaced=1; next } { print } END { if (!replaced) exit 1 }' \
+      "$ssh_config" >"$ssh_tmp"; then
+      chmod 600 "$ssh_tmp" && mv "$ssh_tmp" "$ssh_config"
+    else
+      rm -f "$ssh_tmp"
+      return 1
+    fi
+  fi
+
+  if [[ "${MSW_TEST_MODE:-0}" == 1 ]]; then
+    cmd_host_repair_test || return
+  fi
+
+  for box in "${WORKSPACES[@]}"; do
+    if sandbox_exists "$box" && app_workspace_configuration_changed "$old_copy" "$MSW_WORKSPACES_FILE" "$box"; then
+      port_forwarder_stop "$box"
+      port_forwarder_stop_launchd "$box"
+      workspace_msb "$box" rm -f "$box" >/dev/null || return
+    fi
+    workspace_volume_name="$(workspace_volume "$box" workspace)"
+    runtime_volume_name="$(workspace_volume "$box" runtime)"
+    workspace_size="$(workspace_configuration_value "$box" workspaceStorageGiB)" || return
+    runtime_size="$(workspace_configuration_value "$box" runtimeStorageGiB)" || return
+    if app_workspace_volume_requires_reconcile \
+      "$old_copy" "$MSW_WORKSPACES_FILE" "$box" workspaceStorageGiB "$workspace_volume_name"; then
+      app_reconcile_named_volume_capacity "$workspace_volume_name" "$workspace_size" || return
+    fi
+    if app_workspace_volume_requires_reconcile \
+      "$old_copy" "$MSW_WORKSPACES_FILE" "$box" runtimeStorageGiB "$runtime_volume_name"; then
+      app_reconcile_named_volume_capacity "$runtime_volume_name" "$runtime_size" || return
+    fi
+    sandbox_exists "$box" || app_create_configured_workspace "$box" || return
+    port_forwarder_start "$box" || return
+  done
+  rm -f "$input" "$old_copy"
+}
+
 app_cmd_bootstrap() {
-  local resume=0 events_fd="" format="" phase request_id output recovery detail
+  local resume=0 events_fd="" workspace_config_fd="" format="" phase request_id output recovery detail
   while (( $# > 0 )); do
     case "$1" in
       --resume) resume=1; shift ;;
       --events-fd) [[ $# -ge 2 ]] || app_usage_error bootstrap "missing value for --events-fd"; events_fd="$2"; shift 2 ;;
+      --workspace-config-fd) [[ $# -ge 2 ]] || app_usage_error bootstrap "missing value for --workspace-config-fd"; workspace_config_fd="$2"; shift 2 ;;
       --format) [[ "${2:-}" == json ]] || app_usage_error bootstrap "bootstrap requires --format json"; format="$2"; shift 2 ;;
       *) app_usage_error bootstrap "unknown bootstrap option '$1'" ;;
     esac
   done
   [[ "$resume" == 1 ]] || app_usage_error bootstrap "bootstrap requires --resume"
   [[ -z "$events_fd" || "$events_fd" =~ ^[0-9]+$ ]] || app_usage_error bootstrap "events fd must be numeric"
+  [[ -n "$workspace_config_fd" ]] || app_usage_error bootstrap "bootstrap requires --workspace-config-fd"
+  [[ "$workspace_config_fd" =~ ^[0-9]+$ ]] || app_usage_error bootstrap "workspace config fd must be numeric"
   request_id="${MSW_APP_REQUEST_ID:-$(app_request_id)}"
   app_require_config bootstrap
   app_require_runtime bootstrap
+
+  if ! app_reconcile_workspace_configuration "$workspace_config_fd"; then
+    app_emit_error bootstrap "MSW_WORKSPACE_CONFIGURATION_FAILED" \
+      "The requested workspace configuration could not be applied." \
+      "Review workspace names and limits, then retry Setup." "" true 78
+  fi
 
   for phase in preflight toolchain host-integration workspaces; do
     if [[ -n "$events_fd" ]]; then
@@ -6916,7 +7213,7 @@ Machine-readable MSW Monitor commands:
   msw app restore --archive ARCHIVE --confirmation-fd FD --format json
   msw app plan ACTION --workspace WORKSPACE --format json
   msw app apply PLAN_ID --confirmation-fd FD --format json
-  msw app bootstrap --resume --events-fd FD --format json
+  msw app bootstrap --resume --workspace-config-fd FD [--events-fd FD] --format json
 
 Every finite command returns one schemaVersion=1 JSON envelope. Lifecycle
 observations never start a VM; unknown or unavailable observations are not
@@ -6975,11 +7272,12 @@ main() {
     app) cmd_app "$@"; return ;;
   esac
   require_command_path msb "$MSB_BIN"
-  case "$command" in
-    dev|playgrounds|personal)
+  if is_workspace "$command"; then
       (( $# <= 1 )) || fatal "usage: msw $command [PATH]"
       cmd_shell "$command" "${1:-}"
-      ;;
+      return
+  fi
+  case "$command" in
     shell)
       (( $# >= 1 && $# <= 2 )) || fatal "usage: msw shell WORKSPACE [PATH]"
       cmd_shell "$1" "${2:-}"

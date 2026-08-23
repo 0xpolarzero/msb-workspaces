@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Security
 import ServiceManagement
 
@@ -28,6 +29,8 @@ struct MSWBootstrapState: Codable, Sendable, Equatable {
     var updatedAt: Date
     var lastError: String?
     var completedPhases: Set<Phase>
+    var workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil
+    var reconnectWorkspace: String? = nil
 
     static var initial: Self {
         Self(phase: .welcome, startedAt: nil, updatedAt: Date(), lastError: nil, completedPhases: [])
@@ -40,6 +43,7 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
     case toolchainUnavailable
     case configurationUnavailable
     case configurationInstallationFailed(String)
+    case invalidWorkspaceConfiguration(String)
     case toolchainInstallationFailed(String)
     case hostRegistrationFailed(String)
 
@@ -52,6 +56,7 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
             return "The MSW runtime is not bundled with this build, and the source setup installer could not be found."
         case .configurationUnavailable: return "The default MSW configuration is not included in this app build."
         case .configurationInstallationFailed(let detail): return "The MSW configuration could not be installed: \(detail)"
+        case .invalidWorkspaceConfiguration(let detail): return "Workspace configuration is invalid: \(detail)"
         case .toolchainInstallationFailed(let detail): return "MSW runtime setup failed: \(detail)"
         case .hostRegistrationFailed(let detail): return "Host integration could not be completed: \(detail)"
         }
@@ -241,6 +246,58 @@ actor BootstrapStateStore {
         }
     }
 
+    nonisolated static func persistedWorkspaceConfigurations() -> [SetupWorkspaceConfiguration] {
+        let workspaceConfigurationURL: URL = {
+            if let explicit = ProcessInfo.processInfo.environment["MSW_WORKSPACES_FILE"],
+               !explicit.isEmpty {
+                return URL(fileURLWithPath: explicit)
+            }
+            return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+                .appendingPathComponent(".config/msw/workspaces.json")
+        }()
+        var workspaceFileMetadata = stat()
+        let workspaceFileExists = Darwin.lstat(
+            workspaceConfigurationURL.path,
+            &workspaceFileMetadata
+        ) == 0
+        if let values = try? workspaceConfigurationURL.resourceValues(forKeys: [
+               .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey
+           ]),
+           values.isRegularFile == true,
+           values.isSymbolicLink != true,
+           let fileSize = values.fileSize,
+           fileSize <= 256 * 1_024,
+           let data = try? Data(contentsOf: workspaceConfigurationURL),
+           let boundary = MSWBootstrapConfiguration.decodeValidated(from: data) {
+            return boundary.setupConfigurations
+        }
+        if workspaceFileExists {
+            return []
+        }
+
+        let defaultDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?.appendingPathComponent("MSW Monitor", isDirectory: true)
+        let fallbackDirectory = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent("Library/Application Support/MSW Monitor", isDirectory: true)
+        let url = (defaultDirectory ?? fallbackDirectory).appendingPathComponent("bootstrap-state.json")
+        guard let values = try? url.resourceValues(forKeys: [
+                  .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey
+              ]),
+              values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              let fileSize = values.fileSize,
+              fileSize <= 256 * 1_024,
+              let data = try? Data(contentsOf: url),
+              let state = try? JSONDecoder().decode(MSWBootstrapState.self, from: data),
+              let configurations = state.workspaceConfigurations,
+              SetupWorkspaceConfiguration.validationMessage(for: configurations) == nil else {
+            return SetupWorkspaceConfiguration.defaults
+        }
+        return configurations
+    }
+
     func load() -> MSWBootstrapState { value }
 
     func save(_ state: MSWBootstrapState) throws {
@@ -256,8 +313,16 @@ actor BootstrapStateStore {
 protocol MSWBootstrapCoordinating: AnyObject, Sendable {
     func state() async -> MSWBootstrapState
     func preflight() async -> [MSWPreflightCheck]
-    func run() async throws -> MSWBootstrapResult
+    func run(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async throws -> MSWBootstrapResult
     func openHostApprovalSettings() async
+}
+
+extension MSWBootstrapCoordinating {
+    func run() async throws -> MSWBootstrapResult {
+        try await run(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
+    }
 }
 
 actor BootstrapCoordinator: MSWBootstrapCoordinating {
@@ -309,6 +374,20 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
 
 
     func preflight() async -> [MSWPreflightCheck] {
+        await preflight(workspaceConfigurations: nil)
+    }
+
+    /// Host integration is workspace-scoped. During an onboarding run the
+    /// selected configuration is not persisted until bootstrap has applied
+    /// and read it back, so post-repair verification must use the submitted
+    /// boundary rather than the previously persisted/default boundary.
+    private func preflight(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]?
+    ) async -> [MSWPreflightCheck] {
+        let persistedWorkspaceConfigurations = (await stateStore.load()).workspaceConfigurations
+        let targetWorkspaceConfigurations = workspaceConfigurations
+            ?? persistedWorkspaceConfigurations
+            ?? SetupWorkspaceConfiguration.defaults
         var checks: [MSWPreflightCheck] = []
         let osMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
         checks.append(MSWPreflightCheck(
@@ -342,7 +421,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             title: "Memory budget",
             status: memoryGiB >= 16 ? .pass : .needsAction,
             detail: "Detected \(memoryGiB) GiB physical memory.",
-            remediation: memoryGiB >= 16 ? nil : "At least 16 GiB is recommended for all three workspaces."
+            remediation: memoryGiB >= 16 ? nil : "At least 16 GiB is recommended for the configured workspaces."
         ))
         for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
             let resolved = await runner.resolveExecutable(named: name)
@@ -418,7 +497,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
         let hostPackaging = await hostService.packagingStatus
         if hostPackaging == .signingUnavailable {
-            let ready = await hostRepairVerifier.isReady()
+            let records = MSWWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
+            let ready = await hostRepairVerifier.isReady(records: records)
             let directRepairAvailable = sourceSetup.isAvailable
             let status: MSWPreflightCheck.Status = ready
                 ? .pass
@@ -458,8 +538,9 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         switch hostStatus {
         case .enabled:
             do {
-                let snapshot = try await hostAgent.inspect()
-                let expectedAliases = MSWWorkspaceNetwork.addresses
+                let records = MSWWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
+                let snapshot = try await hostAgent.inspect(records: records)
+                let expectedAliases = records.map(\.address)
                 let ready = snapshot.fixedAliases == expectedAliases && snapshot.hostsBlockInstalled
                 checks.append(MSWPreflightCheck(
                     id: "host-integration",
@@ -695,8 +776,13 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
     }
 
-    func run() async throws -> MSWBootstrapResult {
+    func run(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async throws -> MSWBootstrapResult {
         guard !running else { throw BootstrapCoordinatorError.busy }
+        if let validation = SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) {
+            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
+        }
         running = true
         defer { running = false }
 
@@ -704,6 +790,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         current.startedAt = current.startedAt ?? Date()
         current.updatedAt = Date()
         current.lastError = nil
+        current.reconnectWorkspace = nil
         try await stateStore.save(current)
         current.phase = .toolchain
         try await stateStore.save(current)
@@ -751,7 +838,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
 
         let hostPackaging = await hostService.packagingStatus
         if hostPackaging == .signingUnavailable {
-            if !(await hostRepairVerifier.isReady()) {
+            let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
+            if !(await hostRepairVerifier.isReady(records: records)) {
                 guard sourceSetup.isAvailable else {
                     let failure = BootstrapCoordinatorError.hostRegistrationFailed(hostPackaging.detail)
                     current.lastError = failure.localizedDescription
@@ -762,7 +850,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 }
                 do {
                     try await sourceSetup.configureUserIntegrationIfAvailable()
-                    try await hostRepairAuthorization.repair()
+                    try await hostRepairAuthorization.repair(records: records)
                 } catch {
                     let failure = BootstrapCoordinatorError.hostRegistrationFailed(error.localizedDescription)
                     current.lastError = failure.localizedDescription
@@ -771,7 +859,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                     try? await stateStore.save(current)
                     throw failure
                 }
-                guard await hostRepairVerifier.isReady() else {
+                guard await hostRepairVerifier.isReady(records: records) else {
                     let failure = BootstrapCoordinatorError.hostRegistrationFailed(
                         "The administrator-approved repair did not complete the fixed aliases and host records."
                     )
@@ -822,8 +910,9 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             }
 
             do {
-                _ = try await hostAgent.ensureFixedLoopbackAliases()
-                _ = try await hostAgent.installFixedHostRecords()
+                let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
+                _ = try await hostAgent.ensureFixedLoopbackAliases(records: records)
+                _ = try await hostAgent.installFixedHostRecords(records: records)
             } catch {
                 let failure = BootstrapCoordinatorError.hostRegistrationFailed(error.localizedDescription)
                 current.lastError = failure.localizedDescription
@@ -834,7 +923,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             }
         }
 
-        let checks = await preflight()
+        let checks = await preflight(workspaceConfigurations: workspaceConfigurations)
         guard checks.allSatisfy(isPassingOrAdvisory) else {
             current.phase = .preflight
             current.updatedAt = Date()
@@ -845,11 +934,18 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         current.phase = .workspaces
         try await stateStore.save(current)
         do {
-            let response = try await client.bootstrap()
+            let response = try await client.bootstrap(workspaceConfigurations: workspaceConfigurations)
             guard let result = response.result else { throw MSWClientError.missingResult(command: "bootstrap") }
+            guard let installed = await runner.installedWorkspaceConfigurations(),
+                  MSWBootstrapConfiguration(installed) == MSWBootstrapConfiguration(workspaceConfigurations) else {
+                throw BootstrapCoordinatorError.configurationInstallationFailed(
+                    "The installed workspace configuration did not match the selected configuration after bootstrap."
+                )
+            }
             current.phase = MSWBootstrapState.Phase(rawValue: result.phase) ?? .workspaces
             if !result.requiresApproval && result.phase == MSWBootstrapState.Phase.complete.rawValue {
                 current.completedPhases.formUnion([.preflight, .toolchain, .hostIntegration, .workspaces])
+                current.workspaceConfigurations = workspaceConfigurations
             } else {
                 current.completedPhases.insert(.preflight)
             }
@@ -857,6 +953,20 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             try await stateStore.save(current)
             return result
         } catch {
+            if let clientError = error as? MSWClientError,
+               case .protocolFailure(let protocolError) = clientError,
+               protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
+               let installed = await runner.installedWorkspaceConfigurations(),
+               MSWBootstrapConfiguration(installed) == MSWBootstrapConfiguration(workspaceConfigurations) {
+                // The CLI reports reconnect only after it has atomically
+                // installed and reconciled the selected workspace boundary.
+                // Record that verified boundary before Setup enters GitHub;
+                // the later retry still owns deep workspace verification.
+                current.workspaceConfigurations = workspaceConfigurations
+                current.completedPhases.formUnion([.preflight, .toolchain, .hostIntegration, .workspaces])
+                current.phase = .github
+                current.reconnectWorkspace = protocolError.workspace
+            }
             current.lastError = String(describing: error)
             current.updatedAt = Date()
             try? await stateStore.save(current)
@@ -958,9 +1068,18 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
         ]
     }
 
-    func run() async throws -> MSWBootstrapResult {
+    func run(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async throws -> MSWBootstrapResult {
+        if let validation = SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) {
+            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
+        }
         runCount += 1
         if runCount == 1 {
+            current.workspaceConfigurations = workspaceConfigurations
+            current.completedPhases.insert(.workspaces)
+            current.phase = .github
+            current.reconnectWorkspace = failureWorkspace
             let failure = MSWClientError.protocolFailure(MSWProtocolError(
                 code: "MSW_GITHUB_RECONNECT_REQUIRED",
                 message: "GitHub is configured for '\(failureWorkspace)', but its credential is unavailable.",
@@ -974,6 +1093,8 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
         }
         current.phase = .complete
         current.completedPhases = Set(MSWBootstrapState.Phase.allCases)
+        current.workspaceConfigurations = workspaceConfigurations
+        current.reconnectWorkspace = nil
         current.lastError = nil
         current.updatedAt = Date()
         return MSWBootstrapResult(

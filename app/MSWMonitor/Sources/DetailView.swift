@@ -180,7 +180,7 @@ struct DetailView: View {
                         ContentUnavailableView(
                             "Choose a workspace",
                             systemImage: "square.stack.3d.up.badge.a",
-                            description: Text("Select dev, playgrounds, or personal above. No workspace is selected implicitly.")
+                            description: Text("Select a configured workspace above. No workspace is selected implicitly.")
                         )
                     } else {
                         sectionContent
@@ -269,7 +269,7 @@ struct DetailView: View {
             Spacer(minLength: 12)
             Picker("Workspace", selection: workspaceBinding) {
                 Text("All workspaces").tag(nil as Workspace.ID?)
-                ForEach(Workspace.ID.allCases, id: \.rawValue) { id in
+                ForEach(model.workspaces.map(\.id), id: \.rawValue) { id in
                     Text(id.rawValue).tag(Optional(id))
                 }
             }
@@ -616,7 +616,7 @@ struct DetailView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             LabeledContent("Archive", value: restoreArchive.lastPathComponent)
                             LabeledContent("Size", value: archiveSize(restoreArchive))
-                            Text("Impact: replaces managed state for dev, playgrounds, and personal. All workspaces are stopped; the current restore contract does not promise automatic restart.")
+                            Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
                                 .font(.caption)
                             Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
                                 .font(.caption)
@@ -1172,7 +1172,7 @@ private struct RestoreConfirmationView: View {
             Label("Destructive restore", systemImage: "exclamationmark.triangle.fill")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.red)
-            Text("Restoring \(archive.lastPathComponent) replaces managed state for dev, playgrounds, and personal, including code, data, VM state, databases, Docker artifacts, and guest-side credentials.")
+            Text("Restoring \(archive.lastPathComponent) replaces managed state for every configured workspace, including code, data, VM state, databases, Docker artifacts, and guest-side credentials.")
             LabeledContent("Currently running", value: workspaces.filter { $0.state == .running }.map { $0.id.rawValue }.joined(separator: ", ").nilIfEmpty ?? "None")
             LabeledContent("After restore", value: "All workspaces stopped")
             Text("The runtime validates the archive during restore. This UI cannot preview checksum validity or guarantee rollback. If an error occurs after mutation starts, the outcome may be unknown; run diagnostics and refresh before retrying.")

@@ -25,16 +25,16 @@ enum MSWHostAgentError: Error, LocalizedError, Sendable, Equatable {
 }
 
 @objc protocol MSWHostAgentProtocol {
-    func inspect(_ reply: @escaping (Data?, String?) -> Void)
-    func ensureFixedLoopbackAliases(_ reply: @escaping (Data?, String?) -> Void)
-    func installFixedHostRecords(_ reply: @escaping (Data?, String?) -> Void)
-    func uninstall(reply: @escaping (Data?, String?) -> Void)
+    func inspect(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
+    func ensureFixedLoopbackAliases(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
+    func installFixedHostRecords(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
+    func uninstall(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
 }
 protocol MSWHostAgentControlling: Sendable {
-    func inspect() async throws -> MSWHostRecordSnapshot
-    func ensureFixedLoopbackAliases() async throws -> MSWHostRecordSnapshot
-    func installFixedHostRecords() async throws -> MSWHostRecordSnapshot
-    func uninstall() async throws -> MSWHostRecordSnapshot
+    func inspect(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
+    func ensureFixedLoopbackAliases(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
+    func installFixedHostRecords(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
+    func uninstall(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
 }
 
 
@@ -96,26 +96,30 @@ actor HostAgentClient: MSWHostAgentControlling {
         self.machServiceName = machServiceName
     }
 
-    func inspect() async throws -> MSWHostRecordSnapshot {
-        try await call { proxy, reply in proxy.inspect(reply) }
+    func inspect(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+        try await call(records: records) { proxy, data, reply in proxy.inspect(data, reply: reply) }
     }
 
-    func ensureFixedLoopbackAliases() async throws -> MSWHostRecordSnapshot {
-        try await call { proxy, reply in proxy.ensureFixedLoopbackAliases(reply) }
+    func ensureFixedLoopbackAliases(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+        try await call(records: records) { proxy, data, reply in proxy.ensureFixedLoopbackAliases(data, reply: reply) }
     }
 
-    func installFixedHostRecords() async throws -> MSWHostRecordSnapshot {
-        try await call { proxy, reply in proxy.installFixedHostRecords(reply) }
+    func installFixedHostRecords(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+        try await call(records: records) { proxy, data, reply in proxy.installFixedHostRecords(data, reply: reply) }
     }
 
-    func uninstall() async throws -> MSWHostRecordSnapshot {
-        try await call { proxy, reply in proxy.uninstall(reply: reply) }
+    func uninstall(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+        try await call(records: records) { proxy, data, reply in proxy.uninstall(data, reply: reply) }
     }
 
     private func call(
-        _ invoke: @escaping (MSWHostAgentProtocol, @escaping (Data?, String?) -> Void) -> Void
+        records: [MSWWorkspaceNetworkRecord],
+        _ invoke: @escaping (MSWHostAgentProtocol, Data, @escaping (Data?, String?) -> Void) -> Void
     ) async throws -> MSWHostRecordSnapshot {
-        try await withCheckedThrowingContinuation { continuation in
+        guard let configuration = try? JSONEncoder().encode(records), configuration.count <= 16 * 1024 else {
+            throw MSWHostAgentError.invalidInput
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             let completion = MSWHostAgentCompletion(continuation)
             do {
                 let (proxy, generation) = try remoteProxy { _ in
@@ -136,7 +140,7 @@ actor HostAgentClient: MSWHostAgentControlling {
                     }
                 }
                 completion.setTimeoutTask(timeoutTask)
-                invoke(proxy) { data, errorMessage in
+                invoke(proxy, configuration) { data, errorMessage in
                     if let errorMessage {
                         completion.finish(.failure(MSWHostAgentError.rejected(errorMessage)))
                     } else if let data,

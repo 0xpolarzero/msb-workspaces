@@ -70,6 +70,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -285,9 +286,14 @@ def _default_policy_path() -> str:
     )
 
 
+def _default_workspace_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".config", "msw", "workspaces.json")
+
+
 class Config:
     def __init__(self) -> None:
         self.policy_file = Path(os.environ.get("MSW_POLICY_FILE", _default_policy_path()))
+        self.workspace_file = Path(os.environ.get("MSW_WORKSPACES_FILE", _default_workspace_path()))
         policy_dir = self.policy_file.parent
         self.hmac_key_file = Path(
             os.environ.get("MSW_PROXY_HMAC_KEY_FILE", str(policy_dir / "github-proxy-hmac.key"))
@@ -388,7 +394,10 @@ def _valid_canonical(repo: str) -> bool:
     return bool(_REPO_SEG_RE.fullmatch(owner) and _REPO_SEG_RE.fullmatch(name))
 
 
-VALID_WORKSPACES = ("dev", "playgrounds", "personal")
+WORKSPACE_KEYS = {
+    "name", "cpu", "cpuCeiling", "memoryGiB", "memoryCeilingGiB",
+    "workspaceStorageGiB", "runtimeStorageGiB",
+}
 # EXACT canonical repo grammar (host parity): owner/name, each segment starts
 # with [a-z0-9] then [a-z0-9._-]*; lowercase only, no IGNORECASE.
 POLICY_REPO_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$")
@@ -398,12 +407,66 @@ def _is_schema_one(value: Any) -> bool:
     """Match jq's JSON numeric equality: accept 1 and 1.0, reject booleans."""
     return not isinstance(value, bool) and isinstance(value, (int, float)) and value == 1
 
+
+def _supported_number(value: Any, allowed: Tuple[int, ...]) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and not value.is_integer():
+        return False
+    return value in allowed
+
+
+def _load_configured_workspaces(cfg: Config) -> Optional[Tuple[str, ...]]:
+    """Load the same schema-v1 workspace list as the CLI; malformed input denies all."""
+    try:
+        metadata = cfg.workspace_file.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 262144:
+            return None
+        data = json.loads(cfg.workspace_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if (not isinstance(data, dict)
+            or set(data) != {"schemaVersion", "workspaces"}
+            or not _is_schema_one(data.get("schemaVersion"))):
+        return None
+    workspaces = data.get("workspaces")
+    if not isinstance(workspaces, list) or not 1 <= len(workspaces) <= 64:
+        return None
+    names: List[str] = []
+    for workspace in workspaces:
+        if not isinstance(workspace, dict) or set(workspace) != WORKSPACE_KEYS:
+            return None
+        name = workspace.get("name")
+        if not isinstance(name, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name) is None:
+            return None
+        cpu = workspace.get("cpu")
+        cpu_ceiling = workspace.get("cpuCeiling")
+        memory = workspace.get("memoryGiB")
+        memory_ceiling = workspace.get("memoryCeilingGiB")
+        if not (
+            _supported_number(cpu, (4, 6, 8, 12))
+            and _supported_number(cpu_ceiling, (4, 6, 8, 12))
+            and cpu <= cpu_ceiling
+            and _supported_number(memory, (16, 32, 48))
+            and _supported_number(memory_ceiling, (16, 32, 48))
+            and memory <= memory_ceiling
+            and _supported_number(workspace.get("workspaceStorageGiB"), (60, 80, 100, 120))
+            and _supported_number(workspace.get("runtimeStorageGiB"), (60, 80, 100, 120))
+        ):
+            return None
+        names.append(name)
+    if len(set(names)) != len(names):
+        return None
+    return tuple(names)
+
 def _load_policy(cfg: Config) -> Optional[Dict[str, Any]]:
     """Load and STRICTLY validate the policy file (section 2; fail-closed).
 
     Mirrors the host's strict validator exactly: schemaVersion must be JSON
-    numeric 1 (1 or 1.0; booleans rejected); workspace keys may ONLY be
-    dev/playgrounds/personal (absent workspaces are simply denied); capability
+    numeric 1 (1 or 1.0; booleans rejected); workspace keys may only name
+    configured workspaces (absent workspaces are simply denied); capability
     must be exactly lowercase [0-9a-f]{48} and unique across workspaces; repo
     canonicals must match EXACTLY `^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`
     (already-lowercase, leading [a-z0-9] only, no .git suffix, no query or
@@ -428,11 +491,14 @@ def _load_policy(cfg: Config) -> Optional[Dict[str, Any]]:
     workspaces = data.get("workspaces")
     if not isinstance(workspaces, dict):
         return None
-    if any(key not in VALID_WORKSPACES for key in workspaces):
+    configured_workspaces = _load_configured_workspaces(cfg)
+    if configured_workspaces is None:
+        return None
+    if any(key not in configured_workspaces for key in workspaces):
         return None
     out: Dict[str, Any] = {}
     seen_capabilities: set = set()
-    for box in VALID_WORKSPACES:
+    for box in configured_workspaces:
         if box not in workspaces:
             continue  # absent workspace: denied (fail-closed)
         workspace = workspaces[box]

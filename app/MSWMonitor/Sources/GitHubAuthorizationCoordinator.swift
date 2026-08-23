@@ -299,6 +299,7 @@ actor GitHubAuthorizationCoordinator {
     private let journalURL: URL?
     private var pending: [UUID: PendingAuthorization] = [:]
     private var latestVerifications: [GitHubWorkspaceVerificationResult] = []
+    private var configuredWorkspaces: [String]
 
     init(
         broker: CredentialBroker,
@@ -319,6 +320,7 @@ actor GitHubAuthorizationCoordinator {
         self.mswClient = mswClient
         self.now = now
         self.journalURL = journalURL ?? Self.defaultJournalURL()
+        self.configuredWorkspaces = BootstrapStateStore.persistedWorkspaceConfigurations().map(\.name)
     }
     nonisolated var isConfigured: Bool {
         connect.configuration.isConfigured
@@ -329,7 +331,7 @@ actor GitHubAuthorizationCoordinator {
     }
 
     /// Starts one browser authorization session. The resulting session may
-    /// create grants for all three workspaces; no workspace credential exists
+    /// create grants for every configured workspace; no workspace credential exists
     /// until commitPolicy has reviewed and applied the complete set.
     func beginAuthorization(
         browser: (any MSWConnectBrowserAuthenticating)? = nil
@@ -497,6 +499,7 @@ actor GitHubAuthorizationCoordinator {
         let repositories = policy.flatMap { $0.repositories }
         guard !policy.isEmpty,
               Set(policy.map(\.workspace)).count == policy.count,
+              Set(policy.map(\.workspace)).isSubset(of: Set(configuredWorkspaces)),
               policy.allSatisfy(Self.isValidPolicy),
               Set(repositories.map(\.id)).count == repositories.count else {
             throw GitHubAuthorizationError.invalidSelection
@@ -776,11 +779,11 @@ actor GitHubAuthorizationCoordinator {
         guard isAvailable else {
             do {
                 _ = try await quarantineUnresolvableAccess()
-                return await broker.allMetadata()
+                return scopedMetadata(await broker.allMetadata())
             } catch {
-                return (await broker.allMetadata()).filter {
+                return scopedMetadata((await broker.allMetadata()).filter {
                     $0.quarantined || $0.recoveryState == .quarantined
-                }
+                })
             }
         }
         // Settings must never inspect credential metadata while a durable
@@ -789,14 +792,14 @@ actor GitHubAuthorizationCoordinator {
         do {
             try await recoverPendingAuthorization()
             await silentlyRenewExpiredGrants()
-            return await broker.allMetadata()
+            return scopedMetadata(await broker.allMetadata())
         } catch {
             // A malformed or otherwise unrecoverable journal must not expose
             // any ready metadata. Quarantined records remain visible so the
             // user can understand which access needs explicit repair.
-            return (await broker.allMetadata()).filter {
+            return scopedMetadata((await broker.allMetadata()).filter {
                 $0.quarantined || $0.recoveryState == .quarantined
-            }
+            })
         }
     }
 
@@ -809,9 +812,28 @@ actor GitHubAuthorizationCoordinator {
     /// mutation coordinator.
     func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> MSWIdentityResult {
         guard let mswClient else { throw GitHubAuthorizationError.serviceUnavailable }
+        let expected = workspace.map { [$0] } ?? configuredWorkspaces
+        guard !expected.isEmpty,
+              expected.allSatisfy({ configuredWorkspaces.contains($0) }) else {
+            throw GitHubAuthorizationError.invalidSelection
+        }
         let response = try await mswClient.setIdentity(name: name, email: email, workspace: workspace)
         guard let result = response.result else { throw GitHubAuthorizationError.authorizationFailed }
+        guard Set(result.workspaces) == Set(expected) else {
+            throw GitHubAuthorizationError.verificationFailed(
+                "Git identity was not verified for the selected workspace configuration."
+            )
+        }
         return result
+    }
+
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws {
+        if let validation = SetupWorkspaceConfiguration.validationMessage(for: configurations) {
+            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
+        }
+        try await mswClient?.reloadWorkspaceConfiguration(configurations)
+        configuredWorkspaces = configurations.map(\.name)
+        latestVerifications.removeAll { !configuredWorkspaces.contains($0.workspace) }
     }
 
     func connectedAccount() async -> GitHubAccount? {
@@ -833,7 +855,14 @@ actor GitHubAuthorizationCoordinator {
     /// Reads only nonsecret local facts. Used by builds that deliberately do
     /// not ship Connect/attestations and therefore must not attempt recovery.
     func retainedMetadata() async -> [WorkspaceCredentialMetadata] {
-        await broker.allMetadata()
+        scopedMetadata(await broker.allMetadata())
+    }
+
+    private func scopedMetadata(
+        _ entries: [WorkspaceCredentialMetadata]
+    ) -> [WorkspaceCredentialMetadata] {
+        let configured = Set(configuredWorkspaces)
+        return entries.filter { configured.contains($0.workspace) }
     }
 
     /// A normal release without Connect/attestations cannot prove the state of

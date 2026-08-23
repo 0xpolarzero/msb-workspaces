@@ -2,10 +2,21 @@ import AppKit
 import Observation
 
 struct Workspace: Identifiable, Equatable, Sendable {
-    enum ID: String, CaseIterable, Codable, Sendable {
-        case dev
-        case playgrounds
-        case personal
+    struct ID: RawRepresentable, Hashable, Codable, Sendable, Identifiable {
+        let rawValue: String
+        var id: String { rawValue }
+
+        init?(rawValue: String) {
+            guard WorkspaceID.isValid(rawValue) else { return nil }
+            self.rawValue = rawValue
+        }
+
+        private init(_ value: String) { rawValue = value }
+
+        static let dev = Self("dev")
+        static let playgrounds = Self("playgrounds")
+        static let personal = Self("personal")
+        static let fixtureDefaults: [Self] = [.dev, .playgrounds, .personal]
     }
 
     enum State: String, Equatable, Sendable {
@@ -110,6 +121,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         case .dev: return "Primary software development workspace"
         case .playgrounds: return "Experiments and disposable prototypes"
         case .personal: return "Personal projects and services"
+        default: return "Configured MSW workspace"
         }
     }
 }
@@ -264,6 +276,7 @@ final class AppModel {
     private var sustainedUnavailableNotified = false
     private var notificationGeneration = 0
     private var detailRequestGeneration = 0
+    private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
         case applied(MSWStateResponse)
         case failed
@@ -280,6 +293,7 @@ final class AppModel {
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
         activityStore: MSWActivityStore = MSWActivityStore(),
+        workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil,
         startupRecoveryBlockedReason: String? = nil,
         startupRecoveryRetry: (() -> Void)? = nil
     ) {
@@ -292,7 +306,11 @@ final class AppModel {
         self.activityStore = activityStore
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.startupRecoveryRetry = startupRecoveryRetry
-        workspaces = Workspace.ID.allCases.map {
+        let configured = workspaceConfigurations ?? SetupWorkspaceConfiguration.defaults
+        let resolvedWorkspaceIDs = configured.compactMap { Workspace.ID(rawValue: $0.name) }
+        let initialWorkspaceIDs = resolvedWorkspaceIDs
+        configuredWorkspaceIDs = initialWorkspaceIDs
+        workspaces = initialWorkspaceIDs.map {
             if let startupRecoveryBlockedReason {
                 return Workspace(
                     id: $0,
@@ -328,6 +346,42 @@ final class AppModel {
                     canRestart: false
                 )
         }
+    }
+
+    /// Replaces the monitor's workspace target list immediately after Setup
+    /// applies a validated configuration. A subsequent authoritative refresh
+    /// fills the new rows, but stale removed/renamed fixture IDs never remain
+    /// visible while that observation is in flight or unavailable.
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) {
+        guard SetupWorkspaceConfiguration.validationMessage(for: configurations) == nil else { return }
+        refreshGeneration &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
+        detailRequestGeneration &+= 1
+        isDetailLoading = false
+        detailError = nil
+        let ids = configurations.compactMap { Workspace.ID(rawValue: $0.name) }
+        let previous = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
+        configuredWorkspaceIDs = ids
+        workspaces = ids.map { id in
+            if let existing = previous[id] { return existing }
+            return Workspace(
+                id: id,
+                state: client == nil ? .stopped : .unknown,
+                freshness: client == nil ? .fresh : .unavailable,
+                statusReason: client == nil
+                    ? "Deterministic fixture workspace."
+                    : "Awaiting an authoritative observation for the applied workspace configuration.",
+                recoveryAction: client == nil ? nil : "Retry the observation or run diagnostics.",
+                nextAction: client == nil ? nil : "Observe",
+                canStart: false,
+                canStop: false,
+                canRestart: false
+            )
+        }
+        githubSnapshot = nil
+        pendingLifecyclePlan = nil
+        pendingPushPlan = nil
     }
 
 
@@ -834,7 +888,11 @@ final class AppModel {
                     let catalog = try await provider.loadCatalog()
                     let policy = await provider.currentPolicy()
                     guard let self, request == self.detailRequestGeneration else { return }
-                    self.githubSnapshot = Self.localGitHubSnapshot(policy: policy, catalog: catalog)
+                    self.githubSnapshot = Self.localGitHubSnapshot(
+                        policy: policy,
+                        catalog: catalog,
+                        workspaceIDs: self.configuredWorkspaceIDs
+                    )
                 } catch {
                     guard let self, request == self.detailRequestGeneration else { return }
                     self.detailError = error.localizedDescription
@@ -862,9 +920,10 @@ final class AppModel {
     /// of truth) plus the CLI-reported credential/account presence.
     static func localGitHubSnapshot(
         policy: GitHubPolicyFile?,
-        catalog: GitHubCatalog
+        catalog: GitHubCatalog,
+        workspaceIDs: [Workspace.ID] = Workspace.ID.fixtureDefaults
     ) -> MSWGitHubStateResponse {
-        let workspaces = Workspace.ID.allCases.map { id in
+        let workspaces = workspaceIDs.map { id in
             let workspace = policy?.workspaces[id.rawValue]
             let repos = workspace?.repos ?? []
             let hasWrite = repos.contains { $0.mode == .readWrite }
@@ -1263,7 +1322,7 @@ final class AppModel {
         let hadAuthoritativeObservation = lastObservedAt != nil
         lastObservedAt = observedAt ?? Date()
         let snapshots = Dictionary(uniqueKeysWithValues: state.workspaces.map { ($0.id, $0) })
-        workspaces = Workspace.ID.allCases.map { id in
+        workspaces = configuredWorkspaceIDs.map { id in
             guard let snapshot = snapshots[id.rawValue] else {
                 return Workspace(
                     id: id,
@@ -1613,7 +1672,7 @@ final class AppModel {
         }
     }
     private func restoreStateIsVerified(_ state: MSWStateResponse) -> Bool {
-        let expectedIDs = Set(Workspace.ID.allCases.map(\.rawValue))
+        let expectedIDs = Set(configuredWorkspaceIDs.map(\.rawValue))
         guard state.workspaces.count == expectedIDs.count,
               Set(state.workspaces.map(\.id)) == expectedIDs else {
             return false

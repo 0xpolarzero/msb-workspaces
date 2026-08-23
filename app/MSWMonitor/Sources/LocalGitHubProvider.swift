@@ -43,6 +43,9 @@ protocol GitHubProviding: Sendable {
     func retryCurrentPolicyApply() async throws
     func cancelCurrentPolicyApply() async
     func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult
+    /// Rebuilds every workspace-scoped target after the selected bootstrap
+    /// configuration has been operationally applied and read back.
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws
 }
 
 enum GitHubApplyPhase: String, Codable, Sendable, Equatable {
@@ -113,6 +116,7 @@ extension GitHubProviding {
     func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
         throw GitHubCatalogError.unavailable("Workspace Git identity is unavailable for this GitHub provider.")
     }
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws {}
 }
 
 /// Catalog for the existing picker models. `installations` is a synthetic
@@ -178,11 +182,17 @@ actor GitHubLocalProvider: GitHubProviding {
     private var desiredHash: String?
     private var nextGeneration: Int
     private var persistedCompletionNeedsVerification: Bool
+    private var configuredWorkspaces: [String]
 
-    init(client: MSWClient, policyStore: GitHubPolicyStore) {
+    init(
+        client: MSWClient,
+        policyStore: GitHubPolicyStore,
+        workspaceConfigurations: [SetupWorkspaceConfiguration] = SetupWorkspaceConfiguration.defaults
+    ) {
         self.client = client
         self.policyStore = policyStore
         self.policyURL = policyStore.policyURL
+        self.configuredWorkspaces = workspaceConfigurations.map(\.name)
         let persisted = GitHubPolicyStore.readIntent(policyURL: policyStore.policyURL)
         let persistedDesired = persisted.map { Self.intentRequest($0.desired) }
         self.nextGeneration = persisted?.generation ?? 0
@@ -225,6 +235,45 @@ actor GitHubLocalProvider: GitHubProviding {
 
     nonisolated var isAvailable: Bool { true }
 
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws {
+        if let validation = SetupWorkspaceConfiguration.validationMessage(for: configurations) {
+            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
+        }
+        await cancelCurrentPolicyApply()
+        let names = configurations.map(\.name)
+        try await client.reloadWorkspaceConfiguration(configurations)
+        configuredWorkspaces = names
+        let persisted = GitHubPolicyStore.readIntent(policyURL: policyURL)
+        let intentMatchesConfiguration = persisted.map {
+            Set($0.desired.workspaces.keys) == Set(names)
+        } ?? false
+        nextGeneration = max(nextGeneration, persisted?.generation ?? 0)
+        desiredRequest = persisted.map { Self.scopedRequest($0.desired, workspaces: names) }
+        desiredHash = intentMatchesConfiguration
+            ? desiredRequest.map { Self.semanticHash($0, workspaces: names) }
+            : nil
+        persistedCompletionNeedsVerification = intentMatchesConfiguration && persisted?.status == .completed
+        if let persisted, intentMatchesConfiguration {
+            let phase: GitHubApplyPhase
+            switch persisted.status {
+            case .pending: phase = .saving
+            case .failed: phase = .failed
+            case .completed: phase = .completed
+            case .cancelled: phase = .cancelled
+            }
+            applyProgress = GitHubApplyProgress(
+                generation: persisted.generation,
+                phase: phase,
+                workspace: persisted.failure?.workspace.flatMap { names.contains($0) ? $0 : nil },
+                failure: persisted.failure.flatMap { failure in
+                    (failure.workspace.map(names.contains) ?? true) ? failure : nil
+                }
+            )
+        } else {
+            applyProgress = nil
+        }
+    }
+
     func loadCatalog() async throws -> GitHubCatalog {
         let status = try await client.githubStatus()
         guard status.mode == GitHubAccessMode.local.rawValue else {
@@ -232,7 +281,10 @@ actor GitHubLocalProvider: GitHubProviding {
                 "GitHub is in \(status.mode) mode on this Mac; local repository access is unavailable."
             )
         }
-        let hasCredential = status.workspaces.contains { $0.hostCredential == "present" }
+        let configured = Set(configuredWorkspaces)
+        let hasCredential = status.workspaces.contains {
+            configured.contains($0.workspace) && $0.hostCredential == "present"
+        }
         var account: GitHubAccount?
         if hasCredential, let metadata = try? await client.githubAuthMetadata(),
            let login = metadata.accountLogin, !login.isEmpty {
@@ -288,7 +340,14 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     func currentPolicy() async -> GitHubPolicyFile? {
-        await policyStore.current
+        guard let policy = await policyStore.current else { return nil }
+        return GitHubPolicyFile(
+            schemaVersion: policy.schemaVersion,
+            workspaces: Dictionary(uniqueKeysWithValues: configuredWorkspaces.map {
+                ($0, policy.workspaces[$0] ?? GitHubPolicyWorkspace(capability: nil, repos: []))
+            }),
+            updatedAt: policy.updatedAt
+        )
     }
 
     /// Validates and durably records intent, then returns immediately. The
@@ -296,7 +355,7 @@ actor GitHubLocalProvider: GitHubProviding {
     /// cancel it and are serialized behind cleanup by `mutationTail`.
     func beginPolicyApply(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress {
         let request = try await makeRequest(policy, preserving: desiredRequest)
-        let hash = Self.semanticHash(request)
+        let hash = Self.semanticHash(request, workspaces: configuredWorkspaces)
         if hash == desiredHash, let applyProgress {
             if applyProgress.isInFlight { return applyProgress }
             if applyProgress.phase == .completed, await matchesEffectivePolicy(request) {
@@ -438,13 +497,24 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
-        try await performMutation { [client] in
+        let expected = workspace.map { [$0] } ?? configuredWorkspaces
+        guard !expected.isEmpty,
+              expected.allSatisfy({ configuredWorkspaces.contains($0) }) else {
+            throw MSWClientError.invalidArguments
+        }
+        let result = try await performMutation { [client] in
             let response = try await client.setIdentity(name: name, email: email, workspace: workspace)
             guard let result = response.result else {
                 throw MSWClientError.missingResult(command: "identity")
             }
             return result
         }
+        guard Set(result.workspaces) == Set(expected) else {
+            throw GitHubCatalogError.commitFailed(
+                "Git identity was not verified for the selected workspace configuration."
+            )
+        }
+        return result
     }
 
     /// Applies the desired per-workspace policy through ONE journaled CLI
@@ -474,7 +544,12 @@ actor GitHubLocalProvider: GitHubProviding {
             edited[workspacePolicy.workspace] = workspacePolicy
         }
         var workspaces: [String: GitHubPolicyWorkspace] = [:]
-        for workspace in WorkspaceID.all {
+        guard Set(edited.keys).isSubset(of: Set(configuredWorkspaces)) else {
+            throw GitHubCatalogError.commitFailed(
+                "GitHub policy includes a workspace outside the applied configuration."
+            )
+        }
+        for workspace in configuredWorkspaces {
             guard WorkspaceID.isValid(workspace) else {
                 throw GitHubCatalogError.commitFailed("Invalid workspace \(workspace).")
             }
@@ -648,7 +723,7 @@ actor GitHubLocalProvider: GitHubProviding {
         guard let current = await policyStore.current else {
             return request.workspaces.values.allSatisfy(\.repos.isEmpty)
         }
-        for workspace in WorkspaceID.all {
+        for workspace in configuredWorkspaces {
             let desired = request.workspaces[workspace]?.repos ?? []
             let effective = current.workspaces[workspace]?.repos ?? []
             if desired != effective { return false }
@@ -660,7 +735,7 @@ actor GitHubLocalProvider: GitHubProviding {
         in request: MSWGitHubPolicyApplyRequest
     ) async -> String? {
         let current = await policyStore.current
-        return WorkspaceID.all.first { workspace in
+        return configuredWorkspaces.first { workspace in
             let desired = request.workspaces[workspace]?.repos ?? []
             let effective = current?.workspaces[workspace]?.repos ?? []
             return !desired.isEmpty && desired != effective
@@ -687,9 +762,12 @@ actor GitHubLocalProvider: GitHubProviding {
         )
     }
 
-    private static func semanticHash(_ request: MSWGitHubPolicyApplyRequest) -> String {
+    private static func semanticHash(
+        _ request: MSWGitHubPolicyApplyRequest,
+        workspaces: [String]
+    ) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
-        for workspace in WorkspaceID.all {
+        for workspace in workspaces {
             for repo in (request.workspaces[workspace]?.repos ?? []).sorted(by: { $0.canonical < $1.canonical }) {
                 for byte in "\(workspace)\u{0}\(repo.canonical)\u{0}\(repo.mode.rawValue)\u{0}".utf8 {
                     hash ^= UInt64(byte)
@@ -710,6 +788,21 @@ actor GitHubLocalProvider: GitHubProviding {
             workspaces: request.workspaces.mapValues {
                 GitHubPolicyWorkspace(capability: nil, repos: $0.repos)
             }
+        )
+    }
+
+    private static func scopedRequest(
+        _ request: MSWGitHubPolicyApplyRequest,
+        workspaces: [String]
+    ) -> MSWGitHubPolicyApplyRequest {
+        MSWGitHubPolicyApplyRequest(
+            schemaVersion: request.schemaVersion,
+            workspaces: Dictionary(uniqueKeysWithValues: workspaces.map {
+                ($0, GitHubPolicyWorkspace(
+                    capability: nil,
+                    repos: request.workspaces[$0]?.repos ?? []
+                ))
+            })
         )
     }
 
@@ -734,7 +827,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     func removeAllAccess() async throws {
-        let cleared = WorkspaceID.all.map {
+        let cleared = configuredWorkspaces.map {
             GitHubWorkspacePolicy(workspace: $0, repositories: [])
         }
         try await commit(cleared)

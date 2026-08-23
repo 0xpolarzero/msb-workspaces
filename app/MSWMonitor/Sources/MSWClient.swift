@@ -5,6 +5,7 @@ actor MSWClient {
     private let credentialBroker: CredentialBroker?
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let ghResolver: @Sendable () async -> URL?
+    private var configuredWorkspaces: [String]
     private var lastState: MSWStateResponse?
     private var lastStateObservedAt: Date?
 
@@ -18,6 +19,7 @@ actor MSWClient {
         self.credentialBroker = credentialBroker
         self.tokenRefreshCoordinator = tokenRefreshCoordinator
         self.ghResolver = ghResolver ?? { await runner.resolveExecutable(named: "gh") }
+        self.configuredWorkspaces = BootstrapStateStore.persistedWorkspaceConfigurations().map(\.name)
     }
 
     /// Test seam: local-mode clients must never carry Connect dependencies
@@ -29,6 +31,13 @@ actor MSWClient {
 
     func executableURL() async -> URL? {
         await runner.mswResolution().selected
+    }
+
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) throws {
+        if let validation = SetupWorkspaceConfiguration.validationMessage(for: configurations) {
+            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
+        }
+        configuredWorkspaces = configurations.map(\.name)
     }
 
     func openInZed(workspace: String) async throws {
@@ -601,12 +610,19 @@ actor MSWClient {
         )
     }
 
-    func bootstrap() async throws -> MSWEnvelope<MSWBootstrapResult> {
+    func bootstrap(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async throws -> MSWEnvelope<MSWBootstrapResult> {
+        guard SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) == nil else {
+            throw MSWClientError.invalidArguments
+        }
+        let input = try JSONEncoder().encode(MSWBootstrapConfiguration(workspaceConfigurations))
         return try await execute(
-            arguments: ["app", "bootstrap", "--resume", "--format", "json"],
+            arguments: ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json"],
             as: MSWBootstrapResult.self,
             command: "bootstrap",
             includeGuestCredentials: true,
+            stdin: input,
             timeout: .seconds(1800)
         )
     }
@@ -848,7 +864,7 @@ actor MSWClient {
         includeGuest: Bool,
         includeHost: Bool
     ) async throws {
-        let workspaces = workspace.map { [$0] } ?? WorkspaceID.all
+        let workspaces = workspace.map { [$0] } ?? configuredWorkspaces
         for workspace in workspaces {
             if includeGuest { _ = try await accessToken(workspace: workspace, role: .guest) }
             if includeHost { _ = try await accessToken(workspace: workspace, role: .host) }

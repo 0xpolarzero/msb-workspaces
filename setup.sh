@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REBUILD_BASE=0
 RECREATE_WORKSPACES=0
 RESET_CONFIG=0
+SKIP_WORKSPACES=0
 TEST_MODE="${MSW_TEST_MODE:-0}"
 
 usage() {
@@ -15,6 +16,7 @@ Options:
   --rebuild-base         Rebuild the reusable development snapshot.
   --recreate-workspaces  Recreate VM roots; repository and Docker volumes survive.
   --reset-config         Replace ~/.config/msw/config.sh with packaged defaults.
+  --skip-workspaces      Install dependencies and the base snapshot only.
   -h, --help             Show this help.
 HELP
 }
@@ -24,6 +26,7 @@ while (( $# )); do
     --rebuild-base) REBUILD_BASE=1 ;;
     --recreate-workspaces) RECREATE_WORKSPACES=1 ;;
     --reset-config) RESET_CONFIG=1; RECREATE_WORKSPACES=1 ;;
+    --skip-workspaces) SKIP_WORKSPACES=1 ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 64 ;;
   esac
@@ -125,6 +128,58 @@ install -m 0644 "$SCRIPT_DIR/README.md" "$HOME/.local/share/msw/README.md"
 
 # shellcheck source=/dev/null
 source "$HOME/.config/msw/config.sh"
+
+MSW_WORKSPACES_FILE="${MSW_WORKSPACES_FILE:-$HOME/.config/msw/workspaces.json}"
+workspace_config_valid() {
+  [[ -f "$1" && ! -L "$1" && $(wc -c <"$1") -le 262144 ]] || return 1
+  jq -e '
+    type == "object" and
+    (keys | sort) == ["schemaVersion", "workspaces"] and
+    .schemaVersion == 1 and
+    (.workspaces | type == "array" and length > 0 and length <= 64) and
+    ([.workspaces[].name] | length == (unique | length)) and
+    ([.workspaces[] |
+      (type == "object") and
+      (keys | sort) == ["cpu", "cpuCeiling", "memoryCeilingGiB", "memoryGiB", "name", "runtimeStorageGiB", "workspaceStorageGiB"] and
+      (.name | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")) and
+      (.cpu | type == "number" and floor == . and IN(4,6,8,12)) and
+      (.cpuCeiling | type == "number" and floor == . and IN(4,6,8,12)) and
+      (.memoryGiB | type == "number" and floor == . and IN(16,32,48)) and
+      (.memoryCeilingGiB | type == "number" and floor == . and IN(16,32,48)) and
+      (.workspaceStorageGiB | type == "number" and floor == . and IN(60,80,100,120)) and
+      (.runtimeStorageGiB | type == "number" and floor == . and IN(60,80,100,120)) and
+      .cpu <= .cpuCeiling and .memoryGiB <= .memoryCeilingGiB
+    ] | all)
+  ' "$1" >/dev/null 2>&1
+}
+
+if [[ ! -f "$MSW_WORKSPACES_FILE" ]]; then
+  default_workspace_config="$(mktemp "$HOME/.config/msw/.workspaces-default.XXXXXX")"
+  jq -n \
+    --argjson devCPU "$MSW_DEV_CPUS" --argjson devMaxCPU "$MSW_DEV_MAX_CPUS" \
+    --argjson devMemory "${MSW_DEV_MEMORY%G}" --argjson devMaxMemory "${MSW_DEV_MAX_MEMORY%G}" \
+    --argjson devWorkspace "${MSW_DEV_WORKSPACE_SIZE%G}" --argjson devRuntime "${MSW_DEV_RUNTIME_SIZE%G}" \
+    --argjson playgroundsCPU "$MSW_PLAYGROUNDS_CPUS" --argjson playgroundsMaxCPU "$MSW_PLAYGROUNDS_MAX_CPUS" \
+    --argjson playgroundsMemory "${MSW_PLAYGROUNDS_MEMORY%G}" --argjson playgroundsMaxMemory "${MSW_PLAYGROUNDS_MAX_MEMORY%G}" \
+    --argjson playgroundsWorkspace "${MSW_PLAYGROUNDS_WORKSPACE_SIZE%G}" --argjson playgroundsRuntime "${MSW_PLAYGROUNDS_RUNTIME_SIZE%G}" \
+    --argjson personalCPU "$MSW_PERSONAL_CPUS" --argjson personalMaxCPU "$MSW_PERSONAL_MAX_CPUS" \
+    --argjson personalMemory "${MSW_PERSONAL_MEMORY%G}" --argjson personalMaxMemory "${MSW_PERSONAL_MAX_MEMORY%G}" \
+    --argjson personalWorkspace "${MSW_PERSONAL_WORKSPACE_SIZE%G}" --argjson personalRuntime "${MSW_PERSONAL_RUNTIME_SIZE%G}" \
+    '{schemaVersion:1,workspaces:[
+      {name:"dev",cpu:$devCPU,cpuCeiling:$devMaxCPU,memoryGiB:$devMemory,memoryCeilingGiB:$devMaxMemory,workspaceStorageGiB:$devWorkspace,runtimeStorageGiB:$devRuntime},
+      {name:"playgrounds",cpu:$playgroundsCPU,cpuCeiling:$playgroundsMaxCPU,memoryGiB:$playgroundsMemory,memoryCeilingGiB:$playgroundsMaxMemory,workspaceStorageGiB:$playgroundsWorkspace,runtimeStorageGiB:$playgroundsRuntime},
+      {name:"personal",cpu:$personalCPU,cpuCeiling:$personalMaxCPU,memoryGiB:$personalMemory,memoryCeilingGiB:$personalMaxMemory,workspaceStorageGiB:$personalWorkspace,runtimeStorageGiB:$personalRuntime}
+    ]}' >"$default_workspace_config"
+  chmod 0600 "$default_workspace_config"
+  mv "$default_workspace_config" "$MSW_WORKSPACES_FILE"
+fi
+workspace_config_valid "$MSW_WORKSPACES_FILE" || fatal "invalid persisted workspace configuration"
+WORKSPACES=()
+while IFS= read -r box; do WORKSPACES+=("$box"); done < <(jq -r '.workspaces[].name' "$MSW_WORKSPACES_FILE")
+workspace_config_value() {
+  jq -er --arg workspace "$1" --arg field "$2" '.workspaces[] | select(.name == $workspace) | .[$field]' "$MSW_WORKSPACES_FILE"
+}
+workspace_host() { printf '%s.msw.test\n' "$1"; }
 
 # Path C §1: mode defaults to local; validate before any workspace work.
 : "${MSW_GITHUB_MODE:=local}"
@@ -310,25 +365,14 @@ configure_workspace_guest() {
 set -Eeuo pipefail
 workspace="$1"; browser_host="$2"; github_mode="$3"
 mkdir -p /workspace /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
-cat >/etc/profile.d/msw-workspace.sh <<PROFILE
-export MSW_WORKSPACE="$workspace"
-export MSW_BROWSER_HOST="$browser_host"
-export HOST="0.0.0.0"
-export BIND_ADDRESS="0.0.0.0"
-export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="$browser_host"
-PROFILE
+printf 'export MSW_WORKSPACE=%q\nexport MSW_BROWSER_HOST=%q\nexport HOST=%q\nexport BIND_ADDRESS=%q\nexport __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=%q\n' \
+  "$workspace" "$browser_host" "0.0.0.0" "0.0.0.0" "$browser_host" \
+  >/etc/profile.d/msw-workspace.sh
 chmod 0644 /etc/profile.d/msw-workspace.sh
 hostnamectl set-hostname "msw-$workspace"
 printf '%s\n' "$workspace" >/workspace/.msw-workspace
-cat >/etc/motd <<MOTD
-MicroSandbox workspace: $workspace
-
-  Code:       /workspace
-  Browser:    http://$browser_host:<published-port>
-  Docker:     docker compose up --build
-  Runtimes:   mise use <tool>@<version>
-  Python:     uv sync / uv run ...
-MOTD
+printf 'MicroSandbox workspace: %s\n\n  Code:       /workspace\n  Browser:    http://%s:<published-port>\n  Docker:     docker compose up --build\n  Runtimes:   mise use <tool>@<version>\n  Python:     uv sync / uv run ...\n' \
+  "$workspace" "$browser_host" >/etc/motd
 if [ "$github_mode" = local ]; then
   cat >>/etc/motd <<'MOTD'
   GitHub:     use git inside the workspace. GitHub API calls are not supported
@@ -361,7 +405,7 @@ keychain_read_token() {
 }
 
 create_workspace() {
-  local box="$1" bind_ip="$2" browser_host="$3" cpus="$4" max_cpus="$5" memory="$6" max_memory="$7" workspace_size="$8" runtime_size="$9"
+  local box="$1" browser_host="$2" cpus="$3" max_cpus="$4" memory="$5" max_memory="$6" workspace_size="$7" runtime_size="$8"
   local effective_cpus effective_max token="" run_args=()
   effective_cpus="$(cap_cpu "$cpus")"; effective_max="$(cap_cpu "$max_cpus")"
   (( effective_cpus > effective_max )) && effective_cpus="$effective_max"
@@ -410,24 +454,32 @@ create_workspace() {
   fi
 }
 
-create_workspace dev "$MSW_DEV_IP" "$MSW_DEV_HOST" "$MSW_DEV_CPUS" "$MSW_DEV_MAX_CPUS" "$MSW_DEV_MEMORY" "$MSW_DEV_MAX_MEMORY" "$MSW_DEV_WORKSPACE_SIZE" "$MSW_DEV_RUNTIME_SIZE"
-create_workspace playgrounds "$MSW_PLAYGROUNDS_IP" "$MSW_PLAYGROUNDS_HOST" "$MSW_PLAYGROUNDS_CPUS" "$MSW_PLAYGROUNDS_MAX_CPUS" "$MSW_PLAYGROUNDS_MEMORY" "$MSW_PLAYGROUNDS_MAX_MEMORY" "$MSW_PLAYGROUNDS_WORKSPACE_SIZE" "$MSW_PLAYGROUNDS_RUNTIME_SIZE"
-create_workspace personal "$MSW_PERSONAL_IP" "$MSW_PERSONAL_HOST" "$MSW_PERSONAL_CPUS" "$MSW_PERSONAL_MAX_CPUS" "$MSW_PERSONAL_MEMORY" "$MSW_PERSONAL_MAX_MEMORY" "$MSW_PERSONAL_WORKSPACE_SIZE" "$MSW_PERSONAL_RUNTIME_SIZE"
+if [[ "$SKIP_WORKSPACES" != 1 ]]; then
+  for box in "${WORKSPACES[@]}"; do
+    create_workspace \
+      "$box" "$(workspace_host "$box")" \
+      "$(workspace_config_value "$box" cpu)" "$(workspace_config_value "$box" cpuCeiling)" \
+      "$(workspace_config_value "$box" memoryGiB)G" "$(workspace_config_value "$box" memoryCeilingGiB)G" \
+      "$(workspace_config_value "$box" workspaceStorageGiB)G" "$(workspace_config_value "$box" runtimeStorageGiB)G"
+  done
+fi
 
-if [[ "$TEST_MODE" != 1 ]]; then
+if [[ "$TEST_MODE" != 1 && "$SKIP_WORKSPACES" != 1 ]]; then
   log "Starting the host-managed published-port forwarders"
-  for box in dev playgrounds personal; do
+  for box in "${WORKSPACES[@]}"; do
     "$HOME/.local/bin/msw" __port-forwarder-start "$box" || warn "could not start the port forwarder for $box"
   done
   log "Verifying the host-managed published-port forwarders"
-  for box in dev playgrounds personal; do
+  for box in "${WORKSPACES[@]}"; do
     verify_launchd_job_alive "org.microsandbox.MSWMonitor.port-forwarder.$box" \
       || fatal "the published-port forwarder for $box did not stay loaded and running; inspect $HOME/.local/state/msw/port-forwarder-$box.log"
   done
 fi
 
-log "Running the complete local VM, Docker, SSH, internet, and browser-port test"
-"$HOME/.local/bin/msw" check --deep
+if [[ "$SKIP_WORKSPACES" != 1 ]]; then
+  log "Running the complete local VM, Docker, SSH, internet, and browser-port test"
+  "$HOME/.local/bin/msw" check --deep
+fi
 
 cat <<'DONE'
 

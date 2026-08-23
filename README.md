@@ -1,6 +1,6 @@
 # MicroSandbox Workspaces (`msw`) 3.1.0
 
-A ready-to-run development setup for an Apple Silicon Mac with three isolated, persistent Linux microVM workspaces:
+A ready-to-run development setup for an Apple Silicon Mac with configurable, isolated, persistent Linux microVM workspaces. A fresh setup starts with these defaults:
 
 | Workspace | Purpose | Normal live limit | Resize ceiling | Browser name |
 |---|---|---:|---:|---|
@@ -19,7 +19,7 @@ cd microsandbox-workspaces
 exec zsh -l
 ```
 
-`setup.sh` installs the host tools, builds the common development image, creates all three workspaces, publishes the configured localhost ports, configures SSH/Zed integration, and finishes with a live deep check.
+`setup.sh` installs the host tools, builds the common development image, creates every workspace in the validated schema-v1 `~/.config/msw/workspaces.json`, publishes the configured localhost ports, configures SSH/Zed integration, and finishes with a live deep check. MSW Monitor supplies that JSON through `msw app bootstrap --resume --workspace-config-fd FD --format json`; names and numeric limits are decoded as data rather than shell syntax.
 
 Then set your commit identity:
 
@@ -73,7 +73,7 @@ msw push dev clients/acme/backend
 msw backup
 ```
 
-A service must listen on `0.0.0.0` inside the VM or container. The common development ports are already published to each workspace's dedicated loopback IP, so all three can use port 3000 simultaneously.
+A service must listen on `0.0.0.0` inside the VM or container. The common development ports are already published to each workspace's dedicated loopback IP, so every configured workspace can use port 3000 simultaneously.
 
 ## Documentation
 
@@ -91,6 +91,6 @@ msw docs cheatsheet
 msw docs tests
 ```
 
-Every process and agent inside one workspace can access everything in that workspace. The three workspaces are separate from one another and no Mac folder, Mac Docker socket, or Mac SSH agent is mounted into them. GitHub access is owner/repository scoped: the proxy allows a workspace to reach only the repositories ticked for it (read-only by default), the host credential stays in macOS Keychain and is used only by the proxy and the explicit `msw push` path, and no GitHub credential exists inside any workspace.
+Every process and agent inside one workspace can access everything in that workspace. Configured workspaces are separate from one another and no Mac folder, Mac Docker socket, or Mac SSH agent is mounted into them. GitHub access is owner/repository scoped: the proxy allows a workspace to reach only the repositories ticked for it (read-only by default), the host credential stays in macOS Keychain and is used only by the proxy and the explicit `msw push` path, and no GitHub credential exists inside any workspace.
 
 Full public internet access means an untrusted agent can still transmit files it can read to an unrelated internet service. This setup prevents direct access to your Mac and gates GitHub pushes to the repositories each workspace is allowed to write; it is not a data-loss-prevention system.

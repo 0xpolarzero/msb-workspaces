@@ -6,8 +6,9 @@ private let serviceName = "org.microsandbox.MSWMonitor.host-agent"
 private let appIdentifier = "org.microsandbox.MSWMonitor"
 private let managedStart = "# BEGIN MSW MONITOR MANAGED HOSTS"
 private let managedEnd = "# END MSW MONITOR MANAGED HOSTS"
+private let legacyManagedStart = "# BEGIN MSW WORKSPACES"
+private let legacyManagedEnd = "# END MSW WORKSPACES"
 private let hostsURL = URL(fileURLWithPath: "/etc/hosts")
-private let fixedRecords = MSWWorkspaceNetwork.records
 
 struct MSWHostRecordSnapshot: Codable, Sendable {
     let fixedAliases: [String]
@@ -16,10 +17,10 @@ struct MSWHostRecordSnapshot: Codable, Sendable {
 }
 
 @objc protocol MSWHostAgentProtocol {
-    func inspect(_ reply: @escaping (Data?, String?) -> Void)
-    func ensureFixedLoopbackAliases(_ reply: @escaping (Data?, String?) -> Void)
-    func installFixedHostRecords(_ reply: @escaping (Data?, String?) -> Void)
-    func uninstall(reply: @escaping (Data?, String?) -> Void)
+    func inspect(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
+    func ensureFixedLoopbackAliases(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
+    func installFixedHostRecords(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
+    func uninstall(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
 }
 
 private enum HostAgentError: LocalizedError {
@@ -40,28 +41,38 @@ private enum HostAgentError: LocalizedError {
 
 private final class LoopbackStore {
     private let executable = URL(fileURLWithPath: "/sbin/ifconfig")
+    private let managedAddresses = Set((10...73).map { "127.0.0.\($0)" })
 
-    func installedAddresses() throws -> [String] {
+    private func currentAddresses() throws -> Set<String> {
         let output = try run(["lo0"], captureOutput: true)
-        let installed = Set(output.split(separator: "\n").compactMap { line -> String? in
+        return Set(output.split(separator: "\n").compactMap { line -> String? in
             let fields = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
             guard fields.count >= 2, fields[0] == "inet" else { return nil }
             return String(fields[1])
         })
-        return fixedRecords.map(\.address).filter(installed.contains).sorted()
     }
 
-    func ensureFixedAliases() throws {
-        var installed = Set(try installedAddresses())
-        for address in fixedRecords.map(\.address) where !installed.contains(address) {
+    func installedAddresses(records: [MSWWorkspaceNetworkRecord]) throws -> [String] {
+        let installed = try currentAddresses()
+        return records.map(\.address).filter(installed.contains).sorted()
+    }
+
+    func ensureFixedAliases(records: [MSWWorkspaceNetworkRecord]) throws {
+        let desired = Set(records.map(\.address))
+        var installed = try currentAddresses()
+        for address in installed.intersection(managedAddresses).subtracting(desired).sorted() {
+            _ = try run(["lo0", "-alias", address], captureOutput: false)
+            installed.remove(address)
+        }
+        for address in desired.subtracting(installed).sorted() {
             _ = try run(["lo0", "alias", address, "up"], captureOutput: false)
             installed.insert(address)
         }
     }
 
-    func removeFixedAliases() throws {
-        let installed = Set(try installedAddresses())
-        for address in fixedRecords.map(\.address) where installed.contains(address) {
+    func removeManagedAliases() throws {
+        let installed = try currentAddresses().intersection(managedAddresses)
+        for address in installed.sorted() {
             _ = try run(["lo0", "-alias", address], captureOutput: false)
         }
     }
@@ -94,20 +105,23 @@ private final class LoopbackStore {
 }
 
 private final class HostRecordStore {
-    func inspect() throws -> Bool {
+    func inspect(records: [MSWWorkspaceNetworkRecord]) throws -> Bool {
         let lines = try readValidatedLines()
-        guard let range = try managedRange(in: lines) else { return false }
-        let expected = fixedRecords.map { "\($0.address)\t\($0.hostname)" }
+        guard try managedRange(in: lines, startMarker: legacyManagedStart, endMarker: legacyManagedEnd) == nil,
+              let range = try managedRange(in: lines, startMarker: managedStart, endMarker: managedEnd) else {
+            return false
+        }
+        let expected = records.map { "\($0.address)\t\($0.hostname)" }
         return Array(lines[(range.lowerBound + 1)..<range.upperBound]) == expected
     }
 
-    func install() throws {
+    func install(records: [MSWWorkspaceNetworkRecord]) throws {
         var lines = try readValidatedLines()
         lines = try removingManagedBlock(from: lines)
         while lines.last == "" { lines.removeLast() }
         if !lines.isEmpty { lines.append("") }
         lines.append(managedStart)
-        lines.append(contentsOf: fixedRecords.map { "\($0.address)\t\($0.hostname)" })
+        lines.append(contentsOf: records.map { "\($0.address)\t\($0.hostname)" })
         lines.append(managedEnd)
         try atomicWrite(lines.joined(separator: "\n") + "\n")
     }
@@ -140,9 +154,13 @@ private final class HostRecordStore {
         }
     }
 
-    private func managedRange(in lines: [String]) throws -> ClosedRange<Int>? {
-        let starts = lines.indices.filter { lines[$0] == managedStart }
-        let ends = lines.indices.filter { lines[$0] == managedEnd }
+    private func managedRange(
+        in lines: [String],
+        startMarker: String,
+        endMarker: String
+    ) throws -> ClosedRange<Int>? {
+        let starts = lines.indices.filter { lines[$0] == startMarker }
+        let ends = lines.indices.filter { lines[$0] == endMarker }
         guard starts.count == ends.count else { throw HostAgentError.invalidInput }
         guard starts.count <= 1 else { throw HostAgentError.invalidInput }
         guard let start = starts.first, let end = ends.first else { return nil }
@@ -151,9 +169,16 @@ private final class HostRecordStore {
     }
 
     private func removingManagedBlock(from lines: [String]) throws -> [String] {
-        guard let range = try managedRange(in: lines) else { return lines }
         var result = lines
-        result.removeSubrange(range)
+        for markers in [(managedStart, managedEnd), (legacyManagedStart, legacyManagedEnd)] {
+            if let range = try managedRange(
+                in: result,
+                startMarker: markers.0,
+                endMarker: markers.1
+            ) {
+                result.removeSubrange(range)
+            }
+        }
         return result
     }
 
@@ -205,45 +230,60 @@ private final class HostAgentOperations: NSObject, MSWHostAgentProtocol {
     private let loopback = LoopbackStore()
     private let lock = NSLock()
 
-    func inspect(_ reply: @escaping (Data?, String?) -> Void) {
-        respond(reply) { try snapshot() }
+    func inspect(_ configuration: Data, reply: @escaping (Data?, String?) -> Void) {
+        respond(configuration, reply: reply) { records in try snapshot(records: records) }
     }
 
-    func ensureFixedLoopbackAliases(_ reply: @escaping (Data?, String?) -> Void) {
-        respond(reply) {
-            try loopback.ensureFixedAliases()
-            return try snapshot()
+    func ensureFixedLoopbackAliases(_ configuration: Data, reply: @escaping (Data?, String?) -> Void) {
+        respond(configuration, reply: reply) { records in
+            try loopback.ensureFixedAliases(records: records)
+            return try snapshot(records: records)
         }
     }
 
-    func installFixedHostRecords(_ reply: @escaping (Data?, String?) -> Void) {
-        respond(reply) {
-            try hosts.install()
-            return try snapshot()
+    func installFixedHostRecords(_ configuration: Data, reply: @escaping (Data?, String?) -> Void) {
+        respond(configuration, reply: reply) { records in
+            try hosts.install(records: records)
+            return try snapshot(records: records)
         }
     }
 
-    func uninstall(reply: @escaping (Data?, String?) -> Void) {
-        respond(reply) {
+    func uninstall(_ configuration: Data, reply: @escaping (Data?, String?) -> Void) {
+        respond(configuration, reply: reply) { records in
             try hosts.uninstall()
-            try loopback.removeFixedAliases()
-            return try snapshot()
+            try loopback.removeManagedAliases()
+            return try snapshot(records: records)
         }
     }
 
-    private func snapshot() throws -> MSWHostRecordSnapshot {
+    private func snapshot(records: [MSWWorkspaceNetworkRecord]) throws -> MSWHostRecordSnapshot {
         MSWHostRecordSnapshot(
-            fixedAliases: try loopback.installedAddresses(),
-            hostsBlockInstalled: try hosts.inspect(),
+            fixedAliases: try loopback.installedAddresses(records: records),
+            hostsBlockInstalled: try hosts.inspect(records: records),
             launchDaemonRegistered: true
         )
     }
 
-    private func respond(_ reply: @escaping (Data?, String?) -> Void, operation: () throws -> MSWHostRecordSnapshot) {
+    private func respond(
+        _ configuration: Data,
+        reply: @escaping (Data?, String?) -> Void,
+        operation: ([MSWWorkspaceNetworkRecord]) throws -> MSWHostRecordSnapshot
+    ) {
         lock.lock()
         defer { lock.unlock() }
         do {
-            reply(try JSONEncoder().encode(operation()), nil)
+            guard configuration.count <= 16 * 1024,
+                  let records = try? JSONDecoder().decode([MSWWorkspaceNetworkRecord].self, from: configuration),
+                  !records.isEmpty,
+                  records.count <= 64,
+                  records.enumerated().allSatisfy({ index, record in
+                      record.address == "127.0.0.\(10 + index)" &&
+                      record.hostname.range(of: #"^[a-z][a-z0-9-]{0,31}\.msw\.test$"#, options: .regularExpression) != nil
+                  }),
+                  Set(records.map(\.hostname)).count == records.count else {
+                throw HostAgentError.invalidInput
+            }
+            reply(try JSONEncoder().encode(operation(records)), nil)
         } catch {
             reply(nil, error.localizedDescription)
         }

@@ -173,7 +173,11 @@ final class StatusBarController {
                 openSettings: { [weak self] section in
                     self?.showSettings(section: section, dismissingSetup: false)
                 },
-                closeSetup: { [weak self] in self?.setupWindowController?.close() },
+                closeSetup: { [weak self] configurations in
+                    self?.setupWindowController?.close()
+                    self?.model.reloadWorkspaceConfiguration(configurations)
+                    self?.model.refresh()
+                },
                 uiTestMode: arguments.contains("--ui-test-setup") ||
                     arguments.contains("--ui-test-setup-review") ||
                     uiTestGitHubScenario != nil,

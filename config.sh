@@ -10,16 +10,13 @@ MSW_BASE_BUILDER="msw-base-builder"
 MSW_BASE_SNAPSHOT="msw-base-v1"
 MSW_ROOT_DISK="48G"
 
-# Friendly browser names. Each VM has a distinct loopback IP, so identical ports can
-# be used concurrently by all workspaces while remaining local to this Mac.
-MSW_DEV_IP="127.0.0.10"
-MSW_DEV_HOST="dev.msw.test"
-MSW_PLAYGROUNDS_IP="127.0.0.11"
-MSW_PLAYGROUNDS_HOST="playgrounds.msw.test"
-MSW_PERSONAL_IP="127.0.0.12"
-MSW_PERSONAL_HOST="personal.msw.test"
+# Typed workspace configuration. MSW Monitor and setup.sh persist the validated
+# JSON document at this path. setup.sh creates the three legacy defaults below
+# only when no typed document exists yet.
+MSW_WORKSPACES_FILE="${MSW_WORKSPACES_FILE:-$HOME/.config/msw/workspaces.json}"
 
-# Workspace CPU defaults plus each workspace's live memory limit and resize ceiling.
+# Legacy seed values used only when setup.sh creates workspaces.json for an
+# installation that does not have the typed document yet.
 MSW_DEV_CPUS="8"
 MSW_DEV_MAX_CPUS="12"
 MSW_DEV_MEMORY="32G"

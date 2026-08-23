@@ -268,6 +268,13 @@ class TestEnv:
         return self.run(self.msw_bin, *args, check=check, input_text=input_text,
                         extra_env=extra_env, timeout=timeout)
 
+    def app_bootstrap(self, *, check: bool = True, timeout: int = 90) -> subprocess.CompletedProcess[str]:
+        workspace_input = (self.home / ".config/msw/workspaces.json").read_text()
+        return self.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=workspace_input, check=check, timeout=timeout,
+        )
+
     def setup(self, *args: str, check: bool = True,
               extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return self.run(PACKAGE / "setup.sh", *args, check=check, extra_env=extra_env, timeout=90)
@@ -716,9 +723,9 @@ class InstallerAndDailyTests(MSWTestCase):
 
     def test_reset_config_and_rebuild_base(self) -> None:
         config = self.env.home / ".config/msw/config.sh"
-        config.write_text(config.read_text().replace("dev.msw.test", "broken.invalid"))
+        config.write_text(config.read_text().replace('MSW_ROOT_DISK="48G"', 'MSW_ROOT_DISK="broken"'))
         self.env.setup("--reset-config", "--rebuild-base")
-        self.assertIn("dev.msw.test", config.read_text())
+        self.assertIn('MSW_ROOT_DISK="48G"', config.read_text())
         state = self.env.state()
         self.assertTrue(state["snapshots"]["msw-base-v1"]["integrity"])
 
@@ -765,7 +772,7 @@ class InstallerAndDailyTests(MSWTestCase):
             box: self.env.state()["sandboxes"][box]["running"]
             for box in ("dev", "playgrounds", "personal")
         }
-        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", timeout=90)
+        proc = self.env.app_bootstrap()
         envelope = json.loads(proc.stdout)
         self.assertTrue(envelope["ok"])
         self.assertEqual(envelope["result"]["phase"], "complete")
@@ -777,11 +784,122 @@ class InstallerAndDailyTests(MSWTestCase):
         }
         self.assertEqual(after, before)
 
+    def test_app_bootstrap_applies_typed_workspace_configuration_end_to_end(self) -> None:
+        marker = self.env.root / "shell-interpolation-must-not-run"
+        invalid = {
+            "schemaVersion": 1,
+            "workspaces": [{
+                "name": f"lab$(touch {marker})", "cpu": 4, "cpuCeiling": 8,
+                "memoryGiB": 16, "memoryCeilingGiB": 32,
+                "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+            }],
+        }
+        rejected = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=json.dumps(invalid), check=False, timeout=90,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "MSW_WORKSPACE_CONFIGURATION_FAILED")
+        self.assertFalse(marker.exists())
+
+        previous_configuration = json.loads(
+            (self.env.home / ".config/msw/workspaces.json").read_text()
+        )
+        unknown_field = json.loads(json.dumps(previous_configuration))
+        unknown_field["workspaces"][0]["host"] = f"dev.msw.test; touch {marker}"
+        rejected = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=json.dumps(unknown_field), check=False, timeout=90,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "MSW_WORKSPACE_CONFIGURATION_FAILED")
+        self.assertEqual(
+            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            previous_configuration,
+        )
+        self.assertFalse(marker.exists())
+
+        policy_file = self.env.home / "Library/Application Support/MSW Monitor/github-policy.json"
+        policy_file.parent.mkdir(parents=True, exist_ok=True)
+        policy_file.write_text(json.dumps({
+            "schemaVersion": 1,
+            "workspaces": {
+                "dev": {"capability": "a" * 48, "repos": []},
+                "playgrounds": {"capability": "b" * 48, "repos": []},
+                "personal": {"capability": "c" * 48, "repos": []},
+            },
+        }))
+        stale_forwarder = (
+            self.env.home / "Library/LaunchAgents/"
+            "org.microsandbox.MSWMonitor.port-forwarder.playgrounds.plist"
+        )
+        stale_forwarder.parent.mkdir(parents=True, exist_ok=True)
+        stale_forwarder.write_text("stale fixture")
+        initial_state = self.env.state()
+        personal_workspace = Path(initial_state["volumes"]["msw-personal-workspace"]["path"])
+        personal_runtime = Path(initial_state["volumes"]["msw-personal-runtime"]["path"])
+        (personal_workspace / "repository-data").write_text("preserved")
+        (personal_runtime / "runtime-data").write_text("preserved")
+
+        desired = {
+            "schemaVersion": 1,
+            "workspaces": [
+                {"name": "development", "cpu": 12, "cpuCeiling": 12,
+                 "memoryGiB": 48, "memoryCeilingGiB": 48,
+                 "workspaceStorageGiB": 120, "runtimeStorageGiB": 100},
+                {"name": "personal", "cpu": 4, "cpuCeiling": 8,
+                 "memoryGiB": 16, "memoryCeilingGiB": 32,
+                 "workspaceStorageGiB": 80, "runtimeStorageGiB": 60},
+                {"name": "lab", "cpu": 6, "cpuCeiling": 12,
+                 "memoryGiB": 32, "memoryCeilingGiB": 48,
+                 "workspaceStorageGiB": 100, "runtimeStorageGiB": 80},
+            ],
+        }
+        proc = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=json.dumps(desired), timeout=90,
+        )
+        self.assertTrue(json.loads(proc.stdout)["ok"])
+        state = self.env.state()
+        self.assertEqual(set(state["sandboxes"]), {"development", "personal", "lab"})
+        self.assertNotIn("playgrounds", state["sandboxes"])
+        personal_args = state["sandboxes"]["personal"]["args"]
+        self.assertEqual(personal_args[personal_args.index("--cpus") + 1], "4")
+        self.assertEqual(personal_args[personal_args.index("--max-cpus") + 1], "8")
+        self.assertEqual(personal_args[personal_args.index("--memory") + 1], "16G")
+        self.assertEqual(personal_args[personal_args.index("--max-memory") + 1], "32G")
+        self.assertIn("msw-personal-workspace:/workspace:kind=disk,size=80G", personal_args)
+        self.assertIn("msw-personal-runtime:/var/lib/msw-runtime:kind=disk,size=60G", personal_args)
+        self.assertEqual(state["volumes"]["msw-personal-workspace"]["size"], "80G")
+        self.assertEqual(state["volumes"]["msw-personal-runtime"]["size"], "60G")
+        self.assertEqual((personal_workspace / "repository-data").read_text(), "preserved")
+        self.assertEqual((personal_runtime / "runtime-data").read_text(), "preserved")
+        self.assertNotIn("msw-personal-workspace-resize", state["volumes"])
+        self.assertNotIn("msw-personal-runtime-resize", state["volumes"])
+        persisted = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        self.assertEqual(persisted, desired)
+        self.assertEqual(set(json.loads(policy_file.read_text())["workspaces"]), {"personal"})
+        self.assertFalse(stale_forwarder.exists())
+        self.assertIn("Host *.msb", (self.env.home / ".ssh/config.d/msw.conf").read_text())
+        test_hosts = (self.env.home / ".config/msw/test-host/hosts").read_text()
+        self.assertIn("127.0.0.10 development.msw.test", test_hosts)
+        self.assertIn("127.0.0.11 personal.msw.test", test_hosts)
+        self.assertIn("127.0.0.12 lab.msw.test", test_hosts)
+        self.assertNotIn("playgrounds.msw.test", test_hosts)
+
+        observed = json.loads(self.env.msw("app", "state", "--format", "json").stdout)
+        self.assertEqual(
+            [workspace["id"] for workspace in observed["result"]["workspaces"]],
+            ["development", "personal", "lab"],
+        )
+        relaunched = self.env.msw("app", "handshake", "--format", "json")
+        self.assertEqual(json.loads(relaunched.stdout)["result"]["capabilities"]["workspaceCount"], 3)
+
     def test_app_bootstrap_typed_reconnect_error_when_github_credential_missing(self) -> None:
         meta = self.env.home / ".config/msw/github/dev.conf"
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", check=False, timeout=90)
+        proc = self.env.app_bootstrap(check=False)
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
@@ -793,14 +911,14 @@ class InstallerAndDailyTests(MSWTestCase):
         meta.unlink()
         self.env.msw("start", "dev")
         meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", timeout=90)
+        proc = self.env.app_bootstrap()
         self.assertTrue(json.loads(proc.stdout)["ok"])
         meta.unlink()
         # Other verification failures carry the sanitized check output so the
         # user can see why verification failed instead of a generic message.
         quarantine = self.env.home / ".config/msw/github/dev.quarantine"
         quarantine.write_text("failed setup transaction\n")
-        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", check=False, timeout=90)
+        proc = self.env.app_bootstrap(check=False)
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
@@ -820,7 +938,7 @@ class InstallerAndDailyTests(MSWTestCase):
         # The reconnect scenario is a configured workspace whose read
         # credential is unavailable (the orphan host-write record remains).
         read_record.unlink()
-        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", check=False, timeout=90)
+        proc = self.env.app_bootstrap(check=False)
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertEqual(envelope["error"]["code"], "MSW_GITHUB_RECONNECT_REQUIRED")
@@ -864,7 +982,7 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertFalse(write_record.exists(), "the legacy host-write record must be removed")
         self.assertFalse(quarantine.exists(), "a successful unbind must clear the quarantine")
         self.env.msw("start", "dev")
-        proc = self.env.msw("app", "bootstrap", "--resume", "--format", "json", timeout=90)
+        proc = self.env.app_bootstrap()
         envelope = json.loads(proc.stdout)
         self.assertTrue(envelope["ok"], envelope.get("error"))
         self.assertEqual(envelope["result"]["phase"], "complete")
@@ -1115,8 +1233,15 @@ class PortForwarderHelperTests(unittest.TestCase):
         (self.home / ".config" / "msw").mkdir(parents=True)
         (self.home / ".config" / "msw" / "config.sh").write_text(
             'MSW_PUBLISHED_PORTS="3000,5173,8080"\n'
-            'MSW_DEV_IP="127.0.0.10"\n'
         )
+        (self.home / ".config" / "msw" / "workspaces.json").write_text(json.dumps({
+            "schemaVersion": 1,
+            "workspaces": [{
+                "name": "dev", "cpu": 4, "cpuCeiling": 8,
+                "memoryGiB": 16, "memoryCeilingGiB": 32,
+                "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+            }],
+        }))
         self.state_file = self.home / ".config" / "msw" / "workspace-state" / "dev.json"
         self.ssh_log = self.root / "ssh.log"
         self.ssh_pidfile = self.root / "ssh.pid"
@@ -4000,6 +4125,51 @@ class GitHubProxyContractTests(MSWTestCase):
         records = fake.requests()
         write_records = [r for r in records if r["query"] == "service=git-receive-pack"]
         self.assertEqual(len(write_records), 1, records)  # only the dev read-write one
+
+    def test_proxy_policy_uses_persisted_non_default_workspace_list(self) -> None:
+        fake = self._start_fake_github()
+        self.env.init_remote()
+        workspace_file = self.env.home / ".config/msw/workspaces.json"
+        workspace_file.write_text(json.dumps({
+            "schemaVersion": 1,
+            "workspaces": [
+                {"name": "development", "cpu": 12, "cpuCeiling": 12,
+                 "memoryGiB": 48, "memoryCeilingGiB": 48,
+                 "workspaceStorageGiB": 120, "runtimeStorageGiB": 100},
+                {"name": "personal", "cpu": 4, "cpuCeiling": 8,
+                 "memoryGiB": 16, "memoryCeilingGiB": 32,
+                 "workspaceStorageGiB": 80, "runtimeStorageGiB": 60},
+                {"name": "lab", "cpu": 6, "cpuCeiling": 12,
+                 "memoryGiB": 32, "memoryCeilingGiB": 48,
+                 "workspaceStorageGiB": 100, "runtimeStorageGiB": 80},
+            ],
+        }))
+        lab_capability = "d" * 48
+        self.policy_file.write_text(json.dumps({
+            "schemaVersion": 1,
+            "workspaces": {
+                "lab": {"capability": lab_capability,
+                        "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            },
+        }))
+        target = "/github.com/acme/demo.git/info/refs?service=git-upload-pack"
+        status, response = self._proxy_request(
+            self._req_bytes("GET", target, capability=lab_capability)
+        )
+        self.assertEqual(status, 200, response[:200])
+        self.assertEqual(len(fake.requests()), 1)
+
+        self.policy_file.write_text(json.dumps({
+            "schemaVersion": 1,
+            "workspaces": {
+                "dev": {"capability": DEV_CAP,
+                        "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            },
+        }))
+        status, response = self._proxy_request(self._req_bytes("GET", target))
+        self.assertEqual(status, 200, response[:200])
+        self.assertIn(b"ERR ", response)
+        self.assertEqual(len(fake.requests()), 1, "removed workspace policy must fail closed")
 
     def test_policy_strict_shapes_deny_all_upstream_untouched(self) -> None:
         """The proxy's policy validator mirrors the host's strict rules.

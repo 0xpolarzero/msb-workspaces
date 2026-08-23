@@ -422,7 +422,7 @@ msw app ports [--workspace WORKSPACE] --format json
 msw app github-state [--workspace WORKSPACE] --format json
 msw app plan ACTION ... --format json
 msw app apply PLAN_ID --confirmation-fd FD --format json
-msw app bootstrap --resume --events-fd FD --format json
+msw app bootstrap --resume --workspace-config-fd FD [--events-fd FD] --format json
 ```
 
 Exact names may be consolidated during implementation, but the properties below are mandatory.

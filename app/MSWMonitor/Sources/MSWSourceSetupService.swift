@@ -54,9 +54,14 @@ struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
             throw Failure.unavailable
         }
         let setupURL = root.appending(path: "setup.sh")
+        // Runtime installation is deliberately dependency-only. Keeping the
+        // previously persisted workspace document untouched lets the later
+        // typed `msw app bootstrap` reconciliation compare old and desired
+        // state, so removals, renames, and resource changes cannot disappear
+        // merely because setup.sh installed the CLI first.
         _ = try await run(
             executable: URL(fileURLWithPath: "/bin/bash"),
-            arguments: [setupURL.path],
+            arguments: [setupURL.path, "--skip-workspaces"],
             timeout: .seconds(30 * 60),
             captureLimit: 4 * 1024 * 1024
         )

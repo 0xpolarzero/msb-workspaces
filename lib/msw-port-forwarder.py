@@ -39,6 +39,10 @@ from typing import List, Optional, Set
 
 DEFAULT_PUBLISHED_PORTS = "3000,5173,8080"
 DEFAULT_INTERVAL = 5
+WORKSPACE_KEYS = {
+    "name", "cpu", "cpuCeiling", "memoryGiB", "memoryCeilingGiB",
+    "workspaceStorageGiB", "runtimeStorageGiB",
+}
 
 
 def log(msg: str) -> None:
@@ -90,9 +94,62 @@ def expand_published(config: dict) -> List[int]:
     return ports
 
 
+def load_workspace_names(config: dict) -> Optional[List[str]]:
+    workspace_file = Path(
+        os.environ.get("MSW_WORKSPACES_FILE")
+        or config.get("MSW_WORKSPACES_FILE")
+        or os.path.expanduser("~/.config/msw/workspaces.json")
+    )
+    try:
+        document = json.loads(workspace_file.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or set(document) != {"schemaVersion", "workspaces"}:
+        return None
+    workspaces = document.get("workspaces")
+    schema_version = document.get("schemaVersion")
+    if isinstance(schema_version, bool) or schema_version != 1:
+        return None
+    if not isinstance(workspaces, list) or not 1 <= len(workspaces) <= 64:
+        return None
+    names: List[str] = []
+    for entry in workspaces:
+        if not isinstance(entry, dict) or set(entry) != WORKSPACE_KEYS:
+            return None
+        name = entry.get("name")
+        cpu = entry.get("cpu")
+        cpu_ceiling = entry.get("cpuCeiling")
+        memory = entry.get("memoryGiB")
+        memory_ceiling = entry.get("memoryCeilingGiB")
+        numeric_values = (cpu, cpu_ceiling, memory, memory_ceiling,
+                          entry.get("workspaceStorageGiB"), entry.get("runtimeStorageGiB"))
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not value.is_integer())
+            for value in numeric_values
+        ):
+            return None
+        if (not isinstance(name, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,31}", name) is None
+                or cpu not in (4, 6, 8, 12) or cpu_ceiling not in (4, 6, 8, 12)
+                or cpu > cpu_ceiling or memory not in (16, 32, 48)
+                or memory_ceiling not in (16, 32, 48) or memory > memory_ceiling
+                or entry["workspaceStorageGiB"] not in (60, 80, 100, 120)
+                or entry["runtimeStorageGiB"] not in (60, 80, 100, 120)):
+            return None
+        names.append(name)
+    if len(set(names)) != len(names):
+        return None
+    return names
+
+
 def workspace_ip(config: dict, box: str) -> str:
-    key = f"MSW_{box.upper()}_IP"
-    return config.get(key) or "127.0.0.10"
+    names = load_workspace_names(config)
+    if names is not None and box in names:
+        return f"127.0.0.{10 + names.index(box)}"
+    raise ValueError(f"workspace is not configured: {box}")
 
 
 def state_file(box: str) -> Path:
@@ -372,11 +429,15 @@ def reconcile_once(box: str, fwd: Forwarder, desired: List[str], desired_ports: 
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in ("dev", "playgrounds", "personal"):
-        print(f"usage: {sys.argv[0]} dev|playgrounds|personal", file=sys.stderr)
+    if len(sys.argv) != 2 or not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", sys.argv[1]):
+        print(f"usage: {sys.argv[0]} WORKSPACE", file=sys.stderr)
         return 64
     box = sys.argv[1]
     config = load_config()
+    configured = load_workspace_names(config)
+    if configured is None or box not in configured:
+        print(f"unknown configured workspace: {box}", file=sys.stderr)
+        return 64
     bind_ip = workspace_ip(config, box)
     desired_ports = expand_published(config)
     desired = [f"{bind_ip}:{p}:{p}" for p in desired_ports]

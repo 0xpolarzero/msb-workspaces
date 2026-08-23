@@ -1,12 +1,12 @@
 # MSW setup guide
 
-This guide installs three persistent MicroSandbox development workspaces on an Apple Silicon Mac:
+This guide installs configurable persistent MicroSandbox development workspaces on an Apple Silicon Mac. The packaged defaults are:
 
 - `dev`
 - `playgrounds`
 - `personal`
 
-The packaged defaults allow up to 80 GB of live VM memory across the three workspaces, with resize ceilings up to 128 GB. Ensure the Mac has sufficient RAM. All commands below run in Ghostty unless stated otherwise.
+The packaged defaults allow up to 80 GB of live VM memory across the default workspaces, with resize ceilings up to 128 GB. Ensure the Mac has sufficient RAM. All commands below run in Ghostty unless stated otherwise.
 
 ## 1. Install
 
@@ -25,12 +25,12 @@ The installer may request your macOS administrator password to add three private
 2. Installs GNU tar, zstd, Git LFS, the GitHub CLI (`gh`), and MicroSandbox.
 3. Runs MicroSandbox diagnostics.
 4. Builds one reusable Ubuntu 24.04 ARM64 development snapshot.
-5. Creates `dev`, `playgrounds`, and `personal` from that snapshot.
+5. Creates every workspace in the validated schema-v1 workspace configuration (`dev`, `playgrounds`, and `personal` by default) from that snapshot.
 6. Attaches a separate persistent ext4 workspace volume and Docker-runtime volume to each VM.
 7. Configures Docker Engine, Compose, Buildx, Git, GitHub CLI, mise, Node LTS, pnpm, uv, Python, zsh, and common development tools.
 8. Enables local TLS interception so MicroSandbox can substitute host-held secrets only at their allow-listed HTTPS endpoints.
 9. Configures fixed local browser names and SSH aliases.
-10. Runs `msw check --deep` against all three VMs.
+10. Runs `msw check --deep` against every configured VM.
 
 When it finishes:
 
@@ -46,7 +46,7 @@ all live VM, Docker, SSH, internet, and published-port checks passed
 
 ## 2. Set your Git identity
 
-Apply one identity to all three workspaces:
+Apply one identity to every configured workspace:
 
 ```bash
 msw identity "Your Full Name" you@example.com
@@ -235,7 +235,7 @@ http://playgrounds.msw.test:3000
 http://personal.msw.test:3000
 ```
 
-The same port can be active in all three VMs because each workspace has its own loopback IP.
+The same port can be active in every configured VM because each workspace has its own loopback IP.
 
 Published ports are forwarded host-side: while a VM runs, the Mac keeps an SSH forward per free desired port. A port already in use on the Mac is skipped with a warning (`skippedPorts`/`portWarning` in `msw app state`) and never blocks, stops, or recreates the workspace.
 
