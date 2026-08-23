@@ -6390,6 +6390,90 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertTrue(data["applied"])
         self.assertEqual([w["capability"] for w in data["workspaces"] if w["workspace"] == "dev"][0], cap)
 
+    def test_policy_apply_full_object_touches_only_changed_non_empty_and_restores_lifecycle(self) -> None:
+        """The app sends all three keys, but that must not provision all
+        three. Empty changes are policy-only and a temporarily started VM is
+        restored to its prior stopped lifecycle before activation."""
+        self.empty_policy()
+        for box in ("dev", "playgrounds", "personal"):
+            self.env.msw("stop", box)
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            "playgrounds": {"repos": []},
+            "personal": {"repos": []},
+        }}
+        proc = self._apply(
+            desired,
+            extra_env={"MSW_FAKE_APPLY_PROVISION_FAIL": "playgrounds"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        state = self.env.state()
+        self.assertFalse(state["sandboxes"]["dev"]["running"])
+        self.assertFalse(state["sandboxes"]["playgrounds"]["running"])
+        self.assertFalse(state["sandboxes"]["personal"]["running"])
+
+        # Clearing dev is a semantic change but has no non-empty transport to
+        # provision. Injecting failure for dev therefore cannot affect it.
+        cleared = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": []},
+            "playgrounds": {"repos": []},
+            "personal": {"repos": []},
+        }}
+        proc = self._apply(cleared, extra_env={"MSW_FAKE_APPLY_PROVISION_FAIL": "dev"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_policy_apply_cancellation_restores_lifecycle_preserves_policy_and_releases_locks(self) -> None:
+        self.empty_policy()
+        self.env.msw("stop", "dev")
+        before = self.policy_path.read_bytes()
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            "playgrounds": {"repos": []},
+            "personal": {"repos": []},
+        }}
+        pause = self.env.root / "apply-provision-pause"
+        reached = self.env.root / "apply-provision-pause-reached"
+        pause.touch()
+        env = self.env.env.copy()
+        env["MSW_FAKE_APPLY_PROVISION_PAUSE_FILE"] = str(pause)
+        env["MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED"] = str(reached)
+        env["MSW_FAKE_TRANSPORT_PROBE"] = "403"
+        proc = subprocess.Popen(
+            [str(self.env.msw_bin), "app", "github-policy-apply", "--format", "json"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env, start_new_session=True)
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(desired))
+        proc.stdin.close()
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and not reached.exists():
+                time.sleep(0.05)
+            self.assertTrue(reached.exists(), "apply never reached the provisioning cancellation seam")
+            self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=90)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+            self.assertEqual(self.policy_path.read_bytes(), before)
+            journal = (self.github_meta_dir / "policy-journal.jsonl").read_text()
+            self.assertIn('"status":"cancelled"', journal)
+
+            # A follow-up apply can immediately acquire all three locks.
+            follow_up = self._apply({"schemaVersion": 1, "workspaces": {
+                "dev": {"repos": []}, "playgrounds": {"repos": []}, "personal": {"repos": []},
+            }})
+            self.assertEqual(follow_up.returncode, 0, follow_up.stdout + follow_up.stderr)
+        finally:
+            pause.unlink(missing_ok=True)
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=30)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
     def test_policy_apply_partial_failure_rolls_back_policy(self) -> None:
         before = "BEFORE_POLICY"
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6516,6 +6600,8 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             except subprocess.TimeoutExpired:
                 proxy_proc.kill()
                 proxy_proc.wait(timeout=5)
+            if proxy_proc.stdout is not None:
+                proxy_proc.stdout.close()
             try:
                 err.close()
             except OSError:
@@ -6576,6 +6662,10 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=30)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
 
     def test_policy_apply_invalid_request_typed_error(self) -> None:
         for bad in (

@@ -804,6 +804,9 @@ actor GitHubAuthorizationCoordinator {
         latestVerifications.sorted { $0.id < $1.id }
     }
 
+    /// Preserve Connect-mode's existing identity path. Local onboarding uses
+    /// `GitHubLocalProvider` so identity and policy reconciliation share one
+    /// mutation coordinator.
     func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> MSWIdentityResult {
         guard let mswClient else { throw GitHubAuthorizationError.serviceUnavailable }
         let response = try await mswClient.setIdentity(name: name, email: email, workspace: workspace)

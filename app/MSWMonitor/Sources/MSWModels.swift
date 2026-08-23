@@ -452,7 +452,7 @@ struct MSWGitHubAuthRepoCheck: Codable, Sendable {
 /// `msw app github-policy-apply` request: the FULL desired policy file
 /// carried on stdin. Missing workspace keys are treated by the CLI as
 /// "clear this workspace", so the app always sends all three workspaces.
-struct MSWGitHubPolicyApplyRequest: Codable, Sendable {
+struct MSWGitHubPolicyApplyRequest: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let workspaces: [String: GitHubPolicyWorkspace]
 }

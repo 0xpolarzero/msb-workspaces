@@ -280,7 +280,9 @@ struct SetupView: View {
     @State private var githubRefreshGeneration = 0
     @State private var isApplyingGitHub = false
     @State private var githubApplyTask: Task<Void, Never>?
+    @State private var githubProgressTask: Task<Void, Never>?
     @State private var githubApplyGeneration = 0
+    @State private var githubApplyProgress: GitHubApplyProgress?
     @State private var uiTestAuthorizationAttempts = 0
     @State private var authorizationIssue: AuthorizationIssue?
     @State private var verificationResults: [GitHubWorkspaceVerificationResult] = []
@@ -302,6 +304,7 @@ struct SetupView: View {
 
     @State private var identitySkipped = false
     @State private var isSavingIdentity = false
+    @State private var identitySaveTask: Task<Void, Never>?
     @State private var identityStatus = ""
     @State private var activeStep: SetupStep = .readiness
     @State private var githubContextLoaded = false
@@ -389,6 +392,7 @@ struct SetupView: View {
                 loadUITestState()
             } else {
                 await loadGitHubStartupContext()
+                await refreshLocalApplyProgress()
             }
         }
         .onDisappear {
@@ -470,7 +474,17 @@ struct SetupView: View {
         githubRefreshGeneration &+= 1
         githubRefreshTask?.cancel()
         githubRefreshTask = nil
+        githubApplyGeneration &+= 1
+        githubApplyTask?.cancel()
+        githubApplyTask = nil
+        githubProgressTask?.cancel()
+        githubProgressTask = nil
+        identitySaveTask?.cancel()
+        identitySaveTask = nil
         githubSkipTask?.cancel()
+        if accessMode == .local, let provider {
+            Task { await provider.cancelCurrentPolicyApply() }
+        }
     }
 
     private func handleSetupWindowWillClose(_ notification: Notification) {
@@ -594,6 +608,7 @@ struct SetupView: View {
         // stepper's Identity/Review selectors, and the review status — not just
         // the footer Continue button.
         !isSkippingGitHub && githubSkipIssue == nil &&
+            (accessMode != .local || githubSkipped || githubApplyProgress?.isTerminalSuccess == true) &&
             verificationResults.allSatisfy { $0.verified && $0.lifecycleRestored } &&
             existingMetadata.allSatisfy { $0.recoveryState == .ready && !$0.quarantined }
     }
@@ -1220,6 +1235,7 @@ struct SetupView: View {
             }
 
             githubStatusSlot
+            githubApplyProgressView
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github-boundary")
@@ -1245,6 +1261,38 @@ struct SetupView: View {
             .frame(maxWidth: .infinity, minHeight: 54, maxHeight: 54, alignment: .topLeading)
             .accessibilityHidden(githubStatus.isEmpty)
             .accessibilityIdentifier("setup.github.status")
+    }
+
+    @ViewBuilder
+    private var githubApplyProgressView: some View {
+        if accessMode == .local, let progress = githubApplyProgress {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 7) {
+                    if progress.isInFlight {
+                        ProgressView().controlSize(.small).accessibilityHidden(true)
+                    } else {
+                        Image(systemName: progress.isTerminalSuccess
+                            ? "checkmark.circle.fill"
+                            : "exclamationmark.triangle.fill")
+                            .foregroundStyle(progress.isTerminalSuccess ? .green : .orange)
+                            .accessibilityHidden(true)
+                    }
+                    Text(progress.summary)
+                }
+                if let failure = progress.failure {
+                    Text(failure.recovery).foregroundStyle(.secondary)
+                    if failure.retryable {
+                        Button("Retry GitHub reconciliation") { retryLocalPolicyApply() }
+                            .controlSize(.small)
+                            .accessibilityIdentifier("setup.github.apply.retry.button")
+                    }
+                }
+            }
+            .font(.caption)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("setup.github.apply.progress")
+            .accessibilityValue("Generation \(progress.generation), \(progress.phase.rawValue)")
+        }
     }
 
     private func localCatalogIssueTitle(_ kind: LocalCatalogIssueKind) -> String {
@@ -1473,6 +1521,7 @@ struct SetupView: View {
                 value: githubReviewSummary,
                 ready: githubDecisionMade && verificationAllowsCompletion
             )
+            githubApplyProgressView
             reviewStatusLine(
                 title: "Name for Git changes",
                 value: identityReviewSummary,
@@ -1591,7 +1640,7 @@ struct SetupView: View {
                 } else {
                     Button(action: commitPolicy) {
                         ZStack {
-                            Text("Continue")
+                            Text(accessMode == .local ? "Save and continue" : "Continue")
                                 .opacity(isApplyingGitHub ? 0 : 1)
                             ProgressView()
                                 .controlSize(.small)
@@ -1602,7 +1651,7 @@ struct SetupView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!isGitHubConnected || !hasValidAssignments || isApplyingGitHub || isSkippingGitHub || githubSkipIssue != nil)
                         .keyboardShortcut(.defaultAction)
-                        .accessibilityLabel("Continue")
+                        .accessibilityLabel(accessMode == .local ? "Save and continue" : "Continue")
                         .accessibilityValue(isApplyingGitHub ? "Saving" : "Ready")
                         .accessibilityIdentifier("setup.github.apply.button")
                 }
@@ -2159,7 +2208,7 @@ struct SetupView: View {
             }
             githubApplyTask = Task {
                 do {
-                    try await provider.commit(workspacePolicies)
+                    let progress = try await provider.beginPolicyApply(workspacePolicies)
                     try Task.checkCancellation()
                     await MainActor.run {
                         guard githubApplyGeneration == generation else { return }
@@ -2168,10 +2217,13 @@ struct SetupView: View {
                         isApplyingGitHub = false
                         githubApplyTask = nil
                         githubSkipped = false
+                        retainedRepositoryPolicy = workspacePolicies
                         repositoryPolicyApplied = true
                         authorizationSessionID = nil
-                        githubStatus = "GitHub access saved for \(workspacePolicies.count) workspace(s)."
+                        githubApplyProgress = progress
+                        githubStatus = "GitHub choices saved. Reconciliation continues in the background."
                         activeStep = .identity
+                        monitorLocalPolicyApply(generation: generation)
                     }
                 } catch is CancellationError {
                     // The setup surface closed or the lifecycle was invalidated.
@@ -2349,6 +2401,58 @@ struct SetupView: View {
         githubStatus = "GitHub connection cancelled."
         isConnectingGitHub = false
         githubConnectionMayCancel = false
+    }
+
+    private func refreshLocalApplyProgress() async {
+        guard accessMode == .local, let provider,
+              let progress = await provider.currentPolicyApplyProgress() else { return }
+        githubApplyProgress = progress
+        repositoryPolicyApplied = progress.phase != .cancelled
+        if progress.isInFlight {
+            monitorLocalPolicyApply(generation: githubApplyGeneration)
+        }
+    }
+
+    private func monitorLocalPolicyApply(generation: Int) {
+        githubProgressTask?.cancel()
+        guard let provider else { return }
+        githubProgressTask = Task {
+            while !Task.isCancelled {
+                guard let progress = await provider.currentPolicyApplyProgress() else { return }
+                await MainActor.run {
+                    guard githubApplyGeneration == generation else { return }
+                    githubApplyProgress = progress
+                    isApplyingGitHub = false
+                    if progress.isTerminalSuccess {
+                        githubStatus = "GitHub access is ready."
+                    } else if progress.phase == .failed {
+                        githubStatus = "GitHub choices are saved, but reconciliation needs attention."
+                    }
+                }
+                if !progress.isInFlight { return }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+
+    private func retryLocalPolicyApply() {
+        guard accessMode == .local, let provider else { return }
+        githubApplyGeneration &+= 1
+        let generation = githubApplyGeneration
+        githubStatus = "Retrying GitHub reconciliation…"
+        githubApplyTask = Task {
+            do {
+                try await provider.retryCurrentPolicyApply()
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    monitorLocalPolicyApply(generation: generation)
+                }
+            } catch {
+                await MainActor.run {
+                    githubStatus = "GitHub reconciliation could not be retried: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     private static func validatedInstallationURL(_ value: URL?) -> URL? {
@@ -2560,12 +2664,27 @@ struct SetupView: View {
         closeSetup()
     }
 
+    static func allowsIdentitySave(
+        clientAvailable: Bool,
+        systemReady: Bool,
+        name: String,
+        email: String
+    ) -> Bool {
+        clientAvailable &&
+            systemReady &&
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            email.contains("@") &&
+            !email.contains(where: \.isWhitespace)
+    }
+
     private var canSaveIdentity: Bool {
-        (uiTestMode || authorizationCoordinator != nil) &&
-            canFinishWithoutGitHub &&
-            !identityName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            identityEmail.contains("@") &&
-            !identityEmail.contains(where: \.isWhitespace)
+        Self.allowsIdentitySave(
+            clientAvailable: uiTestMode ||
+                (accessMode == .local ? provider != nil : authorizationCoordinator != nil),
+            systemReady: canFinishWithoutGitHub,
+            name: identityName,
+            email: identityEmail
+        )
     }
 
     private func saveIdentity() {
@@ -2597,18 +2716,20 @@ struct SetupView: View {
             }
             return
         }
-        guard let authorizationCoordinator else {
-            isSavingIdentity = false
-            identityStatus = "Workspace Git settings are unavailable. Try setup again."
-            return
-        }
-        Task {
+        identitySaveTask?.cancel()
+        identitySaveTask = Task {
             do {
-                let result = try await authorizationCoordinator.setIdentity(
-                    name: name,
-                    email: email,
-                    workspace: target
-                )
+                let result: MSWIdentityResult
+                if accessMode == .local, let provider {
+                    result = try await provider.setIdentity(name: name, email: email, workspace: target)
+                } else if let authorizationCoordinator {
+                    result = try await authorizationCoordinator.setIdentity(
+                        name: name, email: email, workspace: target
+                    )
+                } else {
+                    throw MSWClientError.invalidExecutable
+                }
+                try Task.checkCancellation()
                 await MainActor.run {
                     let verified = SetupVerifiedIdentity(name: name, email: email)
                     for workspace in result.workspaces {
@@ -2616,12 +2737,17 @@ struct SetupView: View {
                     }
                     identityConfiguredWorkspaces.formUnion(result.workspaces)
                     isSavingIdentity = false
+                    identitySaveTask = nil
                     identityStatus = "Saved \(result.name) <\(result.email)> for \(result.workspaces.joined(separator: ", "))."
                     activeStep = .review
                 }
+            } catch is CancellationError {
+                // Setup teardown owns cancellation; publish nothing after the
+                // window disappears.
             } catch {
                 await MainActor.run {
                     isSavingIdentity = false
+                    identitySaveTask = nil
                     identityStatus = "Your name and email were not changed: \(error.localizedDescription) Try again after workspace setup is available."
                 }
             }

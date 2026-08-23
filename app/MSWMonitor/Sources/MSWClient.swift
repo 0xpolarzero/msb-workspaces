@@ -398,9 +398,10 @@ actor MSWClient {
 
     /// ONE `msw app github-policy-apply` invocation carrying the FULL desired
     /// policy on stdin. The CLI validates the request, acquires the
-    /// per-workspace github locks, provisions/verifies the transport for
-    /// every workspace using the final capabilities, and performs ONE atomic
-    /// policy-file commit (rolling back byte-exact on any unproven step).
+    /// per-workspace github locks, provisions/verifies transport for each
+    /// semantically changed, non-empty workspace using the final capabilities,
+    /// and performs ONE atomic policy-file commit (rolling back byte-exact on
+    /// any unproven step).
     /// Typed failures (MSW_INVALID_REQUEST, MSW_GITHUB_MODE_MISMATCH,
     /// MSW_OPERATION_CONFLICT, MSW_TRANSPORT_PROVISION_FAILED,
     /// MSW_POLICY_WRITE_FAILED, MSW_INTERNAL_ERROR) surface as protocol
@@ -423,7 +424,11 @@ actor MSWClient {
             as: MSWGitHubPolicyApplyResult.self,
             command: "github-policy-apply",
             stdin: input,
-            timeout: .seconds(600)
+            timeout: .seconds(600),
+            // The CLI's TERM trap restores any temporarily changed workspace
+            // lifecycle before releasing locks. Allow its bounded stop stage
+            // to finish before process-group SIGKILL escalation.
+            terminationGrace: .seconds(65)
         )
         guard let result = envelope.result else {
             throw MSWClientError.missingResult(command: "github-policy-apply")
@@ -796,7 +801,8 @@ actor MSWClient {
         includeGuestCredentials: Bool = false,
         includeHostCredentials: Bool = false,
         stdin: Data? = nil,
-        timeout: Duration = .seconds(30)
+        timeout: Duration = .seconds(30),
+        terminationGrace: Duration = .milliseconds(250)
     ) async throws -> MSWEnvelope<Value> {
         try await prepareCredentials(
             for: workspace,
@@ -806,7 +812,8 @@ actor MSWClient {
         let request = try await runner.makeMSWCommand(
             arguments: arguments,
             timeout: timeout,
-            stdin: stdin
+            stdin: stdin,
+            terminationGrace: terminationGrace
         )
         let output = try await runner.run(request)
         do {

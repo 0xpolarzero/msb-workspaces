@@ -33,6 +33,27 @@ struct GitHubPolicyWorkspace: Codable, Sendable, Equatable {
     }
 }
 
+enum GitHubApplyPersistenceStatus: String, Codable, Sendable, Equatable {
+    case pending
+    case failed
+    case completed
+    case cancelled
+}
+
+/// Durable, non-secret onboarding intent. The effective policy remains
+/// `github-policy.json`; this record only says which generation still needs
+/// reconciliation, so a crash can never make an old verification look
+/// current or activate unprovisioned access.
+struct GitHubApplyPersistentState: Codable, Sendable, Equatable {
+    let schemaVersion: Int
+    let generation: Int
+    let semanticHash: String
+    let status: GitHubApplyPersistenceStatus
+    let desired: MSWGitHubPolicyApplyRequest
+    let updatedAt: Date
+    let failure: GitHubApplyFailure?
+}
+
 struct GitHubPolicyRepository: Codable, Sendable, Equatable, Identifiable {
     let canonical: String
     let mode: GitHubRepositoryAccessMode
@@ -105,6 +126,84 @@ final class GitHubPolicyStore {
             return nil
         }
         return file
+    }
+
+    nonisolated static func intentURL(for policyURL: URL) -> URL {
+        policyURL.deletingLastPathComponent()
+            .appendingPathComponent("github-policy-apply.json", isDirectory: false)
+    }
+
+    nonisolated static func readIntent(policyURL: URL) -> GitHubApplyPersistentState? {
+        let url = intentURL(for: policyURL)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? MSWProtocolDecoder.decoder().decode(GitHubApplyPersistentState.self, from: data)
+    }
+
+    /// Writes a private sibling temporary file, fsyncs it, renames it, then
+    /// fsyncs the directory. The generation boundary is durable before Setup
+    /// advances to the next screen.
+    nonisolated static func writeIntent(
+        _ state: GitHubApplyPersistentState,
+        policyURL: URL
+    ) throws {
+        let url = intentURL(for: policyURL)
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(state)
+        let temporary = directory.appendingPathComponent(".github-policy-apply.\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        var writeError: Error?
+        data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var written = 0
+            while written < rawBuffer.count {
+                let count = Darwin.write(descriptor, base.advanced(by: written), rawBuffer.count - written)
+                if count < 0 {
+                    if errno == EINTR { continue }
+                    writeError = POSIXError(.init(rawValue: errno) ?? .EIO)
+                    break
+                }
+                written += count
+            }
+        }
+        if writeError == nil, fsync(descriptor) != 0 {
+            writeError = POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        if close(descriptor) != 0, writeError == nil {
+            writeError = POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        if let writeError {
+            try? FileManager.default.removeItem(at: temporary)
+            throw writeError
+        }
+        guard rename(temporary.path, url.path) == 0 else {
+            let error = POSIXError(.init(rawValue: errno) ?? .EIO)
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
+        let directoryDescriptor = open(directory.path, O_RDONLY)
+        guard directoryDescriptor >= 0 else {
+            throw POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        var directoryError: Error?
+        if fsync(directoryDescriptor) != 0 {
+            directoryError = POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        if close(directoryDescriptor) != 0, directoryError == nil {
+            directoryError = POSIXError(.init(rawValue: errno) ?? .EIO)
+        }
+        if let directoryError {
+            throw directoryError
+        }
     }
 
     func startWatching() {

@@ -1487,6 +1487,15 @@ guest_exec() {
   workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
 }
 
+# Internal provisioning helper for callers that already completed the single
+# bounded ensure_running/systemd readiness stage. Keeping this separate makes
+# the precondition explicit and avoids repeating the 120-second readiness loop
+# for relay hash, Git config, and transport probes.
+guest_exec_ready() {
+  local box="$1"; shift
+  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
+}
+
 guest_exec_w() {
   local box="$1" workdir="$2"; shift 2
   ensure_running "$box"
@@ -3336,6 +3345,24 @@ cmd_github_repos() {
 
 shuttle_pidfile() { printf '%s/shuttle-%s.pid\n' "$HOME/.local/state/msw" "$1"; }
 shuttle_logfile() { printf '%s/shuttle-%s.log\n' "$HOME/.local/state/msw" "$1"; }
+shuttle_signature_file() { printf '%s/shuttle-%s.signature\n' "$HOME/.local/state/msw" "$1"; }
+
+shuttle_signature() {
+  local box="$1" binary_hash
+  binary_hash="$(/usr/bin/shasum -a 256 "$SHUTTLE_BIN" 2>/dev/null | awk '{print $1}')" || return 1
+  [[ -n "$binary_hash" ]] || return 1
+  printf '%s\0%s\0%s\0%s\0%s\n' "$binary_hash" "$box" "$MSB_BIN" \
+    "${MSW_GITHUB_PROXY_PORT:-18446}" "$MSW_PYTHON_BIN" |
+    /usr/bin/shasum -a 256 | awk '{print $1}'
+}
+
+shuttle_record_signature() {
+  local box="$1" signature="$2" file
+  file="$(shuttle_signature_file "$box")"
+  umask 077
+  printf '%s\n' "$signature" >"$file.tmp.$$" || return 1
+  mv "$file.tmp.$$" "$file" || { rm -f "$file.tmp.$$"; return 1; }
+}
 
 shuttle_running() {
   local box="$1" pidfile pid
@@ -3411,15 +3438,26 @@ PLIST
 # guest relay on every failure, so stopping/restarting the workspace heals the
 # tunnel automatically.
 proxy_shuttle_start() {
-  local box="$1" pidfile logfile
+  local box="$1" force="${2:-0}" pidfile logfile signature signature_file
   pidfile="$(shuttle_pidfile "$box")"; logfile="$(shuttle_logfile "$box")"
+  signature_file="$(shuttle_signature_file "$box")"
+  signature="$(shuttle_signature "$box")" || return 1
   mkdir -p "$(dirname "$pidfile")" || return 1
+  # Healthy transport is already reconciled. Do not bounce a shuttle merely
+  # because the same effective policy was submitted again.
+  if [[ "$force" != 1 ]] && shuttle_running "$box" &&
+    [[ "$(cat "$signature_file" 2>/dev/null || true)" == "$signature" ]]; then
+    return 0
+  fi
   proxy_shuttle_stop_launchd "$box" 2>/dev/null || true
   shuttle_stop "$box" || true
   if [[ "${MSW_TEST_MODE:-0}" != 1 ]]; then
     if proxy_shuttle_launchd_start "$box"; then
       sleep 1
-      shuttle_running "$box" && return 0
+      if shuttle_running "$box"; then
+        shuttle_record_signature "$box" "$signature" || return 1
+        return 0
+      fi
     fi
     warn "launchd shuttle unavailable; falling back to a direct background shuttle for $box"
   fi
@@ -3431,6 +3469,7 @@ proxy_shuttle_start() {
     warn "shuttle for $box did not stay up; see $logfile"
     return 1
   fi
+  shuttle_record_signature "$box" "$signature" || return 1
   return 0
 }
 
@@ -3570,8 +3609,26 @@ proxy_policy_ensure_workspace() {
 }
 
 proxy_install_relay() {
-  local box="$1"
+  local box="$1" host_hash guest_hash
+  host_hash="$(/usr/bin/shasum -a 256 "$RELAY_BIN" 2>/dev/null | awk '{print $1}')"
+  guest_hash="$(guest_exec_ready "$box" sh -c 'test -f /var/lib/msw-runtime/msw-github-relay.py && sha256sum /var/lib/msw-runtime/msw-github-relay.py | awk '\''{print $1}'\''' 2>/dev/null || true)"
+  [[ -n "$host_hash" && "$guest_hash" == "$host_hash" ]] && return 0
   workspace_msb "$box" copy -q "$RELAY_BIN" "$box:/var/lib/msw-runtime/msw-github-relay.py"
+}
+
+proxy_guest_config_matches() {
+  local box="$1" capability="$2"
+  guest_exec_ready "$box" bash -s -- "$capability" <<'GUEST'
+set -Eeuo pipefail
+capability="$1"
+proxy_base="http://127.0.0.1:18446"
+github_base="$proxy_base/github.com/"
+objects_base="$proxy_base/objects.githubusercontent.com/"
+[[ -z "$(git config --system --get-all url.https://github.com/.insteadOf 2>/dev/null || true)" ]]
+[[ "$(git config --global --get-all "url.$github_base.insteadOf")" == $'https://github.com/\ngit@github.com:\nssh://git@github.com/\nssh://git@github.com:22/' ]]
+[[ "$(git config --global --get-all "url.$objects_base.insteadOf")" == 'https://objects.githubusercontent.com/' ]]
+[[ "$(git config --global --get-all "http.$proxy_base/.extraHeader")" == "X-MSW-Capability: $capability" ]]
+GUEST
 }
 
 # Path C §7 per-workspace git config: insteadOf rewrites for every github.com
@@ -3582,8 +3639,20 @@ proxy_install_relay() {
 # version/order dependent and can route ssh URLs to https://github.com
 # directly, bypassing the proxy.
 proxy_guest_configure() {
-  local box="$1" capability="$2"
-  guest_exec "$box" bash -s -- "$capability" <<'GUEST'
+  local box="$1" capability="$2" marker
+  marker="$GITHUB_META_DIR/$box.transport-capability"
+  # The marker is only a durable hint. Verify the actual guest config so drift
+  # is repaired, and skip the rewrite when config already matches even if the
+  # marker was lost.
+  if proxy_guest_config_matches "$box" "$capability"; then
+    if [[ "$(cat "$marker" 2>/dev/null || true)" != "v1:$capability" ]]; then
+      umask 077
+      printf 'v1:%s\n' "$capability" >"$marker.tmp.$$" || return 1
+      mv "$marker.tmp.$$" "$marker" || { rm -f "$marker.tmp.$$"; return 1; }
+    fi
+    return 0
+  fi
+  if ! guest_exec_ready "$box" bash -s -- "$capability" <<'GUEST'
 set -Eeuo pipefail
 capability="$1"
 proxy_base="http://127.0.0.1:18446"
@@ -3599,6 +3668,12 @@ git config --global --unset-all "url.$objects_base.insteadOf" 2>/dev/null || tru
 git config --global --add "url.$objects_base.insteadOf" https://objects.githubusercontent.com/
 git config --global "http.$proxy_base/.extraHeader" "X-MSW-Capability: $capability"
 GUEST
+  then
+    return 1
+  fi
+  umask 077
+  printf 'v1:%s\n' "$capability" >"$marker.tmp.$$" || return 1
+  mv "$marker.tmp.$$" "$marker" || { rm -f "$marker.tmp.$$"; return 1; }
 }
 
 proxy_configure_one() {
@@ -3654,6 +3729,7 @@ cmd_github_capability_rotate() {
     fatal "could not update the GitHub policy file"
   fi
   if sandbox_inspect_state "$box" && workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
+    ensure_running "$box"
     if ! proxy_guest_configure "$box" "$new_cap"; then
       github_lock_release
       fatal "capability rotated in the policy, but the guest extraHeader could not be updated (re-run: msw github proxy-configure $box)"
@@ -5526,6 +5602,59 @@ app_cmd_github_policy_set() {
 # missing from the request is cleared (deny).
 # ---------------------------------------------------------------------------
 MSW_APPLY_LOCKED=()
+MSW_APPLY_LIFECYCLES=""
+MSW_APPLY_RESTORE_FAILED_WORKSPACE=""
+
+app_apply_remember_lifecycle() {
+  local box="$1" lifecycle="$2"
+  MSW_APPLY_LIFECYCLES="${MSW_APPLY_LIFECYCLES}${box}:${lifecycle} "
+}
+
+app_apply_restore_lifecycles() {
+  local item box lifecycle observed failed=0
+  MSW_APPLY_RESTORE_FAILED_WORKSPACE=""
+  for item in $MSW_APPLY_LIFECYCLES; do
+    box="${item%%:*}"
+    lifecycle="${item#*:}"
+    case "$lifecycle" in
+      Running)
+        observed="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+        if [[ "$observed" != Running ]]; then
+          ensure_running "$box" >/dev/null 2>&1 || {
+            failed=1
+            MSW_APPLY_RESTORE_FAILED_WORKSPACE="$box"
+          }
+        fi
+        ;;
+      Stopped|Exited)
+        observed="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+        if [[ "$observed" == Running || "$observed" == Starting || "$observed" == Restarting ]]; then
+          workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1 || {
+            failed=1
+            MSW_APPLY_RESTORE_FAILED_WORKSPACE="$box"
+          }
+        fi
+        observed="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+        [[ "$observed" == Stopped || "$observed" == Exited ]] || {
+          failed=1
+          MSW_APPLY_RESTORE_FAILED_WORKSPACE="$box"
+        }
+        ;;
+      *) failed=1; MSW_APPLY_RESTORE_FAILED_WORKSPACE="$box" ;;
+    esac
+  done
+  MSW_APPLY_LIFECYCLES=""
+  (( failed == 0 ))
+}
+
+app_apply_cancel_trap() {
+  local status="$1"
+  trap - EXIT INT TERM HUP
+  app_apply_restore_lifecycles >/dev/null 2>&1 || true
+  app_apply_release_all
+  policy_journal all apply cancelled >/dev/null 2>&1 || true
+  exit "$status"
+}
 
 app_apply_release_all() {
   local box fd
@@ -5590,6 +5719,7 @@ app_apply_snapshot() {
   local file="$1"
   file="$(policy_file)"
   MSW_APPLY_SNAPSHOT="$file.snapshot.$$"
+  mkdir -p "$(dirname "$file")" || { MSW_APPLY_SNAPSHOT=""; return 1; }
   rm -f "$MSW_APPLY_SNAPSHOT" 2>/dev/null || true
   if [[ -f "$file" && ! -L "$file" ]]; then
     cp -p "$file" "$MSW_APPLY_SNAPSHOT" 2>/dev/null || { MSW_APPLY_SNAPSHOT=""; return 1; }
@@ -5658,7 +5788,7 @@ app_apply_verify_transport() {
   # proxy (unknown capability for the uncommitted capability, or
   # missing-service when it is committed).
   probe_url="http://127.0.0.1:${port}/github.com/${probe_repo}.git/info/refs"
-  body_and_code="$(guest_exec "$box" curl -sS -w '\n%{http_code}' --max-time 10 \
+  body_and_code="$(guest_exec_ready "$box" curl -sS -w '\n%{http_code}' --max-time 10 \
     -H "X-MSW-Capability: $capability" "$probe_url" 2>/dev/null || true)"
   code="${body_and_code##*$'\n'}"
   body="${body_and_code%$'\n'*}"
@@ -5688,18 +5818,33 @@ app_apply_provision_transport() {
     printf 'msw: workspace %s does not exist\n' "$box" >&2
     return 1
   fi
-  ensure_running "$box" || return 1
-  proxy_install_relay "$box" || return 1
-  proxy_guest_configure "$box" "$capability" || return 1
-  proxy_shuttle_start "$box" || return 1
+  ensure_running "$box" || { printf 'MSW_APPLY_STAGE=starting\n' >&2; return 1; }
+  # Test-only cancellation seam: production has no pause. The parent command
+  # already recorded the prior lifecycle and holds the apply locks here.
+  if [[ -n "${MSW_FAKE_APPLY_PROVISION_PAUSE_FILE:-}" ]]; then
+    [[ -n "${MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED:-}" ]] &&
+      : >"$MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED"
+    while [[ -e "$MSW_FAKE_APPLY_PROVISION_PAUSE_FILE" ]]; do sleep 0.1; done
+  fi
+  proxy_install_relay "$box" || { printf 'MSW_APPLY_STAGE=relay\n' >&2; return 1; }
+  proxy_guest_configure "$box" "$capability" || { printf 'MSW_APPLY_STAGE=configuring\n' >&2; return 1; }
+  proxy_shuttle_start "$box" || { printf 'MSW_APPLY_STAGE=shuttle\n' >&2; return 1; }
   # readiness: a bounded end-to-end guest probe with the desired capability
-  app_apply_verify_transport "$box" "$capability" || return 1
+  if ! app_apply_verify_transport "$box" "$capability"; then
+    # A live pid is not sufficient health evidence. Restart once when the
+    # bounded end-to-end probe fails, then require the desired capability to
+    # reach the proxy before policy activation.
+    proxy_shuttle_start "$box" 1 || { printf 'MSW_APPLY_STAGE=shuttle\n' >&2; return 1; }
+    app_apply_verify_transport "$box" "$capability" || { printf 'MSW_APPLY_STAGE=verifying\n' >&2; return 1; }
+  fi
   return 0
 }
 
 app_cmd_github_policy_apply() {
   local request="" old_exists=0 failed=0 box cap caps_json="" sep="" items="" \
-        final_policy="" file tmp output="" format=""
+        final_policy="" file tmp output="" format="" lifecycle="" changed="" \
+        changed_boxes="" provision_boxes="" failure_code="" failure_message="" \
+        failure_recovery=""
   while (( $# > 0 )); do
     case "$1" in
       --format) [[ "${2:-}" == json ]] || app_usage_error github-policy-apply "github-policy-apply requires --format json"; shift 2 ;;
@@ -5770,6 +5915,9 @@ app_cmd_github_policy_apply() {
     return
   fi
   trap 'app_apply_release_all' EXIT
+  trap 'app_apply_cancel_trap 130' INT
+  trap 'app_apply_cancel_trap 143' TERM
+  trap 'app_apply_cancel_trap 129' HUP
   file="$(policy_file)"
   old_exists="$(app_apply_snapshot "$file")" || {
     app_apply_release_all
@@ -5797,22 +5945,118 @@ app_cmd_github_policy_apply() {
   done
   caps_json+="}"
 
-  # Provision + verify the transport for every affected workspace BEFORE the
+  # Compute the semantic delta under the same locks as the final commit.
+  # Capability-only differences are intentionally ignored: the effective
+  # capability remains stable and repository intent is the access contract.
+  for box in "${WORKSPACES[@]}"; do
+    changed=true
+    if policy_validate && "$JQ_BIN" -e --arg w "$box" --argjson req "$request" '
+      ((.workspaces[$w].repos // []) | sort_by(.canonical, .mode)) ==
+      (($req.workspaces[$w].repos // []) | sort_by(.canonical, .mode))
+    ' "$(policy_file)" >/dev/null 2>&1; then
+      changed=false
+    fi
+    if [[ "$changed" == true ]]; then
+      changed_boxes="${changed_boxes}${box} "
+      if "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos | length > 0' <<<"$request" >/dev/null 2>&1; then
+        provision_boxes="${provision_boxes}${box} "
+      fi
+    fi
+  done
+
+  # Exact semantic no-op: do not start a VM, copy a relay, rewrite Git config,
+  # restart a shuttle, or rewrite the effective policy.
+  if [[ -z "$changed_boxes" ]]; then
+    policy_journal all apply completed
+    app_apply_release_all
+    trap - EXIT INT TERM HUP
+    items=""
+    for box in "${WORKSPACES[@]}"; do
+      cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+      [[ -n "$items" ]] && items+=","
+      items+="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_optional "$cap"),\"repos\":$(policy_repo_json "$box")}"
+    done
+    app_emit_success github-policy-apply \
+      "{\"applied\":true,\"provisioned\":true,\"committed\":true,\"workspaces\":[$items]}"
+    return
+  fi
+
+  # Provision + verify only semantically changed, non-empty workspaces BEFORE the
   # single atomic policy commit. A provisioning/readiness failure changes NO
   # policy — so the pre-apply snapshot is NEVER restored (nothing to restore);
   # the typed error is returned with the policy file untouched.
-  for box in "${WORKSPACES[@]}"; do
-    "$JQ_BIN" -e --arg w "$box" '.workspaces | has($w)' <<<"$request" >/dev/null 2>&1 || continue
-    cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
-    if ! output="$(app_apply_provision_transport "$box" "$cap" 2>&1)"; then
+  for box in $provision_boxes; do
+    lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+    if [[ "$lifecycle" == Unknown || "$lifecycle" == Starting || "$lifecycle" == Stopping || "$lifecycle" == Restarting ]]; then
+      app_apply_restore_lifecycles >/dev/null 2>&1 || true
       app_apply_release_all
       policy_journal all apply failed
-      app_emit_error github-policy-apply "MSW_TRANSPORT_PROVISION_FAILED" \
-        "GitHub proxy transport could not be provisioned for workspace $box; the policy was NOT changed." \
-        "Check the workspace runtime and retry the policy apply." "$box" true 77
+      app_emit_error github-policy-apply "MSW_STATE_UNAVAILABLE" \
+        "Workspace $box has no stable lifecycle to snapshot before GitHub reconciliation." \
+        "Wait for the workspace lifecycle to settle, then retry." "$box" true 69
+      return
+    fi
+    app_apply_remember_lifecycle "$box" "$lifecycle"
+    cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
+    if ! output="$(app_apply_provision_transport "$box" "$cap" 2>&1)"; then
+      if ! app_apply_restore_lifecycles >/dev/null 2>&1; then
+        app_apply_release_all
+        policy_journal all apply failed
+        app_emit_error github-policy-apply "MSW_LIFECYCLE_RESTORE_FAILED" \
+          "GitHub transport failed and workspace $MSW_APPLY_RESTORE_FAILED_WORKSPACE could not return to its prior lifecycle; the policy was NOT changed." \
+          "Repair the affected workspace lifecycle, then retry reconciliation." "$MSW_APPLY_RESTORE_FAILED_WORKSPACE" true 77
+        return
+      fi
+      app_apply_release_all
+      policy_journal all apply failed
+      case "$output" in
+        *MSW_APPLY_STAGE=starting*)
+          failure_code="MSW_WORKSPACE_START_FAILED"
+          failure_message="Workspace $box could not be started for GitHub reconciliation; the policy was NOT changed."
+          failure_recovery="Check the workspace runtime and retry when its lifecycle is stable."
+          ;;
+        *MSW_APPLY_STAGE=relay*)
+          failure_code="MSW_RELAY_INSTALL_FAILED"
+          failure_message="The GitHub relay could not be installed in workspace $box; the policy was NOT changed."
+          failure_recovery="Repair workspace file access, then retry GitHub reconciliation."
+          ;;
+        *MSW_APPLY_STAGE=configuring*)
+          failure_code="MSW_GIT_CONFIG_FAILED"
+          failure_message="Git transport configuration could not be verified in workspace $box; the policy was NOT changed."
+          failure_recovery="Check Git configuration access in the workspace, then retry."
+          ;;
+        *MSW_APPLY_STAGE=shuttle*)
+          failure_code="MSW_SHUTTLE_START_FAILED"
+          failure_message="The GitHub shuttle could not be started for workspace $box; the policy was NOT changed."
+          failure_recovery="Check the local shuttle runtime and retry GitHub reconciliation."
+          ;;
+        *MSW_APPLY_STAGE=verifying*)
+          failure_code="MSW_TRANSPORT_VERIFY_FAILED"
+          failure_message="GitHub transport readiness could not be verified for workspace $box; the policy was NOT changed."
+          failure_recovery="Check the local proxy and workspace network, then retry."
+          ;;
+        *)
+          failure_code="MSW_TRANSPORT_PROVISION_FAILED"
+          failure_message="GitHub proxy transport could not be provisioned for workspace $box; the policy was NOT changed."
+          failure_recovery="Check the workspace runtime and retry the policy apply."
+          ;;
+      esac
+      app_emit_error github-policy-apply "$failure_code" \
+        "$failure_message" "$failure_recovery" "$box" true 77
       return
     fi
   done
+
+  # Provisioning may have started stopped/exited workspaces. Restore the
+  # exact running-vs-not-running lifecycle before activating access.
+  if ! app_apply_restore_lifecycles; then
+    app_apply_release_all
+    policy_journal all apply failed
+    app_emit_error github-policy-apply "MSW_LIFECYCLE_RESTORE_FAILED" \
+      "GitHub transport was configured, but a workspace lifecycle could not be restored." \
+      "Repair the affected workspace lifecycle, then retry reconciliation." "$MSW_APPLY_RESTORE_FAILED_WORKSPACE" true 77
+    return
+  fi
   # Test seam: park here (locks still held) so a test can prove concurrent
   # per-repo edits are serialized against the apply
   # (MSW_FAKE_APPLY_PAUSE_REACHED marks the park).
@@ -5882,6 +6126,7 @@ app_cmd_github_policy_apply() {
   fsync_path "$(dirname "$file")" dir || true
   policy_journal all apply committed
   app_apply_release_all
+  trap - EXIT INT TERM HUP
 
   items=""
   for box in "${WORKSPACES[@]}"; do

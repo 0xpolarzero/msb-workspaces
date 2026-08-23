@@ -2199,6 +2199,39 @@ final class AppModelTests: XCTestCase {
         ))
     }
 
+    func testIdentityContinueRequiresClientReadinessAndValidIdentity() {
+        XCTAssertTrue(SetupView.allowsIdentitySave(
+            clientAvailable: true,
+            systemReady: true,
+            name: "Taylor Example",
+            email: "taylor@example.com"
+        ))
+        XCTAssertFalse(SetupView.allowsIdentitySave(
+            clientAvailable: false,
+            systemReady: true,
+            name: "Taylor Example",
+            email: "taylor@example.com"
+        ), "A valid identity still requires the migrated MSW client dependency.")
+        XCTAssertFalse(SetupView.allowsIdentitySave(
+            clientAvailable: true,
+            systemReady: false,
+            name: "Taylor Example",
+            email: "taylor@example.com"
+        ), "Git identity must remain blocked until workspace setup is ready.")
+        XCTAssertFalse(SetupView.allowsIdentitySave(
+            clientAvailable: true,
+            systemReady: true,
+            name: "   ",
+            email: "taylor@example.com"
+        ))
+        XCTAssertFalse(SetupView.allowsIdentitySave(
+            clientAvailable: true,
+            systemReady: true,
+            name: "Taylor Example",
+            email: "taylor @example.com"
+        ))
+    }
+
     func testMSWConnectSessionSurvivesRestoreFromAnotherConfiguration() async throws {
         let keychain = InMemoryConnectKeychain()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))

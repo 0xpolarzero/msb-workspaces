@@ -147,6 +147,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(gitSkip.label, "Skip")
         XCTAssertEqual(gitBack.label, "Back")
         XCTAssertEqual(gitContinue.label, "Continue")
+        XCTAssertFalse(gitContinue.isEnabled, "Git identity remains required before continuing")
         assertAction(gitSkip, precedes: gitBack, in: app)
         assertAction(gitBack, precedes: gitContinue, in: app)
         assertActionsReachTrailingEdge(of: setup, in: app)
@@ -289,7 +290,7 @@ final class MSWMonitorUITests: XCTestCase {
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
-        XCTAssertEqual(apply.label, "Continue")
+        XCTAssertEqual(apply.label, "Save and continue")
         apply.click()
 
         let identitySkip = app.buttons["setup.identity.skip.button"]
@@ -428,7 +429,7 @@ final class MSWMonitorUITests: XCTestCase {
         refresh.click()
         XCTAssertEqual(refresh.label, "Refresh")
         XCTAssertEqual(refresh.value as? String, "Refreshing repositories")
-        XCTAssertEqual(apply.label, "Continue")
+        XCTAssertEqual(apply.label, "Save and continue")
         XCTAssertEqual(apply.value as? String, "Ready")
         XCTAssertTrue(apply.isEnabled, "Refresh must not disable the save action")
         XCTAssertTrue(picker.isEnabled, "Refresh must not disable repository selection")
@@ -500,7 +501,7 @@ final class MSWMonitorUITests: XCTestCase {
         let apply = app.buttons["setup.github.apply.button"]
         XCTAssertTrue(apply.waitForExistence(timeout: 2))
         XCTAssertTrue(apply.isEnabled)
-        XCTAssertEqual(apply.label, "Continue")
+        XCTAssertEqual(apply.label, "Save and continue")
         apply.click()
 
         let identitySkip = app.buttons["setup.identity.skip.button"]

@@ -8,6 +8,7 @@ struct MSWCommand: Sendable {
     let timeout: Duration
     let captureLimit: Int
     let stdin: Data?
+    let terminationGrace: Duration
 
     init(
         executable: URL,
@@ -15,7 +16,8 @@ struct MSWCommand: Sendable {
         environment: [String: String] = [:],
         timeout: Duration = .seconds(30),
         captureLimit: Int = 4 * 1024 * 1024,
-        stdin: Data? = nil
+        stdin: Data? = nil,
+        terminationGrace: Duration = .milliseconds(250)
     ) {
         self.executable = executable
         self.arguments = arguments
@@ -23,6 +25,7 @@ struct MSWCommand: Sendable {
         self.timeout = timeout
         self.captureLimit = captureLimit
         self.stdin = stdin
+        self.terminationGrace = terminationGrace
     }
 }
 
@@ -166,7 +169,7 @@ actor MSWCommandRunner {
         do {
             status = try await wait(for: processIdentifier, command: command)
         } catch {
-            await Self.terminate(processIdentifier)
+            await Self.terminate(processIdentifier, grace: command.terminationGrace)
             _ = await stdoutTask.value
             _ = await stderrTask.value
             throw error
@@ -185,7 +188,7 @@ actor MSWCommandRunner {
     func cancel(operationID: UUID) async {
         guard let process = runningProcesses[operationID] else { return }
         cancelledOperations.insert(operationID)
-        await Self.terminate(process.processIdentifier)
+        await Self.terminate(process.processIdentifier, grace: .milliseconds(250))
     }
 
     func homeDirectory() -> URL {
@@ -211,6 +214,17 @@ actor MSWCommandRunner {
                 )
                 cachedMSWResolution = resolution
                 return resolution
+            }
+            // Cancellation can interrupt the handshake used for capability
+            // detection. Do not poison the shared resolver cache with that
+            // transient result; a queued mutation must be able to resolve the
+            // same executable after the cancelled process group has exited.
+            if Task.isCancelled {
+                return MSWExecutableResolution(
+                    selected: nil,
+                    candidates: candidates,
+                    incompatibleCandidates: incompatibleCandidates
+                )
             }
             incompatibleCandidates.append(candidate)
         }
@@ -330,7 +344,8 @@ actor MSWCommandRunner {
         arguments: [String],
         environment: [String: String] = [:],
         timeout: Duration = .seconds(30),
-        stdin: Data? = nil
+        stdin: Data? = nil,
+        terminationGrace: Duration = .milliseconds(250)
     ) async throws -> MSWCommand {
         guard let executable = await mswResolution().selected else {
             throw MSWClientError.invalidExecutable
@@ -340,7 +355,8 @@ actor MSWCommandRunner {
             arguments: arguments,
             environment: environment,
             timeout: timeout,
-            stdin: stdin
+            stdin: stdin,
+            terminationGrace: terminationGrace
         )
     }
 
@@ -403,7 +419,7 @@ actor MSWCommandRunner {
                     group.addTask { await statusTask.value }
                     group.addTask {
                         try await Task.sleep(for: command.timeout)
-                        await Self.terminate(processIdentifier)
+                        await Self.terminate(processIdentifier, grace: command.terminationGrace)
                         throw MSWClientError.timedOut(command: command.arguments.first ?? "msw")
                     }
                     guard let result = try await group.next() else {
@@ -414,7 +430,7 @@ actor MSWCommandRunner {
                     return result
                 }
             } onCancel: {
-                Task { await Self.terminate(processIdentifier) }
+                Task { await Self.terminate(processIdentifier, grace: command.terminationGrace) }
             }
         } catch is CancellationError {
             throw MSWClientError.cancelled
@@ -526,15 +542,22 @@ actor MSWCommandRunner {
         return processIdentifier
     }
 
-    private nonisolated static func terminate(_ processIdentifier: pid_t) async {
+    private nonisolated static func terminate(_ processIdentifier: pid_t, grace: Duration) async {
         guard processIdentifier > 0 else { return }
         _ = Darwin.kill(-processIdentifier, SIGTERM)
         _ = Darwin.kill(processIdentifier, SIGTERM)
-        let deadline = ContinuousClock.now + .milliseconds(250)
-        while ContinuousClock.now < deadline {
-            if Darwin.kill(processIdentifier, 0) != 0 && errno == ESRCH { return }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
+        let deadline = ContinuousClock.now + grace
+        let exited = await Task.detached(priority: .utility) {
+            while ContinuousClock.now < deadline {
+                if Darwin.kill(processIdentifier, 0) != 0 && errno == ESRCH { return true }
+                // Cancellation cleanup must keep its grace period even though
+                // the originating Swift task is cancelled. A cancellable
+                // Task.sleep would otherwise spin until the deadline.
+                Darwin.usleep(10_000)
+            }
+            return false
+        }.value
+        if exited { return }
         _ = Darwin.kill(-processIdentifier, SIGKILL)
         _ = Darwin.kill(processIdentifier, SIGKILL)
     }
