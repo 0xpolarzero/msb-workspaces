@@ -1129,39 +1129,51 @@ struct SetupView: View {
 
                 Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                     GridRow {
+                        resourceLabel("CPU limit")
                         resourcePicker(
                             "CPU limit", selection: workspaceBinding(for: configuration, \.cpus),
                             values: SetupWorkspaceConfiguration.supportedCPUs,
-                            suffix: "CPU", identifier: "setup.workspaces.row.\(index).cpus"
+                            suffix: "CPU", identifier: "setup.workspaces.row.\(index).cpus",
+                            help: "CPU cores this workspace always gets"
                         )
+                        resourceLabel("CPU ceiling")
                         resourcePicker(
                             "CPU ceiling", selection: workspaceBinding(for: configuration, \.maxCPUs),
                             values: SetupWorkspaceConfiguration.supportedCPUs,
-                            suffix: "CPU", identifier: "setup.workspaces.row.\(index).max-cpus"
+                            suffix: "CPU", identifier: "setup.workspaces.row.\(index).max-cpus",
+                            help: "Most CPUs it can be resized up to"
                         )
                     }
                     GridRow {
+                        resourceLabel("Memory limit")
                         resourcePicker(
                             "Memory limit", selection: workspaceBinding(for: configuration, \.memoryGiB),
                             values: SetupWorkspaceConfiguration.supportedMemoryGiB,
-                            suffix: "GB", identifier: "setup.workspaces.row.\(index).memory"
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).memory",
+                            help: "RAM this workspace always gets"
                         )
+                        resourceLabel("Memory ceiling")
                         resourcePicker(
                             "Memory ceiling", selection: workspaceBinding(for: configuration, \.maxMemoryGiB),
                             values: SetupWorkspaceConfiguration.supportedMemoryGiB,
-                            suffix: "GB", identifier: "setup.workspaces.row.\(index).max-memory"
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).max-memory",
+                            help: "Most RAM it can be resized up to"
                         )
                     }
                     GridRow {
+                        resourceLabel("Workspace storage")
                         resourcePicker(
                             "Workspace storage", selection: workspaceBinding(for: configuration, \.workspaceStorageGiB),
                             values: SetupWorkspaceConfiguration.supportedStorageGiB,
-                            suffix: "GB", identifier: "setup.workspaces.row.\(index).workspace-storage"
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).workspace-storage",
+                            help: "Disk space for your files"
                         )
+                        resourceLabel("Runtime storage")
                         resourcePicker(
                             "Runtime storage", selection: workspaceBinding(for: configuration, \.runtimeStorageGiB),
                             values: SetupWorkspaceConfiguration.supportedStorageGiB,
-                            suffix: "GB", identifier: "setup.workspaces.row.\(index).runtime-storage"
+                            suffix: "GB", identifier: "setup.workspaces.row.\(index).runtime-storage",
+                            help: "Disk space for VM images and runtimes"
                         )
                     }
                 }
@@ -1176,12 +1188,17 @@ struct SetupView: View {
         .accessibilityIdentifier("setup.workspaces.row.\(index)")
     }
 
+    private func resourceLabel(_ title: String) -> some View {
+        Text(title)
+    }
+
     private func resourcePicker(
         _ title: String,
         selection: Binding<Int>,
         values: [Int],
         suffix: String,
-        identifier: String
+        identifier: String,
+        help: String
     ) -> some View {
         Picker(title, selection: selection) {
             ForEach(values, id: \.self) { value in
@@ -1189,8 +1206,12 @@ struct SetupView: View {
             }
         }
         .pickerStyle(.menu)
+        .labelsHidden()
+        .frame(minWidth: 90, alignment: .leading)
+        .accessibilityLabel(title)
         .accessibilityValue("\(selection.wrappedValue) \(suffix)")
         .accessibilityIdentifier(identifier)
+        .help(help)
     }
 
     private func workspaceBinding<Value>(
