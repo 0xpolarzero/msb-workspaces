@@ -276,11 +276,6 @@ final class MSWMonitorUITests: XCTestCase {
             "60 GB workspace storage, 60 GB runtime storage; personal: 6/12 CPU, " +
             "16/32 GB memory, 100 GB workspace storage, 80 GB runtime storage"
         )
-        assertText(
-            "The GitHub and Git choices below are saved.",
-            identifier: "setup.final-review.summary",
-            in: app
-        )
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertEqual(done.label, "Done")
@@ -718,7 +713,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 2))
     }
 
-    func testSetupReviewExplainsCompletionState() {
+    func testSetupReviewRendersTitleInTestLaunchMode() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -738,11 +733,6 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["setup.final-review.title"].waitForExistence(timeout: 2))
         assertText("Review setup", identifier: "setup.final-review.title", in: app)
-        assertText(
-            "The GitHub and Git choices below are saved.",
-            identifier: "setup.final-review.summary",
-            in: app
-        )
     }
 
 

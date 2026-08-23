@@ -1135,9 +1135,6 @@ struct SetupView: View {
             Text("Configure workspaces")
                 .font(.title3.weight(.semibold))
                 .accessibilityIdentifier("setup.workspaces.title")
-            Text("Choose the workspaces and resource limits MSW Monitor will carry through setup.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
 
             HStack {
                 Button {
@@ -1931,20 +1928,14 @@ struct SetupView: View {
             Text("Review setup")
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("setup.final-review.title")
-            Text("The GitHub and Git choices below are saved.")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("setup.final-review.summary")
             reviewStatusLine(
                 title: "Configured workspaces",
                 value: workspaceConfigurationReviewSummary,
                 ready: workspaceValidationMessage == nil,
                 accessibilityIdentifier: "setup.final-review.workspaces"
             )
-            Text("Finish any remaining workspace setup, then choose Done to close onboarding.")
-                .foregroundStyle(.secondary)
             reviewStatusLine(
                 title: "System and workspaces",
-                value: canFinishWithoutGitHub ? "Finished" : "Still in progress",
                 ready: canFinishWithoutGitHub
             )
             if !canFinishWithoutGitHub && systemReady {
@@ -1957,13 +1948,11 @@ struct SetupView: View {
             }
             reviewStatusLine(
                 title: "GitHub",
-                value: githubReviewSummary,
                 ready: githubDecisionMade && verificationAllowsCompletion
             )
             githubApplyProgressView
             reviewStatusLine(
                 title: "Name for Git changes",
-                value: identityReviewSummary,
                 ready: identityDecisionMade
             )
         }
@@ -1982,7 +1971,7 @@ struct SetupView: View {
     @ViewBuilder
     private func reviewStatusLine(
         title: String,
-        value: String,
+        value: String? = nil,
         ready: Bool,
         accessibilityIdentifier: String? = nil
     ) -> some View {
@@ -1992,15 +1981,23 @@ struct SetupView: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline)
-                Text(value).font(.caption).foregroundStyle(.secondary)
+                if let value {
+                    Text(value).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .accessibilityElement(children: .combine)
         if let accessibilityIdentifier {
-            line
-                .accessibilityLabel(title)
-                .accessibilityValue(value)
-                .accessibilityIdentifier(accessibilityIdentifier)
+            if let value {
+                line
+                    .accessibilityLabel(title)
+                    .accessibilityValue(value)
+                    .accessibilityIdentifier(accessibilityIdentifier)
+            } else {
+                line
+                    .accessibilityLabel(title)
+                    .accessibilityIdentifier(accessibilityIdentifier)
+            }
         } else {
             line
         }
@@ -3327,25 +3324,6 @@ struct SetupView: View {
                 }
             }
         }
-    }
-
-    private var githubReviewSummary: String {
-        if accessMode == .local {
-            if githubSkipped { return "Skipped." }
-            if repositoryPolicyApplied { return "Configured." }
-            return "Not configured yet."
-        }
-        if githubSkipped { return "Skipped." }
-        if !verificationResults.isEmpty { return "Connected." }
-        if !existingMetadata.isEmpty { return "Managed in Settings." }
-        return "Not connected."
-    }
-
-    private var identityReviewSummary: String {
-        if identitySkipped { return "Skipped by choice; configure it later in Workspace Settings." }
-        if identityConfiguredWorkspaces.isEmpty { return "Not configured yet." }
-        if identityHasUnverifiedEdits { return "Changed since last save; save again." }
-        return "Saved for \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))."
     }
 
     private var identityNameBinding: Binding<String> {
