@@ -226,9 +226,7 @@ struct MonitorHealth: Equatable, Sendable {
 @MainActor
 final class AppModel {
     private(set) var workspaces: [Workspace]
-    private(set) var observationCount = 0
     private(set) var lastObservedAt: Date?
-    private(set) var isRefreshing = false
     private(set) var lastError: String?
     private(set) var lastRecovery: MSWRecoveryContext?
     private(set) var activities: [MSWActivity] = []
@@ -271,7 +269,6 @@ final class AppModel {
     private var pollingTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
-    private var refreshInFlight = 0
     private var consecutiveRefreshFailures = 0
     private var sustainedUnavailableNotified = false
     private var notificationGeneration = 0
@@ -385,9 +382,6 @@ final class AppModel {
     }
 
 
-    var observationText: String {
-        observationCount == 0 ? (client == nil ? "Not yet refreshed" : "Not observed") : "Observation #\(observationCount)"
-    }
     var isMaintenanceOperationInFlight: Bool {
         operationStates.values.contains { operation in
             (operation.kind == .backup || operation.kind == .restore) &&
@@ -413,38 +407,19 @@ final class AppModel {
                 severity: .critical
             )
         }
-        let observed = lastObservedAt.map {
-            "Last observed \($0.formatted(date: .abbreviated, time: .shortened))"
-        } ?? "No successful state observation yet"
-
         if workspaces.contains(where: { $0.state == .quarantined || $0.credential == .quarantined }) {
             return MonitorHealth(
                 title: "Action required",
-                detail: "A workspace is quarantined. Unsafe actions are blocked. \(observed)",
+                detail: "A workspace is quarantined. Unsafe actions are blocked.",
                 symbol: "exclamationmark.octagon.fill",
                 severity: .critical
             )
         }
-        guard lastObservedAt != nil else {
-            if isRefreshing {
-                return MonitorHealth(
-                    title: "Observing…",
-                    detail: "Requesting an authoritative workspace snapshot.",
-                    symbol: "arrow.triangle.2.circlepath",
-                    severity: .neutral
-                )
-            }
-            if let lastError {
-                return MonitorHealth(
-                    title: "Unavailable",
-                    detail: "No authoritative baseline is available. \(lastError)",
-                    symbol: "exclamationmark.triangle.fill",
-                    severity: .attention
-                )
-            }
+        if lastError == nil,
+           workspaces.allSatisfy({ $0.freshness == .neverObserved || $0.state == .unknown }) {
             return MonitorHealth(
                 title: "Not observed",
-                detail: observed,
+                detail: "No authoritative workspace state is available yet.",
                 symbol: "questionmark.circle",
                 severity: .neutral
             )
@@ -452,16 +427,15 @@ final class AppModel {
         if workspaces.contains(where: { $0.state == .unavailable || $0.freshness == .unavailable }) {
             return MonitorHealth(
                 title: "Unavailable",
-                detail: "Some workspace state is unavailable. Last-known values remain visible. \(observed)",
+                detail: lastError ?? "Some workspace state is unavailable.",
                 symbol: "exclamationmark.triangle.fill",
                 severity: .attention
             )
         }
         if lastError != nil || workspaces.contains(where: { $0.freshness == .stale }) {
-            let failure = lastError.map { " \($0)" } ?? ""
             return MonitorHealth(
-                title: "Showing last known state",
-                detail: "Workspace data is stale; fresh-state actions are blocked. \(observed)\(failure)",
+                title: "Last known state",
+                detail: lastError ?? "Workspace data is stale; fresh-state actions are blocked.",
                 symbol: "clock.badge.exclamationmark",
                 severity: .attention
             )
@@ -469,22 +443,14 @@ final class AppModel {
         if workspaces.contains(where: { $0.state == .exited || $0.credential.needsAttention }) {
             return MonitorHealth(
                 title: "Needs attention",
-                detail: "One or more workspaces has a recovery step. \(observed)",
+                detail: "One or more workspaces has a recovery step.",
                 symbol: "exclamationmark.triangle.fill",
                 severity: .attention
             )
         }
-        if isRefreshing {
-            return MonitorHealth(
-                title: "Refreshing…",
-                detail: "Keeping the last verified snapshot visible. \(observed)",
-                symbol: "arrow.triangle.2.circlepath",
-                severity: .normal
-            )
-        }
         return MonitorHealth(
             title: "Ready",
-            detail: "All workspace state is fresh and actions are available. \(observed)",
+            detail: "Workspace state is current and actions are available.",
             symbol: "checkmark.circle.fill",
             severity: .normal
         )
@@ -496,7 +462,6 @@ final class AppModel {
             return
         }
         if client == nil {
-            observationCount += 1
             return
         }
         refreshGeneration += 1
@@ -633,30 +598,27 @@ final class AppModel {
 
     private func refreshRemote(generation: Int) async -> RefreshResult {
         guard let client else { return .failed }
-        refreshInFlight += 1
-        isRefreshing = true
-        lastError = nil
-        defer {
-            refreshInFlight -= 1
-            if refreshInFlight == 0 {
-                isRefreshing = false
-            }
-        }
         do {
             let response = try await client.state()
             guard generation == refreshGeneration else { return .superseded }
             guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
+            let previousWorkspaces = workspaces
             let reconciledOperations = apply(state: state, observedAt: response.observedAt)
-            observationCount += 1
+            let stateChanged = workspaces != previousWorkspaces
+            if lastError != nil {
+                lastError = nil
+            }
             consecutiveRefreshFailures = 0
             sustainedUnavailableNotified = false
             lastRecovery = nil
-            let activity = MSWActivity(
-                id: UUID(), createdAt: Date(), kind: .observation, title: "State refreshed",
-                detail: "MSW returned a state snapshot for \(state.workspaces.count) workspaces.",
-                workspace: nil, isFailure: false
-            )
-            await append(activity)
+            if stateChanged {
+                let activity = MSWActivity(
+                    id: UUID(), createdAt: Date(), kind: .observation, title: "State changed",
+                    detail: "MSW returned updated state for \(state.workspaces.count) workspaces.",
+                    workspace: nil, isFailure: false
+                )
+                await append(activity)
+            }
             for operation in reconciledOperations {
                 let succeeded = operation.outcome == .succeeded
                 let activity = MSWActivity(
@@ -1322,7 +1284,7 @@ final class AppModel {
         let hadAuthoritativeObservation = lastObservedAt != nil
         lastObservedAt = observedAt ?? Date()
         let snapshots = Dictionary(uniqueKeysWithValues: state.workspaces.map { ($0.id, $0) })
-        workspaces = configuredWorkspaceIDs.map { id in
+        let nextWorkspaces = configuredWorkspaceIDs.map { id in
             guard let snapshot = snapshots[id.rawValue] else {
                 return Workspace(
                     id: id,
@@ -1354,7 +1316,7 @@ final class AppModel {
             let recovery: String? = isQuarantined
                 ? (snapshot.actionCapabilities.recovery ?? "Stop safely or run diagnostics before retrying other actions.")
                 : snapshot.actionCapabilities.recovery
-            return Workspace(
+            var candidate = Workspace(
                 id: id,
                 purpose: snapshot.purpose,
                 state: lifecycle,
@@ -1375,6 +1337,17 @@ final class AppModel {
                 portWarning: snapshot.portWarning,
                 serverCapabilities: snapshot.actionCapabilities
             )
+            if let previous = previousByID[id] {
+                candidate.observedAt = previous.observedAt
+                if candidate == previous {
+                    return previous
+                }
+                candidate.observedAt = stateObservedAt
+            }
+            return candidate
+        }
+        if nextWorkspaces != workspaces {
+            workspaces = nextWorkspaces
         }
         for workspace in workspaces {
             let previous = previousByID[workspace.id]

@@ -24,18 +24,33 @@ struct MonitorView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(spacing: 0) {
             header
+                .padding(12)
+
             Divider()
-            ScrollView {
-                workspaceList
-                    .padding(.vertical, 2)
+
+            ForEach(Array(model.workspaces.enumerated()), id: \.element.id) { index, workspace in
+                WorkspaceRow(
+                    workspace: workspace,
+                    operation: currentOperation(for: workspace),
+                    publishedSitePorts: publishedSitePorts(for: workspace),
+                    model: model,
+                    openDetails: openDetails,
+                    openSetup: openSetup
+                )
+
+                if index < model.workspaces.count - 1 {
+                    Divider()
+                        .padding(.leading, 38)
+                }
             }
+
             Divider()
-            observationFooter
+            shortcuts
+                .padding(10)
         }
-        .padding(16)
-        .frame(minWidth: 360, idealWidth: 420, maxWidth: 480, minHeight: 360, idealHeight: 590, maxHeight: 720)
+        .frame(width: 340)
         .confirmationDialog(
             model.pendingLifecyclePlan.map { "\($0.action.capitalized) \($0.workspace)?" } ?? "Confirm workspace action",
             isPresented: Binding(
@@ -61,101 +76,90 @@ struct MonitorView: View {
         }
     }
 
-    private var health: MonitorHealth { model.health }
-
     private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: health.symbol)
-                .font(.title3)
+        let health = model.health
+        return HStack(spacing: 8) {
+            Text(Self.title)
+                .font(.headline)
+                .accessibilityIdentifier("monitor.title")
+            Spacer()
+            Label(health.title, systemImage: health.symbol)
+                .font(.caption.weight(.medium))
                 .foregroundStyle(color(for: health.severity))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(Self.title)
-                    .font(.headline)
-                    .accessibilityIdentifier("monitor.title")
-                Text(health.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(color(for: health.severity))
-                    .accessibilityIdentifier("monitor.health")
-                Text(health.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("monitor.observed-at")
+                .accessibilityIdentifier("monitor.health")
+            if model.lastError != nil || model.startupRecoveryBlockedReason != nil {
+                Button {
+                    model.refresh()
+                } label: {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("retry.button")
+                .help("Retry workspace observation")
             }
-            Spacer(minLength: 8)
+        }
+    }
+
+    private var shortcuts: some View {
+        HStack(spacing: 8) {
             Button {
-                model.refresh()
+                openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .overview))
             } label: {
-                Label(
-                    model.startupRecoveryBlockedReason == nil
-                        ? (model.lastError == nil ? "Refresh" : "Retry")
-                        : "Retry recovery",
-                    systemImage: "arrow.clockwise"
-                )
+                Label("Overview", systemImage: "rectangle.split.2x1")
             }
-            .buttonStyle(.borderless)
-            .keyboardShortcut("r")
-            .disabled(model.isRefreshing)
-            .accessibilityIdentifier("refresh.button")
-            .help("Request a fresh workspace state snapshot")
+            .accessibilityIdentifier("details.button")
+
+            Spacer()
+
+            Button {
+                openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .activity))
+            } label: {
+                Label("Activity", systemImage: "clock")
+                    .labelStyle(.iconOnly)
+            }
+            .accessibilityIdentifier("activity.button")
+            .help("Open activity")
+
+            Button(action: openSettings) {
+                Label("Settings", systemImage: "gearshape")
+                    .labelStyle(.iconOnly)
+            }
+            .accessibilityIdentifier("settings.button")
+            .help("Open settings")
+
+            if let openSetup {
+                Button(action: openSetup) {
+                    Label("Setup", systemImage: "wrench.and.screwdriver")
+                        .labelStyle(.iconOnly)
+                }
+                .accessibilityIdentifier("setup.button")
+                .help("Review setup")
+            }
+
+            Button(action: quit) {
+                Label("Quit", systemImage: "power")
+                    .labelStyle(.iconOnly)
+            }
+            .keyboardShortcut("q")
+            .accessibilityIdentifier("quit.button")
+            .help("Quit MSW Monitor")
         }
-        .accessibilityElement(children: .contain)
+        .controlSize(.small)
     }
 
-    private var workspaceList: some View {
-        LazyVStack(spacing: 10) {
-            ForEach(model.workspaces) { workspace in
-                WorkspaceCard(
-                    workspace: workspace,
-                    model: model,
-                    openDetails: openDetails,
-                    openSetup: openSetup
-                )
-            }
-        }
+    private func currentOperation(for workspace: Workspace) -> MSWOperationState? {
+        model.operationStates.values
+            .filter { $0.workspace == workspace.id.rawValue && $0.kind == .lifecycle }
+            .max { $0.updatedAt < $1.updatedAt }
     }
 
-    private var observationFooter: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(model.observationText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("observation.value")
-            if let error = model.lastError {
-                RecoveryNotice(
-                    title: "Refresh failed",
-                    message: error,
-                    actionTitle: "Retry",
-                    action: model.refresh
-                )
-                .accessibilityIdentifier("monitor.error")
-            }
-            HStack {
-                if let openSetup {
-                    Button("Setup", action: openSetup)
-                        .accessibilityIdentifier("setup.button")
-                        .help("Review or repair MSW Monitor setup")
-                }
-                Button("Activity") {
-                    openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .activity))
-                }
-                .accessibilityIdentifier("activity.button")
-                Button("Settings", action: openSettings)
-                    .accessibilityIdentifier("settings.button")
-                Spacer()
-            }
-            HStack {
-                Button("Open Details") {
-                    openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .overview))
-                }
-                .accessibilityIdentifier("details.button")
-                Spacer()
-                Button("Quit", action: quit)
-                    .keyboardShortcut("q")
-                    .accessibilityIdentifier("quit.button")
-            }
+    private func publishedSitePorts(for workspace: Workspace) -> [String] {
+        guard let snapshot = model.portsSnapshot,
+              snapshot.workspace == workspace.id.rawValue else {
+            return []
         }
+        return snapshot.published.map(\.port).filter { !$0.isEmpty && $0 != "3000" }
     }
 
     private func color(for severity: MonitorHealth.Severity) -> Color {
@@ -168,254 +172,162 @@ struct MonitorView: View {
     }
 }
 
-private struct WorkspaceCard: View {
+private struct WorkspaceRow: View {
     let workspace: Workspace
+    let operation: MSWOperationState?
+    let publishedSitePorts: [String]
     @Bindable var model: AppModel
     let openDetails: (DetailRoute) -> Void
     let openSetup: (() -> Void)?
 
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(workspace.id.rawValue)
-                        .font(.body.weight(.semibold))
-                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).name")
-                    Text(workspace.purpose)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 8)
-                HStack(spacing: 4) {
-                    Image(systemName: stateSymbol).accessibilityHidden(true)
-                    Text(workspace.state.rawValue)
-                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).state")
-                }
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(stateColor)
-            }
+        HStack(spacing: 10) {
+            Circle()
+                .fill(stateColor)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
 
-            if showsFreshnessNotice {
-                Label(freshnessMessage, systemImage: freshnessSymbol)
-                    .font(.caption)
-                    .foregroundStyle(workspace.freshness == .stale ? .orange : .secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).freshness")
-            }
-
-            if let reason = workspace.quarantineReason ?? workspace.statusReason,
-               workspace.state == .quarantined || workspace.state == .unknown || workspace.state == .unavailable {
-                Text(workspace.state == .quarantined ? "Quarantine reason: \(reason)" : reason)
-                    .font(.caption)
-                    .foregroundStyle(workspace.state == .quarantined ? .red : .orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let recovery = workspace.recoveryAction,
-               workspace.freshness != .fresh || workspace.credential.needsAttention {
-                Text("Recovery: \(recovery)")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack(spacing: 8) {
-                Label(workspace.credential.rawValue, systemImage: credentialSymbol)
-                    .font(.caption)
-                    .foregroundStyle(credentialColor)
-                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).credential")
-                Spacer()
-                Text("Next: \(workspace.nextAction)")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspace.id.rawValue)
+                    .font(.body.weight(.medium))
+                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).name")
+                Text(workspace.state.rawValue)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).state")
             }
 
-            if let operation = currentOperation {
-                OperationPhaseView(operation: operation)
-            }
+            Spacer(minLength: 8)
 
-            HStack(spacing: 8) {
-                primaryAction
-                if workspace.canStop && (workspace.state == .running || workspace.state == .quarantined) {
-                    Button(workspace.state == .quarantined ? "Stop Safely" : "Stop") {
-                        model.stop(workspace.id)
-                    }
-                    .buttonStyle(.bordered)
+            if operation?.outcome == .pending {
+                ProgressView()
                     .controlSize(.small)
-                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).stop")
-                }
-                Spacer()
-                actionsMenu
+                    .accessibilityLabel("\(workspace.id.rawValue) \(operation?.action ?? "workspace") in progress")
+            } else {
+                primaryAction
             }
+
+            actionsMenu
+                .labelStyle(.iconOnly)
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 11))
-        .overlay {
-            RoundedRectangle(cornerRadius: 11)
-                .strokeBorder(stateColor.opacity(0.22))
-        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(accessibilitySummary)
-        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).card")
+        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).row")
     }
 
     @ViewBuilder
     private var primaryAction: some View {
         if workspace.state == .quarantined {
-            Button("Review Recovery") {
+            compactButton("Review", systemImage: "exclamationmark.triangle") {
                 openDetails(DetailRoute(workspace: workspace.id, section: .diagnostics))
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        } else if workspace.freshness == .stale || workspace.freshness == .unavailable || workspace.state == .unknown || workspace.state == .unavailable {
-            Button("Retry Observation") { model.refresh() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(model.isRefreshing)
+        } else if workspace.freshness != .fresh || workspace.state == .unknown || workspace.state == .unavailable {
+            compactButton("Retry", systemImage: "arrow.clockwise") {
+                model.refresh()
+            }
         } else if workspace.credential == .needsRestart && workspace.canRestart && workspace.state == .running {
-            Button("Restart to Apply Access") { model.restart(workspace.id) }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-        } else if workspace.credential == .needsAuthorization || workspace.credential == .legacy || workspace.credential == .expiring {
-            if let openSetup {
-                Button(workspace.credential == .legacy ? "Migrate Access" : "Review Authorization") { openSetup() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-            } else {
-                Button("Review Access") {
+            compactButton("Restart", systemImage: "arrow.clockwise") {
+                model.restart(workspace.id)
+            }
+        } else if workspace.credential.needsAttention {
+            compactButton("Review access", systemImage: "exclamationmark.shield") {
+                if let openSetup {
+                    openSetup()
+                } else {
                     openDetails(DetailRoute(workspace: workspace.id, section: .github))
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
             }
-        } else if workspace.credential == .serviceUnavailable || workspace.credential == .removalPending || workspace.credential == .quarantined {
-            Button("Review Access Recovery") {
-                openDetails(DetailRoute(workspace: workspace.id, section: .github))
+        } else if canOpenWorkspace {
+            compactButton("Open Terminal", systemImage: "terminal") {
+                model.openTerminal(for: workspace.id)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        } else if workspace.state == .running && workspace.freshness == .fresh && workspace.canOpenTerminal {
-            Button("Open Terminal") { model.openTerminal(for: workspace.id) }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
         } else if workspace.canStart && workspace.state != .running {
-            Button("Start") { model.start(workspace.id) }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .accessibilityIdentifier("workspace.\(workspace.id.rawValue).start")
+            compactButton("Start", systemImage: "play.fill") {
+                model.start(workspace.id)
+            }
+            .accessibilityIdentifier("workspace.\(workspace.id.rawValue).start")
         } else {
-            Button("View Details") {
+            compactButton("View Details", systemImage: "arrow.up.right") {
                 openDetails(DetailRoute(workspace: workspace.id, section: .overview))
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
         }
     }
 
+    private func compactButton(
+        _ title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .labelStyle(.iconOnly)
+        }
+        .buttonStyle(.borderless)
+        .help(title)
+    }
+
     private var actionsMenu: some View {
-        Menu("Actions") {
-            Button("Start \(workspace.id.rawValue)") { model.start(workspace.id) }
-                .disabled(!workspace.canStart || workspace.state == .running)
-            Button("Stop \(workspace.id.rawValue)") { model.stop(workspace.id) }
-                .disabled(!workspace.canStop || (workspace.state != .running && workspace.state != .quarantined))
-            Button("Restart \(workspace.id.rawValue)") { model.restart(workspace.id) }
-                .disabled(!workspace.canRestart || workspace.state != .running)
-            Divider()
-            Menu("Open Site for \(workspace.id.rawValue)") {
+        Menu {
+            if workspace.canStart && workspace.state != .running {
+                Button("Start \(workspace.id.rawValue)") { model.start(workspace.id) }
+            }
+            if workspace.canStop && (workspace.state == .running || workspace.state == .quarantined) {
+                Button("Stop \(workspace.id.rawValue)") { model.stop(workspace.id) }
+            }
+            if workspace.canRestart && workspace.state == .running {
+                Button("Restart \(workspace.id.rawValue)") { model.restart(workspace.id) }
+            }
+            if workspace.canStart || workspace.canStop || workspace.canRestart {
+                Divider()
+            }
+
+            Button("Open Terminal") { model.openTerminal(for: workspace.id) }
+                .disabled(!canOpenWorkspace)
+            Button("Open in Zed") { model.openZed(for: workspace.id) }
+                .disabled(!canOpenWorkspace)
+            Menu("Open Site") {
                 Button("Port 3000") { model.openSite(for: workspace.id, port: "3000") }
                 ForEach(publishedSitePorts, id: \.self) { port in
                     Button("Port \(port)") { model.openSite(for: workspace.id, port: port) }
                 }
                 Divider()
-                Button("Choose another port…") {
+                Button("Choose Port…") {
                     model.selectedWorkspace = workspace.id
                     openDetails(DetailRoute(workspace: workspace.id, section: .ports))
                 }
             }
-            .disabled(!canOpenSiteAction)
-            Button("Open Terminal for \(workspace.id.rawValue)") { model.openTerminal(for: workspace.id) }
-                .disabled(!canOpenTerminalAction)
-            Button("Open \(workspace.id.rawValue) in Zed") { model.openZed(for: workspace.id) }
-                .disabled(!canOpenZedAction)
+            .disabled(!canOpenSite)
+
             Divider()
-            Button("Repositories for \(workspace.id.rawValue)") {
+            Button("Repositories") {
                 model.selectedWorkspace = workspace.id
                 openDetails(DetailRoute(workspace: workspace.id, section: .repositories))
             }
-            Button("All details for \(workspace.id.rawValue)") {
+            Button("Details") {
                 model.selectedWorkspace = workspace.id
                 openDetails(DetailRoute(workspace: workspace.id, section: .overview))
             }
+        } label: {
+            Label("Actions for \(workspace.id.rawValue)", systemImage: "ellipsis")
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .accessibilityIdentifier("workspace.\(workspace.id.rawValue).actions")
-        .help("Actions scoped to \(workspace.id.rawValue)")
+        .help("More actions")
     }
 
-    private var canOpenTerminalAction: Bool {
+    private var canOpenWorkspace: Bool {
         workspace.state == .running &&
             workspace.freshness == .fresh &&
             workspace.canOpenTerminal &&
             workspace.credential != .quarantined
     }
 
-    private var canOpenZedAction: Bool {
-        workspace.state == .running &&
-            workspace.freshness == .fresh &&
-            workspace.credential != .quarantined
-    }
-
-    private var canOpenSiteAction: Bool {
-        canOpenZedAction && workspace.networkHost != nil
-    }
-
-    private var publishedSitePorts: [String] {
-        guard let snapshot = model.portsSnapshot,
-              snapshot.workspace == workspace.id.rawValue else {
-            return []
-        }
-        return snapshot.published.map(\.port).filter { !$0.isEmpty && $0 != "3000" }
-    }
-
-    private var currentOperation: MSWOperationState? {
-        model.operationStates.values
-            .filter { $0.workspace == workspace.id.rawValue && $0.kind == .lifecycle }
-            .max { $0.updatedAt < $1.updatedAt }
-    }
-
-    private var showsFreshnessNotice: Bool {
-        workspace.freshness != .fresh || workspace.observedAt != nil
-    }
-
-    private var freshnessMessage: String {
-        let age = workspace.observedAt.map {
-            " Last observed \($0.formatted(date: .abbreviated, time: .shortened))."
-        } ?? " No successful observation is available."
-        switch workspace.freshness {
-        case .fresh: return "Fresh.\(age)"
-        case .stale: return "Showing last known state; fresh-state actions are blocked.\(age)"
-        case .unavailable: return "Current state unavailable; last-known content may be shown.\(age)"
-        case .neverObserved: return "Not observed.\(age)"
-        }
-    }
-
-    private var freshnessSymbol: String {
-        switch workspace.freshness {
-        case .fresh: return "checkmark.circle"
-        case .stale: return "clock.badge.exclamationmark"
-        case .unavailable: return "wifi.exclamationmark"
-        case .neverObserved: return "questionmark.circle"
-        }
-    }
-
-    private var stateSymbol: String {
-        switch workspace.state {
-        case .running: return "play.circle.fill"
-        case .stopped: return "stop.circle"
-        case .starting, .stopping, .restarting: return "arrow.triangle.2.circlepath"
-        case .quarantined: return "exclamationmark.octagon.fill"
-        case .unknown, .unavailable, .exited: return "exclamationmark.triangle.fill"
-        }
+    private var canOpenSite: Bool {
+        canOpenWorkspace && workspace.networkHost != nil
     }
 
     private var stateColor: Color {
@@ -423,104 +335,9 @@ private struct WorkspaceCard: View {
         case .running: return .green
         case .quarantined: return .red
         case .unknown, .unavailable, .exited: return .orange
-        case .starting, .stopping, .restarting: return .accentColor
+        case .starting, .stopping, .restarting: return .blue
         case .stopped: return .secondary
         }
     }
-
-    private var credentialColor: Color {
-        workspace.credential.needsAttention ? .orange : .secondary
-    }
-
-    private var credentialSymbol: String {
-        switch workspace.credential {
-        case .ready, .readOnly:
-            return "checkmark.shield"
-        case .unconfigured:
-            return "shield"
-        case .legacy, .needsAuthorization, .expiring:
-            return "exclamationmark.shield"
-        case .needsRestart:
-            return "arrow.clockwise.circle"
-        case .serviceUnavailable, .removalPending, .quarantined:
-            return "xmark.shield"
-        }
-    }
-
-    private var accessibilitySummary: String {
-        "\(workspace.id.rawValue), \(workspace.state.rawValue), credential \(workspace.credential.rawValue), \(freshnessMessage) Next action: \(workspace.nextAction)\(workspace.quarantineReason.map { ". Quarantine reason: \($0)" } ?? "")"
-    }
 }
 
-private struct OperationPhaseView: View {
-    let operation: MSWOperationState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if let fraction = operation.fraction {
-                ProgressView(value: fraction)
-            } else if operation.outcome == .pending {
-                ProgressView().controlSize(.small)
-            }
-            HStack {
-                Text("Phase: \(phaseTitle)")
-                    .font(.caption.weight(.medium))
-                Spacer()
-                Text(operation.workspace ?? "global")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-            Text(operation.message)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if operation.outcome == .failed || operation.outcome == .unknown {
-                Text(operation.recovery?.recovery ?? "Refresh state and review the latest activity before retrying.")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(operation.workspace ?? "Global") \(operation.action) operation. \(phaseTitle). \(operation.message)")
-    }
-
-    private var phaseTitle: String {
-        switch operation.phase {
-        case .preparing: return "Preparing"
-        case .awaitingConfirmation: return "Awaiting confirmation"
-        case .running: return operation.fraction.map { "Running, \(Int($0 * 100)) percent" } ?? "Running, progress indeterminate"
-        case .verifying: return "Verifying observed state"
-        case .finished:
-            switch operation.outcome {
-            case .succeeded: return "Succeeded and verified"
-            case .failed: return "Failed"
-            case .unknown: return "Outcome unknown"
-            case .pending: return "Finishing"
-            }
-        }
-    }
-}
-
-private struct RecoveryNotice: View {
-    let title: String
-    let message: String
-    let actionTitle: String
-    let action: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Label(title, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(actionTitle, action: action)
-                .controlSize(.small)
-        }
-        .padding(9)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-    }
-}

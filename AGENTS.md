@@ -146,14 +146,15 @@ Use accessibility identifiers rather than screen coordinates:
 | `workspace.dev.name` / `.state` | dev row | `dev` / `Stopped` |
 | `workspace.playgrounds.name` / `.state` | playgrounds row | `playgrounds` / `Stopped` |
 | `workspace.personal.name` / `.state` | personal row | `personal` / `Stopped` |
-| `observation.value` | observation text | `Not yet refreshed`, then `Observation #1` |
-| `refresh.button` | Refresh button | Increments the observation counter |
+| `details.button` | Overview shortcut | Opens the detail window |
+| `activity.button` | Activity shortcut | Opens activity |
+| `settings.button` | Settings shortcut | Opens settings |
 | `quit.button` | Quit button | Terminates the app |
 
-The SwiftUI buttons also define the `Command-R` and `Command-Q` keyboard
-shortcuts. Prefer semantic UI queries and waits over fixed sleeps or pixel
-coordinates. The test intentionally checks the status item, popover content,
-all three workspace rows, refresh behavior, and clean termination.
+The Quit button defines the `Command-Q` keyboard shortcut. Prefer semantic UI
+queries and waits over fixed sleeps or pixel coordinates. The test intentionally
+checks the status item, compact popover, all three workspace rows, shortcuts,
+absence of refresh/counter UI, and clean termination.
 
 ### Capturing complete evidence
 
@@ -180,7 +181,7 @@ xcrun xcresulttool get test-results summary --path "$RESULT"
 xcrun xcresulttool get test-results tests --path "$RESULT"
 xcrun xcresulttool get test-results activities \
   --path "$RESULT" \
-  --test-id 'MSWMonitorUITests/testStatusItemPopoverRefreshAndQuit()' \
+  --test-id 'MSWMonitorUITests/testStatusItemMinimalPopoverAndQuit()' \
   --compact
 ```
 
@@ -271,8 +272,6 @@ Check the symptom against the narrowest evidence source:
 | Smoke says the app bundle is missing | Run `build.sh`; `smoke-test.sh` requires `build/MSWMonitor.app` |
 | `statusItem.button` is missing | Confirm the bundle path, `pgrep`, `LSUIElement=false`, the application menu, and launch logs; the status item may exist without the monitor popover being open |
 | `monitor.title` or rows are missing | Confirm `--ui-test-open-popover`, rebuild the bundle, then inspect the smoke log and result activities |
-| Content disappears after clicking Refresh | Check for transient-popover dismissal and unrelated desktop-window interruption messages; test mode must use `.applicationDefined` |
-| Refresh does not become `Observation #1` | Confirm `refresh.button` was found/clicked and inspect the accessibility activity tree; the current model only increments an integer |
 | Quit times out | Check `pgrep -x MSWMonitor`, query the app log for termination, and close it gracefully with `osascript` |
 | Test reports a crash | Inspect the `.xcresult` summary, activities, exported failure attachments, and the unified log; do not rely on the final one-line XCTest failure alone |
 
@@ -296,9 +295,9 @@ Every investigation report should state:
 6. Which behavior is real implementation versus the current static scaffold.
 
 For the current static fixture, the report must explicitly say that workspace
-states and the observation counter are deterministic scaffold values, not live
-sandbox telemetry. It must enumerate observed semantic identifiers and values,
-not only say that the UI was verified:
+states are deterministic scaffold values, not live sandbox telemetry. It must
+enumerate observed semantic identifiers and values, not only say that the UI
+was verified:
 
 - `statusItem.button`: `MSW Monitor`; application menu: `MSW Monitor`.
 - Application menu items: `About MSW Monitor`, `Settings…`, `Hide MSW Monitor`,
@@ -307,8 +306,8 @@ not only say that the UI was verified:
 - `workspace.dev.name/state`: `dev` / `Stopped`;
   `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`;
   `workspace.personal.name/state`: `personal` / `Stopped`.
-- `observation.value`: `Not yet refreshed`, then `Observation #1` after
-  clicking `refresh.button` (`Refresh`).
+- `details.button`: `Overview`; `activity.button`: `Activity`;
+  `settings.button`: `Settings`.
 - `quit.button`: `Quit`; clicking it must reach app state `notRunning`.
 
 Keep generated logs and result bundles under `app/MSWMonitor/build/`. Do not

@@ -56,7 +56,7 @@ final class StatusBarController {
         )
         popover.behavior = ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") ? .applicationDefined : .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 430, height: 620)
+        popover.contentSize = NSSize(width: 340, height: 280)
         let hostingController = NSHostingController(rootView: content)
         hostingController.view.setAccessibilityIdentifier("monitor.popover")
         popover.contentViewController = hostingController
@@ -193,11 +193,7 @@ final class StatusBarController {
 
     private func observeModelStatus() {
         withObservationTracking {
-            _ = model.aggregateText
-            _ = model.aggregateDetail
-            _ = model.isRefreshing
-            _ = model.lastError
-            _ = model.workspaces.map { ($0.state, $0.credential, $0.freshness) }
+            _ = model.health
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.observeModelStatus()

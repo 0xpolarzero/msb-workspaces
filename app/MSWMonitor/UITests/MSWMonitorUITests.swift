@@ -2,7 +2,7 @@ import XCTest
 
 @MainActor
 final class MSWMonitorUITests: XCTestCase {
-    func testStatusItemPopoverRefreshAndQuit() {
+    func testStatusItemMinimalPopoverAndQuit() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -39,13 +39,12 @@ final class MSWMonitorUITests: XCTestCase {
         assertText("Stopped", identifier: "workspace.playgrounds.state", in: app)
         assertText("personal", identifier: "workspace.personal.name", in: app)
         assertText("Stopped", identifier: "workspace.personal.state", in: app)
-        assertText("Not yet refreshed", identifier: "observation.value", in: app)
-
-        let refresh = app.buttons["refresh.button"]
-        XCTAssertTrue(refresh.waitForExistence(timeout: 2))
-        XCTAssertEqual(refresh.label, "Refresh")
-        refresh.click()
-        assertText("Observation #1", identifier: "observation.value", in: app)
+        XCTAssertFalse(app.descendants(matching: .any)["observation.value"].exists)
+        XCTAssertFalse(app.buttons["refresh.button"].exists)
+        XCTAssertTrue(app.buttons["details.button"].waitForExistence(timeout: 2))
+        XCTAssertEqual(app.buttons["details.button"].label, "Overview")
+        XCTAssertTrue(app.buttons["activity.button"].exists)
+        XCTAssertTrue(app.buttons["settings.button"].exists)
 
         let quit = app.buttons["quit.button"]
         XCTAssertTrue(quit.waitForExistence(timeout: 2))

@@ -874,7 +874,6 @@ private struct AggregateStatusView: View {
             }
             Spacer()
             Button("Refresh") { model.refresh() }
-                .disabled(model.isRefreshing)
         }
         .padding(14)
         .background(color(health.severity).opacity(0.08), in: RoundedRectangle(cornerRadius: 10))

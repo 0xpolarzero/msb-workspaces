@@ -116,8 +116,6 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(model.workspaces.map(\.id), [.dev, .playgrounds, .personal])
         XCTAssertEqual(model.workspaces.map(\.state), [.stopped, .stopped, .stopped])
-        XCTAssertEqual(model.observationCount, 0)
-        XCTAssertEqual(model.observationText, "Not yet refreshed")
     }
 
     // MARK: - Local-mode init never builds Connect dependencies (blocker 7)
@@ -220,16 +218,6 @@ final class AppModelTests: XCTestCase {
         }
     }
 
-    func testRefreshAdvancesVisibleObservationCounter() {
-        let model = AppModel()
-
-        model.refresh()
-        XCTAssertEqual(model.observationCount, 1)
-        XCTAssertEqual(model.observationText, "Observation #1")
-
-        model.refresh()
-        XCTAssertEqual(model.observationText, "Observation #2")
-    }
     func testStartupRecoveryBlockedModelFailsClosedAndRetriesRecovery() {
         var retryCount = 0
         let model = AppModel(
@@ -242,8 +230,6 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.workspaces.map(\.credential), [.quarantined, .quarantined, .quarantined])
         model.refresh()
         XCTAssertEqual(retryCount, 1)
-        XCTAssertEqual(model.observationCount, 0)
-        XCTAssertEqual(model.observationText, "Not yet refreshed")
     }
 
     func testNotificationDeliveryCapsPersistentFailures() async {
@@ -304,18 +290,15 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(client: client)
 
         XCTAssertEqual(model.aggregateText, "Not observed")
-        XCTAssertEqual(model.observationCount, 0)
         XCTAssertTrue(model.workspaces.allSatisfy { $0.state == .unknown && $0.freshness == .unavailable })
 
         await model.refreshRemote()
         XCTAssertEqual(model.aggregateText, "Unavailable")
-        XCTAssertEqual(model.observationCount, 0)
         XCTAssertEqual(model.lastRecovery?.code, "MSW_RUNTIME_UNAVAILABLE")
         XCTAssertEqual(model.lastRecovery?.recovery, "Repair MSW and retry.")
         XCTAssertTrue(model.notificationEvents.isEmpty)
 
         await model.refreshRemote()
-        XCTAssertEqual(model.observationCount, 0)
         let events = model.drainNotificationEvents()
         XCTAssertEqual(events.map(\.kind), [.sustainedUnavailability])
         XCTAssertEqual(events.first?.deepLink, "msw-monitor://diagnostics")
@@ -352,6 +335,9 @@ final class AppModelTests: XCTestCase {
         let model = AppModel(client: client)
 
         await model.refreshRemote()
+        let stateActivityCount = model.activities.filter { $0.title == "State changed" }.count
+        await model.refreshRemote()
+        XCTAssertEqual(model.activities.filter { $0.title == "State changed" }.count, stateActivityCount)
         XCTAssertTrue(model.drainNotificationEvents().isEmpty)
 
         try encoder.encode(makeTestStateEnvelope(devLifecycle: .stopped, devQuarantine: .clear)).write(to: stateURL)
@@ -401,7 +387,6 @@ final class AppModelTests: XCTestCase {
         await model.refreshRemote()
 
         let fresh = try XCTUnwrap(model.workspaces.first(where: { $0.id == .dev }))
-        XCTAssertEqual(model.observationCount, 1)
         XCTAssertEqual(model.aggregateText, "Ready")
         XCTAssertEqual(fresh.state, .running)
         XCTAssertTrue(fresh.canOpenTerminal)
@@ -413,8 +398,7 @@ final class AppModelTests: XCTestCase {
         await model.refreshRemote()
 
         let stale = try XCTUnwrap(model.workspaces.first(where: { $0.id == .dev }))
-        XCTAssertEqual(model.observationCount, 1)
-        XCTAssertEqual(model.aggregateText, "Showing last known state")
+        XCTAssertEqual(model.aggregateText, "Last known state")
         XCTAssertEqual(stale.state, .running)
         XCTAssertEqual(stale.freshness, .stale)
         XCTAssertFalse(stale.canOpenTerminal)
