@@ -41,7 +41,7 @@ final class StatusBarController {
         self.settingsNavigation = settingsNavigation
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.retryStartupRecovery = retryStartupRecovery
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         popover = NSPopover()
         let content = MonitorView(
             model: model,

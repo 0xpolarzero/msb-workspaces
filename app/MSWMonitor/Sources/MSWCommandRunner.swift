@@ -442,6 +442,10 @@ actor MSWCommandRunner {
             || key == "MSW_TEST_VISIBLE"
     }
 
+    func executableSearchPath() -> String {
+        deterministicPath()
+    }
+
     private func deterministicPath() -> String {
         var paths = [configuration.homeDirectory.appending(path: ".local/bin").path]
         paths.append(contentsOf: configuration.additionalSearchPaths.map { $0.deletingLastPathComponent().path })

@@ -33,6 +33,10 @@ actor MSWClient {
         await runner.mswResolution().selected
     }
 
+    func executableSearchPath() async -> String {
+        await runner.executableSearchPath()
+    }
+
     func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) throws {
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: configurations) {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)

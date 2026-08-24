@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import UniformTypeIdentifiers
 
 struct Workspace: Identifiable, Equatable, Sendable {
     struct ID: RawRepresentable, Hashable, Codable, Sendable, Identifiable {
@@ -221,6 +222,149 @@ struct MonitorHealth: Equatable, Sendable {
     let symbol: String
     let severity: Severity
 }
+@MainActor
+struct TerminalLauncher {
+    enum LaunchError: LocalizedError {
+        case noDefaultTerminal
+        case openFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noDefaultTerminal:
+                return "No default terminal app is configured."
+            case .openFailed(let message):
+                return "The default terminal could not open a new tab: \(message)"
+            }
+        }
+    }
+
+    func open(executableURL: URL, workspaceID: String, executableSearchPath: String) async throws {
+        guard let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: .unixExecutable) else {
+            throw LaunchError.noDefaultTerminal
+        }
+        if Bundle(url: applicationURL)?.bundleIdentifier == "com.mitchellh.ghostty" {
+            try openGhostty(
+                executableURL: executableURL,
+                workspaceID: workspaceID,
+                executableSearchPath: executableSearchPath
+            )
+            return
+        }
+
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-monitor-\(UUID().uuidString).command")
+        do {
+            try Data(Self.commandScript(
+                executableURL: executableURL,
+                workspaceID: workspaceID,
+                executableSearchPath: executableSearchPath
+            ).utf8).write(to: scriptURL, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: scriptURL.path
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw LaunchError.openFailed(error.localizedDescription)
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.promptsUserIfNeeded = false
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                NSWorkspace.shared.open(
+                    [scriptURL],
+                    withApplicationAt: applicationURL,
+                    configuration: configuration
+                ) { _, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw LaunchError.openFailed(error.localizedDescription)
+        }
+
+        Task {
+            try? await Task.sleep(for: .seconds(30))
+            try? FileManager.default.removeItem(at: scriptURL)
+        }
+    }
+
+    static func ghosttyScript(
+        executableURL: URL,
+        workspaceID: String,
+        executableSearchPath: String
+    ) -> String {
+        let command = "\(shellQuoted(executableURL.path)) \(shellQuoted(workspaceID))"
+        let commandText = appleScriptQuoted(command)
+        let pathVariable = appleScriptQuoted("PATH=\(executableSearchPath)")
+        return """
+        set commandText to \(commandText)
+        tell application id "com.mitchellh.ghostty"
+            activate
+            set cfg to new surface configuration
+            set command of cfg to commandText
+            set environment variables of cfg to {\(pathVariable)}
+            if (count of windows) is 0 then
+                new window with configuration cfg
+            else
+                set targetTab to new tab in front window with configuration cfg
+                select tab targetTab
+            end if
+        end tell
+        """
+    }
+
+    private func openGhostty(
+        executableURL: URL,
+        workspaceID: String,
+        executableSearchPath: String
+    ) throws {
+        guard let script = NSAppleScript(source: Self.ghosttyScript(
+            executableURL: executableURL,
+            workspaceID: workspaceID,
+            executableSearchPath: executableSearchPath
+        )) else {
+            throw LaunchError.openFailed("MSW Monitor could not prepare the Ghostty command.")
+        }
+        var errorInfo: NSDictionary?
+        script.executeAndReturnError(&errorInfo)
+        if let errorInfo {
+            let message = errorInfo["NSAppleScriptErrorMessage"] as? String
+                ?? "Ghostty automation was denied or failed."
+            throw LaunchError.openFailed(message)
+        }
+    }
+
+    static func commandScript(
+        executableURL: URL,
+        workspaceID: String,
+        executableSearchPath: String
+    ) -> String {
+        """
+        #!/bin/zsh
+        script_path=$0
+        rm -f -- "$script_path"
+        export PATH=\(shellQuoted(executableSearchPath))
+        exec \(shellQuoted(executableURL.path)) \(shellQuoted(workspaceID))
+        """
+    }
+
+    private static func shellQuoted(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
+    private static func appleScriptQuoted(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+    }
+}
+
 
 @Observable
 @MainActor
@@ -514,18 +658,15 @@ final class AppModel {
                 self?.lastError = "The MSW executable is unavailable. Repair the toolchain and retry."
                 return
             }
-            guard let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.mitchellh.ghostty") else {
-                self?.lastError = "Ghostty is not installed."
-                return
-            }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.arguments = ["-e", executable.path, id.rawValue]
-            NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { [weak self] _, error in
-                Task { @MainActor in
-                    if let error {
-                        self?.lastError = "Could not open Ghostty: \(error.localizedDescription)"
-                    }
-                }
+            do {
+                let executableSearchPath = await client.executableSearchPath()
+                try await TerminalLauncher().open(
+                    executableURL: executable,
+                    workspaceID: id.rawValue,
+                    executableSearchPath: executableSearchPath
+                )
+            } catch {
+                self?.lastError = error.localizedDescription
             }
         }
     }

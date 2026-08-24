@@ -118,6 +118,32 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.workspaces.map(\.state), [.stopped, .stopped, .stopped])
     }
 
+    func testTerminalLauncherBuildsSelfDeletingCommandScript() {
+        let script = TerminalLauncher.commandScript(
+            executableURL: URL(fileURLWithPath: "/tmp/MSW Monitor's/msw"),
+            workspaceID: "dev",
+            executableSearchPath: "/Users/test/.local/bin:/usr/bin:/bin"
+        )
+
+        XCTAssertTrue(script.contains("rm -f -- \"$script_path\""))
+        XCTAssertTrue(script.contains(#"exec '/tmp/MSW Monitor'"'"'s/msw' 'dev'"#))
+        XCTAssertTrue(script.contains("export PATH='/Users/test/.local/bin:/usr/bin:/bin'"))
+    }
+
+    func testTerminalLauncherBuildsNativeGhosttyTabAutomation() {
+        let script = TerminalLauncher.ghosttyScript(
+            executableURL: URL(fileURLWithPath: "/usr/local/bin/msw"),
+            workspaceID: "dev",
+            executableSearchPath: "/Users/test/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+        )
+
+        XCTAssertTrue(script.contains("new tab in front window with configuration cfg"))
+        XCTAssertTrue(script.contains("set commandText to \"'/usr/local/bin/msw' 'dev'\""))
+        XCTAssertTrue(script.contains(
+            "set environment variables of cfg to {\"PATH=/Users/test/.local/bin:/opt/homebrew/bin:/usr/bin:/bin\"}"
+        ))
+    }
+
     // MARK: - Local-mode init never builds Connect dependencies (blocker 7)
 
     func testAppDelegateLocalModeConstructsNoConnectDependencies() throws {

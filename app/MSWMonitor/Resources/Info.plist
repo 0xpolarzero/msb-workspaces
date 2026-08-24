@@ -43,6 +43,8 @@
     <string>$(MSW_CONNECT_INSTALLATION_URL)</string>
     <key>MSWConnectScopeAttestationPublicKey</key>
     <string>$(MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY)</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>MSW Monitor opens requested workspaces in a new tab of your default terminal.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
