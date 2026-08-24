@@ -60,19 +60,42 @@ struct MonitorView: View {
             titleVisibility: .visible
         ) {
             if let plan = model.pendingLifecyclePlan {
-                Button("Confirm \(plan.action.capitalized)", role: .destructive) {
+                Button(plan.action.capitalized, role: confirmationRole(for: plan)) {
                     model.confirmPendingLifecycle()
                 }
+                .accessibilityIdentifier("lifecycle.confirm.button")
                 Button("Cancel", role: .cancel) {
                     model.cancelPendingLifecycle()
                 }
             }
         } message: {
             if let plan = model.pendingLifecyclePlan {
-                Text("Workspace: \(plan.workspace)\n\(plan.effects)\nThe reviewed plan expires at \(plan.expiresAt.formatted(date: .omitted, time: .shortened)) and will be rejected if state changes.")
+                Text(confirmationMessage(for: plan))
             } else {
                 Text("Review the workspace effect before continuing.")
             }
+        }
+    }
+
+    private func confirmationMessage(for plan: MSWLifecyclePlan) -> String {
+        switch MSWLifecycleAction(rawValue: plan.action) {
+        case .start:
+            return "The \(plan.workspace) workspace will start."
+        case .stop:
+            return "The \(plan.workspace) workspace will stop. You can start it again later."
+        case .restart:
+            return "The \(plan.workspace) workspace will restart. Running processes may be interrupted."
+        case nil:
+            return plan.effects
+        }
+    }
+
+    private func confirmationRole(for plan: MSWLifecyclePlan) -> ButtonRole? {
+        switch MSWLifecycleAction(rawValue: plan.action) {
+        case .stop, .restart:
+            return .destructive
+        case .start, nil:
+            return nil
         }
     }
 

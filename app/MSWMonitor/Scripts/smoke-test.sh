@@ -9,6 +9,18 @@ SMOKE_LOG="$LOG_DIR/smoke-ui.log"
 DERIVED_DATA="$APP_DIR/build/DerivedData/Smoke"
 PRODUCTS_DIR="$APP_DIR/build/SmokeProducts"
 
+TEST_TARGET="MSWMonitorUITests"
+case "${1:-}" in
+  "") ;;
+  --monitor-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testStatusItemMinimalPopoverAndQuit"
+    ;;
+  *)
+    print -u2 "usage: $0 [--monitor-only]"
+    exit 64
+    ;;
+esac
+
 mkdir -p "$LOG_DIR"
 rm -f "$SMOKE_LOG" "$LOG_DIR/smoke-app.log" "$LOG_DIR/smoke-launch.log"
 /bin/rm -rf -- "$DERIVED_DATA" "$PRODUCTS_DIR"
@@ -21,7 +33,7 @@ xcodebuild \
   -configuration Debug \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" \
-  -only-testing:MSWMonitorUITests \
+  "-only-testing:$TEST_TARGET" \
   ARCHS=arm64 \
   ONLY_ACTIVE_ARCH=YES \
   CONFIGURATION_BUILD_DIR="$PRODUCTS_DIR" \

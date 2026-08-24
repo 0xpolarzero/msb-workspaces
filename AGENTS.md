@@ -77,25 +77,33 @@ This writes `app/MSWMonitor/build/logs/test.log` and runs only the
 `MSWMonitorTests` target. It does not update the bundle at
 `app/MSWMonitor/build/MSWMonitor.app`.
 
-Run the real macOS accessibility/UI flow:
+Run the real macOS accessibility/UI flow. For status-item and popover-only
+changes, use the focused flow so onboarding is not replayed:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --monitor-only
+```
+
+Run the complete onboarding and GitHub fixture suite only when those surfaces or
+their shared infrastructure change:
 
 ```bash
 app/MSWMonitor/Scripts/smoke-test.sh
 ```
 
-This clears and recreates `build/DerivedData/Smoke` and `build/SmokeProducts`,
-then runs `MSWMonitorUITests` and writes the complete xcodebuild/XCTest output to
+Both modes clear and recreate `build/DerivedData/Smoke` and
+`build/SmokeProducts`, then write complete xcodebuild/XCTest output to
 `app/MSWMonitor/build/logs/smoke-ui.log`. The UI test launches the bundle at
 `build/MSWMonitor.app`, not the newly built dependency under `SmokeProducts`;
 therefore running `build.sh` first is mandatory after source changes. The script
 exits non-zero unless the log contains `** TEST SUCCEEDED **`.
 
-The normal verification sequence is:
+For status-item and popover work, the normal verification sequence is:
 
 ```bash
 app/MSWMonitor/Scripts/build.sh
 app/MSWMonitor/Scripts/test.sh
-app/MSWMonitor/Scripts/smoke-test.sh
+app/MSWMonitor/Scripts/smoke-test.sh --monitor-only
 ```
 
 Do not run two smoke tests concurrently: each invocation removes the shared
@@ -332,16 +340,17 @@ unredacted system logs.
   a failing log and exact result bundle before rerunning.
 - Do not guess the newest result with a glob. Use the exact
   `Test session results, code coverage, and logs:` path printed by that run.
-- The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`, and
-  `smoke-test.sh` runs only `MSWMonitorUITests`. A bare `xcodebuild test` is a
-  different, broader operation and is not a replacement for the documented
+- The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`;
+  `smoke-test.sh` runs `MSWMonitorUITests`; and `--monitor-only` narrows that
+  target to `testStatusItemMinimalPopoverAndQuit()`. A bare `xcodebuild test` is
+  a different, broader operation and is not a replacement for the documented
   checks.
 - UI automation requires an interactive GUI session and may require narrowly
   scoped Automation/Accessibility permission for the launcher or test runner.
   Never reset TCC globally or use `sudo` as a shortcut.
-- A passing build proves compilation and bundling; a passing smoke proves the
-  current static status-item/popover, fixture rows, counter, and quit flow. It
-  does not prove VM health, `msw` command integration, lifecycle actions,
+- A passing build proves compilation and bundling; a passing focused smoke
+  proves the static status-item/popover, fixture rows, shortcuts, and quit flow.
+  It does not prove VM health, `msw` command integration, lifecycle actions,
   telemetry, signing, notarization, or release readiness.
 
 <!-- smithers:prefer-workflows START -->
