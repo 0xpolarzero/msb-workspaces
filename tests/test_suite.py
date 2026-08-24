@@ -3031,6 +3031,19 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn("ghp_secret", lines[1]["message"])
         self.assertNotIn("opaque_secret", lines[1]["message"])
 
+        self.env.msw("stop", "dev")
+        stopped = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS": json.dumps({
+                "message": "agentd: disk mount failed for /workspace",
+            })},
+        )
+        stopped_lines = [json.loads(line) for line in stopped.stdout.splitlines() if line.strip()]
+        self.assertTrue(stopped_lines[0]["available"])
+        self.assertEqual(stopped_lines[0]["lifecycle"], "Stopped")
+        self.assertIn("stopped", stopped_lines[0]["reason"].lower())
+        self.assertIn("disk mount failed", stopped_lines[1]["message"])
+
 
     def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
         plan_document = json.loads(self.env.msw(
@@ -3045,6 +3058,8 @@ class PackagedBehaviorTests(MSWTestCase):
             input_text="START playgrounds\n", check=False,
         )
         self.assertFailed(rejected, "MSW_CONFIRMATION_MISMATCH")
+        rejected_document = json.loads(rejected.stdout)
+        self.assertEqual(rejected_document["warnings"], [])
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
         applied = json.loads(self.env.msw(
@@ -3060,6 +3075,34 @@ class PackagedBehaviorTests(MSWTestCase):
         )
         self.assertEqual(replayed.returncode, 78)
         self.assertFailed(replayed, "MSW_PLAN_NOT_FOUND")
+        replayed_document = json.loads(replayed.stdout)
+        self.assertEqual(replayed_document["warnings"], [])
+
+    def test_app_lifecycle_failure_returns_actionable_typed_error(self) -> None:
+        plan = json.loads(self.env.msw(
+            "app", "plan", "start", "--workspace", "dev", "--format", "json"
+        ).stdout)["result"]
+        failed = self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text="START dev\n", check=False,
+            extra_env={
+                "MSW_FAKE_START_FAIL": "1",
+                "MSW_FAKE_LOGS": json.dumps({
+                    "message": "agentd: disk mount failed for /workspace",
+                }),
+            },
+        )
+        self.assertEqual(failed.returncode, 1)
+        self.assertTrue(failed.stdout, (failed.stdout, failed.stderr, failed.returncode))
+        document = json.loads(failed.stdout)
+        self.assertEqual(document["error"]["code"], "MSW_OPERATION_FAILED")
+        self.assertIn("fake start failure", document["error"]["message"])
+        self.assertIn("disk mount failed", document["error"]["message"])
+        self.assertEqual(
+            document["error"]["recovery"],
+            "Resolve the runtime error shown above, then create a fresh plan and retry.",
+        )
+        self.assertEqual(document["warnings"], [])
 
     def test_app_push_apply_reconciles_the_reviewed_commit(self) -> None:
         bare = self.env.init_remote()

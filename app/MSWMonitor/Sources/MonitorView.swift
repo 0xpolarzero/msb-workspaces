@@ -110,7 +110,20 @@ struct MonitorView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(color(for: health.severity))
                 .accessibilityIdentifier("monitor.health")
-            if model.lastError != nil || model.startupRecoveryBlockedReason != nil {
+            if let failure = model.latestOperationFailure {
+                Button {
+                    openDetails(DetailRoute(
+                        workspace: failure.workspace,
+                        section: failure.workspace == nil ? .activity : .logs
+                    ))
+                } label: {
+                    Label("View Error Details", systemImage: "doc.text.magnifyingglass")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("error.details.button")
+                .help("View error details")
+            } else if model.lastError != nil || model.startupRecoveryBlockedReason != nil {
                 Button {
                     model.refresh()
                 } label: {
@@ -135,14 +148,6 @@ struct MonitorView: View {
 
             Spacer()
 
-            Button {
-                openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .activity))
-            } label: {
-                Label("Activity", systemImage: "clock")
-                    .labelStyle(.iconOnly)
-            }
-            .accessibilityIdentifier("activity.button")
-            .help("Open activity")
 
             Button(action: openSettings) {
                 Label("Settings", systemImage: "gearshape")

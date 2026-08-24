@@ -4725,7 +4725,7 @@ app_emit_success() {
 app_emit_error() {
   local command="$1" code="$2" message="$3" recovery="$4" workspace="${5:-}" retryable="${6:-false}" exit_code="${7:-1}"
   MSW_APP_RESPONSE_EMITTED=1
-  printf '{"schemaVersion":1,"requestId":%s,"ok":false,"command":%s,"error":{"code":%s,"message":%s,"recovery":%s,"workspace":%s,"retryable":%s}}\n' \
+  printf '{"schemaVersion":1,"requestId":%s,"ok":false,"command":%s,"error":{"code":%s,"message":%s,"recovery":%s,"workspace":%s,"retryable":%s},"warnings":[]}\n' \
     "$(app_json_string "${MSW_APP_REQUEST_ID:-$(app_request_id)}")" \
     "$(app_json_string "$command")" \
     "$(app_json_string "$code")" \
@@ -6611,7 +6611,7 @@ app_redact() {
 }
 
 app_cmd_logs() {
-  local box="" status raw line safe
+  local box="" status raw line safe reason_json="null"
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error logs "missing value for --workspace"; box="$2"; shift 2 ;;
@@ -6626,21 +6626,20 @@ app_cmd_logs() {
   if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
     app_emit_error logs "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
   fi
-  if [[ "$status" != Running ]]; then
-    MSW_APP_RESPONSE_EMITTED=1
-    printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":%s,"workspace":%s,"observedAt":%s,"available":false,"lifecycle":%s,"freshness":"fresh","reason":"workspace is not running","safeForDisplay":true}\n' \
-      "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" \
-      "$(app_json_string "$(app_now)")" "$(app_json_string "$status")"
-    printf '{"schemaVersion":1,"type":"stream-end","requestId":%s,"workspace":%s,"observedAt":%s,"safeForDisplay":true}\n' \
-      "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" "$(app_json_string "$(app_now)")"
-    return
-  fi
-  if ! raw="$(workspace_msb "$box" logs "$box" --format jsonl --tail 200 2>/dev/null)"; then
-    app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide bounded JSONL logs." "Retry with Logs visible after repairing the runtime." "$box" true 69
+  if [[ "$status" == Running ]]; then
+    if ! raw="$(workspace_msb "$box" logs "$box" --format jsonl --tail 200 2>/dev/null)"; then
+      app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide bounded JSONL logs." "Retry after repairing the workspace runtime." "$box" true 69
+    fi
+  else
+    reason_json="$(app_json_string "Showing system logs for a workspace that is $status.")"
+    if ! raw="$(workspace_msb "$box" logs "$box" --source system --format jsonl --tail 200 2>/dev/null)"; then
+      app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide stopped-workspace system logs." "Inspect the named volume and sandbox runtime." "$box" true 69
+    fi
   fi
   MSW_APP_RESPONSE_EMITTED=1
-  printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":%s,"workspace":%s,"observedAt":%s,"available":true,"lifecycle":"Running","freshness":"fresh","reason":null,"safeForDisplay":true}\n' \
-    "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" "$(app_json_string "$(app_now)")"
+  printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":%s,"workspace":%s,"observedAt":%s,"available":true,"lifecycle":%s,"freshness":"fresh","reason":%s,"safeForDisplay":true}\n' \
+    "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" \
+    "$(app_json_string "$(app_now)")" "$(app_json_string "$status")" "$reason_json"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     if (( ${#line} > 262144 )); then line="${line:0:262144}"; fi
@@ -6785,8 +6784,7 @@ app_cmd_push_plan() {
 app_cmd_apply() {
   local plan_id="${1:-}" fd="" plan_path="" claimed_path="" action="" box="" path="" created=0 expires=0 now="" supplied="" phrase=""
   local expected="" planned="" current_state="" observed="" current_json="" current_local="" current_remote="" current_branch="" current_canonical="" current_pushability="" current_ahead=0
-  local reconciled_json="" reconciled_remote="" reconciled_destination=""
-  local expected_local="" expected_remote="" expected_branch="" expected_destination="" expected_worktree="" expected_canonical=""
+  local reconciled_json="" reconciled_remote="" reconciled_destination="" operation_error="" operation_detail="" runtime_detail=""
   local credential_state="" quarantine_state="" push_error="" action_upper=""
   shift || true
   while (( $# > 0 )); do
@@ -6859,13 +6857,25 @@ app_cmd_apply() {
         stop) expected="Stopped" ;;
         restart) expected="Running" ;;
       esac
-      if ! case "$action" in
-        start) cmd_start "$box" >/dev/null 2>&1 ;;
-        stop) cmd_stop "$box" >/dev/null 2>&1 ;;
-        restart) cmd_restart "$box" >/dev/null 2>&1 ;;
-      esac; then
-        app_emit_error apply "MSW_OPERATION_FAILED" "The workspace operation failed before reconciliation." "Refresh the workspace state and retry if it is safe." "$box" true 1
+      operation_error="$(mktemp "${TMPDIR:-/tmp}/msw-app-lifecycle.XXXXXX")"
+      if ! (
+        case "$action" in
+          start) cmd_start "$box" ;;
+          stop) cmd_stop "$box" ;;
+          restart) cmd_restart "$box" ;;
+        esac
+      ) >/dev/null 2>"$operation_error"; then
+        operation_detail="$(app_redact "$(/bin/cat "$operation_error")" | /usr/bin/tail -n 8 | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-2000)"
+        if [[ "$action" == start ]]; then
+          runtime_detail="$(workspace_msb "$box" logs "$box" --source system --tail 40 2>/dev/null | /usr/bin/tail -n 12 | /usr/bin/tr '\n' ' ' | /usr/bin/cut -c1-2000 || true)"
+          runtime_detail="$(app_redact "$runtime_detail")"
+          [[ -z "$runtime_detail" ]] || operation_detail="$operation_detail Runtime: $runtime_detail"
+        fi
+        rm -f "$operation_error"
+        [[ -n "$operation_detail" ]] || operation_detail="The workspace operation failed before reconciliation."
+        app_emit_error apply "MSW_OPERATION_FAILED" "$operation_detail" "Resolve the runtime error shown above, then create a fresh plan and retry." "$box" true 1
       fi
+      rm -f "$operation_error"
       if ! observed="$(app_status_for_workspace "$box" 2>/dev/null)" || [[ "$observed" != "$expected" ]]; then
         app_emit_error apply "MSW_RECONCILE_PENDING" "The lifecycle operation completed without a matching fresh state observation." "Refresh after checking the workspace runtime; MSW did not claim final state." "$box" true 69
       fi

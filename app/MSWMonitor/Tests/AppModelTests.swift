@@ -691,6 +691,90 @@ final class AppModelTests: XCTestCase {
         model.cancelPendingLifecycle()
     }
 
+    func testFailedStartPersistsNoticeAndDetailedActivityAfterRefresh() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-start-failure-notice-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stateURL = temporary.appendingPathComponent("state.json")
+        try encoder.encode(
+            makeTestStateEnvelope(devLifecycle: .stopped, devQuarantine: .clear)
+        ).write(to: stateURL)
+
+        let planURL = temporary.appendingPathComponent("plan.json")
+        try encoder.encode(
+            MSWEnvelope(
+                schemaVersion: 1,
+                requestId: "plan-start",
+                ok: true,
+                command: "plan",
+                observedAt: Date(),
+                result: MSWLifecyclePlan(
+                    planId: "plan-start",
+                    action: "start",
+                    workspace: "dev",
+                    expiresAt: Date().addingTimeInterval(300),
+                    confirmationPhrase: "START dev",
+                    effects: "Starting dev."
+                )
+            )
+        ).write(to: planURL)
+
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            /bin/cat "\(stateURL.path)"
+        elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then
+            /bin/cat "\(planURL.path)"
+        elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
+            exit 7
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        ))
+        let client = MSWClient(runner: runner)
+        let model = AppModel(
+            client: client,
+            operationCoordinator: MSWOperationCoordinator(client: client)
+        )
+
+        await model.refreshRemote()
+        model.start(.dev)
+        for _ in 0..<80 {
+            if model.latestOperationFailure != nil,
+               model.workspaces.first(where: { $0.id == .dev })?.state == .stopped {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        let notice = try XCTUnwrap(model.latestOperationFailure)
+        XCTAssertEqual(notice.title, "Start failed")
+        XCTAssertEqual(notice.workspace, .dev)
+        XCTAssertEqual(notice.reason, "MSW apply exited with status 7 without returning error details.")
+        XCTAssertEqual(notice.recovery, "Run Diagnostics and Maintenance before retrying start.")
+        XCTAssertEqual(model.health.title, "Start failed")
+        XCTAssertNil(model.lastError)
+        XCTAssertTrue(model.activities.contains {
+            $0.kind == .failure &&
+                $0.workspace == "dev" &&
+                $0.detail?.contains("MSW apply exited with status 7 without returning error details.") == true
+        })
+    }
+
     func testStopApplyDoesNotLoadQuarantinedGuestCredential() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-stop-credential-isolation-\(UUID().uuidString)", isDirectory: true)

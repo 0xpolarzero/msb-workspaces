@@ -43,7 +43,6 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["refresh.button"].exists)
         XCTAssertTrue(app.buttons["details.button"].waitForExistence(timeout: 2))
         XCTAssertEqual(app.buttons["details.button"].label, "Overview")
-        XCTAssertTrue(app.buttons["activity.button"].exists)
         XCTAssertTrue(app.buttons["settings.button"].exists)
 
         let quit = app.buttons["quit.button"]
@@ -51,6 +50,48 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(quit.label, "Quit")
         quit.click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+    func testOperationFailureOpensDetailedLogs() {
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "build/MSWMonitor.app")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+
+        let app = XCUIApplication(url: appURL)
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+        }
+        app.launchArguments = ["--ui-test-open-popover", "--ui-test-operation-failure"]
+        app.launch()
+
+        assertText("Start failed", identifier: "monitor.health", in: app)
+        let details = app.buttons["error.details.button"]
+        XCTAssertTrue(details.waitForExistence(timeout: 2))
+        details.click()
+
+        XCTAssertTrue(app.descendants(matching: .any)["details.sidebar"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["details.latest-operation-error"].waitForExistence(timeout: 2))
+        assertText(
+            "The runtime rejected the start request.",
+            identifier: "details.latest-operation-error.message",
+            in: app
+        )
+        assertText(
+            "Run Diagnostics and Maintenance before retrying start.",
+            identifier: "details.latest-operation-error.recovery",
+            in: app
+        )
+        let diagnostics = app.buttons["Run Diagnostics"]
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 2))
+        diagnostics.click()
+        assertText("Diagnostics and Maintenance", identifier: "details.section-title", in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["diagnostics.latest-operation"]
+                .waitForExistence(timeout: 2)
+        )
     }
     func testDetailSidebarRemainsVisibleAcrossGlobalSections() {
         let appURL = URL(fileURLWithPath: #filePath)

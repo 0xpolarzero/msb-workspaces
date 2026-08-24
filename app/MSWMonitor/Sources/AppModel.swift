@@ -222,6 +222,14 @@ struct MonitorHealth: Equatable, Sendable {
     let symbol: String
     let severity: Severity
 }
+
+struct MSWOperationFailureNotice: Equatable, Sendable {
+    let action: String
+    let title: String
+    let reason: String
+    let recovery: String
+    let workspace: Workspace.ID?
+}
 @MainActor
 struct TerminalLauncher {
     enum LaunchError: LocalizedError {
@@ -373,6 +381,7 @@ final class AppModel {
     private(set) var lastObservedAt: Date?
     private(set) var lastError: String?
     private(set) var lastRecovery: MSWRecoveryContext?
+    private(set) var latestOperationFailure: MSWOperationFailureNotice?
     private(set) var activities: [MSWActivity] = []
     private(set) var operationStates: [String: MSWOperationState] = [:]
     private(set) var notificationEvents: [MSWNotificationEvent] = []
@@ -436,7 +445,8 @@ final class AppModel {
         activityStore: MSWActivityStore = MSWActivityStore(),
         workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil,
         startupRecoveryBlockedReason: String? = nil,
-        startupRecoveryRetry: (() -> Void)? = nil
+        startupRecoveryRetry: (() -> Void)? = nil,
+        initialOperationFailure: MSWOperationFailureNotice? = nil
     ) {
         self.client = client
         self.operationCoordinator = operationCoordinator
@@ -447,6 +457,7 @@ final class AppModel {
         self.activityStore = activityStore
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.startupRecoveryRetry = startupRecoveryRetry
+        self.latestOperationFailure = initialOperationFailure
         let configured = workspaceConfigurations ?? SetupWorkspaceConfiguration.defaults
         let resolvedWorkspaceIDs = configured.compactMap { Workspace.ID(rawValue: $0.name) }
         let initialWorkspaceIDs = resolvedWorkspaceIDs
@@ -557,6 +568,14 @@ final class AppModel {
                 detail: "A workspace is quarantined. Unsafe actions are blocked.",
                 symbol: "exclamationmark.octagon.fill",
                 severity: .critical
+            )
+        }
+        if let failure = latestOperationFailure {
+            return MonitorHealth(
+                title: failure.title,
+                detail: failure.reason,
+                symbol: "exclamationmark.triangle.fill",
+                severity: .attention
             )
         }
         if lastError == nil,
@@ -1078,15 +1097,25 @@ final class AppModel {
     }
 
     func runDiagnostics() {
+        let operationCheck = latestOperationFailure.map { failure in
+            MSWDiagnosticCheck(
+                id: "latest-operation",
+                title: failure.title,
+                status: .failed,
+                detail: failure.reason,
+                recovery: failure.recovery
+            )
+        }
         guard let diagnostics else {
-            detailError = "Diagnostics are unavailable in fixture mode."
+            diagnosticChecks = operationCheck.map { [$0] } ?? []
+            detailError = "Runtime diagnostics are unavailable in fixture mode."
             return
         }
         let request = beginDetailRequest()
         Task { [weak self] in
             let result = await diagnostics.checks()
             guard let self, request == self.detailRequestGeneration else { return }
-            self.diagnosticChecks = result
+            self.diagnosticChecks = operationCheck.map { [$0] + result } ?? result
             self.finishDetailRequest(request)
         }
     }
@@ -1684,6 +1713,26 @@ final class AppModel {
         operation.fraction = outcome == .succeeded ? 1 : operation.fraction
         operation.updatedAt = Date()
         operationStates[key] = operation
+        if outcome == .succeeded,
+           latestOperationFailure?.action == operation.action,
+           latestOperationFailure?.workspace?.rawValue == operation.workspace {
+            latestOperationFailure = nil
+        }
+    }
+
+    private func recordOperationFailure(
+        action: String,
+        workspace: String?,
+        reason: String,
+        recovery: String
+    ) {
+        latestOperationFailure = MSWOperationFailureNotice(
+            action: action,
+            title: "\(action.capitalized) failed",
+            reason: reason,
+            recovery: recovery,
+            workspace: workspace.flatMap(Workspace.ID.init(rawValue:))
+        )
     }
 
     private func failOperation(
@@ -1700,7 +1749,13 @@ final class AppModel {
         let recovery = recoveryContext(
             for: error,
             workspace: workspace,
-            fallbackRecovery: "Review the latest state, then retry when it is safe."
+            fallbackRecovery: "Run Diagnostics and Maintenance before retrying \(action)."
+        )
+        recordOperationFailure(
+            action: action,
+            workspace: workspace,
+            reason: recovery.reason,
+            recovery: recovery.recovery ?? "Run Diagnostics and Maintenance before retrying \(action)."
         )
         finishOperation(key: key, outcome: .failed, message: error.localizedDescription)
         if var operation = operationStates[key] {
@@ -1750,6 +1805,12 @@ final class AppModel {
                     : "A fresh observation did not match the expected \(current.action) outcome."
             )
             if !matches {
+                recordOperationFailure(
+                    action: current.action,
+                    workspace: workspaceID,
+                    reason: "The workspace returned \(workspace.state.rawValue.lowercased()) after \(current.action), so the requested change did not take effect.",
+                    recovery: "Run Diagnostics and Maintenance, then retry \(current.action) only if the checks pass."
+                )
                 emitNotification(
                     kind: .operationFailure,
                     workspace: workspaceID,
@@ -1767,6 +1828,12 @@ final class AppModel {
     private func markOperationUnknown(key: String, reason: String) {
         guard let operation = operationStates[key], operation.phase == .verifying else { return }
         finishOperation(key: key, outcome: .unknown, message: reason)
+        recordOperationFailure(
+            action: operation.action,
+            workspace: operation.workspace,
+            reason: reason,
+            recovery: "Run Diagnostics and Maintenance before retrying \(operation.action)."
+        )
         emitNotification(
             kind: .operationFailure,
             workspace: operation.workspace,
@@ -1810,6 +1877,17 @@ final class AppModel {
                 recovery: protocolError.recovery ?? fallbackRecovery,
                 workspace: protocolError.workspace ?? workspace,
                 retryable: protocolError.retryable
+            )
+        }
+        if case let MSWClientError.processFailed(command, status, message) = error {
+            let reason = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return MSWRecoveryContext(
+                code: "MSW_PROCESS_FAILED",
+                reason: reason.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "MSW \(command) exited with status \(status) without returning error details.",
+                recovery: fallbackRecovery,
+                workspace: workspace,
+                retryable: true
             )
         }
         return MSWRecoveryContext(

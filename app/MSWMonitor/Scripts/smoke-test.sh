@@ -18,8 +18,11 @@ case "${1:-}" in
   --details-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDetailSidebarRemainsVisibleAcrossGlobalSections"
     ;;
+  --failure-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
+    ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--details-only]"
+    print -u2 "usage: $0 [--monitor-only|--details-only|--failure-only]"
     exit 64
     ;;
 esac

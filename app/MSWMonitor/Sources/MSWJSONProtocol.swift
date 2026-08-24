@@ -22,7 +22,8 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
         case .invalidArguments: return "The requested MSW operation has invalid arguments."
         case .timedOut(let command): return "MSW operation timed out: \(command)."
         case .cancelled: return "The MSW operation was cancelled."
-        case .processFailed(_, _, let message): return message ?? "The MSW operation failed."
+        case .processFailed(let command, let status, let message):
+            return message ?? "MSW \(command) exited with status \(status) without returning error details."
         case .invalidUTF8: return "MSW returned invalid UTF-8 output."
         case .malformedJSON(let command): return "MSW returned malformed JSON for \(command)."
         case .unsupportedSchema(let version): return "MSW returned unsupported schema version \(version)."

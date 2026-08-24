@@ -409,9 +409,34 @@ struct DetailView: View {
             sectionToolbar(actionTitle: "Refresh") {
                 if let id = selectedWorkspaceID { model.loadLogs(for: id) }
             }
-            Text("Logs are bounded and redacted before they reach the app.")
+            Text("Current operation errors appear first. Runtime logs below are bounded and redacted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let failure = model.latestOperationFailure,
+               failure.workspace == navigation.workspace {
+                GroupBox(failure.title) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("What happened")
+                            .font(.caption.weight(.semibold))
+                        Text(failure.reason)
+                            .font(.caption)
+                            .accessibilityIdentifier("details.latest-operation-error.message")
+                            .textSelection(.enabled)
+                        Divider()
+                        Text("What to do")
+                            .font(.caption.weight(.semibold))
+                        Text(failure.recovery)
+                            .font(.caption)
+                            .accessibilityIdentifier("details.latest-operation-error.recovery")
+                            .textSelection(.enabled)
+                        Button("Run Diagnostics") {
+                            navigation.section = .diagnostics
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityIdentifier("details.latest-operation-error")
+            }
             if let id = selectedWorkspaceID, let value = model.logsByWorkspace[id.rawValue] {
                 FreshnessNotice(freshness: value.freshness, observedAt: selectedWorkspace?.observedAt, reason: value.reason)
                 if value.lines.isEmpty {
@@ -560,7 +585,7 @@ struct DetailView: View {
 
     private var activity: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Sanitized operation, observation, and failure history. Times use your Mac’s current time zone.")
+            Text("A chronological audit trail of actions and observations. Use Logs for the current error and recovery steps.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if scopedActivities.isEmpty {
@@ -719,6 +744,7 @@ struct DetailView: View {
                         }
                     }
                     .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("diagnostics.\(check.id)")
                 }
                 .listStyle(.inset)
             }

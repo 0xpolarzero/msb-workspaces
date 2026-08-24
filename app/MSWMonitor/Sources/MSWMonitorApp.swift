@@ -226,6 +226,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fixtureProvider: (any GitHubProviding)? = (fixtureMode && accessMode == .local)
             ? GitHubFixtureProvider(scenario: uiTestGitHubScenario)
             : nil
+        let fixtureOperationFailure = arguments.contains("--ui-test-operation-failure")
+            ? MSWOperationFailureNotice(
+                action: "start",
+                title: "Start failed",
+                reason: "The runtime rejected the start request.",
+                recovery: "Run Diagnostics and Maintenance before retrying start.",
+                workspace: .dev
+            )
+            : nil
         let model: AppModel
         let configuredWorkspaces = fixtureMode
             ? SetupWorkspaceConfiguration.defaults
@@ -240,7 +249,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 accessMode: accessMode,
                 workspaceConfigurations: configuredWorkspaces,
                 startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
-                startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry
+                startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry,
+                initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil
             )
             operationCoordinator = nil
         } else {

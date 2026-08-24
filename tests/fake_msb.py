@@ -532,6 +532,8 @@ def main() -> int:
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
         record_lock_fd()
+        if os.environ.get("MSW_FAKE_START_FAIL") == "1":
+            return fail("fake start failure")
         if state["sandboxes"][box].get("secrets", {}).get("GH_TOKEN") and not os.environ.get("GH_TOKEN"):
             return fail("host source GH_TOKEN missing")
         state["sandboxes"][box]["running"] = True

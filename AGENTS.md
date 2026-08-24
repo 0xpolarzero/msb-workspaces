@@ -90,6 +90,12 @@ For detail-window navigation changes, use the focused detail flow:
 app/MSWMonitor/Scripts/smoke-test.sh --details-only
 ```
 
+For operation-failure presentation and error-detail routing, use:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --failure-only
+```
+
 Run the complete onboarding and GitHub fixture suite only when those surfaces or
 their shared infrastructure change:
 
@@ -161,7 +167,6 @@ Use accessibility identifiers rather than screen coordinates:
 | `workspace.playgrounds.name` / `.state` | playgrounds row | `playgrounds` / `Stopped` |
 | `workspace.personal.name` / `.state` | personal row | `personal` / `Stopped` |
 | `details.button` | Overview shortcut | Opens the detail window |
-| `activity.button` | Activity shortcut | Opens activity |
 | `settings.button` | Settings shortcut | Opens settings |
 | `quit.button` | Quit button | Terminates the app |
 
@@ -320,8 +325,7 @@ was verified:
 - `workspace.dev.name/state`: `dev` / `Stopped`;
   `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`;
   `workspace.personal.name/state`: `personal` / `Stopped`.
-- `details.button`: `Overview`; `activity.button`: `Activity`;
-  `settings.button`: `Settings`.
+- `details.button`: `Overview`; `settings.button`: `Settings`.
 - `quit.button`: `Quit`; clicking it must reach app state `notRunning`.
 
 Keep generated logs and result bundles under `app/MSWMonitor/build/`. Do not
@@ -347,9 +351,10 @@ unredacted system logs.
 - Do not guess the newest result with a glob. Use the exact
   `Test session results, code coverage, and logs:` path printed by that run.
 - The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`;
-  `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` narrows that target
-  to `testStatusItemMinimalPopoverAndQuit()`; and `--details-only` narrows it to
-  `testDetailSidebarRemainsVisibleAcrossGlobalSections()`. A bare
+  `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` runs
+  `testStatusItemMinimalPopoverAndQuit()`; `--details-only` runs
+  `testDetailSidebarRemainsVisibleAcrossGlobalSections()`; and
+  `--failure-only` runs `testOperationFailureOpensDetailedLogs()`. A bare
   `xcodebuild test` is a different, broader operation and is not a replacement
   for the documented checks.
 - UI automation requires an interactive GUI session and may require narrowly

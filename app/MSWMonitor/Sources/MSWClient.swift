@@ -853,7 +853,7 @@ actor MSWClient {
             guard output.status != 0 else { throw error }
             let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
             throw MSWClientError.processFailed(
-                command: arguments.first ?? command,
+                command: command,
                 status: output.status,
                 message: message.isEmpty ? nil : message
             )
