@@ -15,8 +15,11 @@ case "${1:-}" in
   --monitor-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testStatusItemMinimalPopoverAndQuit"
     ;;
+  --details-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDetailSidebarRemainsVisibleAcrossGlobalSections"
+    ;;
   *)
-    print -u2 "usage: $0 [--monitor-only]"
+    print -u2 "usage: $0 [--monitor-only|--details-only]"
     exit 64
     ;;
 esac

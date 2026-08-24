@@ -52,6 +52,41 @@ final class MSWMonitorUITests: XCTestCase {
         quit.click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
+    func testDetailSidebarRemainsVisibleAcrossGlobalSections() {
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "build/MSWMonitor.app")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+
+        let app = XCUIApplication(url: appURL)
+        defer {
+            if app.state != .notRunning {
+                app.terminate()
+            }
+        }
+        app.launchArguments = ["--ui-test-open-popover"]
+        app.launch()
+
+        let details = app.buttons["details.button"]
+        XCTAssertTrue(details.waitForExistence(timeout: 3))
+        details.click()
+
+        let sidebar = app.descendants(matching: .any)["details.sidebar"]
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 3))
+
+        let github = app.descendants(matching: .any)["details.section.GitHub Access"]
+        XCTAssertTrue(github.waitForExistence(timeout: 2))
+        github.click()
+        assertText("GitHub Access", identifier: "details.section-title", in: app)
+        XCTAssertTrue(sidebar.exists)
+
+        let diagnostics = app.descendants(matching: .any)["details.section.Diagnostics and Maintenance"]
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 2))
+        diagnostics.click()
+        assertText("Diagnostics and Maintenance", identifier: "details.section-title", in: app)
+        XCTAssertTrue(sidebar.exists)
+    }
     func testSetupCanReviewAndFinishInFixtureMode() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

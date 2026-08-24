@@ -84,6 +84,12 @@ changes, use the focused flow so onboarding is not replayed:
 app/MSWMonitor/Scripts/smoke-test.sh --monitor-only
 ```
 
+For detail-window navigation changes, use the focused detail flow:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --details-only
+```
+
 Run the complete onboarding and GitHub fixture suite only when those surfaces or
 their shared infrastructure change:
 
@@ -341,10 +347,11 @@ unredacted system logs.
 - Do not guess the newest result with a glob. Use the exact
   `Test session results, code coverage, and logs:` path printed by that run.
 - The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`;
-  `smoke-test.sh` runs `MSWMonitorUITests`; and `--monitor-only` narrows that
-  target to `testStatusItemMinimalPopoverAndQuit()`. A bare `xcodebuild test` is
-  a different, broader operation and is not a replacement for the documented
-  checks.
+  `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` narrows that target
+  to `testStatusItemMinimalPopoverAndQuit()`; and `--details-only` narrows it to
+  `testDetailSidebarRemainsVisibleAcrossGlobalSections()`. A bare
+  `xcodebuild test` is a different, broader operation and is not a replacement
+  for the documented checks.
 - UI automation requires an interactive GUI session and may require narrowly
   scoped Automation/Accessibility permission for the launcher or test runner.
   Never reset TCC globally or use `sudo` as a shortcut.

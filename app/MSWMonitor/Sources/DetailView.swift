@@ -162,34 +162,9 @@ struct DetailView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(DetailSection.allCases, selection: $navigation.section) { section in
-                Label(section.rawValue, systemImage: icon(for: section))
-                    .tag(section)
-            }
-            .navigationTitle("MSW Monitor")
-            .frame(minWidth: 200, idealWidth: 220)
-        } detail: {
-            VStack(alignment: .leading, spacing: 0) {
-                detailHeader
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 14)
-                Divider()
-                Group {
-                    if navigation.section.requiresWorkspace && navigation.workspace == nil {
-                        ContentUnavailableView(
-                            "Choose a workspace",
-                            systemImage: "square.stack.3d.up.badge.a",
-                            description: Text("Select a configured workspace above. No workspace is selected implicitly.")
-                        )
-                    } else {
-                        sectionContent
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(22)
-            }
-            .task(id: routeIdentity) { loadSelectedSection() }
+        HSplitView {
+            sidebar
+            detailPane
         }
         .frame(minWidth: 700, minHeight: 480)
         .sheet(isPresented: Binding(
@@ -253,6 +228,48 @@ struct DetailView: View {
         }
     }
 
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("MSW Monitor")
+                .font(.headline)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            Divider()
+            List(DetailSection.allCases, selection: $navigation.section) { section in
+                Label(section.rawValue, systemImage: icon(for: section))
+                    .tag(section)
+                    .accessibilityIdentifier("details.section.\(section.rawValue)")
+            }
+            .listStyle(.sidebar)
+        }
+        .frame(minWidth: 200, idealWidth: 220, maxWidth: 280)
+        .accessibilityIdentifier("details.sidebar")
+    }
+
+    private var detailPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            detailHeader
+                .padding(.horizontal, 22)
+                .padding(.vertical, 14)
+            Divider()
+            Group {
+                if navigation.section.requiresWorkspace && navigation.workspace == nil {
+                    ContentUnavailableView(
+                        "Choose a workspace",
+                        systemImage: "square.stack.3d.up.badge.a",
+                        description: Text("Select a configured workspace above. No workspace is selected implicitly.")
+                    )
+                } else {
+                    sectionContent
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(22)
+        }
+        .frame(minWidth: 480)
+        .task(id: routeIdentity) { loadSelectedSection() }
+    }
+
     private var routeIdentity: String {
         "\(navigation.section.rawValue):\(navigation.workspace?.rawValue ?? "all")"
     }
@@ -262,6 +279,7 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(navigation.section.rawValue)
                     .font(.title2.weight(.semibold))
+                    .accessibilityIdentifier("details.section-title")
                 Text(scopeDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
