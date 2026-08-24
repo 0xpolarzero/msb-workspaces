@@ -331,7 +331,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(waitUntilEnabled(refreshCatalog, timeout: 2))
 
         let initialSetupFrame = setup.frame
-        let workspaceAccessHelp = "Choose which repositories each workspace can access and whether it can push changes."
+        let workspaceAccessHelp = "Choose which repositories each workspace can use with your GitHub credentials, and whether it can push changes. Public repositories remain cloneable without granting access."
         let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
         let accessInfo = app.descendants(matching: .any)["setup.github.workspace-access.info"]
         XCTAssertTrue(accessInfo.waitForExistence(timeout: 2))
@@ -473,7 +473,7 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github.account"].waitForExistence(timeout: 3)
         )
         assertText(
-            "No repositories found. Add one manually, refresh, or skip GitHub.",
+            "No repositories were found. Refresh, manage your connected account, or skip GitHub. Public repositories remain cloneable without granting access.",
             identifier: "setup.github.status",
             in: app
         )
@@ -481,7 +481,7 @@ final class MSWMonitorUITests: XCTestCase {
         let skip = app.buttons["setup.github.skip.button"]
         XCTAssertTrue(skip.waitForExistence(timeout: 2))
         XCTAssertTrue(skip.isEnabled)
-        XCTAssertTrue(app.descendants(matching: .any)["setup.github.manual-add"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["setup.github.manual-add"].exists)
     }
 
     func testGitHubRefreshKeepsRepositoryActionsInteractiveAndProgressLocal() {

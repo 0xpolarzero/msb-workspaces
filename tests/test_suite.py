@@ -1043,6 +1043,77 @@ class InstallerAndDailyTests(MSWTestCase):
         (self.env.workspace("dev") / "link").symlink_to(outside)
         self.assertFailed(self.env.msw("push", "dev", "link", "--yes", check=False), "escapes /workspace")
 
+    def test_clone_and_pull_ignore_connect_repository_names_gate(self) -> None:
+        """Local-mode clone/pull ignore dormant Connect repositoryNames.
+
+        With the SAME Connect-style dev.guest metadata (credentials.json with
+        repositoryNames EXCLUDING acme/demo), default MSW_GITHUB_MODE=connect
+        still enforces the metadata gate: the clone must fail with "not
+        assigned", because Connect mode places a guest token in the VM and
+        cannot prove anonymous forwarding. Explicit MSW_GITHUB_MODE=local
+        reads NO Connect grants, so the dormant metadata must not gate the
+        anonymous clone or the subsequent fast-forward pull -- the old
+        repositoryNames gate fataled here.
+        """
+        self.env.init_remote()
+        self.env.configure_tokens("dev", "acme/demo")  # read token for guest exec
+        # Connect-style guest grant that does NOT include acme/demo.
+        credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
+        credentials.parent.mkdir(parents=True, exist_ok=True)
+        credentials.write_text(json.dumps({
+            "schemaVersion": 2,
+            "entries": {
+                "dev.guest": {
+                    "workspace": "dev",
+                    "schemaVersion": 2,
+                    "role": "guest",
+                    "provider": "github-app-installation",
+                    "appClientID": "guest-public",
+                    "accountLogin": "alice",
+                    "owner": "acme",
+                    "repositoryNames": ["acme/other"],
+                    "repositoryIDs": [34],
+                    "accessMode": "read-only",
+                    "verificationRepository": "acme/other",
+                    "installationID": 123,
+                    "accessExpiresAt": "2030-01-01T00:00:00Z",
+                    "refreshExpiresAt": "2030-01-01T00:00:00Z",
+                    "needsRestart": False,
+                    "generation": 1,
+                    "quarantined": False,
+                    "updatedAt": "2026-08-08T00:00:00Z",
+                    "recoveryState": "ready",
+                }
+            },
+        }))
+        # Connect mode (default in this suite) still enforces the metadata
+        # gate: acme/demo is not in repositoryNames, so the clone fails.
+        self.assertFailed(
+            self.env.msw("clone", "dev", "acme/demo", "clients/acme/connect-blocked",
+                         check=False),
+            "not assigned")
+        # acme/demo is NOT in repositoryNames: the old require_repository_access
+        # gate fataled here; the read paths now clone anonymously.
+        self.env.msw("clone", "dev", "acme/demo", "clients/acme/backend",
+                     extra_env={"MSW_GITHUB_MODE": "local"})
+        repo = self.env.guest_repo("dev", "clients/acme/backend")
+        self.assertTrue((repo / ".git").is_dir())
+
+        # an upstream commit must pull through the same anonymous read path
+        updater = self.env.root / "updater"
+        run_cmd([SYSTEM_GIT, "clone", str(self.env.root / "remotes" / "acme" / "demo.git"), str(updater)],
+                env=self.env.env)
+        run_cmd([SYSTEM_GIT, "-C", updater, "config", "user.name", "Updater"], env=self.env.env)
+        run_cmd([SYSTEM_GIT, "-C", updater, "config", "user.email", "updater@example.invalid"], env=self.env.env)
+        (updater / "remote.txt").write_text("remote\n")
+        run_cmd([SYSTEM_GIT, "-C", updater, "add", "remote.txt"], env=self.env.env)
+        run_cmd([SYSTEM_GIT, "-C", updater, "commit", "-m", "Remote update"], env=self.env.env)
+        run_cmd([SYSTEM_GIT, "-C", updater, "push", "origin", "main"], env=self.env.env)
+
+        self.env.msw("pull", "dev", "clients/acme/backend",
+                     extra_env={"MSW_GITHUB_MODE": "local"})
+        self.assertEqual((repo / "remote.txt").read_text(), "remote\n")
+
 
 class PublishedPortWarningTests(MSWTestCase):
     """Warn-and-skip for published ports under host-managed forwarding.
@@ -3127,11 +3198,16 @@ class GitHubProxyContractTests(MSWTestCase):
       push) and http.client LFS flows.
 
     The stateful fake GitHub (tests/fake_github.py) is the upstream; every
-    request it records proves the proxy forwarded it, and an EMPTY request log
-    proves a rejection never touched upstream ("upstream untouched"). Policy
-    fixture per contract §2: dev=read-write acme/demo, playgrounds=read-only
-    acme/demo, personal=no repos. Host credential per §5 seeded in
-    MSW_TEST_KEYCHAIN_DIR.
+    request it records proves the proxy forwarded it (and whether the host
+    credential rode along), and an EMPTY request log proves a shape rejection
+    never touched upstream ("upstream untouched"). Policy fixture per
+    contract §2: dev=read-write acme/demo, playgrounds=read-only acme/demo,
+    personal=no repos. The policy is a CREDENTIAL GRANT table: every valid
+    request is forwarded and only a live workspace+repo+operation grant
+    injects the host credential (Authorization present upstream); missing/
+    malformed policy, unknown/missing capability, unticked repos, and
+    read-only writes all go out ANONYMOUSLY and GitHub decides. Host
+    credential per §5 seeded in MSW_TEST_KEYCHAIN_DIR.
 
     Named cases (contract §9): INGRESS-1..4, TIMEOUT-1, REGRESS-1/2, the
     SMUGGLE matrix (13 framing cases), the policy matrix, identity spoofing,
@@ -3357,6 +3433,7 @@ class GitHubProxyContractTests(MSWTestCase):
                         "method": method,
                         "path": self.path,
                         "authorization": self.headers.get("Authorization"),
+                        "cookie": self.headers.get("Cookie"),
                     }) + "\n")
 
             def _send(self, status: int, body: bytes, ctype: str) -> None:
@@ -3539,15 +3616,13 @@ class GitHubProxyContractTests(MSWTestCase):
         self.assertEqual(stat.S_IMODE(key_file.stat().st_mode), 0o600)
         self.assertRegex(key_file.read_text().strip(), r"^[0-9a-f]{64}$")
 
-    def test_lfs_read_only_download_allowed_upload_denied(self) -> None:
-        """Read-only workspaces can clone/pull LFS objects, never upload them.
-
-        Contract §4: objects.githubusercontent.com GET=download(read) and
-        PUT=upload(write). The stamped object operation is normalized to the
-        policy op (download->read, upload->write) BEFORE the policy check, so
-        a read-only repo's stamped GET is authorized as read while its upload
-        batch AND a validly-stamped PUT stay denied (policy write) --
-        fail-closed, upstream untouched for every denied leg.
+    def test_lfs_read_only_download_allowed_upload_forwarded_anonymously(self) -> None:
+        """Read-only workspaces get AUTHENTICATED LFS downloads; their uploads
+        are no longer denied locally -- they are forwarded anonymously (no
+        host credential, no credentials sealed into the stamp) and GitHub
+        decides. An AUTHENTICATED stamp still requires a live grant on the
+        objects leg: the read-only workspace's forged credential-carrying
+        PUT is denied, while the same stamp works under dev (read-write).
         """
         fake = self._start_fake_github()
         self.env.init_remote()
@@ -3555,7 +3630,7 @@ class GitHubProxyContractTests(MSWTestCase):
         oid = hashlib.sha256(payload).hexdigest()
         with self._proxy_listener() as port:
             # Seed the object via the READ-WRITE workspace (dev): upload batch
-            # allowed -> stamped PUT allowed.
+            # authenticated -> stamped PUT allowed.
             status, _, body = self._http_req(
                 port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
                 body=json.dumps({"operation": "upload", "transfers": ["basic"],
@@ -3572,8 +3647,8 @@ class GitHubProxyContractTests(MSWTestCase):
                 headers={"Content-Type": "application/octet-stream"})
             self.assertEqual(status, 200, body)
 
-            # READ-ONLY workspace (playgrounds): download batch allowed ->
-            # stamped GET returns the object bytes (download -> policy read).
+            # READ-ONLY workspace (playgrounds): download batch authenticated
+            # (read grant) -> stamped GET returns the object bytes.
             status, _, body = self._http_req(
                 port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
                 body=json.dumps({"operation": "download", "transfers": ["basic"],
@@ -3591,18 +3666,21 @@ class GitHubProxyContractTests(MSWTestCase):
             self.assertEqual(status, 200, body[:200])
             self.assertEqual(body, payload)
 
-            # READ-ONLY workspace: upload batch denied (policy write).
+            # READ-ONLY workspace: upload batch forwarded ANONYMOUSLY (no
+            # local denial) and stamped WITHOUT credentials; GitHub decides.
             status, _, body = self._http_req(
                 port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
                 body=json.dumps({"operation": "upload", "transfers": ["basic"],
                                  "objects": [{"oid": oid, "size": len(payload)}]}),
                 headers={"Content-Type": "application/vnd.git-lfs+json"},
                 capability=PLAY_CAP)
-            self.assertEqual(status, 403, body[:200])
-            self.assertIn(b"read-only", body)
+            self.assertEqual(status, 200, body[:200])
+            self.assertNotIn(b"Authorization", body)
+            self.assertNotIn(b"header", body)
 
-            # READ-ONLY workspace: even a VALID stamped upload URL denies the
-            # PUT (upload -> policy write, before the policy check).
+            # An AUTHENTICATED upload stamp (credentials sealed inside) must
+            # be covered by a live write grant: forged with the real key, it
+            # is denied for the read-only workspace (no write grant) ...
             key_file = self.policy_dir / "github-proxy-hmac.key"
             real_key = bytes.fromhex(key_file.read_text().strip())
             saved_path = list(sys.path)
@@ -3613,8 +3691,9 @@ class GitHubProxyContractTests(MSWTestCase):
                 sys.path[:] = saved_path
             stamp_exp = q_up["_msw_exp"][0]
             forged_upload = json.dumps({
-                "v": 1, "href": f"{fake.base_url}/objects/{oid}", "headers": {},
-                "op": "upload", "repo": "acme/demo", "exp": stamp_exp,
+                "v": 1, "href": f"{fake.base_url}/objects/{oid}",
+                "headers": {"Authorization": "Bearer forged-cred"},
+                "op": "upload", "repo": "acme/demo", "exp": stamp_exp, "auth": True,
             }, sort_keys=True).encode()
             upload_blob = proxycore_mod.stamp_encode(real_key, forged_upload)
             put_q = urllib.parse.urlencode({
@@ -3623,17 +3702,211 @@ class GitHubProxyContractTests(MSWTestCase):
             })
             status, _, body = self._http_req(
                 port, "PUT", f"/objects.githubusercontent.com/objects/{oid}?{put_q}",
-                body=b"x", headers={"Content-Type": "application/octet-stream"},
+                body=payload, headers={"Content-Type": "application/octet-stream"},
                 capability=PLAY_CAP)
             self.assertEqual(status, 403, body[:200])
-            self.assertIn(b"read-only", body)
+            self.assertIn(b"revoked", body)
 
-        # Upstream provenance: only the authorized legs ever leave the host.
+            # ... but the SAME stamp is still valid for the READ-WRITE
+            # workspace (dev), which forwards it with the stored credential.
+            status, _, body = self._http_req(
+                port, "PUT", f"/objects.githubusercontent.com/objects/{oid}?{put_q}",
+                body=payload, headers={"Content-Type": "application/octet-stream"},
+                capability=DEV_CAP)
+            self.assertEqual(status, 200, body[:200])
+
+        # Upstream provenance: only the forwarded legs ever leave the host.
         records = fake.requests()
         batches = [r for r in records if "lfs/objects/batch" in r["path"]]
         objects = [r for r in records if r["path"].startswith("/objects/")]
-        self.assertEqual([r["method"] for r in batches], ["POST", "POST"], records)
-        self.assertEqual([r["method"] for r in objects], ["PUT", "GET"], records)
+        self.assertEqual([r["method"] for r in batches], ["POST", "POST", "POST"], records)
+        self.assertEqual([r["method"] for r in objects], ["PUT", "GET", "PUT"], records)
+        # dev seed upload + read-only download batches used the host
+        # credential; the read-only workspace's upload batch was anonymous.
+        self.assertEqual([r["authorization_present"] for r in batches],
+                         [True, True, False], records)
+    def test_lfs_anonymous_public_download_no_host_auth(self) -> None:
+        """Public LFS download needs no grant and no setup.
+
+        Unticked, unknown-capability, and missing-policy workspaces get the
+        batch AND the object bytes anonymously: the upstream never sees an
+        Authorization header anywhere, and the VM never sees a credential-
+        bearing header or an upstream href (stamped proxy URLs only).
+        """
+        fake = self._start_fake_github()
+        self.env.init_remote()
+        payload = bytes(range(251)) * 4096  # ~1 MiB
+        oid = hashlib.sha256(payload).hexdigest()
+        with self._proxy_listener() as port:
+            # seed the object via dev (read-write) so it exists upstream
+            status, _, body = self._http_req(
+                port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                body=json.dumps({"operation": "upload", "transfers": ["basic"],
+                                 "objects": [{"oid": oid, "size": len(payload)}]}),
+                headers={"Content-Type": "application/vnd.git-lfs+json"})
+            self.assertEqual(status, 200, body[:200])
+            upload_href = json.loads(body)["objects"][0]["actions"]["upload"]["href"]
+            u = urllib.parse.urlsplit(upload_href)
+            status, _, body = self._http_req(
+                port, "PUT", u.path + "?" + u.query, body=payload,
+                headers={"Content-Type": "application/octet-stream"})
+            self.assertEqual(status, 200, body[:200])
+
+            # unticked workspace and unknown capability: anonymous download
+            for capability, tag in ((PERSONAL_CAP, "unticked"), ("d" * 48, "unknown")):
+                status, _, body = self._http_req(
+                    port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                    body=json.dumps({"operation": "download", "transfers": ["basic"],
+                                     "objects": [{"oid": oid, "size": len(payload)}]}),
+                    headers={"Content-Type": "application/vnd.git-lfs+json"},
+                    capability=capability)
+                self.assertEqual(status, 200, f"{tag}: {body[:200]}")
+                self.assertNotIn(b"Authorization", body)
+                self.assertNotIn(b"header", body)
+                download_href = json.loads(body)["objects"][0]["actions"]["download"]["href"]
+                d = urllib.parse.urlsplit(download_href)
+                self.assertEqual(d.path, f"/objects.githubusercontent.com/objects/{oid}")
+                status, _, body = self._http_req(
+                    port, "GET", d.path + "?" + d.query, capability=capability)
+                self.assertEqual(status, 200, f"{tag}: {body[:200]}")
+                self.assertEqual(body, payload)
+
+        # missing policy: anonymous LFS still works end to end
+        missing = str(self.env.root / "missing-policy.json")
+        batch_body = json.dumps({"operation": "download", "transfers": ["basic"],
+                                 "objects": [{"oid": oid, "size": len(payload)}]}).encode()
+        status, resp = self._proxy_request(
+            self._req_bytes("POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                            headers=[("Content-Type", "application/vnd.git-lfs+json"),
+                                     ("Content-Length", str(len(batch_body)))],
+                            body=batch_body),
+            env_overrides={"MSW_POLICY_FILE": missing})
+        self.assertEqual(status, 200, resp[:200])
+        download_href = json.loads(resp.split(b"\r\n\r\n", 1)[1])[
+            "objects"][0]["actions"]["download"]["href"]
+        d = urllib.parse.urlsplit(download_href)
+        status, resp = self._proxy_request(
+            self._req_bytes("GET", d.path + "?" + d.query),
+            env_overrides={"MSW_POLICY_FILE": missing})
+        self.assertEqual(status, 200, resp[:200])
+        self.assertEqual(resp.split(b"\r\n\r\n", 1)[1], payload)
+
+        records = fake.requests()
+        batches = [r for r in records if "lfs/objects/batch" in r["path"]]
+        objects = [r for r in records if r["path"].startswith("/objects/")]
+        self.assertEqual(len(batches), 4, records)
+        self.assertEqual(len(objects), 4, records)
+        # only the dev seed batch used the host credential
+        self.assertEqual([r["authorization_present"] for r in batches],
+                         [True, False, False, False], records)
+        # no object leg ever carried an Authorization header
+        self.assertEqual([r["authorization_present"] for r in objects],
+                         [False, False, False, False], records)
+
+    def test_lfs_stamp_cannot_bypass_later_grant_revocation(self) -> None:
+        """Authenticated LFS stamps cannot outlive their grant.
+
+        A credential-carrying stamp minted under dev's read-write grant stops
+        working the moment the grant is revoked: the objects leg re-checks
+        the CURRENT policy (re-read per request), so even a signature-valid,
+        unexpired stamp is denied and never reaches the upstream.
+        """
+        fake = self._start_fake_github()
+        self.env.init_remote()
+        oid = hashlib.sha256(b"revoke-me").hexdigest()
+        credential = "Bearer lfs-revoke-cred"
+        record = self.env.root / "mini-revoke.jsonl"
+        crafted = {}
+        with self._crafted_batch_upstream(lambda: crafted, record) as mini:
+            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+                crafted = {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "actions": {"upload": {"href": f"{mini}/objects/{oid}",
+                                           "header": {"Authorization": credential}}}}]}
+                # mint an authenticated upload stamp under dev's grant
+                status, _, body = self._http_req(
+                    port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                    body=json.dumps({"operation": "upload", "transfers": ["basic"],
+                                     "objects": [{"oid": oid, "size": 9}]}),
+                    headers={"Content-Type": "application/vnd.git-lfs+json"})
+                self.assertEqual(status, 200, body[:200])
+                upload_href = json.loads(body)["objects"][0]["actions"]["upload"]["href"]
+                u = urllib.parse.urlsplit(upload_href)
+                # the stamp works while the grant exists (the stored
+                # credential is re-attached host-side on the outbound leg)
+                status, _, body = self._http_req(
+                    port, "PUT", u.path + "?" + u.query, body=b"objdata",
+                    headers={"Content-Type": "text/plain"})
+                self.assertEqual(status, 200, body[:200])
+                # revoke dev's grant for acme/demo
+                self._rewrite_policy({
+                    "schemaVersion": 1,
+                    "workspaces": {
+                        "dev": {"capability": DEV_CAP, "repos": []},
+                        "playgrounds": {"capability": PLAY_CAP,
+                                        "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+                        "personal": {"capability": PERSONAL_CAP, "repos": []},
+                    },
+                })
+                # the SAME stamp is now denied (signature + TTL still valid)
+                status, _, body = self._http_req(
+                    port, "PUT", u.path + "?" + u.query, body=b"objdata",
+                    headers={"Content-Type": "text/plain"})
+                self.assertEqual(status, 403, body[:200])
+                self.assertIn(b"revoked", body)
+        entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+        puts = [e for e in entries if e["method"] == "PUT"]
+        self.assertEqual(len(puts), 1, entries)   # the revoked PUT never left the host
+        self.assertEqual(puts[0]["authorization"], credential)
+
+    def test_lfs_anonymous_batch_keeps_github_issued_action_headers(self) -> None:
+        """Real public LFS: GitHub returns object-scoped temporary action
+        headers (e.g. RemoteAuth) even for ANONYMOUS batches.
+
+        The proxy must not drop them or public object fetches break: the
+        batch goes upstream without the host token, GitHub's temporary
+        headers are sealed into the stamp (auth:false -- no grant recheck,
+        they are not host secrets), stripped from the VM-visible response,
+        and re-attached host-side on the objects leg so the fetch succeeds.
+        """
+        fake = self._start_fake_github()
+        self.env.init_remote()
+        oid = hashlib.sha256(b"anon-header").hexdigest()
+        credential = "RemoteAuth anon-scoped-temp-cred"
+        record = self.env.root / "mini-anon-headers.jsonl"
+        crafted = {}
+        with self._crafted_batch_upstream(lambda: crafted, record) as mini:
+            crafted = {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 7, "authenticated": True,
+                "actions": {"download": {"href": f"{mini}/objects/{oid}",
+                                         "header": {"Authorization": credential}}}}]}
+            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+                # UNTICKED workspace (no grant): anonymous batch forward
+                status, _, body = self._http_req(
+                    port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                    body=json.dumps({"operation": "download", "transfers": ["basic"],
+                                     "objects": [{"oid": oid, "size": 7}]}),
+                    headers={"Content-Type": "application/vnd.git-lfs+json"},
+                    capability=PERSONAL_CAP)
+                self.assertEqual(status, 200, body[:200])
+                self.assertNotIn(b"Authorization", body)   # never VM-visible
+                self.assertNotIn(b"header", body)
+                href = json.loads(body)["objects"][0]["actions"]["download"]["href"]
+                u = urllib.parse.urlsplit(href)
+                # object fetch with the UNGRANTED capability: the stamp is
+                # auth:false (no grant recheck) and GitHub's temporary header
+                # is re-attached host-side only (the mini answers 404 for
+                # GET, which propagates -- the point is the recorded header).
+                status, _, body = self._http_req(
+                    port, "GET", u.path + "?" + u.query, capability=PERSONAL_CAP)
+                self.assertEqual(status, 404, body[:200])
+        entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+        batches = [e for e in entries if e["method"] == "POST"]
+        gets = [e for e in entries if e["method"] == "GET"]
+        self.assertEqual(len(batches), 1, entries)
+        self.assertIsNone(batches[0]["authorization"], entries)  # no host token
+        self.assertEqual(len(gets), 1, entries)
+        self.assertEqual(gets[0]["authorization"], credential)  # temp cred re-attached
 
     # ---- LFS batch fail-closed (never pass through upstream hrefs/headers) --
 
@@ -3711,6 +3984,389 @@ class GitHubProxyContractTests(MSWTestCase):
         self.assertEqual(len(puts), 1, entries)
         self.assertEqual(puts[0]["path"], f"/objects/{oid}")
         self.assertEqual(puts[0]["authorization"], credential)
+
+    # ---- guest credentials can never authenticate an anonymous request ----
+
+    def test_guest_credentials_cannot_authenticate_anonymous_requests(self) -> None:
+        """Guest Cookie/Authorization never ride an anonymous request.
+
+        An ungranted workspace is forwarded ANONYMOUSLY: the guest's own
+        Cookie/Authorization headers are stripped on the outbound leg (the
+        host token may be re-added ONLY under a live grant), so neither a
+        guest Cookie nor a guest Authorization can authenticate a batch or a
+        regular Git request outside the grant decision. The mini upstream
+        records exactly what arrived; neither header may be present, and the
+        VM-visible batch body never echoes the guest secrets.
+        """
+        oid = hashlib.sha256(b"anon-cred").hexdigest()
+        record = self.env.root / "mini-guest-cred.jsonl"
+        crafted = {}
+        with self._crafted_batch_upstream(lambda: crafted, record) as mini:
+            crafted = {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 7, "authenticated": True,
+                "actions": {"download": {"href": f"{mini}/objects/{oid}"}}}]}
+            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+                guest_cookie = "session=guest-secret-cookie"
+                guest_auth = "Bearer guest-token-xyz"
+                # (a) LFS batch, ungranted capability (personal has no repos),
+                #     guest Cookie + Authorization attached by the client.
+                status, _, raw_body = self._http_req(
+                    port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                    body=json.dumps({"operation": "download", "transfers": ["basic"],
+                                     "objects": [{"oid": oid, "size": 7}]}),
+                    headers={"Content-Type": "application/vnd.git-lfs+json",
+                             "Cookie": guest_cookie,
+                             "Authorization": guest_auth},
+                    capability=PERSONAL_CAP)
+                self.assertEqual(status, 200, raw_body[:200])
+                self.assertNotIn(guest_cookie.encode(), raw_body)
+                self.assertNotIn(guest_auth.encode(), raw_body)
+                # (b) regular Git request (info/refs), same ungranted
+                #     capability with guest credentials attached. The mini
+                #     answers 404 for GETs; the point is what it RECORDED.
+                status, _, _ = self._http_req(
+                    port, "GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack",
+                    headers={"Cookie": guest_cookie, "Authorization": guest_auth},
+                    capability=PERSONAL_CAP)
+                self.assertEqual(status, 404)
+        entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+        batches = [e for e in entries if e["method"] == "POST"]
+        gets = [e for e in entries if e["method"] == "GET"]
+        self.assertEqual(len(batches), 1, entries)
+        self.assertIsNone(batches[0]["authorization"], entries)  # no host token either
+        self.assertIsNone(batches[0]["cookie"], entries)         # guest Cookie stripped
+        self.assertEqual(len(gets), 1, entries)
+        self.assertIsNone(gets[0]["authorization"], entries)
+        self.assertIsNone(gets[0]["cookie"], entries)
+
+    # ---- LFS batch fail-closed (never pass through upstream hrefs/headers) --
+
+    def test_lfs_batch_malformed_entries_fail_closed(self) -> None:
+        """Malformed LFS batch entries refuse the WHOLE batch (fail-closed).
+
+        A non-dict entry, a missing or invalid oid, non-dict actions, an
+        unsupported action name, or a non-dict action must never pass
+        through unchanged: the VM sees an LFS error, no raw upstream href or
+        credential header appears in any VM-visible byte, and no object
+        request ever follows (the mini records the batch POSTs only).
+        """
+        oid = hashlib.sha256(b"malformed").hexdigest()
+        credential = "Bearer leak-me-cred"
+        marker = b"127.0.0.1:1"  # the crafted upstream href host:port
+        record = self.env.root / "mini-malformed.jsonl"
+        crafted = {}
+        cases = [
+            ("non-dict entry", {"transfer": "basic", "objects": [["junk", 42]]}),
+            ("missing oid", {"transfer": "basic", "objects": [{
+                "size": 3, "authenticated": True,
+                "actions": {"download": {"href": f"http://127.0.0.1:1/objects/{oid}",
+                                         "header": {"Authorization": credential}}}}]}),
+            ("invalid oid", {"transfer": "basic", "objects": [{
+                "oid": "not-a-64-hex-oid", "size": 3, "authenticated": True,
+                "actions": {"download": {"href": f"http://127.0.0.1:1/objects/{oid}",
+                                         "header": {"Authorization": credential}}}}]}),
+            ("non-dict actions", {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 3, "authenticated": True,
+                "actions": "not-an-actions-map"}]}),
+            ("unsupported action", {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 3, "authenticated": True,
+                "actions": {"verify": {"href": f"http://127.0.0.1:1/objects/{oid}",
+                                       "header": {"Authorization": credential}}}}]}),
+            ("non-dict action", {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 3, "authenticated": True,
+                "actions": {"download": "not-an-action"}}]}),
+        ]
+        batch_body = json.dumps({"operation": "download", "transfers": ["basic"],
+                                 "objects": [{"oid": oid, "size": 3}]}).encode()
+        with self._crafted_batch_upstream(lambda: crafted, record) as mini:
+            for tag, batch in cases:
+                crafted = batch
+                status, resp = self._proxy_request(
+                    self._req_bytes("POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                                    headers=[("Content-Type", "application/vnd.git-lfs+json"),
+                                             ("Content-Length", str(len(batch_body)))],
+                                    body=batch_body),
+                    env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+                self.assertEqual(status, 403, f"{tag}: {resp[:200]}")
+                self.assertIn(b'"message"', resp, tag)   # LFS error shape
+                self.assertNotIn(credential.encode(), resp, tag)
+                self.assertNotIn(marker, resp, tag)      # no raw upstream href
+    def test_lfs_batch_error_only_entries_pass_through_unchanged(self) -> None:
+        """Actionless valid-oid batch entries pass through unchanged.
+
+        GitHub legitimately returns valid-oid entries WITHOUT actions: a
+        missing-object download carries `error` and no actions; an upload of
+        an already-present object carries neither actions nor error. Such
+        entries are serialized as-is (nothing to stamp, nothing to leak),
+        including an EMPTY actions map -- as long as the oid is valid and
+        there is no top-level href/header; when an `error` is present it
+        must be spec-shaped (a dict with an integer code and a string
+        message). Every deviation (raw href/header on the entry, malformed
+        error) still fails the WHOLE batch closed.
+        """
+        oid = hashlib.sha256(b"missing-object").hexdigest()
+        record = self.env.root / "mini-error-entry.jsonl"
+        crafted = {}
+        good_cases = [
+            ("error-only", {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 9, "authenticated": True,
+                "error": {"code": 404, "message": "Object does not exist"}}]}),
+            ("no actions no error (upload already present)",
+             {"transfer": "basic", "objects": [{
+                 "oid": oid, "size": 9, "authenticated": True}]}),
+            ("empty actions map", {"transfer": "basic", "objects": [{
+                "oid": oid, "size": 9, "authenticated": True, "actions": {}}]}),
+        ]
+        with self._crafted_batch_upstream(lambda: crafted, record) as mini:
+            # (a) actionless entries pass through unchanged, 200
+            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+                for tag, good in good_cases:
+                    crafted = good
+                    status, _, body = self._http_req(
+                        port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                        body=json.dumps({"operation": "download", "transfers": ["basic"],
+                                         "objects": [{"oid": oid, "size": 9}]}),
+                        headers={"Content-Type": "application/vnd.git-lfs+json"})
+                    self.assertEqual(status, 200, f"{tag}: {body[:200]}")
+                    entry = json.loads(body)["objects"][0]
+                    self.assertEqual(entry["oid"], oid, tag)
+                    self.assertNotIn("href", entry, tag)
+                    self.assertNotIn("header", entry, tag)
+                    self.assertNotIn(b"/objects/", body, tag)  # no proxy/upstream URL
+                    self.assertNotIn(b"http://", body, tag)
+                    if tag == "error-only":
+                        self.assertEqual(entry["error"],
+                                         {"code": 404, "message": "Object does not exist"})
+                        self.assertNotIn("actions", entry)  # unchanged: nothing stamped
+                    elif tag == "empty actions map":
+                        self.assertEqual(entry.get("actions"), {})
+            # (b) every deviation still refuses the WHOLE batch closed
+            batch_body = json.dumps({"operation": "download", "transfers": ["basic"],
+                                     "objects": [{"oid": oid, "size": 9}]}).encode()
+            bad_cases = [
+                ("raw href on error entry", {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "href": f"{mini}/objects/{oid}",
+                    "error": {"code": 404, "message": "Object does not exist"}}]}),
+                ("raw header on error entry", {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "header": {"Authorization": "Bearer leak"},
+                    "error": {"code": 404, "message": "Object does not exist"}}]}),
+                ("non-dict error", {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "error": "missing"}]}),
+                ("non-int error code", {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "error": {"code": "404", "message": "Object does not exist"}}]}),
+                ("bool error code", {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "error": {"code": True, "message": "Object does not exist"}}]}),
+                ("non-str error message", {"transfer": "basic", "objects": [{
+                    "oid": oid, "size": 9, "authenticated": True,
+                    "error": {"code": 404, "message": {"x": 1}}}]}),
+            ]
+            for tag, batch in bad_cases:
+                crafted = batch
+                status, resp = self._proxy_request(
+                    self._req_bytes("POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                                    headers=[("Content-Type", "application/vnd.git-lfs+json"),
+                                             ("Content-Length", str(len(batch_body)))],
+                                    body=batch_body),
+                    env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+                self.assertEqual(status, 403, f"{tag}: {resp[:200]}")
+                self.assertIn(b'"message"', resp, tag)
+                self.assertNotIn(b"leak", resp, tag)
+                self.assertNotIn(b"127.0.0.1", resp, tag)
+        entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+        self.assertEqual([e["method"] for e in entries], ["POST"] * 9, entries)
+
+    def test_lfs_and_git_query_parameters_cannot_smuggle_credentials(self) -> None:
+        """Query parameters cannot authenticate outside the grant decision.
+
+        info/refs accepts EXACTLY one `service` parameter and no other query
+        keys; git smart-HTTP POST endpoints and the LFS batch accept NO query
+        at all. A query that embeds credentials
+        (e.g. `?service=...&access_token=...`) is refused locally as a
+        request-shape violation and NEVER forwarded -- auth:false truly means
+        no guest or host credential went upstream with the batch request.
+        """
+        fake = self._start_fake_github()
+        self.env.init_remote()
+        batch_body = json.dumps({"operation": "download", "transfers": ["basic"],
+                                 "objects": []}).encode()
+        cases = [
+            ("info/refs extra param",
+             self._req_bytes("GET", "/github.com/acme/demo.git/info/refs"
+                                    "?service=git-upload-pack&access_token=guest-token")),
+            ("info/refs bare extra key",
+             self._req_bytes("GET", "/github.com/acme/demo.git/info/refs"
+                                    "?service=git-upload-pack&access_token")),
+            ("info/refs missing service",
+             self._req_bytes("GET", "/github.com/acme/demo.git/info/refs"
+                                    "?access_token=guest-token")),
+            ("git POST query",
+             self._req_bytes("POST", "/github.com/acme/demo.git/git-upload-pack"
+                                     "?access_token=guest-token",
+                             headers=[("Content-Length", "0")])),
+            ("LFS batch query",
+             self._req_bytes("POST", "/github.com/acme/demo.git/info/lfs/objects/batch"
+                                     "?access_token=guest-token",
+                             headers=[("Content-Type", "application/vnd.git-lfs+json"),
+                                      ("Content-Length", str(len(batch_body)))],
+                             body=batch_body)),
+        ]
+        for tag, raw in cases:
+            status, resp = self._proxy_request(raw)
+            # git-shape denials surface as HTTP 200 with an ERR pkt-line, the
+            # batch denial as a JSON 403; either way the token never reaches
+            # the upstream and never appears in the response.
+            self.assertIn(status, (200, 403), f"{tag}: {resp[:200]}")
+            self.assertNotIn(b"guest-token", resp, tag)
+        self.assertEqual(fake.requests(), [], "no credential-bearing query may reach the upstream")
+        # the strict shape still admits the canonical form
+        status, resp = self._proxy_request(
+            self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack"))
+        self.assertEqual(status, 200, resp[:200])
+        self.assertEqual(len(fake.requests()), 1, fake.requests())
+
+    # ---- objects-leg redirects are resealed, never exposed raw ------------
+
+    def test_lfs_object_redirect_resealed_stamped(self) -> None:
+        """Objects-leg redirects are resealed into a fresh stamp.
+
+        The real object endpoint answers the stamped request with a 302 whose
+        Location carries the upstream-SIGNED URL. The proxy must NOT hand
+        that Location to the VM (it leaks the upstream signature and is an
+        unstamped URL the classifier would reject): it reseals the redirect
+        href/query and the PRESERVED action headers into a fresh stamp with
+        the same repo/op/oid/auth provenance, so the VM-visible Location is
+        stamped and the second hop through the proxy works -- even for an
+        auth:false (ungranted) workspace, proving the provenance survived.
+        Non-covered redirects stay denied.
+        """
+        oid = hashlib.sha256(b"redirect-reseal").hexdigest()
+        payload = b"redirected-object-bytes"
+        credential = "RemoteAuth redirect-scoped-temp"
+        signed_query = "X-Amz-Credential=upstream-signed&X-Amz-Signature=abc123"
+        record = self.env.root / "mini-redirect.jsonl"
+        state = {"oid": oid, "payload": payload, "credential": credential,
+                 "signed_query": signed_query, "target": "signed"}
+
+        class RedirectObjectHandler(http.server.BaseHTTPRequestHandler):
+            def _record(self, method: str) -> None:
+                with record.open("a") as fh:
+                    fh.write(json.dumps({
+                        "method": method,
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization"),
+                    }) + "\n")
+
+            def do_GET(self) -> None:
+                self._record("GET")
+                if state["target"] == "signed":
+                    self.send_response(302)
+                    self.send_header(
+                        "Location",
+                        f"{self.server.base_url}/objects/{state['oid']}?{state['signed_query']}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif state["target"] == "evil":
+                    self.send_response(302)
+                    self.send_header(
+                        "Location",
+                        f"https://evil.example/objects/{state['oid']}?{state['signed_query']}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    body = state["payload"]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def do_POST(self) -> None:
+                self._record("POST")
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length:
+                    self.rfile.read(length)
+                batch = {"transfer": "basic", "objects": [{
+                    "oid": state["oid"], "size": len(state["payload"]),
+                    "authenticated": True,
+                    "actions": {"download": {
+                        "href": f"{self.server.base_url}/objects/{state['oid']}",
+                        "header": {"Authorization": state["credential"]}}}}]}
+                body = json.dumps(batch).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.git-lfs+json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectObjectHandler)
+        server.base_url = f"http://127.0.0.1:{server.server_address[1]}"
+        mini = server.base_url
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+                # UNGRANTED workspace: anonymous batch -> auth:false stamp.
+                status, _, body = self._http_req(
+                    port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
+                    body=json.dumps({"operation": "download", "transfers": ["basic"],
+                                     "objects": [{"oid": oid, "size": len(payload)}]}),
+                    headers={"Content-Type": "application/vnd.git-lfs+json"},
+                    capability=PERSONAL_CAP)
+                self.assertEqual(status, 200, body[:200])
+                self.assertNotIn(b"upstream-signed", body)
+                self.assertNotIn(credential.encode(), body)
+                href = json.loads(body)["objects"][0]["actions"]["download"]["href"]
+                u = urllib.parse.urlsplit(href)
+                # First hop: the real endpoint redirects with a SIGNED query;
+                # the proxy reseals it -- the VM sees a STAMPED Location only.
+                status, resp_headers, body = self._http_req(
+                    port, "GET", u.path + "?" + u.query, capability=PERSONAL_CAP)
+                self.assertEqual(status, 302, body[:200])
+                location = resp_headers.get("Location", "")
+                loc = urllib.parse.urlsplit(location)
+                self.assertEqual(loc.path, f"/objects.githubusercontent.com/objects/{oid}")
+                loc_q = urllib.parse.parse_qs(loc.query)
+                for key in ("_msw_repo", "_msw_op", "_msw_exp", "_msw_sig"):
+                    self.assertIn(key, loc_q)
+                self.assertEqual(loc_q["_msw_repo"], ["acme/demo"])
+                self.assertEqual(loc_q["_msw_op"], ["download"])
+                self.assertNotIn("X-Amz", location)          # upstream signature sealed
+                self.assertNotIn("upstream-signed", location)
+                self.assertNotIn(credential, location)       # action headers sealed
+                self.assertNotIn("header", location)
+                # Second hop: the resealed stamp works WITHOUT any grant
+                # (auth:false provenance preserved) and the preserved action
+                # header is re-attached host-side.
+                state["target"] = "serve"
+                status, _, body = self._http_req(
+                    port, "GET", loc.path + "?" + loc.query, capability=PERSONAL_CAP)
+                self.assertEqual(status, 200, body[:200])
+                self.assertEqual(body, payload)
+                # Non-covered redirect stays denied (fresh hop on the ORIGINAL
+                # stamp now redirects to an evil host).
+                state["target"] = "evil"
+                status, _, body = self._http_req(
+                    port, "GET", u.path + "?" + u.query, capability=PERSONAL_CAP)
+                self.assertEqual(status, 403, body[:200])
+        finally:
+            server.shutdown()
+            server.server_close()
+        entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+        posts = [e for e in entries if e["method"] == "POST"]
+        gets = [e for e in entries if e["method"] == "GET"]
+        self.assertEqual(len(posts), 1, entries)
+        self.assertIsNone(posts[0]["authorization"], entries)  # anonymous batch
+        self.assertEqual(len(gets), 3, entries)  # hop1, hop2, evil
+        self.assertEqual([g["authorization"] for g in gets],
+                         [credential, credential, credential], entries)
 
     # ---- INGRESS-3: chunked over cap killed mid-stream -------------------
 
@@ -4075,6 +4731,14 @@ class GitHubProxyContractTests(MSWTestCase):
     # ---- policy matrix ----------------------------------------------------
 
     def test_policy_matrix(self) -> None:
+        """Policy is a CREDENTIAL GRANT, never a reachability gate.
+
+        Every valid git request reaches the upstream. Only a live
+        workspace+repo+operation grant injects the host credential
+        (Authorization present upstream); every other state -- read-only
+        workspace, unticked repo, unknown capability, missing or malformed
+        policy -- forwards ANONYMOUSLY and GitHub decides.
+        """
         fake = self._start_fake_github()
         self.env.init_remote()
         read_adv = "/github.com/acme/demo.git/info/refs?service=git-upload-pack"
@@ -4083,48 +4747,60 @@ class GitHubProxyContractTests(MSWTestCase):
         def req(capability: str, target: str) -> tuple[int, bytes]:
             return self._proxy_request(self._req_bytes("GET", target, capability=capability))
 
-        # read-only workspace: reads allowed, writes denied (git ERR pkt-line
-        # so the VM's git shows "fatal: remote error: <reason>", no prompt)
-        status, _ = req(PLAY_CAP, read_adv)
-        self.assertEqual(status, 200)
+        # read-only workspace: the READ rides the host credential (read-only
+        # permits reads); the WRITE is forwarded anonymously (no write grant)
+        # and GitHub decides.
+        status, resp = req(PLAY_CAP, read_adv)
+        self.assertEqual(status, 200, resp[:200])
+        self.assertNotIn(b"ERR ", resp)
         status, resp = req(PLAY_CAP, write_adv)
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
-        self.assertIn(b"read-only", resp)
-        self.assertIn(b"Clone/pull + Push from VM", resp)
-        # read-write workspace: both allowed
+        self.assertNotIn(b"ERR ", resp)
+        # read-write workspace: both forwarded WITH the host credential
         status, _ = req(DEV_CAP, read_adv)
         self.assertEqual(status, 200)
         status, resp = req(DEV_CAP, write_adv)
         self.assertEqual(status, 200, resp[:200])
         self.assertNotIn(b"ERR ", resp)
-        # unticked workspace (no repos) -> git ERR on the git endpoint
+        # unticked workspace (no repos): anonymous, forwarded
         status, resp = req(PERSONAL_CAP, read_adv)
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
-        self.assertIn(b"Clone/pull + Push from VM", resp)
-        # unknown workspace capability -> git ERR
+        self.assertNotIn(b"ERR ", resp)
+        # unknown workspace capability: anonymous, forwarded
         status, resp = req("d" * 48, read_adv)
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
-        # missing policy file (fail-closed) -> git ERR
+        self.assertNotIn(b"ERR ", resp)
+        # missing policy file: anonymous, forwarded
         status, resp = self._proxy_request(
             self._req_bytes("GET", read_adv),
             env_overrides={"MSW_POLICY_FILE": str(self.env.root / "missing-policy.json")})
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
-        # malformed policy file (fail-closed) -> git ERR
+        self.assertNotIn(b"ERR ", resp)
+        # malformed policy file: anonymous, forwarded
         bad = self.env.root / "bad-policy.json"
         bad.write_text("{not json!!")
         status, resp = self._proxy_request(
             self._req_bytes("GET", read_adv),
             env_overrides={"MSW_POLICY_FILE": str(bad)})
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
+        self.assertNotIn(b"ERR ", resp)
 
         records = fake.requests()
+        self.assertEqual(len(records), 8, records)
+        # upstream saw every request; the host credential rode only with live
+        # grants: playgrounds' READ (read-only allows reads), dev's read and
+        # write. The read-only workspace's WRITE, unticked, unknown, and
+        # missing/malformed-policy requests were anonymous.
+        self.assertEqual(
+            [r["authorization_present"] for r in records],
+            [True, False, True, True, False, False, False, False], records,
+        )
+        self.assertTrue(all(r["response_status"] == 200 for r in records), records)
         write_records = [r for r in records if r["query"] == "service=git-receive-pack"]
-        self.assertEqual(len(write_records), 1, records)  # only the dev read-write one
+        self.assertEqual(len(write_records), 2, records)
+        self.assertEqual(
+            [r["authorization_present"] for r in write_records], [False, True], records,
+        )
 
     def test_proxy_policy_uses_persisted_non_default_workspace_list(self) -> None:
         fake = self._start_fake_github()
@@ -4166,18 +4842,25 @@ class GitHubProxyContractTests(MSWTestCase):
                         "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
             },
         }))
+        # "dev" is not a configured workspace in this workspaces.json, so the
+        # whole policy is unloadable: the request is forwarded ANONYMOUSLY
+        # (never a local denial) and GitHub decides.
         status, response = self._proxy_request(self._req_bytes("GET", target))
         self.assertEqual(status, 200, response[:200])
-        self.assertIn(b"ERR ", response)
-        self.assertEqual(len(fake.requests()), 1, "removed workspace policy must fail closed")
+        self.assertNotIn(b"ERR ", response)
+        records = fake.requests()
+        self.assertEqual(len(records), 2, records)
+        self.assertTrue(records[0]["authorization_present"], records)   # lab read grant
+        self.assertFalse(records[1]["authorization_present"], records)  # unloadable policy
 
-    def test_policy_strict_shapes_deny_all_upstream_untouched(self) -> None:
+    def test_policy_strict_shapes_degrade_to_anonymous(self) -> None:
         """The proxy's policy validator mirrors the host's strict rules.
 
         Every malformed shape (unknown workspace, uppercase repo/capability,
         duplicate repo/capability, invalid mode, .git suffix, short/non-hex
-        capability, shape deviations) makes the WHOLE policy malformed:
-        the proxy fails closed and the upstream is never contacted.
+        capability, shape deviations) makes the WHOLE policy unloadable: no
+        workspace can hold a grant, so every valid request is forwarded
+        ANONYMOUSLY (never a local denial) and GitHub decides.
         """
         fake = self._start_fake_github()
         self.env.init_remote()
@@ -4255,10 +4938,14 @@ class GitHubProxyContractTests(MSWTestCase):
             self._rewrite_policy(payload)
             status, resp = self._proxy_request(self._req_bytes("GET", read_adv))
             self.assertEqual(status, 200, f"{name}: {resp[:200]}")
-            self.assertIn(b"ERR ", resp, f"{name}: {resp[:200]}")
-            self.assertEqual(fake.requests(), [], f"{name} must not reach upstream")
+            self.assertNotIn(b"ERR ", resp, f"{name}: {resp[:200]}")
+        # every malformed shape still reached the upstream -- anonymously
+        records = fake.requests()
+        self.assertEqual(len(records), len(malformed), records)
+        self.assertTrue(all(not r["authorization_present"] for r in records), records)
+        self.assertTrue(all(r["response_status"] == 200 for r in records), records)
         # sanity: both JSON numeric spellings accepted by jq (`1` and `1.0`)
-        # are accepted by the proxy too; each reaches upstream.
+        # are accepted by the proxy too; a valid policy authenticates again.
         for schema_version in (1, 1.0):
             valid = json.loads(json.dumps(base))
             valid["schemaVersion"] = schema_version
@@ -4266,7 +4953,10 @@ class GitHubProxyContractTests(MSWTestCase):
             status, resp = self._proxy_request(self._req_bytes("GET", read_adv))
             self.assertEqual(status, 200, resp[:200])
             self.assertNotIn(b"ERR ", resp)
-        self.assertEqual(len(fake.requests()), 2, fake.requests())
+        records = fake.requests()
+        self.assertEqual(len(records), len(malformed) + 2, records)
+        self.assertTrue(records[-1]["authorization_present"], records)
+        self.assertTrue(records[-2]["authorization_present"], records)
 
     def _bridge_procs(self) -> list[str]:
         proc = subprocess.run(["/usr/bin/pgrep", "-f", "msw-keychain-bridge"],
@@ -4279,8 +4969,9 @@ class GitHubProxyContractTests(MSWTestCase):
         """Closure re-review: a wedged keychain-bridge worker must not hang
         the proxy or leave descendants behind.
 
-        The request fails bounded (503, credential unavailable, fail-closed);
-        no bridge/worker process survives; the next request works; the
+        The request DEGRADES to anonymous forwarding (public access keeps
+        working) bounded by the helper watchdog -- never a local denial; no
+        bridge/worker process survives; the next request works; the
         credential record is unchanged. The requested proxy deadline is
         deliberately lower than the helper's two-read budget; production code
         must clamp it above both complete helper cleanup deadlines.
@@ -4299,7 +4990,7 @@ class GitHubProxyContractTests(MSWTestCase):
             self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack"),
             env_overrides=hang_env, timeout=20)
         elapsed = time.monotonic() - t0
-        self.assertEqual(status, 503, resp[:200])
+        self.assertEqual(status, 200, resp[:200])
         self.assertLess(elapsed, 12, f"must be bounded by the helper watchdog, took {elapsed:.1f}s")
         self.assertEqual(self._bridge_procs(), [], "no bridge/worker may survive the request")
         # the credential record is unchanged
@@ -4309,15 +5000,23 @@ class GitHubProxyContractTests(MSWTestCase):
         )
         record = json.loads((self.env.root / "keychain" / name).read_text())
         self.assertEqual(record["accessToken"], HOST_TOKEN)
-        # the next request works normally
+        # the next request works normally (token now loads -> authenticated)
         status, resp = self._proxy_request(
             self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack"))
         self.assertEqual(status, 200, resp[:200])
+        records = fake.requests()
+        self.assertEqual(len(records), 2, records)
+        # the wedged-bridge request reached the upstream WITHOUT the host
+        # credential; the healthy one carried it
+        self.assertFalse(records[0]["authorization_present"], records)
+        self.assertTrue(records[1]["authorization_present"], records)
         self.assertEqual(self._bridge_procs(), [])
 
-    def test_git_client_sees_actionable_deny_reason(self) -> None:
-        """A read-only push through the proxy fails with git's clean
-        'fatal: remote error: <reason>' -- never a credential prompt."""
+    def test_read_only_push_forwarded_anonymously_to_github(self) -> None:
+        """A read-only workspace's push is no longer denied locally: it
+        reaches GitHub anonymously (no host credential anywhere) and GitHub's
+        decision is what the git client sees -- against the permissive fake
+        the push succeeds."""
         fake = self._start_fake_github()
         self.env.init_remote()
         with self._proxy_listener() as port:
@@ -4325,58 +5024,118 @@ class GitHubProxyContractTests(MSWTestCase):
             git_home.mkdir(exist_ok=True)
             env = self.env.env.copy()
             env.update({"HOME": str(git_home), "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1"})
-            work = self.env.root / "deny-work"
+            work = self.env.root / "anon-push-work"
             run_cmd([SYSTEM_GIT, "clone", "-q",
                      str(self.env.root / "remotes" / "acme" / "demo.git"), str(work)], env=env)
             run_cmd([SYSTEM_GIT, "-C", str(work), "config", "user.name", "T"], env=env)
             run_cmd([SYSTEM_GIT, "-C", str(work), "config", "user.email", "t@example.invalid"], env=env)
-            (work / "note.txt").write_text("deny\n")
+            (work / "note.txt").write_text("anon\n")
             run_cmd([SYSTEM_GIT, "-C", str(work), "add", "note.txt"], env=env)
-            run_cmd([SYSTEM_GIT, "-C", str(work), "commit", "-qm", "deny test"], env=env)
+            run_cmd([SYSTEM_GIT, "-C", str(work), "commit", "-qm", "anon push"], env=env)
             url = f"http://127.0.0.1:{port}/github.com/acme/demo.git"
             push = run_cmd(
                 [SYSTEM_GIT, "-C", str(work), "-c", f"http.extraHeader=X-MSW-Capability: {PLAY_CAP}",
                  "push", url, "main"],
-                env=env, timeout=120, check=False)
-            self.assertNotEqual(push.returncode, 0, push.stdout)
-            self.assertIn("fatal: remote error:", push.stderr)
-            self.assertIn("Clone/pull + Push from VM", push.stderr)
-            self.assertNotIn("Password", push.stderr)
-            self.assertNotIn("Username", push.stderr)
+                env=env, timeout=120)
+            self.assertEqual(push.returncode, 0, push.stdout + push.stderr)
         records = fake.requests()
-        self.assertEqual(
-            [r for r in records if r["query"] == "service=git-receive-pack"], [],
-            "the denied push must not reach the upstream")
+        receive = [r for r in records if r["query"] == "service=git-receive-pack"]
+        self.assertTrue(receive, records)
+        self.assertTrue(all(not r["authorization_present"] for r in receive), records)
+        self.assertTrue(all(r["response_status"] == 200 for r in receive), records)
+
+    def test_private_style_upstream_denial_propagates(self) -> None:
+        """A GitHub-side denial for a grant-less request is passed through
+        unchanged: no local 403->ERR conversion, no host credential added --
+        GitHub's 403 (private-repo style) is exactly what the guest sees."""
+        fake = self._start_fake_github()
+        self.env.init_remote()
+        record = self.env.root / "mini-deny.jsonl"
+
+        class DenyHandler(http.server.BaseHTTPRequestHandler):
+            def _send(self, status: int, body: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                with record.open("a") as fh:
+                    fh.write(json.dumps({
+                        "method": "GET",
+                        "path": self.path,
+                        "authorization": self.headers.get("Authorization"),
+                    }) + "\n")
+                self._send(403, json.dumps({"message": "Not Found"}).encode())
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DenyHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            mini = f"http://127.0.0.1:{server.server_address[1]}"
+            # an unticked workspace's read of a private-style repo: the
+            # upstream's 403 reaches the guest as a plain 403
+            status, resp = self._proxy_request(
+                self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack",
+                                capability=PERSONAL_CAP),
+                env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+            self.assertEqual(status, 403, resp[:200])
+            self.assertIn(b'"message"', resp)
+            self.assertNotIn(b"ERR ", resp)
+        finally:
+            server.shutdown()
+            server.server_close()
+        entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
+        self.assertEqual(len(entries), 1, entries)
+        self.assertEqual(entries[0]["method"], "GET")
+        self.assertIsNone(entries[0]["authorization"], entries)
 
     # ---- identity spoofing ------------------------------------------------
 
     def test_identity_spoofing_workspace_capability_not_interchangeable(self) -> None:
+        """Capabilities map to POLICY GRANTS, not to each other.
+
+        playgrounds' capability never injects dev's read-write credential:
+        its write is forwarded anonymously and GitHub decides, while dev's
+        capability authenticates the same request. A MISSING capability is
+        likewise anonymous (public access needs no setup); duplicate
+        capability headers remain a local shape denial.
+        """
         fake = self._start_fake_github()
         self.env.init_remote()
         write_adv = "/github.com/acme/demo.git/info/refs?service=git-receive-pack"
 
-        # playgrounds is read-only; its capability must NOT grant dev's
-        # read-write (denied via a git ERR pkt-line, never a credential prompt)
+        # playgrounds is read-only; its capability must NOT inject the host
+        # credential (anonymous forward; GitHub decides)
         status, resp = self._proxy_request(
             self._req_bytes("GET", write_adv, capability=PLAY_CAP))
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
-        self.assertIn(b"Clone/pull + Push from VM", resp)
-        # the same request with dev's capability is allowed
+        self.assertNotIn(b"ERR ", resp)
+        # the same request with dev's capability IS authenticated
         status, _ = self._proxy_request(
             self._req_bytes("GET", write_adv, capability=DEV_CAP))
         self.assertEqual(status, 200)
-        # missing / extra capability headers are denied (git ERR on a git endpoint)
+        # missing capability: anonymous, forwarded (git ERR would be a denial)
         status, resp = self._proxy_request(self._req_bytes("GET", write_adv, capability=None))
         self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
+        self.assertNotIn(b"ERR ", resp)
+        # duplicate capability headers: ambiguous identity stays a local
+        # shape denial (git ERR on a git endpoint)
         status, resp = self._proxy_request(
             self._req_bytes("GET", write_adv, capability=None, headers=[
                 ("X-MSW-Capability", DEV_CAP), ("X-MSW-Capability", PLAY_CAP)]))
         self.assertEqual(status, 200, resp[:200])
         self.assertIn(b"ERR ", resp)
         records = fake.requests()
-        self.assertEqual(len(records), 1, records)  # only the dev-capability write
+        self.assertEqual(len(records), 3, records)  # duplicate-header one denied
+        self.assertEqual(
+            [r["authorization_present"] for r in records],
+            [False, True, False], records,
+        )
 
     # ---- canonicalization attacks -----------------------------------------
 
@@ -4402,11 +5161,16 @@ class GitHubProxyContractTests(MSWTestCase):
             self._req_bytes("GET", "/github.com/acme%2Fdemo.git/info/refs?service=git-upload-pack"))
         self.assertEqual(status, 200, resp[:200])
         self.assertIn(b"ERR ", resp)
-        # trailing dot does not canonicalize to acme/demo (git ERR)
+        # trailing dot canonicalizes to a DISTINCT repo (acme./demo, never
+        # acme/demo): not granted, so the read is forwarded ANONYMOUSLY and
+        # GitHub decides (the fake 404s; its record proves no host credential
+        # rode along)
         status, resp = self._proxy_request(
             self._req_bytes("GET", "/github.com/acme./demo.git/info/refs?service=git-upload-pack"))
-        self.assertEqual(status, 200, resp[:200])
-        self.assertIn(b"ERR ", resp)
+        self.assertEqual(status, 404, resp[:200])
+        records = fake.requests()
+        self.assertEqual(records[-1]["path"], "/acme./demo.git/info/refs")
+        self.assertFalse(records[-1]["authorization_present"], records)
         # absolute-form target rejected at ingress
         status, _ = self._proxy_request(
             self._req_bytes("GET", f"http://{PROXY_HOST}/github.com/acme/demo.git/info/refs?service=git-upload-pack"))
@@ -4476,8 +5240,10 @@ class GitHubProxyContractTests(MSWTestCase):
             self._req_bytes("GET", f"/objects.githubusercontent.com/objects/{'0' * 64}",
                             capability="d" * 48))
         self.assertEqual(status, 403)
+        # a shape denial on a git endpoint (canonicalization attack) still
+        # surfaces as a git ERR (HTTP 200 with an error reason)
         status, resp = self._proxy_request(
-            self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-receive-pack",
+            self._req_bytes("GET", "/github.com//acme/demo.git/info/refs?service=git-receive-pack",
                             capability="d" * 48))
         self.assertEqual(status, 200, resp[:200])
         self.assertIn(b"ERR ", resp)
@@ -5178,7 +5944,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.seed_host_credential()
         self.prepare_guest_repo()
         proc = self.env.msw("push", "dev", "repo", "--yes", check=False)
-        self.assertFailed(proc, "not on workspace 'dev' allowed list")
+        self.assertFailed(proc, "has no credential grant on workspace 'dev'")
         self.assertIn("github-policy-set", proc.stdout + proc.stderr)
 
     def test_push_local_missing_host_credential_blocked(self) -> None:
@@ -6670,9 +7436,10 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertEqual(json.loads(proc.stdout)["result"]["committed"], True)
 
     def test_policy_apply_transport_probe_broken_typed_and_untouched(self) -> None:
-        """Re-review item 3: a broken proxy/relay path fails the bounded
-        readiness probe -> typed MSW_TRANSPORT_PROVISION_FAILED and the
-        policy file is NEVER touched (no stale-snapshot restore)."""
+        """Re-review item 3: transport readiness is validated with the expected
+        `<repo>.git/info/refs` request shape where `service=` is intentionally
+        omitted; a malformed/broken proxy request fails readiness as
+        `MSW_TRANSPORT_VERIFY_FAILED` and leaves policy untouched."""
         before = "BEFORE_POLICY"
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
         self.policy_path.write_text(before)
@@ -6683,15 +7450,15 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
                            extra_env={"MSW_FAKE_TRANSPORT_PROBE": "fail"})
         self.assertEqual(proc.returncode, 77, proc.stdout + proc.stderr)
         err = json.loads(proc.stdout)["error"]
-        self.assertEqual(err["code"], "MSW_TRANSPORT_PROVISION_FAILED")
+        self.assertEqual(err["code"], "MSW_TRANSPORT_VERIFY_FAILED")
         self.assertTrue(err["retryable"])
         self.assertEqual(self.policy_path.read_text(), before)
 
     def test_policy_apply_transport_probe_wrong_codes_fail(self) -> None:
-        """Re-review item 3: ONLY the expected 403 (MSW proxy deny for the
-        uncommitted capability) proves readiness; 200/404/500/503 or any
-        non-403 response -> typed MSW_TRANSPORT_PROVISION_FAILED and the
-        policy file is untouched."""
+        """Re-review item 3: transport readiness depends on a fixed bare
+        `info/refs` probe request (no `service=`). A `403` response for that
+        request shape is expected; 200/404/500/503 or any other non-403 response
+        fails as `MSW_TRANSPORT_VERIFY_FAILED`, leaving policy untouched."""
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
         }}
@@ -6703,9 +7470,10 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
                                extra_env={"MSW_FAKE_TRANSPORT_PROBE": code})
             self.assertEqual(proc.returncode, 77, (code, proc.stdout, proc.stderr))
             err = json.loads(proc.stdout)["error"]
-            self.assertEqual(err["code"], "MSW_TRANSPORT_PROVISION_FAILED", code)
+            self.assertEqual(err["code"], "MSW_TRANSPORT_VERIFY_FAILED", code)
             self.assertEqual(self.policy_path.read_text(), before, code)
-        # the expected deny (403) succeeds with the same request shape
+        # 403 for the malformed bare `info/refs` request is the expected readiness
+        # signal for the missing `service=` request shape.
         self.policy_path.write_text("BEFORE_POLICY_403_OK")
         proc = self._apply(desired, probe=False,
                            extra_env={"MSW_FAKE_TRANSPORT_PROBE": "403"})

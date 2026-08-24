@@ -162,16 +162,18 @@ enum GitHubLocalStrings {
     static let settingsNoCredential = "GitHub account not connected on this Mac"
     static let settingsConnectAccount = "Connect GitHub account on this Mac…"
     static let noReposCopy = "No repositories found."
-    static let detailFootnote = "GitHub access is enforced by the local proxy on this Mac. Your workspace never receives a GitHub credential. Local editing and commits always work."
+    static let detailFootnote = "Authenticated GitHub access is enforced by the local proxy on this Mac. Your workspace never receives a GitHub credential. Local editing and commits always work."
 }
 
 /// Local-mode provider. The repo catalog is assembled from the policy file
-/// (read-back through `msw github status --format json`, which lists every
-/// workspace's ticked repos) plus repositories the user enters by
-/// OWNER/REPO in the picker; the CLI exposes no GitHub repo enumeration, so
-/// the app never adds one. Credential/account state comes from the CLI
-/// (`github status`, `github auth --json`) — the app only reads status and
-/// never holds the token.
+/// read-back through `msw github status --format json`, which lists every
+/// workspace's granted repos; the CLI exposes no GitHub repo enumeration,
+/// so the app never adds one. On EVERY successful load, credential grants
+/// whose repos are missing from the discovered catalog are re-synthesized
+/// into the fresh catalog so a refresh can never drop a granted repo from
+/// the picker or from the draft-to-policy mapping. Credential/account state
+/// comes from the CLI (`github status`, `github auth --json`) — the app
+/// only reads status and never holds the token.
 actor GitHubLocalProvider: GitHubProviding {
     private let client: MSWClient
     private let policyStore: GitHubPolicyStore
@@ -333,12 +335,68 @@ actor GitHubLocalProvider: GitHubProviding {
                 repositoriesByInstallation[ownerID, default: []].append(repository)
             }
         }
+        // Every successful load re-merges policy-only grants into the fresh
+        // catalog BEFORE any draft-to-policy mapping, so a refresh can never
+        // make an existing grant disappear or be silently dropped on save.
+        let merged = Self.mergingPolicyOnlyRepositories(
+            installations: installations,
+            repositoriesByInstallation: repositoriesByInstallation,
+            policy: await policyStore.current,
+            configuredWorkspaces: Set(configuredWorkspaces)
+        )
         return GitHubCatalog(
             account: account,
             hostCredentialPresent: hasCredential,
-            installations: installations,
-            repositoriesByInstallation: repositoriesByInstallation
+            installations: merged.installations,
+            repositoriesByInstallation: merged.repositoriesByInstallation
         )
+    }
+
+    /// Pure merge used by `loadCatalog` on EVERY successful local load,
+    /// before any draft-to-policy mapping: policy-only credential grants
+    /// (canonical repos absent from the discovered catalog, e.g. an owner
+    /// GitHub no longer lists or a missing host credential) are re-added as
+    /// selectable entries so a refresh keeps them visible and the
+    /// draft-to-policy mapping still resolves them. Deselected entries are
+    /// never repopulated — drafts are untouched; the entries merely stay
+    /// available in the catalog. Entries from workspaces outside
+    /// `configuredWorkspaces` are ignored.
+    static func mergingPolicyOnlyRepositories(
+        installations: [GitHubInstallation],
+        repositoriesByInstallation: [Int: [GitHubRepository]],
+        policy: GitHubPolicyFile?,
+        configuredWorkspaces: Set<String>
+    ) -> (installations: [GitHubInstallation], repositoriesByInstallation: [Int: [GitHubRepository]]) {
+        guard let policy else { return (installations, repositoriesByInstallation) }
+        var updatedInstallations = installations
+        var updatedRepositories = repositoriesByInstallation
+        for workspaceName in policy.workspaces.keys where configuredWorkspaces.contains(workspaceName) {
+            for entry in policy.workspaces[workspaceName]?.repos ?? [] {
+                let canonical = entry.canonical
+                guard let (owner, name) = Self.splitCanonical(canonical) else { continue }
+                let ownerID = Self.stableID(owner)
+                let repositoryID = Self.stableID(canonical)
+                guard !(updatedRepositories[ownerID]?.contains(where: { $0.id == repositoryID }) ?? false) else {
+                    continue
+                }
+                if !updatedInstallations.contains(where: { $0.id == ownerID }) {
+                    updatedInstallations.append(GitHubInstallation(
+                        id: ownerID,
+                        account: GitHubInstallationAccount(login: owner, id: ownerID, type: nil),
+                        repositorySelection: nil
+                    ))
+                }
+                updatedRepositories[ownerID, default: []].append(GitHubRepository(
+                    id: repositoryID,
+                    fullName: canonical,
+                    name: name,
+                    owner: GitHubInstallationAccount(login: owner, id: ownerID, type: nil),
+                    private: true,
+                    defaultBranch: nil
+                ))
+            }
+        }
+        return (updatedInstallations, updatedRepositories)
     }
 
     func currentPolicy() async -> GitHubPolicyFile? {

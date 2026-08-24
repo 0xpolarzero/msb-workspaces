@@ -33,9 +33,15 @@ client disconnect mid-stream the upstream request is aborted so a partial
 body never appears complete. The ONLY buffered body is the LFS batch JSON,
 bounded in memory (8 MiB) for the operation parse and href rewriting.
 
-Identity is the X-MSW-Capability header ONLY, matched constant-time against
-the policy file (re-read per request/process; missing or malformed policy is
-fail-closed). The endpoint table, policy engine, LFS URL stamping (HMAC), and
+Identity is the X-MSW-Capability header, matched constant-time against
+the policy file (re-read per request/process). The policy is a CREDENTIAL
+GRANT table, never a reachability gate: a missing or malformed policy, an
+absent or unknown capability, an ungranted repository, or a read-only
+workspace attempting a write all mean "forward anonymously WITHOUT the host
+credential" -- GitHub decides whether the request succeeds. The host token
+is loaded and injected ONLY for a valid workspace+repo+operation grant, and
+an unavailable token degrades to anonymous forwarding so public access
+keeps working. The endpoint table, LFS URL stamping (HMAC), and
 canonicalization rules are in this module; the outbound TLS/socket leg is
 lib/proxy-upstream.py.
 
@@ -227,6 +233,10 @@ def _git_service_from_target(target: str) -> Optional[str]:
 
 # Hop-by-hop + identity headers stripped on the OUTBOUND leg (framing headers
 # and Host are re-added by the caller). BYTES: header names from h11 are bytes.
+# Every standard credential-bearing REQUEST header is stripped too, so a guest
+# Cookie/Authorization can never authenticate GitHub outside the host grant
+# decision -- the only credential that may ride an outbound request is the host
+# token, re-added below strictly under a live grant.
 _STRIP_OUTBOUND = frozenset({
     b"connection",
     b"keep-alive",
@@ -240,6 +250,7 @@ _STRIP_OUTBOUND = frozenset({
     b"expect",
     b"host",
     b"authorization",
+    b"cookie",
     b"x-msw-capability",
 })
 
@@ -383,7 +394,7 @@ def _parse_key_file(path: Path) -> Optional[bytes]:
 
 
 # ---------------------------------------------------------------------------
-# Policy (section 2; fail-closed)
+# Policy (section 2; credential grants, never a reachability gate)
 # ---------------------------------------------------------------------------
 
 
@@ -473,8 +484,9 @@ def _load_policy(cfg: Config) -> Optional[Dict[str, Any]]:
     fragment; uppercase is rejected, never silently lowercased); modes only
     read-only/read-write; duplicate canonical entries and any shape deviation
     (workspaces not an object, repos not a list, entries not objects,
-    non-string fields) reject the WHOLE policy so the proxy denies everything
-    (upstream untouched).
+    non-string fields) reject the WHOLE policy so NO workspace can hold a
+    grant: every valid request is then forwarded anonymously and GitHub
+    decides (never a local denial for valid Git traffic).
     """
     try:
         raw = cfg.policy_file.read_bytes()
@@ -500,7 +512,7 @@ def _load_policy(cfg: Config) -> Optional[Dict[str, Any]]:
     seen_capabilities: set = set()
     for box in configured_workspaces:
         if box not in workspaces:
-            continue  # absent workspace: denied (fail-closed)
+            continue  # absent workspace: no grant possible (anonymous)
         workspace = workspaces[box]
         if not isinstance(workspace, dict):
             return None
@@ -552,10 +564,11 @@ def _load_host_token(cfg: Config) -> Optional[str]:
     exits 0; on a missing/invalid record or a rejected token kind (ghs_/ghr_)
     it prints NOTHING and exits 1. The token is captured over a pipe
     (stdout=PIPE) and never appears in argv, env, or logs. Empty stdout or a
-    nonzero exit is treated as unavailable, so the caller denies github.com
-    requests (503) -- objects requests never need a token (the signed URL is
-    the auth). MSW_HOST_TOKEN_BIN is the test/install seam; fallbacks are the
-    repo copy and the setup.sh install location.
+    nonzero exit is treated as unavailable, so the caller degrades to
+    anonymous forwarding (never a local denial) -- objects requests never
+    need a token (the signed URL is the auth). MSW_HOST_TOKEN_BIN is the
+    test/install seam; fallbacks are the repo copy and the setup.sh install
+    location.
     """
     candidates = [
         os.environ.get("MSW_HOST_TOKEN_BIN"),
@@ -629,7 +642,7 @@ def _load_host_token(cfg: Config) -> Optional[str]:
 
 
 class Decision:
-    __slots__ = ("host", "kind", "repo", "op", "oid", "service", "href", "headers")
+    __slots__ = ("host", "kind", "repo", "op", "oid", "service", "href", "headers", "authenticated", "stamp_op")
 
     def __init__(
         self,
@@ -641,6 +654,8 @@ class Decision:
         service: Optional[str] = None,
         href: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
+        authenticated: bool = False,
+        stamp_op: Optional[str] = None,
     ) -> None:
         self.host = host
         self.kind = kind  # "git" | "lfs-batch" | "objects"
@@ -650,6 +665,12 @@ class Decision:
         self.service = service
         self.href = href  # objects leg: the REAL href, decrypted host-side
         self.headers = headers  # objects leg: the REAL action headers, host-side only
+        # objects leg only: True when the stamp was minted under a grant (it
+        # carries host-derived credentials and MUST re-check the grant here)
+        self.authenticated = authenticated
+        # objects leg only: the stamp's raw operation ("download"|"upload"),
+        # preserved so a resealed redirect keeps the same provenance.
+        self.stamp_op = stamp_op
 
 
 def _canonical_repo(owner: str, repo: str) -> str:
@@ -661,11 +682,17 @@ def _canonical_repo(owner: str, repo: str) -> str:
 
 
 def _service_param(query: str) -> str:
-    params = urllib.parse.parse_qs(query)
+    # Strict request shape: exactly ONE service parameter and no other query
+    # keys. An extra query parameter (e.g. an embedded access_token) could
+    # otherwise authenticate the request outside the host grant decision, so
+    # it is rejected locally as a shape violation and never forwarded.
+    # keep_blank_values=True so a bare `&x` (no '=') still counts as a key.
+    params = urllib.parse.parse_qs(query, keep_blank_values=True)
     services = params.get("service", [])
-    if len(services) != 1 or services[0] not in GIT_SERVICES:
+    if set(params) != {"service"} or len(services) != 1 or services[0] not in GIT_SERVICES:
         raise ProxyError(
-            403, "info/refs requires exactly one service=git-upload-pack|git-receive-pack",
+            403, "info/refs requires exactly one service=git-upload-pack|git-receive-pack "
+            "and no other query parameters",
             category="denied",
         )
     return services[0]
@@ -714,6 +741,12 @@ class Classifier:
         if len(segs) == 3 and segs[2] in GIT_SERVICES:
             if method != b"POST":
                 raise ProxyError(405, f"{segs[2]} requires POST", category="denied")
+            if query:
+                # Query parameters could carry credentials that authenticate
+                # outside the grant decision: refuse the shape, never forward.
+                raise ProxyError(
+                    403, f"{segs[2]} accepts no query parameters", category="denied",
+                )
             repo = _canonical_repo(segs[0], segs[1])
             return Decision(
                 "github.com", "git", repo,
@@ -724,6 +757,10 @@ class Classifier:
         if len(segs) == 6 and segs[2:6] == ["info", "lfs", "objects", "batch"]:
             if method != b"POST":
                 raise ProxyError(405, "LFS batch requires POST", category="denied")
+            if query:
+                raise ProxyError(
+                    403, "LFS batch accepts no query parameters", category="denied",
+                )
             repo = _canonical_repo(segs[0], segs[1])
             return Decision("github.com", "lfs-batch", repo, None)
         raise ProxyError(
@@ -739,27 +776,31 @@ class Classifier:
             )
         if method not in (b"GET", b"PUT"):
             raise ProxyError(405, "objects endpoints require GET or PUT", category="denied")
-        repo, op, href, headers = self._validate_stamp(query, segs[1], method)
+        repo, op, href, headers, authenticated = self._validate_stamp(query, segs[1], method)
         # The stamp operation is download/upload, validated as such (method
-        # match + payload cross-check) inside _validate_stamp; the policy
-        # engine speaks read/write. Normalize BEFORE _policy_check so a
+        # match + payload cross-check) inside _validate_stamp; the grant
+        # engine speaks read/write. Normalize BEFORE the grant decision so a
         # read-only repo's stamped GET is authorized as read (contract §4:
         # GET=download(read), PUT=upload(write)).
         policy_op = "read" if op == "download" else "write"
         return Decision("objects.githubusercontent.com", "objects", repo, policy_op,
-                        oid=segs[1], href=href, headers=headers)
+                        oid=segs[1], href=href, headers=headers, authenticated=authenticated,
+                        stamp_op=op)
 
     def _validate_stamp(
         self, query: str, oid: str, method: bytes
-    ) -> Tuple[str, str, str, Dict[str, str]]:
+    ) -> Tuple[str, str, str, Dict[str, str], bool]:
         """Validate the self-carrying LFS stamp (section 4).
 
         Visible params: _msw_repo, _msw_op, _msw_exp; _msw_sig is the AEAD
         blob (stamp_encode) carrying the REAL href, the action's credential
-        headers, op, repo and expiry -- decrypted host-side only, TTL enforced
-        here. GET must carry op=download, PUT op=upload. Returns
-        (repo, op, real_href, real_headers); the caller forwards to the real
-        href and re-attaches the real headers -- the VM never sees either.
+        headers, op, repo, expiry and whether the batch was authenticated --
+        decrypted host-side only, TTL enforced here. GET must carry
+        op=download, PUT op=upload. Returns (repo, op, real_href,
+        real_headers, authenticated); the caller forwards to the real href
+        and re-attaches the real headers -- the VM never sees either.
+        Authenticated stamps (minted under a grant) re-check the CURRENT
+        policy on this leg so a revoked grant cannot keep using them.
         """
         params = urllib.parse.parse_qs(query)
         try:
@@ -822,7 +863,13 @@ class Classifier:
                 raise ProxyError(403, "invalid LFS stamp headers", category="denied")
             if _HEADER_NAME_RE.fullmatch(name) and len(value) <= MAX_HEADER_VALUE_BYTES:
                 clean_headers[name] = value
-        return repo, op, href, clean_headers
+        # `auth` is set host-side only when the batch was forwarded WITH the
+        # host token; anonymous batches mint stamps with `auth: false`. A
+        # stamp WITHOUT the flag predates this change and was necessarily
+        # minted under a grant (the old proxy never forwarded a batch without
+        # the host token), so it is treated as authenticated -- fail-closed,
+        # so a legacy stamp cannot outlive a grant revocation.
+        return repo, op, href, clean_headers, bool(data.get("auth", True))
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +902,10 @@ class RequestContext:
         self.upstream: Optional[proxy_upstream.Upstream] = None
         self.presented_capability: Optional[str] = None
         self.host_token: Optional[str] = None
+        # Non-None only when the current workspace/repo/operation has a live
+        # policy grant (the repo's "read-only" | "read-write" mode); None
+        # means forward anonymously.
+        self.grant: Optional[str] = None
         self.batch_failed = False
         self.git_service: Optional[str] = None
         self._head_buf = bytearray()
@@ -1040,11 +1091,10 @@ class RequestContext:
     # ---- identity / policy / endpoint ---------------------------------------
 
     def evaluate(self, request: h11.Request) -> Decision:
+        # Policy is a CREDENTIAL-GRANT table, re-read per request. A missing
+        # or malformed policy means NO workspace can hold a grant: every
+        # valid request is forwarded anonymously and GitHub decides.
         self.policy = _load_policy(self.cfg)
-        if self.policy is None:
-            raise ProxyError(
-                403, "policy file missing or malformed (fail-closed)", category="policy",
-            )
         self.box = self._identify(request)
         decision = self.classifier.classify(request.method, request.target)
         self.covered_host = decision.host
@@ -1059,45 +1109,71 @@ class RequestContext:
                     403, "LFS batch requires Content-Type application/vnd.git-lfs+json",
                     category="denied",
                 )
-        if decision.kind != "lfs-batch":
-            self.op = decision.op
-            self._policy_check(self.box, decision.repo, decision.op)
+            return decision
+        self.op = decision.op
+        if decision.kind == "objects":
+            if decision.authenticated:
+                # A credential-carrying stamp was minted under a grant; it
+                # must STILL be covered by a live grant or it is revoked
+                # (immediate revocation safety). Anonymous stamps (public
+                # LFS) need no grant -- GitHub decides.
+                if self._credential_grant(self.box, decision.repo, decision.op) is None:
+                    raise ProxyError(
+                        403,
+                        f"repository {decision.repo} is not granted for {decision.op} "
+                        "in this workspace; the LFS credential was revoked",
+                        category="policy",
+                    )
+        else:
+            self.grant = self._credential_grant(self.box, decision.repo, decision.op)
         return decision
 
-    def _identify(self, request: h11.Request) -> str:
+    def _identify(self, request: h11.Request) -> Optional[str]:
+        """Map the capability header to a policy workspace, or None.
+
+        None means "no grant possible": the header is absent, the policy is
+        unloadable, or the capability is unknown. That is NEVER a local
+        denial -- it only disables host-credential injection. More than one
+        capability header is a request-shape violation and stays denied
+        (ambiguous identity cannot authorize a grant).
+        """
         caps = [value for name, value in request.headers if name == b"x-msw-capability"]
-        if len(caps) != 1:
+        if len(caps) > 1:
             raise ProxyError(
-                403, "exactly one X-MSW-Capability header is required", category="identity",
+                403, "at most one X-MSW-Capability header is allowed", category="identity",
             )
-        self.presented_capability = caps[0].decode("latin-1")
-        assert self.policy is not None
+        if caps:
+            self.presented_capability = caps[0].decode("latin-1")
+        if not caps or self.policy is None:
+            return None
         for box, workspace in self.policy.items():
             if hmac.compare_digest(caps[0], workspace["capability"].encode("ascii")):
                 return box
-        raise ProxyError(
-            403, "unknown capability (workspace not recognized)", category="identity",
-        )
+        return None
 
-    def _policy_check(self, box: str, repo: str, op: str) -> None:
-        assert self.policy is not None
+    def _credential_grant(self, box: Optional[str], repo: str, op: str) -> Optional[str]:
+        """Return the grant mode that authorizes host-credential injection.
+
+        None means "never inject the host credential; forward anonymously
+        and let GitHub decide" -- for missing/malformed policy, absent or
+        unknown capability, unlisted repositories, and read-only workspaces
+        attempting writes. A read grant permits read (either mode); a write
+        grant requires read-write mode. The returned value is the repo's
+        grant mode ("read-only" | "read-write") or None.
+        """
+        if box is None or self.policy is None:
+            return None
         workspace = self.policy.get(box)
         if workspace is None:
-            raise ProxyError(403, "unknown workspace", category="policy")
+            return None
         for canon, mode in workspace["repos"]:
             if canon == repo:
-                if op == "read" or mode == "read-write":
-                    return
-                raise ProxyError(
-                    403, f"repository {repo} is read-only for this workspace; "
-                    "pushes from this workspace require 'Clone/pull + Push from VM' access",
-                    category="policy",
-                )
-        raise ProxyError(
-            403, f"repository {repo} is not enabled for this workspace; "
-            "pushes require 'Clone/pull + Push from VM' access",
-            category="policy",
-        )
+                if op == "read" and mode in ("read-only", "read-write"):
+                    return mode
+                if op == "write" and mode == "read-write":
+                    return mode
+                return None
+        return None
 
     # ---- ingress: body streaming (never buffered/spooled) -------------------
 
@@ -1373,15 +1449,15 @@ class RequestContext:
     def _forward_git(self, request: h11.Request, decision: Decision) -> int:
         host_kind = "github" if decision.host == "github.com" else "objects"
         if host_kind == "github":
-            self.host_token = _load_host_token(self.cfg)
-            if self.host_token is None:
-                raise ProxyError(
-                    503, "host credential unavailable (fail-closed)", category="credential",
-                )
-        # Policy is approved; stream the body upstream as it arrives (the
-        # upstream opens lazily once the first chunk is confirmed, or here for
-        # bodyless requests). The objects leg targets the REAL href decrypted
-        # from the stamp and re-attaches its stored headers host-side only.
+            # The host credential is injected ONLY for a live grant; without
+            # one (or when the token is unavailable) the request is forwarded
+            # anonymously -- public access must never depend on the token.
+            if self.grant:
+                self.host_token = _load_host_token(self.cfg)
+        # Stream the body upstream as it arrives (the upstream opens lazily
+        # once the first chunk is confirmed, or here for bodyless requests).
+        # The objects leg targets the REAL href decrypted from the stamp and
+        # re-attaches its stored headers host-side only.
         self.stream_ingress_body(request, host_kind, decision)
         self._open_upstream(
             request, host_kind, self.framing,
@@ -1391,12 +1467,20 @@ class RequestContext:
         status, reason, resp_headers = self.upstream.read_response_head(
             self.start, self.cfg.total_deadline
         )
-        return self._forward_response(status, reason, resp_headers)
+        return self._forward_response(status, reason, resp_headers, decision)
 
-    def _forward_response(self, status: int, reason: str, headers: List[Tuple[str, str]]) -> int:
+    def _forward_response(self, status: int, reason: str, headers: List[Tuple[str, str]],
+                          decision: Optional[Decision] = None) -> int:
         location = next((v for n, v in headers if n.lower() == "location"), None)
         if status in REDIRECT_STATUSES and location is not None:
-            rewritten = self._rewrite_location(location)
+            if decision is not None and decision.kind == "objects":
+                # Objects-leg redirects are resealed into a fresh stamp (the
+                # upstream Location carries the real signed URL; handing it
+                # to the VM would leak the signature AND yield an unstamped
+                # URL the classifier rejects on the second hop).
+                rewritten = self._stamp_object_redirect(location, decision)
+            else:
+                rewritten = self._rewrite_location(location)
             if rewritten is None:
                 raise ProxyError(
                     403, "redirect to a non-covered host is not allowed", category="redirect",
@@ -1555,11 +1639,20 @@ class RequestContext:
                 403, "LFS batch requires operation=download|upload", category="denied",
             )
         self.op = decision.op
-        self._policy_check(self.box, decision.repo, decision.op)
-
-        self.host_token = _load_host_token(self.cfg)
-        if self.host_token is None:
-            raise ProxyError(503, "host credential unavailable (fail-closed)", category="credential")
+        # The batch is authenticated (host token injected upstream) ONLY under
+        # a live grant with a usable token; otherwise it is forwarded
+        # anonymously and GitHub decides whether the batch succeeds. Either
+        # way the action headers are sealed into the stamps (they are
+        # GitHub-issued, object-scoped temporaries -- for an anonymous batch
+        # they are credentials GitHub granted to the anonymous requester, not
+        # host secrets); `auth` records whether the batch rode the host
+        # credential, which is what the objects leg re-checks.
+        authenticated = False
+        if self._credential_grant(self.box, decision.repo, decision.op) is not None:
+            token = _load_host_token(self.cfg)
+            if token is not None:
+                self.host_token = token
+                authenticated = True
         upstream = self._make_upstream("github")
         framing = self.framing  # CL passthrough or chunked re-encode, never synthesized
         headers = self._outbound_headers(request, "github", framing, upstream)
@@ -1573,7 +1666,7 @@ class RequestContext:
         )
         resp_body = self._read_bounded_response_body(upstream, resp_headers)
         try:
-            rewritten = self._rewrite_batch_body(resp_body, decision.repo)
+            rewritten = self._rewrite_batch_body(resp_body, decision.repo, authenticated)
         except ProxyError:
             self.batch_failed = True
             raise
@@ -1622,37 +1715,34 @@ class RequestContext:
                 raise ResponseTooLarge()
         return bytes(out)
 
-    def _stamp_action(
-        self, action: Dict[str, Any], oid: str, repo: str, op: str
+    def _seal_stamp(
+        self, href: str, headers: Any, oid: str, repo: str, stamp_op: str,
+        authenticated: bool, what: str,
     ) -> str:
-        """Build the self-carrying stamped URL for one upload/download action.
+        """Seal a REAL object href (query included) + its credential headers
+        into a self-carrying stamp; returns the VM-visible stamped proxy URL.
 
-        The REAL href and the action's credential headers are AEAD-encoded
-        into _msw_sig (host-side key); the VM only ever sees the stamped proxy
-        URL. Raises ProxyError (failing the WHOLE batch closed) for any
-        foreign, unparseable, or mismatched href -- the VM must never see an
-        upstream href or action header.
+        Fail-closed: an unparseable, foreign-host, or oid-mismatched href
+        raises ProxyError, so the VM never sees an upstream href or a
+        credential header. `what` names the source ("LFS batch {op} action"
+        or "objects redirect") for deny messages. `auth` records whether the
+        href/headers were granted to the HOST credential (True) or to the
+        anonymous requester (False); the objects leg re-checks the live grant
+        only for host-credential stamps.
         """
-        href = action.get("href")
-        if not isinstance(href, str):
-            raise ProxyError(
-                403, f"LFS batch {op} action has no href; batch refused", category="denied",
-            )
         split = urllib.parse.urlsplit(href)
         if split.scheme not in ("http", "https") or not split.hostname:
             raise ProxyError(
-                403, f"LFS batch {op} action href is not a valid URL; batch refused",
-                category="denied",
+                403, f"{what} href is not a valid URL; refused", category="denied",
             )
         if not split.path.startswith("/objects/"):
             raise ProxyError(
-                403, f"LFS batch {op} action href is not an object URL; batch refused",
-                category="denied",
+                403, f"{what} href is not an object URL; refused", category="denied",
             )
-        action_oid = split.path[len("/objects/"):]
-        if not _OID_RE.fullmatch(action_oid) or action_oid != oid:
+        href_oid = split.path[len("/objects/"):]
+        if not _OID_RE.fullmatch(href_oid) or href_oid != oid:
             raise ProxyError(
-                403, "LFS batch action href oid does not match the object; batch refused",
+                403, f"{what} href oid does not match the object; refused",
                 category="denied",
             )
         host = split.hostname
@@ -1662,14 +1752,15 @@ class RequestContext:
         )
         if not covered:
             raise ProxyError(
-                403, f"LFS batch {op} action href host {host!r} is not covered; batch refused",
+                403, f"{what} href host {host!r} is not covered; refused",
                 category="denied",
             )
-        headers = action.get("header")
         clean_headers: Dict[str, str] = {}
         if isinstance(headers, dict):
             for name, value in headers.items():
-                if isinstance(name, str) and isinstance(value, str) and _HEADER_NAME_RE.fullmatch(name):
+                if (isinstance(name, str) and isinstance(value, str)
+                        and _HEADER_NAME_RE.fullmatch(name)
+                        and len(value) <= MAX_HEADER_VALUE_BYTES):
                     clean_headers[name] = value
         exp = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
             seconds=self.cfg.stamp_ttl
@@ -1678,29 +1769,105 @@ class RequestContext:
             "v": 1,
             "href": href,
             "headers": clean_headers,
-            "op": op,
+            "op": stamp_op,
             "repo": repo,
             "exp": exp,
+            "auth": authenticated,
         }, sort_keys=True).encode("utf-8")
         sig = stamp_encode(self.cfg.hmac_key, payload)
         params = (
             f"_msw_repo={urllib.parse.quote(repo, safe='')}"
-            f"&_msw_op={op}&_msw_exp={exp}&_msw_sig={urllib.parse.quote(sig, safe='')}"
+            f"&_msw_op={stamp_op}&_msw_exp={exp}&_msw_sig={urllib.parse.quote(sig, safe='')}"
         )
         return f"{self.cfg.base_url}/objects.githubusercontent.com/objects/{oid}?{params}"
 
-    def _rewrite_batch_body(self, body: bytes, repo: str) -> bytes:
+    def _stamp_action(
+        self, action: Dict[str, Any], oid: str, repo: str, op: str,
+        authenticated: bool,
+    ) -> str:
+        """Build the self-carrying stamped URL for one upload/download action.
+
+        The REAL href and the action's credential headers are AEAD-encoded
+        into _msw_sig (host-side key); the VM only ever sees the stamped
+        proxy URL. Raises ProxyError (failing the WHOLE batch closed) for any
+        foreign, unparseable, or mismatched href -- the VM must never see an
+        upstream href or action header. The headers are GitHub-issued,
+        object-scoped temporaries: for an authenticated batch they were
+        granted to the HOST credential, for an anonymous batch they were
+        granted to the anonymous requester (never host secrets). `auth`
+        records which, so the objects leg re-checks the live grant only for
+        host-credential stamps.
+        """
+        href = action.get("href")
+        if not isinstance(href, str):
+            raise ProxyError(
+                403, f"LFS batch {op} action has no href; batch refused", category="denied",
+            )
+        return self._seal_stamp(href, action.get("header"), oid, repo, op, authenticated,
+                                f"LFS batch {op} action")
+
+    def _stamp_object_redirect(self, location: str, decision: Decision) -> Optional[str]:
+        """Reseal an objects-leg redirect into a fresh stamped proxy URL.
+
+        The real object endpoint (e.g. GitHub's CDN) answers the stamped
+        request with a 302 whose Location carries the upstream-SIGNED URL,
+        query included. Handing that Location to the VM would leak the
+        upstream signature AND produce an unstamped URL the classifier
+        rejects on the second hop. Instead the redirect href/query and the
+        PRESERVED action headers are sealed into a fresh stamp with the same
+        repo/op/oid/auth provenance, so the second hop re-enters the proxy
+        and works. Non-covered or malformed targets stay denied (None ->
+        the caller refuses the redirect exactly like any other non-covered
+        redirect).
+        """
+        if decision.oid is None or decision.stamp_op is None:
+            return None
+        split = urllib.parse.urlsplit(location)
+        if split.scheme and split.scheme not in ("http", "https"):
+            return None
+        if split.hostname is None:
+            # Relative Location: resolve against the REAL upstream href origin
+            # (the host the redirect came from).
+            base = urllib.parse.urlsplit(decision.href) if decision.href else None
+            if base is None or base.scheme not in ("http", "https") or not base.hostname:
+                return None
+            resolved = urllib.parse.urlunsplit(
+                (base.scheme, base.netloc, split.path or "/", split.query, ""))
+        else:
+            resolved = urllib.parse.urlunsplit(
+                (split.scheme or "https", split.netloc, split.path or "/", split.query, ""))
+        try:
+            return self._seal_stamp(
+                resolved, decision.headers, decision.oid, decision.repo,
+                decision.stamp_op, decision.authenticated, "objects redirect",
+            )
+        except ProxyError:
+            return None
+
+    def _rewrite_batch_body(self, body: bytes, repo: str, authenticated: bool) -> bytes:
         """Rewrite every LFS batch action to a proxy-stamped URL (section 4).
 
-        FAIL-CLOSED: unless EVERY action on EVERY object entry is a covered
-        upload/download action and is successfully stamped, the whole batch is
-        refused with an LFS error -- a foreign or unparseable href (or any
-        unsupported action type such as verify) must never be passed through,
-        because batch actions can carry temporary credentials and direct-to-
-        upstream URLs that would bypass the proxy. Action header maps
-        (credentials) are removed from the VM-visible response; they travel
-        only inside the encrypted stamp and are re-attached host-side on the
-        objects leg.
+        FAIL-CLOSED: unless EVERY object entry is a dictionary carrying a
+        valid 64-hex oid, and EVERY entry is either an actions map whose
+        actions are all covered upload/download dictionaries that stamp
+        successfully, or an actionless form (absent or EMPTY actions) with no
+        top-level href/header and, when present, a spec-shaped `error` (a
+        dict with an integer code and a string message). Any other shape -- a
+        malformed entry, a missing oid, non-dict actions, nonempty malformed
+        actions, raw href/header on the entry, a foreign or unparseable
+        href, or any unsupported action type (such as verify) -- refuses the
+        WHOLE batch with an LFS error and must never pass through, because
+        batch actions can carry temporary credentials and direct-to-upstream
+        URLs that would bypass the proxy. Actionless entries serialize
+        unchanged (nothing to stamp, nothing to leak). Action header maps
+        (credentials) are removed from the VM-visible response and travel
+        only inside the encrypted stamp, re-attached host-side on the
+        objects leg. Stamps minted under a grant carry `auth: true` (the
+        objects leg re-checks the live grant); anonymous batches carry
+        `auth: false` -- their headers are GitHub-issued anonymous-scope
+        temporaries, not host secrets, so no grant recheck applies (and the
+        batch request itself was credential-free, so that provenance is
+        sound).
         """
         try:
             data = json.loads(body.decode("utf-8"))
@@ -1708,22 +1875,64 @@ class RequestContext:
             raise ProxyError(502, "upstream LFS batch response is not valid JSON", category="upstream")
         if not isinstance(data, dict):
             raise ProxyError(502, "upstream LFS batch response is not valid JSON", category="upstream")
-        for entry in data.get("objects", []):
+        objects = data.get("objects")
+        if not isinstance(objects, list):
+            raise ProxyError(502, "upstream LFS batch response is not valid JSON", category="upstream")
+        for entry in objects:
             if not isinstance(entry, dict):
-                continue
+                raise ProxyError(
+                    403, "LFS batch object entry is not an object; batch refused",
+                    category="denied",
+                )
             oid = entry.get("oid")
             if not isinstance(oid, str) or not _OID_RE.fullmatch(oid):
-                continue  # object-level error entries carry no actions
+                raise ProxyError(
+                    403, "LFS batch object entry has no valid oid; batch refused",
+                    category="denied",
+                )
+            # Raw href/header anywhere on an entry is a smuggling vector (they
+            # could carry credentials past the proxy); refuse it on EVERY
+            # entry, action-bearing or error-only.
+            if "href" in entry or "header" in entry:
+                raise ProxyError(
+                    403, f"LFS batch object {oid} carries raw href/header; batch refused",
+                    category="denied",
+                )
             actions = entry.get("actions")
-            if not isinstance(actions, dict) or not actions:
+            if actions is None or actions == {}:
+                # A valid-oid entry WITHOUT actions is legitimate (GitHub
+                # answers an upload of an already-present object, or a
+                # missing-object download, with an actionless entry). There
+                # is nothing to stamp and nothing to leak (raw href/header
+                # already refused above), so it is serialized unchanged; an
+                # EMPTY actions map is the same actionless form. When an
+                # `error` is present it must be spec-shaped (a dict with an
+                # integer code and a string message).
+                error = entry.get("error")
+                if error is not None:
+                    code = error.get("code") if isinstance(error, dict) else None
+                    message = error.get("message") if isinstance(error, dict) else None
+                    if (not isinstance(error, dict)
+                            or isinstance(code, bool) or not isinstance(code, int)
+                            or not isinstance(message, str)):
+                        raise ProxyError(
+                            403, f"LFS batch object {oid} has an invalid error; batch refused",
+                            category="denied",
+                        )
                 continue
+            if not isinstance(actions, dict):
+                raise ProxyError(
+                    403, f"LFS batch object {oid} has invalid actions; batch refused",
+                    category="denied",
+                )
+            # actions is a nonempty dict: stamp EVERY action.
             for name, action in list(actions.items()):
                 if name not in ("upload", "download") or not isinstance(action, dict):
                     raise ProxyError(
                         403, f"LFS batch action {name!r} is not supported; batch refused",
                         category="denied",
                     )
-                stamped = self._stamp_action(action, oid, repo, name)
+                stamped = self._stamp_action(action, oid, repo, name, authenticated)
                 action["href"] = stamped
                 action.pop("header", None)  # credentials never leave the host
         return json.dumps(data).encode("utf-8")

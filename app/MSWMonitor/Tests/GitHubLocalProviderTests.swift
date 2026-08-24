@@ -346,7 +346,57 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertTrue(readLog(directory).contains("repos github repos --format json"))
     }
 
-    func testLoadCatalogWithoutCredentialHasNoAccountAndSkipsDiscovery() async throws {
+    func testLoadCatalogRefreshReMergesPolicyOnlyGrantForMapping() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        // The policy grants acme/one, but GitHub discovery no longer lists it
+        // (only acme/two is discovered): acme/one is a policy-only grant.
+        writePolicy(policyURL, json: """
+        {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]},"playgrounds":{"capability":"def","repos":[]}}}
+        """)
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"present"}]}"#,
+            authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
+            reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
+        )
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+
+        // Load, then refresh (a second load): BOTH must re-merge the grant.
+        let first = try await provider.loadCatalog()
+        let refreshed = try await provider.loadCatalog()
+
+        let acmeID = GitHubLocalProvider.stableID("acme")
+        let acmeOneID = GitHubLocalProvider.stableID("acme/one")
+        for catalog in [first, refreshed] {
+            XCTAssertTrue(catalog.hostCredentialPresent)
+            let acmeRepos = try XCTUnwrap(catalog.repositoriesByInstallation[acmeID])
+            XCTAssertEqual(
+                acmeRepos.map(\.fullName),
+                ["acme/two", "acme/one"],
+                "Every load must re-merge the policy-only grant into the fresh catalog"
+            )
+            let synthetic = try XCTUnwrap(acmeRepos.first { $0.id == acmeOneID })
+            XCTAssertEqual(synthetic.fullName, "acme/one")
+        }
+
+        // The refreshed catalog keeps the grant available for draft-to-policy
+        // mapping: a draft selecting it still yields a policy entry.
+        var draft = WorkspaceRepositoryDraft.initial("dev")
+        draft.repositoryModes = ["acme/one": .readOnly]
+        let entries = SetupView.repositoryPolicyEntries(
+            workspace: "dev",
+            draft: draft,
+            installations: refreshed.installations,
+            repositoriesByInstallation: refreshed.repositoriesByInstallation,
+            accessMode: .local
+        )
+        XCTAssertEqual(entries.map(\.fullName), ["acme/one"])
+        XCTAssertEqual(entries.first?.mode, .readOnly)
+    }
+
+    func testLoadCatalogWithoutCredentialSkipsDiscoveryButMergesPolicyGrants() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{\"dev\":{\"repos\":[{\"canonical\":\"acme/one\",\"mode\":\"read-only\"}]}}}")
@@ -362,8 +412,14 @@ final class GitHubLocalProviderTests: XCTestCase {
 
         XCTAssertFalse(catalog.hostCredentialPresent)
         XCTAssertNil(catalog.account)
-        XCTAssertTrue(catalog.installations.isEmpty)
-        XCTAssertTrue(catalog.repositoriesByInstallation.isEmpty)
+        // Discovery is skipped without a credential, but the existing
+        // policy-only grant is still merged so it stays visible and editable.
+        let acmeID = GitHubLocalProvider.stableID("acme")
+        XCTAssertEqual(catalog.installations.map(\.id), [acmeID])
+        XCTAssertEqual(
+            catalog.repositoriesByInstallation[acmeID]?.map(\.fullName),
+            ["acme/one"]
+        )
         let log = readLog(directory)
         XCTAssertFalse(log.contains("auth "), "auth must not run without a credential")
         XCTAssertFalse(log.contains("repos "), "discovery must not run without a credential")
@@ -1235,7 +1291,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(poll.status, .expired)
     }
 
-    // MARK: - Push permission hints and manual entry
+    // MARK: - Push permission hints
 
     func testPushDeniedReposStayReadOnly() {
         let blocked = GitHubRepository(
@@ -1275,13 +1331,9 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(connect.effectiveMode(.readWrite), .readWrite)
     }
 
-    func testManualRepositoryEntryDefaultsToCollapsed() {
-        XCTAssertFalse(SetupView.manualEntryInitiallyExpanded)
-    }
-
     // MARK: - Local picker: multiple owners per workspace (high-risk fix)
 
-    func testLocalPolicyPrefillPreservesCrossOwnerEntries() {
+    func testLocalPolicyPrefillMapsEveryPolicyEntryToModes() {
         let policyWorkspace = GitHubPolicyWorkspace(
             capability: "abc",
             repos: [
@@ -1289,71 +1341,29 @@ final class GitHubLocalProviderTests: XCTestCase {
                 GitHubPolicyRepository(canonical: "org/two", mode: .readWrite)
             ]
         )
-        // Catalog only discovered acme/one; org/two must be synthesized.
-        let acmeID = GitHubLocalProvider.stableID("acme")
-        let orgID = GitHubLocalProvider.stableID("org")
-        let installations = [GitHubInstallation(
-            id: acmeID,
-            account: GitHubInstallationAccount(login: "acme", id: acmeID, type: nil),
-            repositorySelection: nil
-        )]
-        let repositories: [Int: [GitHubRepository]] = [
-            acmeID: [GitHubRepository(
-                id: GitHubLocalProvider.stableID("acme/one"),
-                fullName: "acme/one",
-                name: "one",
-                owner: GitHubInstallationAccount(login: "acme", id: acmeID, type: nil),
-                private: true,
-                defaultBranch: "main"
-            )]
-        ]
 
-        let result = SetupView.localPolicyPrefill(
-            policyWorkspace: policyWorkspace,
-            installations: installations,
-            repositoriesByInstallation: repositories
-        )
+        let modes = SetupView.localPolicyPrefill(policyWorkspace: policyWorkspace)
 
-        // Both owners' entries survive the prefill (cross-owner preserved).
-        XCTAssertEqual(Set(result.modes.keys), ["acme/one", "org/two"])
-        XCTAssertEqual(result.modes["acme/one"], .readOnly)
-        XCTAssertEqual(result.modes["org/two"], .readWrite)
-        XCTAssertTrue(result.installations.contains { $0.id == orgID },
-                      "Missing owner must be synthesized so its entry stays editable")
-        XCTAssertEqual(result.repositoriesByInstallation[orgID]?.map(\.fullName), ["org/two"])
+        // Every policy entry survives the prefill (cross-owner preserved);
+        // the provider's catalog merge owns synthesis, so no catalog is
+        // extended here.
+        XCTAssertEqual(Set(modes.keys), ["acme/one", "org/two"])
+        XCTAssertEqual(modes["acme/one"], .readOnly)
+        XCTAssertEqual(modes["org/two"], .readWrite)
     }
 
-    func testLocalPolicyPrefillKeepsExistingCatalogUntouched() {
+    func testLocalPolicyPrefillSkipsMalformedCanonicals() {
         let policyWorkspace = GitHubPolicyWorkspace(
             capability: "abc",
-            repos: [GitHubPolicyRepository(canonical: "acme/one", mode: .readOnly)]
-        )
-        let acmeID = GitHubLocalProvider.stableID("acme")
-        let installations = [GitHubInstallation(
-            id: acmeID,
-            account: GitHubInstallationAccount(login: "acme", id: acmeID, type: nil),
-            repositorySelection: nil
-        )]
-        let repositories: [Int: [GitHubRepository]] = [
-            acmeID: [GitHubRepository(
-                id: GitHubLocalProvider.stableID("acme/one"),
-                fullName: "acme/one",
-                name: "one",
-                owner: GitHubInstallationAccount(login: "acme", id: acmeID, type: nil),
-                private: true,
-                defaultBranch: "main"
-            )]
-        ]
-
-        let result = SetupView.localPolicyPrefill(
-            policyWorkspace: policyWorkspace,
-            installations: installations,
-            repositoriesByInstallation: repositories
+            repos: [
+                GitHubPolicyRepository(canonical: "acme/one", mode: .readOnly),
+                GitHubPolicyRepository(canonical: "not-a-canonical", mode: .readWrite)
+            ]
         )
 
-        XCTAssertEqual(result.installations.count, 1, "No synthetic owner when the owner is already present")
-        XCTAssertEqual(result.repositoriesByInstallation.count, 1)
-        XCTAssertEqual(result.modes["acme/one"], .readOnly)
+        let modes = SetupView.localPolicyPrefill(policyWorkspace: policyWorkspace)
+
+        XCTAssertEqual(modes, ["acme/one": .readOnly])
     }
 
     func testEditorSelectionSpansOwnersInLocalMode() {

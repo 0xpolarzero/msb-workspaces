@@ -432,7 +432,8 @@ app_repository_allowed() {
   [[ -f "$APP_CREDENTIALS_FILE" && ! -L "$APP_CREDENTIALS_FILE" ]] || return 1
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
   key="$box.$role"
-  "$JQ_BIN" -e --arg key "$key" --arg repository "${repository,,}" '
+  repository="$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')"
+  "$JQ_BIN" -e --arg key "$key" --arg repository "$repository" '
     (
       .entries[$key].provider == "github-app-installation" and
       .entries[$key].recoveryState == "ready" and
@@ -459,19 +460,24 @@ write_metadata() {
 
 # ---------------------------------------------------------------------------
 # Path C §2 policy helpers. The policy file is the single source of truth for
-# enforcement: missing/malformed file, unknown workspace, and unknown repo all
-# DENY at the proxy. Policy writes serialize on the existing per-workspace
-# GitHub lock (github_lock_acquire) and are always atomic tmp+rename with mode
-# 0600 (directory 0700).
+# host-credential grants: it decides, per workspace and canonical repository,
+# whether the host OAuth/token may be injected and whether that grant is
+# read-only or read-write. Missing/malformed file, unknown workspace, and
+# unknown repo mean "no credential grant" — valid anonymous public GitHub
+# traffic still proceeds and GitHub decides its outcome. Policy writes
+# serialize on the existing per-workspace GitHub lock (github_lock_acquire)
+# and are always atomic tmp+rename with mode 0600 (directory 0700).
 # ---------------------------------------------------------------------------
 policy_file() { printf '%s' "${MSW_POLICY_FILE:-$HOME/Library/Application Support/MSW Monitor/github-policy.json}"; }
 
 # Path C §2 / high-risk / closure: ONE strict policy validator shared by every
 # host gate (push, verify, host-credential checks, app reads). A malformed
-# policy denies host push and host API work exactly like the proxy's
-# fail-closed rule: schemaVersion numeric integer 1, every workspace key is a
-# valid workspace name, every capability is 48 lowercase hex chars and UNIQUE
-# across workspaces, every repo is a canonical lowercase owner/name where each
+# policy denies host push and host API work — both inject the host credential,
+# which is never granted from an invalid policy — but it never blocks
+# otherwise valid anonymous public GitHub traffic. The strict shape rules:
+# schemaVersion numeric integer 1, every workspace key is a valid workspace
+# name, every capability is 48 lowercase hex chars and UNIQUE across
+# workspaces, every repo is a canonical lowercase owner/name where each
 # segment starts [a-z0-9] and continues [a-z0-9._-]* (matching the proxy
 # target grammar), no .git/query/trailing slash, valid modes only, and
 # duplicate canonicals are rejected.
@@ -2157,7 +2163,13 @@ cmd_clone() {
   local box="$1" repo="${2:-}" destination="${3:-}" remote repo_name parent
   validate_workspace "$box"
   validate_github_repo "$repo"
-  require_repository_access "$box" "$repo" guest
+  # Local mode never gates read paths: public repositories clone anonymously
+  # and grants only control host-credential injection. Legacy Connect mode
+  # still places a guest token in the VM and cannot prove anonymous
+  # forwarding, so the clone must carry a metadata grant there.
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    require_repository_access "$box" "$repo" guest
+  fi
   repo_name="${repo#*/}"
   if [[ -z "$destination" ]]; then destination="$repo_name"; fi
   validate_relative_path "$destination"
@@ -2202,7 +2214,13 @@ pull_one() {
   canonical_repo="$(normalize_github_remote "$remote_raw")"
   canonical_repo="${canonical_repo#https://github.com/}"
   canonical_repo="${canonical_repo%.git}"
-  require_repository_access "$box" "$canonical_repo" guest
+  # Local mode never gates read paths: public repositories pull anonymously
+  # and grants only control host-credential injection. Legacy Connect mode
+  # still places a guest token in the VM and cannot prove anonymous
+  # forwarding, so the origin must carry a metadata grant there.
+  if [[ "$MSW_GITHUB_MODE" != local ]]; then
+    require_repository_access "$box" "$canonical_repo" guest
+  fi
   guest_exec_w "$box" "$repo_root" git pull --ff-only --prune
 }
 cmd_pull() {
@@ -2410,14 +2428,16 @@ push_impl() {
   canonical_url="$(normalize_github_remote "$remote_raw")"
   require_repository_access "$box" "${canonical_url#https://github.com/}" guest
   require_repository_access "$box" "${canonical_url#https://github.com/}" host
-  # Path C §8 push gate (local mode): the canonical repo must be on the
-  # workspace's ticked list and the host credential must be available. Host
-  # push is allowed for every selected repo in BOTH modes — only VM-originated
-  # push is gated by read-write (enforced by the proxy's receive-pack rules).
+  # Path C §8 push gate (local mode): pushing injects the host credential, so
+  # the canonical repo must carry a credential grant and the host credential
+  # must be available. Host push is allowed for every granted repo in BOTH
+  # modes — only VM-originated push is gated by read-write (enforced by the
+  # proxy's receive-pack rules).
   if [[ "$MSW_GITHUB_MODE" == local ]]; then
-    # High-risk fail-closed: the strict policy validator runs at EVERY host
-    # gate; a corrupt policy denies host push exactly like the proxy denies VM
-    # access. The repo must be ticked with an EXPLICIT valid mode.
+    # High-risk: the strict policy validator runs at EVERY host gate; a
+    # corrupt policy grants no host credential, so host push is denied — but
+    # otherwise valid anonymous public GitHub traffic is not affected. The
+    # repo must carry an EXPLICIT valid grant mode.
     if ! policy_validate; then
       fatal "GitHub policy file is missing or malformed: $(policy_file); host push fails closed until it is repaired (run: msw github proxy-configure)"
     fi
@@ -2427,7 +2447,7 @@ push_impl() {
     local_repo_mode="$(policy_repo_mode "$box" "$canonical_repo" 2>/dev/null || true)"
     case "$local_repo_mode" in
       read-only|read-write) ;;
-      *) fatal "repository '$canonical_repo' is not on workspace '$box' allowed list; add it with: msw app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" ;;
+      *) fatal "repository '$canonical_repo' has no credential grant on workspace '$box'; add one with: msw app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" ;;
     esac
     if ! host_credential_available; then
       fatal "host GitHub credential is not provisioned for $box; outbound pushes fail closed until it is (run: msw github auth)"
@@ -2568,7 +2588,7 @@ cmd_github_verify_local() {
     repo_mode="$(policy_repo_mode "$box" "$repo" 2>/dev/null || true)"
     if [[ -z "$repo_mode" ]]; then
       github_lock_release
-      fatal "repository '$repo' is not on workspace '$box' allowed list; it cannot be cloned or pushed from the VM"
+      fatal "repository '$repo' has no credential grant on workspace '$box'; public repos remain anonymously cloneable, but authenticated operations and VM push need a grant (add one with: msw app github-policy-set --workspace $box --repository $repo --mode read-write)"
     fi
     case "$repo_mode" in
       read-only|read-write) ;;
@@ -4254,7 +4274,7 @@ SCRIPT
           if [[ ! "$probe_code" =~ ^[0-9]{3}$ ]]; then
             echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
           else
-            note "$box: proxy reachable (HTTP $probe_code); git requests fail closed until the host credential is provisioned (Phase 2)"
+            note "$box: proxy reachable (HTTP $probe_code); anonymous public git requests proceed, host-credential injection waits for provisioning (msw github auth)"
           fi
         fi
       else
@@ -5108,7 +5128,7 @@ app_cmd_clone() {
   app_require_config clone
   app_require_runtime clone
   if ! output="$(cmd_clone "$box" "$repository" "$destination" 2>/dev/null)"; then
-    app_emit_error clone "MSW_CLONE_FAILED" "The repository could not be cloned into the workspace." "Check repository authorization and choose a new destination." "$box" true 1
+    app_emit_error clone "MSW_CLONE_FAILED" "The repository could not be cloned into the workspace." "In local mode public repositories clone anonymously; in Connect mode the repository must be authorized for this workspace." "$box" true 1
   fi
   app_emit_success clone "{\"workspace\":$(app_json_string "$box"),\"operation\":\"clone\",\"target\":$(app_json_string "$destination"),\"changed\":true,\"outcome\":\"repository cloned\"}"
 }
@@ -5818,14 +5838,13 @@ app_apply_rollback_policy() {
 }
 
 # Bounded end-to-end transport readiness (re-review item 3): before the
-# policy commit, prove the guest can reach the MSW proxy through the
-# relay/shuttle with the DESIRED capability. The deliberate probe (bare
-# info/refs, no service param — so git smart-HTTP denies are NOT converted to
-# the HTTP 200 git-deny form) MUST return EXACTLY HTTP 403 with the proxy's
-# "msw-proxy:" error body: that is the expected deny for the uncommitted
-# capability (unknown capability / policy missing / missing-service when the
-# capability is already committed). Anything else — 200, 404, 500, 503, an
-# unrelated listener, or a dead path — fails the probe. Production
+# policy commit, prove the guest can route to the MSW proxy through the
+# relay/shuttle. proxy_guest_configure already proved the exact insteadOf /
+# extraHeader git configuration. The deliberate probe is a bare info/refs
+# request (no service= param): smart-HTTP's missing-service deny is HTTP 403
+# with the "msw-proxy:" body, so a 403 + marker proves only that the
+# malformed request traversed relay -> shuttle -> proxy. It is independent
+# of policy or credential grants and does not verify the capability itself.
 # ensures/repairs the host proxy LaunchAgent first. Test seams:
 # MSW_FAKE_TRANSPORT_PROBE=403|fail models ONLY the expected deny (the fake
 # msb stubs the relay); MSW_TRANSPORT_PROBE_PORT overrides the probe port.
@@ -5847,9 +5866,9 @@ app_apply_verify_transport() {
   probe_repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
   [[ -n "$probe_repo" ]] || probe_repo="acme/demo"
   port="${MSW_TRANSPORT_PROBE_PORT:-${MSW_GITHUB_PROXY_PORT:-18446}}"
-  # No service= param: a bare info/refs yields a real HTTP 403 from the MSW
-  # proxy (unknown capability for the uncommitted capability, or
-  # missing-service when it is committed).
+  # No service= param: the bare info/refs intentionally omits the required
+  # service argument, so the proxy's missing-service deny (HTTP 403 +
+  # "msw-proxy:") is expected when the malformed request reached it.
   probe_url="http://127.0.0.1:${port}/github.com/${probe_repo}.git/info/refs"
   body_and_code="$(guest_exec_ready "$box" curl -sS -w '\n%{http_code}' --max-time 10 \
     -H "X-MSW-Capability: $capability" "$probe_url" 2>/dev/null || true)"
@@ -5893,11 +5912,14 @@ app_apply_provision_transport() {
   proxy_install_relay "$box" || { printf 'MSW_APPLY_STAGE=relay\n' >&2; return 1; }
   proxy_guest_configure "$box" "$capability" || { printf 'MSW_APPLY_STAGE=configuring\n' >&2; return 1; }
   proxy_shuttle_start "$box" || { printf 'MSW_APPLY_STAGE=shuttle\n' >&2; return 1; }
-  # readiness: a bounded end-to-end guest probe with the desired capability
+  # readiness: a bounded end-to-end relay/proxy routing probe (the
+  # missing-service 403 confirms routing; proxy_guest_configure already
+  # proved the git rewrite/extraHeader, so the probe does not verify the
+  # capability)
   if ! app_apply_verify_transport "$box" "$capability"; then
     # A live pid is not sufficient health evidence. Restart once when the
-    # bounded end-to-end probe fails, then require the desired capability to
-    # reach the proxy before policy activation.
+    # bounded end-to-end routing probe fails, then require it to pass
+    # before policy activation.
     proxy_shuttle_start "$box" 1 || { printf 'MSW_APPLY_STAGE=shuttle\n' >&2; return 1; }
     app_apply_verify_transport "$box" "$capability" || { printf 'MSW_APPLY_STAGE=verifying\n' >&2; return 1; }
   fi
@@ -6720,15 +6742,16 @@ app_cmd_push_plan() {
   behind="$("$JQ_BIN" -r '.behindCount // 0' <<<"$repo_json")"
   [[ "$pushability" == pushable || "$pushability" == publish ]] || app_emit_error push-plan "MSW_PUSH_BLOCKED" "MSW policy does not allow pushing this repository state." "Resolve detached, diverged, unavailable, or unauthorized state before reviewing a push." "$box" false 77
   [[ "$pushability" == publish || "$ahead" =~ ^[1-9][0-9]*$ ]] || app_emit_error push-plan "MSW_NOTHING_TO_PUSH" "The reviewed repository has no committed changes to transfer." "Refresh the repository after committing the branch you want to push." "$box" false 77
-  # §8 local gate: the canonical repo must be on the workspace's ticked list
-  # (host push is allowed for every selected repo in BOTH modes).
+  # §8 local gate: host push injects the host credential, so the canonical
+  # repo must carry a credential grant (host push is allowed for every granted
+  # repo in BOTH modes).
   if [[ "$MSW_GITHUB_MODE" == local && "$canonical" == https://github.com/* ]]; then
     canonical_repo="${canonical#https://github.com/}"
     canonical_repo="${canonical_repo%.git}"
     canonical_repo="$(printf '%s' "$canonical_repo" | tr '[:upper:]' '[:lower:]')"
     if [[ "$canonical_repo" == */* && "$canonical_repo" != */*/* ]]; then
       if [[ -z "$(policy_repo_mode "$box" "$canonical_repo" 2>/dev/null || true)" ]]; then
-        app_emit_error push-plan "MSW_PUSH_NOT_AUTHORIZED" "The repository is not on this workspace's GitHub allowed list." "Add it with: msw app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" "$box" false 77
+        app_emit_error push-plan "MSW_PUSH_NOT_AUTHORIZED" "The repository has no credential grant on this workspace." "Add one with: msw app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" "$box" false 77
       fi
     fi
   fi

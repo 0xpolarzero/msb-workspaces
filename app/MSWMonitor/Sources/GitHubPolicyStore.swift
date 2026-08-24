@@ -1,16 +1,17 @@
 import Foundation
 
 /// Path C §2: the local GitHub policy file is the single source of truth for
-/// enforcement. The app never writes it directly — policy writes go through
-/// the journaled `msw app github-policy-apply` CLI so capability
+/// host-credential grants. The app never writes it directly — policy writes
+/// go through the journaled `msw app github-policy-apply` CLI so capability
 /// preservation, transport provisioning, atomic tmp+rename, and the
 /// per-workspace GitHub lock stay CLI-owned. This store only READS the file
 /// (for Settings/Detail/setup display) and watches the policy directory so
 /// external/CLI edits refresh the UI live.
 ///
 /// Decoding is deliberately strict: any missing/malformed/schema-mismatched
-/// file yields `nil`, and every consumer treats `nil` as refuse-all (the
-/// proxy's fail-closed posture).
+/// file yields `nil`, and every consumer treats `nil` as "no credential
+/// grants" — the host OAuth/token is never injected in that state. It does
+/// not deny anonymous public GitHub traffic, which needs no grant.
 struct GitHubPolicyFile: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let workspaces: [String: GitHubPolicyWorkspace]
@@ -64,7 +65,7 @@ struct GitHubPolicyRepository: Codable, Sendable, Equatable, Identifiable {
 /// App-side watcher + reader for `github-policy.json`.
 ///
 /// `current` re-reads the file on every access, so consumers can never
-/// observe stale enforcement state (the file is small and the CLI writes it
+/// observe stale grant state (the file is small and the CLI writes it
 /// atomically via tmp+rename).
 ///
 /// The watcher watches the policy DIRECTORY (atomic writes replace the file
@@ -76,7 +77,8 @@ struct GitHubPolicyRepository: Codable, Sendable, Equatable, Identifiable {
 final class GitHubPolicyStore {
     let policyURL: URL
 
-    /// Fresh read of the policy file (nil = missing/malformed → deny).
+    /// Fresh read of the policy file (nil = missing/malformed → no credential
+    /// grants; anonymous public GitHub access is unaffected).
     var current: GitHubPolicyFile? {
         Self.read(policyURL: policyURL)
     }
@@ -118,7 +120,8 @@ final class GitHubPolicyStore {
     }
 
     /// Strict failable read. Any decode failure (missing file, malformed
-    /// JSON, wrong schemaVersion, unknown mode value) returns nil.
+    /// JSON, wrong schemaVersion, unknown mode value) returns nil, meaning
+    /// "no credential grants".
     static func read(policyURL: URL) -> GitHubPolicyFile? {
         guard let data = try? Data(contentsOf: policyURL) else { return nil }
         guard let file = try? MSWProtocolDecoder.decoder().decode(GitHubPolicyFile.self, from: data),

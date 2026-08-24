@@ -128,7 +128,7 @@ Rules:
 - The verification repository must be visible to both the guest and host app for that workspace and must permit the host app to create/delete the temporary branch used by verification.
 - A workspace may remain public-only or unconfigured; it does not need a GitHub connection to exist or to start.
 
-This is more authorization work than a two-app design, but it is the only backend-free design that keeps the existing per-workspace repository allowlists and guest-read/host-write split while using user OAuth. The setup wizard groups the work and makes the repeated steps explicit rather than hiding them.
+This is more authorization work than a two-app design, but it is the only backend-free design that keeps the existing per-workspace repository credential grants and guest-read/host-write split while using user OAuth. The setup wizard groups the work and makes the repeated steps explicit rather than hiding them.
 
 ### 3.4 Future alternative, not v1
 
@@ -242,11 +242,11 @@ The setup UI explicitly says that deep verification temporarily starts VMs and m
 
 For each workspace, offer:
 
-- `No GitHub access`.
+- `No GitHub credential grants`.
 - `Read from GitHub` (guest app only).
 - `Read and push from this Mac` (guest app plus host app).
 
-The wizard handles the repeated app-specific Device Flow/installation steps described in Section 3.5. It displays the selected owner and repository allowlist before applying it.
+Public repositories are anonymously cloneable from any workspace without any selection; these options only grant authenticated (credential) access. The wizard handles the repeated app-specific Device Flow/installation steps described in Section 3.5. It displays the selected owner and repository credential grants before applying them.
 
 The verification step visibly states:
 
@@ -815,7 +815,7 @@ Use `SMAppService` for an opt-in login item and expose registration status plus 
 - Add GitHub status/expiry/restart-needed UI.
 - Add repositories, explicit stopped-VM scan prompting, worktree dirty/ahead/behind status, clone, fast-forward pull, identity, bounded logs, metrics, and ports.
 
-**Exit:** disposable GitHub repositories prove guest push rejection, host-only push, cleanup, per-workspace repository isolation, refresh error handling, and zero credential leakage.
+**Exit:** disposable GitHub repositories prove guest push rejection, host-only push, cleanup, per-workspace credential-grant isolation while retaining anonymous public access, refresh error handling, and zero credential leakage.
 
 ### M4 — guarded daily operations
 
@@ -921,7 +921,7 @@ Use SwiftUI unit tests, controlled state fixtures, and manual macOS accessibilit
 The plan is actionable without blocking, using these defaults:
 
 1. **GitHub App ownership:** assume a publisher-owned public app family with six app registrations and placeholder client IDs. A personal-only build can use private/personal-owned registrations, but the app configuration and installation UX must be selected before release.
-2. **Trust boundary:** assume the existing three-workspace separation is required. If the user explicitly accepts a shared repository allowlist, the registration count can be reduced to two apps, but that is a security change and must be documented as such.
+2. **Trust boundary:** assume the existing three-workspace separation is required. If the user explicitly accepts shared repository credential grants, the registration count can be reduced to two apps, but that is a security change and must be documented as such.
 3. **Distribution:** assume arm64-only Developer ID/notarized distribution for macOS 26+. No App Store target.
 4. **Toolchain:** default to an app-managed signed toolchain bundle; Homebrew support is optional compatibility, not a prerequisite.
 5. **Token policy:** use expiring GitHub App user tokens and explicit restart/rebind state rather than opting out of expiration for convenience.
