@@ -682,6 +682,10 @@ final class AppModelTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(25))
         }
         XCTAssertNotNil(model.pendingLifecyclePlan)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .quarantined)
+        XCTAssertFalse(model.operationStates.values.contains {
+            $0.kind == .lifecycle && $0.workspace == "dev" && $0.outcome == .pending
+        })
         XCTAssertNil(model.lastError, "Stop plan error: \(model.lastError ?? "nil")")
 
         model.start(.dev)
@@ -948,6 +952,10 @@ final class AppModelTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(25))
         }
         XCTAssertNotNil(model.pendingLifecyclePlan)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertFalse(model.operationStates.values.contains {
+            $0.kind == .lifecycle && $0.workspace == "dev" && $0.outcome == .pending
+        })
 
         try Data("unsafe\n".utf8).write(to: unsafeMarker)
         await model.refreshRemote()

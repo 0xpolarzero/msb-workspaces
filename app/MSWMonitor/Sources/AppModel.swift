@@ -410,7 +410,6 @@ final class AppModel {
         case push
     }
 
-    private var pendingLifecycleOriginalState: Workspace.State?
     private var startupRecoveryRetry: (() -> Void)?
     private let client: MSWClient?
     private let operationCoordinator: MSWOperationCoordinator?
@@ -845,19 +844,10 @@ final class AppModel {
     }
 
     func cancelPendingLifecycle() {
-        if let workspace = pendingLifecycleWorkspace,
-           pendingLifecycleOriginalState != nil {
-            finishOperation(
-                key: operationKey(kind: .lifecycle, workspace: workspace.rawValue),
-                outcome: .unknown,
-                message: "The reviewed operation was cancelled before apply."
-            )
-        }
         clearPendingLifecyclePlan()
     }
 
     private func clearPendingLifecyclePlan() {
-        pendingLifecycleOriginalState = nil
         pendingLifecycleAction = nil
         pendingLifecycleWorkspace = nil
         pendingLifecyclePlan = nil
@@ -1369,17 +1359,28 @@ final class AppModel {
             lastError = "MSW operations are unavailable in fixture mode."
             return
         }
-        guard requireActionSafety(for: id, action: .lifecycle(action), operation: action.rawValue.capitalized) else { return }
-        if confirmation == nil {
-            pendingLifecycleOriginalState = workspaces.first(where: { $0.id == id })?.state
+        guard requireActionSafety(
+            for: id,
+            action: .lifecycle(action),
+            operation: action.rawValue.capitalized
+        ) else {
+            return
         }
-        beginOperation(
-            kind: .lifecycle,
-            workspace: id.rawValue,
-            action: action.rawValue,
-            message: confirmation == nil ? "Preparing a reviewed \(action.rawValue) operation." : "Applying the reviewed operation."
-        )
-        updateState(id, to: action == .start ? .starting : action == .stop ? .stopping : .restarting)
+
+        let isPlanning = action != .start && confirmation == nil
+        if !isPlanning {
+            beginOperation(
+                kind: .lifecycle,
+                workspace: id.rawValue,
+                action: action.rawValue,
+                message: "Applying the reviewed operation."
+            )
+            updateState(
+                id,
+                to: action == .start ? .starting : action == .stop ? .stopping : .restarting
+            )
+        }
+
         Task { [weak self] in
             do {
                 let result = try await operationCoordinator.lifecycle(
@@ -1395,53 +1396,82 @@ final class AppModel {
                         workspace: id.rawValue,
                         message: "\(result.outcome) Verifying with a fresh state observation."
                     )
-                    self.pendingLifecycleOriginalState = nil
                 }
                 await self?.refreshRemote()
             } catch let error as MSWOperationCoordinator.CoordinatorError {
                 if case let .confirmationRequired(plan) = error {
                     await MainActor.run {
                         guard let self else { return }
-                        guard self.requireActionSafety(for: id, action: .lifecycle(action), operation: action.rawValue.capitalized) else {
+                        guard self.requireActionSafety(
+                            for: id,
+                            action: .lifecycle(action),
+                            operation: action.rawValue.capitalized
+                        ) else {
                             self.clearPendingLifecyclePlan()
                             return
                         }
                         self.pendingLifecyclePlan = plan
                         self.pendingLifecycleAction = action
                         self.pendingLifecycleWorkspace = id
-                        self.updateOperation(
-                            kind: .lifecycle,
-                            workspace: id.rawValue,
-                            phase: .awaitingConfirmation,
-                            outcome: .pending,
-                            message: plan.effects
-                        )
-                        if let originalState = self.pendingLifecycleOriginalState {
-                            self.updateState(id, to: originalState)
-                        }
                         self.lastError = nil
                     }
                     return
                 }
                 await MainActor.run {
                     self?.lastError = error.localizedDescription
-                    self?.lastRecovery = self?.recoveryContext(for: error, workspace: id.rawValue, fallbackRecovery: "Refresh state before retrying.")
-                    self?.pendingLifecycleOriginalState = nil
-                    self?.updateState(id, to: .unknown)
-                    self?.failOperation(kind: .lifecycle, workspace: id.rawValue, action: action.rawValue, error: error)
+                    self?.lastRecovery = self?.recoveryContext(
+                        for: error,
+                        workspace: id.rawValue,
+                        fallbackRecovery: "Refresh state before retrying."
+                    )
+                    if !isPlanning {
+                        self?.updateState(id, to: .unknown)
+                    }
+                    self?.failOperation(
+                        kind: .lifecycle,
+                        workspace: id.rawValue,
+                        action: action.rawValue,
+                        error: error
+                    )
                 }
-                let activity = MSWActivity(id: UUID(), createdAt: Date(), kind: .failure, title: "\(action.rawValue.capitalized) failed", detail: error.localizedDescription, workspace: id.rawValue, isFailure: true)
+                let activity = MSWActivity(
+                    id: UUID(),
+                    createdAt: Date(),
+                    kind: .failure,
+                    title: "\(action.rawValue.capitalized) failed",
+                    detail: error.localizedDescription,
+                    workspace: id.rawValue,
+                    isFailure: true
+                )
                 await self?.append(activity)
                 await self?.refreshRemote()
             } catch {
                 await MainActor.run {
                     self?.lastError = error.localizedDescription
-                    self?.lastRecovery = self?.recoveryContext(for: error, workspace: id.rawValue, fallbackRecovery: "Refresh state before retrying.")
-                    self?.pendingLifecycleOriginalState = nil
-                    self?.updateState(id, to: .unknown)
-                    self?.failOperation(kind: .lifecycle, workspace: id.rawValue, action: action.rawValue, error: error)
+                    self?.lastRecovery = self?.recoveryContext(
+                        for: error,
+                        workspace: id.rawValue,
+                        fallbackRecovery: "Refresh state before retrying."
+                    )
+                    if !isPlanning {
+                        self?.updateState(id, to: .unknown)
+                    }
+                    self?.failOperation(
+                        kind: .lifecycle,
+                        workspace: id.rawValue,
+                        action: action.rawValue,
+                        error: error
+                    )
                 }
-                let activity = MSWActivity(id: UUID(), createdAt: Date(), kind: .failure, title: "\(action.rawValue.capitalized) failed", detail: error.localizedDescription, workspace: id.rawValue, isFailure: true)
+                let activity = MSWActivity(
+                    id: UUID(),
+                    createdAt: Date(),
+                    kind: .failure,
+                    title: "\(action.rawValue.capitalized) failed",
+                    detail: error.localizedDescription,
+                    workspace: id.rawValue,
+                    isFailure: true
+                )
                 await self?.append(activity)
                 await self?.refreshRemote()
             }
