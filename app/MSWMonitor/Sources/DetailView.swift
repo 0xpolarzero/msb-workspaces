@@ -16,9 +16,9 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 
     var requiresWorkspace: Bool {
         switch self {
-        case .summary, .logs, .activity, .repositories, .files:
+        case .repositories, .files:
             return true
-        case .ports, .diagnostics:
+        case .summary, .logs, .activity, .ports, .diagnostics:
             return false
         }
     }
@@ -42,6 +42,12 @@ enum DetailMode {
     case backup
 }
 
+private enum WorkspaceAttentionDestination {
+    case network
+    case github
+    case maintenance
+}
+
 struct DetailView: View {
     @Bindable var model: AppModel
     @Bindable private var navigation: AppNavigationState
@@ -53,6 +59,8 @@ struct DetailView: View {
     @State private var restoreConfirmation = ""
     @State private var pushConfirmation = ""
     @State private var maintenanceOperation: MaintenanceOperation?
+    @State private var hiddenLogWorkspaces: Set<Workspace.ID> = []
+    @State private var hiddenActivityWorkspaces: Set<Workspace.ID> = []
 
     init(
         model: AppModel,
@@ -153,7 +161,7 @@ struct DetailView: View {
             .padding(20)
         }
         .task(id: routeIdentity) {
-            if navigation.workspace == nil {
+            if navigation.workspaceSection.requiresWorkspace && navigation.workspace == nil {
                 navigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
                 model.selectedWorkspace = navigation.workspace
             }
@@ -177,8 +185,8 @@ struct DetailView: View {
 
     private var automaticallyRefreshesSelectedSection: Bool {
         switch navigation.workspaceSection {
-        case .summary, .logs, .repositories, .ports: return true
-        case .activity, .files, .diagnostics: return false
+        case .logs, .repositories, .ports: return true
+        case .summary, .activity, .files, .diagnostics: return false
         }
     }
 
@@ -189,14 +197,16 @@ struct DetailView: View {
                     .font(.headline)
                     .accessibilityIdentifier("details.section-title")
                 Spacer()
-                Picker("Workspace", selection: workspaceBinding) {
-                    ForEach(model.workspaces.map(\.id), id: \.rawValue) { id in
-                        Text(id.rawValue).tag(Optional(id))
+                if navigation.workspaceSection.requiresWorkspace {
+                    Picker("Workspace", selection: workspaceBinding) {
+                        ForEach(model.workspaces.map(\.id), id: \.rawValue) { id in
+                            Text(id.rawValue).tag(Optional(id))
+                        }
                     }
+                    .pickerStyle(.menu)
+                    .frame(width: 140)
+                    .accessibilityIdentifier("details.workspace-picker")
                 }
-                .pickerStyle(.menu)
-                .frame(width: 180)
-                .accessibilityIdentifier("details.workspace-picker")
             }
             Picker("Section", selection: $navigation.workspaceSection) {
                 ForEach(WorkspaceSection.allCases) { section in
@@ -240,22 +250,18 @@ struct DetailView: View {
 
     private func loadSelectedSection() {
         switch navigation.workspaceSection {
-        case .summary:
-            if let workspace = navigation.workspace {
-                model.loadMetrics(for: workspace, clearsError: false)
-            }
+        case .summary, .activity, .files:
+            break
         case .logs:
-            if let workspace = navigation.workspace {
-                model.loadLogs(for: workspace, clearsError: false)
-            }
+            model.loadLogs(for: model.workspaces.map(\.id), clearsError: false)
         case .repositories:
             if let workspace = navigation.workspace {
                 model.loadRepositories(for: workspace, clearsError: false)
             }
         case .ports:
-            model.loadPorts(for: navigation.workspace, clearsError: false)
-        case .diagnostics: model.runDiagnostics()
-        case .activity, .files: break
+            model.loadPorts(clearsError: false)
+        case .diagnostics:
+            model.runDiagnostics()
         }
     }
 
@@ -269,89 +275,175 @@ struct DetailView: View {
 
     private var workspaceSummary: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let workspace = selectedWorkspace {
-                    DetailWorkspaceCard(workspace: workspace, model: model)
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(model.workspaces) { workspace in
+                    WorkspaceSummaryRow(
+                        workspace: workspace,
+                        model: model,
+                        latestError: latestError(for: workspace),
+                        openLogs: {
+                            hiddenLogWorkspaces = Set(model.workspaces.map(\.id).filter { $0 != workspace.id })
+                            navigation.workspaceSection = .logs
+                        },
+                        openAttention: openAttention
+                    )
                 }
-                metrics
             }
         }
+        .accessibilityIdentifier("workspace.summary")
     }
 
-    private var metrics: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let id = selectedWorkspaceID,
-               !model.metricsUnavailableWorkspaces.contains(id.rawValue),
-               let value = model.metricsByWorkspace[id.rawValue] {
-                FreshnessNotice(
-                    freshness: value.freshness,
-                    observedAt: selectedWorkspace?.observedAt,
-                    reason: value.reason
-                )
-                LabeledContent("Lifecycle", value: value.lifecycle.rawValue)
-                LabeledContent("Available", value: value.available ? "Yes" : "No")
-                if let snapshot = value.snapshot {
-                    ScrollView {
-                        Text(String(describing: snapshot))
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(10)
-                    .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-                }
-            }
-            detailError
+    private func latestError(for workspace: Workspace) -> String? {
+        if let failure = model.latestOperationFailure, failure.workspace == workspace.id {
+            return failure.reason
+        }
+        return model.activities.first {
+            $0.workspace == workspace.id.rawValue && $0.isFailure
+        }.flatMap { $0.detail ?? $0.title }
+    }
+
+    private func openAttention(_ destination: WorkspaceAttentionDestination) {
+        switch destination {
+        case .network:
+            navigation.workspaceSection = .ports
+        case .github:
+            navigation.tab = .github
+        case .maintenance:
+            navigation.workspaceSection = .diagnostics
         }
     }
 
     private var logs: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Current operation errors appear first. Runtime logs below are bounded and redacted.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let failure = model.latestOperationFailure,
-               failure.workspace == navigation.workspace {
-                GroupBox(failure.title) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("What happened")
-                            .font(.caption.weight(.semibold))
-                        Text(failure.reason)
-                            .font(.caption)
-                            .accessibilityIdentifier("details.latest-operation-error.message")
-                            .textSelection(.enabled)
-                        Divider()
-                        Text("What to do")
-                            .font(.caption.weight(.semibold))
-                        Text(failure.recovery)
-                            .font(.caption)
-                            .accessibilityIdentifier("details.latest-operation-error.recovery")
-                            .textSelection(.enabled)
-                        Button("Run Diagnostics") {
-                            navigation.workspaceSection = .diagnostics
+        VStack(alignment: .leading, spacing: 12) {
+            workspaceFilterBar(hidden: $hiddenLogWorkspaces, identifierPrefix: "logs.filter")
+            Divider()
+            if visibleLogWorkspaces.isEmpty {
+                ContentUnavailableView(
+                    "No workspaces selected",
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    description: Text("Include at least one workspace to see its logs.")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(visibleLogWorkspaces) { workspace in
+                            logSection(for: workspace)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .accessibilityIdentifier("details.latest-operation-error")
-            }
-            if let id = selectedWorkspaceID, let value = model.logsByWorkspace[id.rawValue] {
-                FreshnessNotice(freshness: value.freshness, observedAt: selectedWorkspace?.observedAt, reason: value.reason)
-                if value.lines.isEmpty {
-                    ContentUnavailableView("No log lines", systemImage: "text.alignleft", description: Text(value.available ? "The runtime returned no bounded log lines." : "Logs are unavailable while the workspace is stopped."))
-                } else {
-                    List(Array(value.lines.enumerated()), id: \.offset) { _, line in
-                        Text(line.message)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                    }
-                    .listStyle(.inset)
-                }
-            } else {
-                ContentUnavailableView("No log snapshot", systemImage: "text.alignleft", description: Text("Bounded, redacted logs appear here when available."))
             }
             detailError
         }
+        .accessibilityIdentifier("details.logs")
+    }
+
+    private var visibleLogWorkspaces: [Workspace] {
+        model.workspaces.filter { !hiddenLogWorkspaces.contains($0.id) }
+    }
+
+    @ViewBuilder
+    private func logSection(for workspace: Workspace) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                if let failure = model.latestOperationFailure, failure.workspace == workspace.id {
+                    Label {
+                        Text(failure.reason)
+                            .accessibilityIdentifier("details.latest-operation-error.message")
+                    } icon: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    Text(failure.recovery)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("details.latest-operation-error.recovery")
+                    Button("Run Diagnostics") {
+                        navigation.workspaceSection = .diagnostics
+                    }
+                    .accessibilityIdentifier("details.latest-operation-error.action")
+                }
+                if model.logsUnavailableWorkspaces.contains(workspace.id.rawValue) {
+                    Text(workspace.state == .running
+                         ? "Bounded logs are not available from this runtime."
+                         : "Logs are not available while this workspace is stopped.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("logs.\(workspace.id.rawValue).unavailable")
+                } else if let value = model.logsByWorkspace[workspace.id.rawValue] {
+                    FreshnessNotice(
+                        freshness: value.freshness,
+                        observedAt: workspace.observedAt,
+                        reason: value.reason
+                    )
+                    if value.lines.isEmpty {
+                        Text("No log lines")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(value.lines.suffix(100).enumerated()), id: \.offset) { _, line in
+                            Text(line.message)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                } else {
+                    Text("No logs yet")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier(
+                model.latestOperationFailure?.workspace == workspace.id
+                    ? "details.latest-operation-error"
+                    : "logs.workspace-content.\(workspace.id.rawValue)"
+            )
+        } label: {
+            HStack {
+                Text(workspace.id.rawValue)
+                Spacer()
+                Text(workspace.state.rawValue)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("logs.workspace.\(workspace.id.rawValue)")
+    }
+
+    private func workspaceFilterBar(
+        hidden: Binding<Set<Workspace.ID>>,
+        identifierPrefix: String
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text("Workspaces")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(model.workspaces) { workspace in
+                        Toggle(
+                            workspace.id.rawValue,
+                            isOn: Binding(
+                                get: { !hidden.wrappedValue.contains(workspace.id) },
+                                set: { isIncluded in
+                                    var updated = hidden.wrappedValue
+                                    if isIncluded {
+                                        updated.remove(workspace.id)
+                                    } else {
+                                        updated.insert(workspace.id)
+                                    }
+                                    hidden.wrappedValue = updated
+                                }
+                            )
+                        )
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("\(identifierPrefix).\(workspace.id.rawValue)")
+                    }
+                }
+            }
+        }
+        .controlSize(.small)
     }
 
     private var repositories: some View {
@@ -948,38 +1040,47 @@ private extension DetailView {
 
 
     private var activity: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if scopedActivities.isEmpty {
-                    ContentUnavailableView(
-                        "No recent activity",
-                        systemImage: "clock",
-                        description: Text("Actions for this workspace will appear here.")
-                    )
-                } else {
-                    ForEach(scopedActivities.prefix(20)) { entry in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: entry.isFailure ? "xmark.circle.fill" : "checkmark.circle")
-                                .foregroundStyle(entry.isFailure ? .red : .secondary)
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack {
-                                    Text(entry.title).font(.body.weight(.medium))
-                                    Spacer()
-                                    Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                }
-                                if let detail = entry.detail {
-                                    Text(detail)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
+        VStack(alignment: .leading, spacing: 12) {
+            workspaceFilterBar(hidden: $hiddenActivityWorkspaces, identifierPrefix: "activity.filter")
+            Divider()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    if filteredActivities.isEmpty {
+                        ContentUnavailableView(
+                            "No recent activity",
+                            systemImage: "clock",
+                            description: Text("Actions for the included workspaces will appear here.")
+                        )
+                    } else {
+                        ForEach(filteredActivities.prefix(50)) { entry in
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: entry.isFailure ? "xmark.circle.fill" : "checkmark.circle")
+                                    .foregroundStyle(entry.isFailure ? .red : .secondary)
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text(entry.title).font(.body.weight(.medium))
+                                        Spacer()
+                                        Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if let workspace = entry.workspace {
+                                        Text(workspace)
+                                            .font(.caption.weight(.medium))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if let detail = entry.detail {
+                                        Text(detail)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
                                 }
                             }
+                            .accessibilityElement(children: .combine)
+                            Divider()
                         }
-                        .accessibilityElement(children: .combine)
-                        Divider()
                     }
                 }
             }
@@ -987,9 +1088,14 @@ private extension DetailView {
         .accessibilityIdentifier("details.activity")
     }
 
-    private var scopedActivities: [MSWActivity] {
-        guard let workspace = selectedWorkspaceID else { return [] }
-        return model.activities.filter { $0.workspace == workspace.rawValue }
+    private var filteredActivities: [MSWActivity] {
+        model.activities.filter { entry in
+            guard let workspace = entry.workspace,
+                  let id = Workspace.ID(rawValue: workspace) else {
+                return true
+            }
+            return !hiddenActivityWorkspaces.contains(id)
+        }
     }
 
     private var backup: some View {
@@ -1255,68 +1361,110 @@ private extension DetailView {
 }
 
 
-private struct DetailWorkspaceCard: View {
+private struct WorkspaceSummaryRow: View {
+    private struct Attention {
+        let message: String
+        let destination: WorkspaceAttentionDestination
+        let isCritical: Bool
+    }
+
     let workspace: Workspace
     @Bindable var model: AppModel
+    let latestError: String?
+    let openLogs: () -> Void
+    let openAttention: (WorkspaceAttentionDestination) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(workspace.id.rawValue)
-                        .font(.title3.weight(.semibold))
-                    Text(workspace.purpose)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text(workspace.id.rawValue)
+                    .font(.headline)
+                HStack(spacing: 5) {
                     Circle()
                         .fill(stateColor)
                         .frame(width: 8, height: 8)
                         .accessibilityHidden(true)
                     Text(workspace.state.rawValue)
-                        .font(.body.weight(.medium))
+                        .font(.callout.weight(.medium))
+                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-state")
                 }
-            }
-            if workspace.freshness != .fresh {
-                Label(
-                    "Workspace information is \(workspace.freshness.rawValue.lowercased()).",
-                    systemImage: "clock.badge.exclamationmark"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-            }
-            if workspace.credential.needsAttention {
-                Label(
-                    "GitHub access: \(workspace.credential.rawValue)",
-                    systemImage: "exclamationmark.shield"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-            }
-            if let reason = workspace.quarantineReason {
-                Label(reason, systemImage: "exclamationmark.octagon.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            HStack {
+                Spacer()
                 if workspace.canStart && workspace.state != .running {
                     Button("Start") { model.start(workspace.id) }
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                 }
                 if workspace.canStop && (workspace.state == .running || workspace.state == .quarantined) {
                     Button("Stop") { model.stop(workspace.id) }
+                        .controlSize(.small)
                 }
                 if workspace.canRestart && workspace.state == .running {
                     Button("Restart") { model.restart(workspace.id) }
+                        .controlSize(.small)
+                }
+            }
+
+            if let latestError {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(latestError, systemImage: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-error")
+                    Spacer()
+                    Button("View logs", action: openLogs)
+                        .buttonStyle(.link)
+                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-error-link")
+                }
+            }
+
+            if let attention {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(
+                        attention.message,
+                        systemImage: attention.isCritical
+                            ? "exclamationmark.octagon.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(attention.isCritical ? Color.red : Color.orange)
+                    .lineLimit(2)
+                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-warning")
+                    Spacer()
+                    Button("View") { openAttention(attention.destination) }
+                        .buttonStyle(.link)
+                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-warning-link")
                 }
             }
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 9))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("workspace.summary")
+        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-row")
+    }
+
+    private var attention: Attention? {
+        if let reason = workspace.quarantineReason {
+            return Attention(message: reason, destination: .maintenance, isCritical: true)
+        }
+        if let warning = workspace.portWarning, !warning.isEmpty {
+            return Attention(message: warning, destination: .network, isCritical: false)
+        }
+        if workspace.credential.needsAttention {
+            return Attention(
+                message: "GitHub access: \(workspace.credential.rawValue)",
+                destination: .github,
+                isCritical: false
+            )
+        }
+        if workspace.freshness != .fresh {
+            return Attention(
+                message: workspace.statusReason ?? "Workspace information is \(workspace.freshness.rawValue.lowercased()).",
+                destination: .maintenance,
+                isCritical: false
+            )
+        }
+        return nil
     }
 
     private var stateColor: Color {

@@ -720,14 +720,13 @@ final class AppModel {
     private(set) var notificationEvents: [MSWNotificationEvent] = []
     private(set) var setupState: MSWBootstrapState = .initial
     private(set) var startupRecoveryBlockedReason: String?
-    private(set) var metricsByWorkspace: [String: MSWMetricsResponse] = [:]
-    private(set) var metricsUnavailableWorkspaces: Set<String> = []
     private(set) var repositoriesByWorkspace: [String: MSWRepositoriesResponse] = [:]
     private(set) var portsSnapshot: MSWPortsResponse?
     private(set) var githubSnapshot: MSWGitHubStateResponse?
     private(set) var detailError: String?
     private(set) var isDetailLoading = false
     private(set) var logsByWorkspace: [String: MSWLogsResponse] = [:]
+    private(set) var logsUnavailableWorkspaces: Set<String> = []
     private(set) var diagnosticChecks: [MSWDiagnosticCheck] = []
     private(set) var backupResult: MSWBackupResult?
     private(set) var maintenanceMessage: String?
@@ -855,7 +854,7 @@ final class AppModel {
         detailRequestGeneration &+= 1
         isDetailLoading = false
         detailError = nil
-        metricsUnavailableWorkspaces.removeAll()
+        logsUnavailableWorkspaces.removeAll()
         let ids = configurations.compactMap { Workspace.ID(rawValue: $0.name) }
         let previous = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         configuredWorkspaceIDs = ids
@@ -1353,34 +1352,14 @@ final class AppModel {
         isDetailLoading = false
     }
 
-    func loadMetrics(for id: Workspace.ID, clearsError: Bool = true) {
-        guard !metricsUnavailableWorkspaces.contains(id.rawValue) else { return }
-        guard let operationService else {
-            metricsUnavailableWorkspaces.insert(id.rawValue)
-            return
+    private static func protocolFailure(_ error: any Error, hasCode code: String) -> Bool {
+        guard let clientError = error as? MSWClientError,
+              case .protocolFailure(let protocolError) = clientError else {
+            return false
         }
-        let request = beginDetailRequest(clearsError: clearsError)
-        Task { [weak self] in
-            do {
-                let result = try await operationService.metrics(workspace: id.rawValue)
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.metricsUnavailableWorkspaces.remove(id.rawValue)
-                self.metricsByWorkspace[id.rawValue] = result
-                self.detailError = nil
-            } catch {
-                guard let self, request == self.detailRequestGeneration else { return }
-                if let clientError = error as? MSWClientError,
-                   case .protocolFailure(let protocolError) = clientError,
-                   protocolError.code == "MSW_METRICS_UNAVAILABLE" {
-                    self.metricsUnavailableWorkspaces.insert(id.rawValue)
-                    self.metricsByWorkspace.removeValue(forKey: id.rawValue)
-                } else {
-                    self.detailError = error.localizedDescription
-                }
-            }
-            self?.finishDetailRequest(request)
-        }
+        return protocolError.code == code
     }
+
 
     func loadRepositories(for id: Workspace.ID, clearsError: Bool = true) {
         guard let operationService else { detailError = "Repository inspection is unavailable in fixture mode."; return }
@@ -1571,22 +1550,47 @@ final class AppModel {
     }
 
     func loadLogs(for id: Workspace.ID, clearsError: Bool = true) {
+        loadLogs(for: [id], clearsError: clearsError)
+    }
+
+    func loadLogs(for ids: [Workspace.ID], clearsError: Bool = true) {
+        let requested = Array(Set(ids)).sorted { $0.rawValue < $1.rawValue }
+        guard !requested.isEmpty else { return }
         guard let operationService else {
-            detailError = "MSW logs are unavailable in fixture mode."
+            logsUnavailableWorkspaces.formUnion(requested.map(\.rawValue))
             return
         }
+        let pending = requested.filter { !logsUnavailableWorkspaces.contains($0.rawValue) }
+        guard !pending.isEmpty else { return }
+
         let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
-            do {
-                let result = try await operationService.logs(workspace: id.rawValue)
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.logsByWorkspace[id.rawValue] = result
-                self.detailError = nil
-            } catch {
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.detailError = error.localizedDescription
+            var snapshots: [String: MSWLogsResponse] = [:]
+            var unavailable: Set<String> = []
+            var firstError: String?
+            for id in pending {
+                do {
+                    snapshots[id.rawValue] = try await operationService.logs(workspace: id.rawValue)
+                } catch {
+                    if Self.protocolFailure(error, hasCode: "MSW_LOGS_UNAVAILABLE") {
+                        unavailable.insert(id.rawValue)
+                    } else if firstError == nil {
+                        firstError = error.localizedDescription
+                    }
+                }
             }
-            self?.finishDetailRequest(request)
+
+            guard let self, request == self.detailRequestGeneration else { return }
+            for (workspace, snapshot) in snapshots {
+                self.logsByWorkspace[workspace] = snapshot
+                self.logsUnavailableWorkspaces.remove(workspace)
+            }
+            for workspace in unavailable {
+                self.logsByWorkspace.removeValue(forKey: workspace)
+                self.logsUnavailableWorkspaces.insert(workspace)
+            }
+            self.detailError = firstError
+            self.finishDetailRequest(request)
         }
     }
 
@@ -2067,6 +2071,10 @@ final class AppModel {
                 candidate.observedAt = stateObservedAt
             }
             return candidate
+        }
+        for workspace in nextWorkspaces
+        where workspace.state == .running && previousByID[workspace.id]?.state != .running {
+            logsUnavailableWorkspaces.remove(workspace.id.rawValue)
         }
         if nextWorkspaces != workspaces {
             workspaces = nextWorkspaces

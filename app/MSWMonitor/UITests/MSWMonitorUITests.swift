@@ -169,25 +169,66 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["workspace.section-picker"].waitForExistence(timeout: 2))
         assertText("Summary", identifier: "details.section-title", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["workspace.summary"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
+        let expectedStates = ["dev": "Running", "playgrounds": "Stopped", "personal": "Stopped"]
+        for workspace in ["dev", "playgrounds", "personal"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any)["workspace.\(workspace).summary-row"]
+                    .waitForExistence(timeout: 2)
+            )
+            assertText(
+                expectedStates[workspace]!,
+                identifier: "workspace.\(workspace).summary-state",
+                in: app
+            )
+        }
+        XCTAssertFalse(app.staticTexts["Primary software development workspace"].exists)
         XCTAssertFalse(app.staticTexts["Ready"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
         XCTAssertFalse(app.buttons["Retry"].exists)
 
-        let workspacePicker = app.popUpButtons["details.workspace-picker"]
-        XCTAssertTrue(workspacePicker.waitForExistence(timeout: 2))
-        workspacePicker.click()
-        app.menuItems["dev"].click()
+        let logs = app.descendants(matching: .any)["workspace.section.Logs"]
+        XCTAssertTrue(logs.waitForExistence(timeout: 2))
+        logs.click()
+        assertText("Logs", identifier: "details.section-title", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["details.logs"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
+        for workspace in ["dev", "playgrounds", "personal"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any)["logs.filter.\(workspace)"]
+                    .waitForExistence(timeout: 2)
+            )
+            XCTAssertTrue(
+                app.descendants(matching: .any)["logs.workspace.\(workspace)"]
+                    .waitForExistence(timeout: 2)
+            )
+        }
+        XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
+        XCTAssertFalse(app.buttons["Retry"].exists)
+        let devLogFilter = app.descendants(matching: .any)["logs.filter.dev"]
+        devLogFilter.click()
+        XCTAssertFalse(app.descendants(matching: .any)["logs.workspace.dev"].exists)
+        devLogFilter.click()
+        XCTAssertTrue(app.descendants(matching: .any)["logs.workspace.dev"].waitForExistence(timeout: 2))
 
         let activity = app.descendants(matching: .any)["workspace.section.Activity"]
         XCTAssertTrue(activity.waitForExistence(timeout: 2))
         activity.click()
         assertText("Activity", identifier: "details.section-title", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.activity"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
+        for workspace in ["dev", "playgrounds", "personal"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any)["activity.filter.\(workspace)"]
+                    .waitForExistence(timeout: 2)
+            )
+        }
 
         let files = app.descendants(matching: .any)["workspace.section.Files"]
         XCTAssertTrue(files.waitForExistence(timeout: 2))
         files.click()
         assertText("Files", identifier: "details.section-title", in: app)
+        XCTAssertTrue(app.popUpButtons["details.workspace-picker"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.descendants(matching: .any)["folders.path-bar"].waitForExistence(timeout: 2))
 
         let githubTab = app.toolbars.buttons["GitHub"]

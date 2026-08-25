@@ -147,19 +147,19 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppNavigationState().tab, .workspaces)
     }
 
-    func testUnavailableMetricsBecomeQuietCapabilityState() async throws {
+    func testUnavailableLogsBecomeQuietPerWorkspaceCapabilityState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-metrics-capability-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("msw-logs-capability-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let failure = #"{"schemaVersion":1,"requestId":"metrics-failed","ok":false,"command":"metrics","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_METRICS_UNAVAILABLE","message":"metrics unavailable","recovery":"Update the runtime.","workspace":"dev","retryable":true}}"#
+        let failure = #"{"schemaVersion":1,"requestId":"logs-failed","ok":false,"command":"logs","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_LOGS_UNAVAILABLE","message":"logs unavailable","recovery":"Repair the runtime.","workspace":"dev","retryable":true}}"#
         let executable = temporary.appendingPathComponent("msw")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
             printf '%s\n' '\(protocolCompatibleHandshake)'
-        elif [ "$1" = "app" ] && [ "$2" = "metrics" ]; then
+        elif [ "$1" = "app" ] && [ "$2" = "logs" ]; then
             printf '%s\n' '\(failure)'
             exit 69
         else
@@ -177,19 +177,20 @@ final class AppModelTests: XCTestCase {
             client: client,
             operationService: MSWOperationService(client: client)
         )
+        let workspaces: [Workspace.ID] = [.dev, .personal]
 
-        model.loadMetrics(for: .dev)
+        model.loadLogs(for: workspaces)
         for _ in 0..<100 {
             if !model.isDetailLoading { break }
             try await Task.sleep(for: .milliseconds(20))
         }
 
-        XCTAssertTrue(model.metricsUnavailableWorkspaces.contains("dev"))
-        XCTAssertNil(model.metricsByWorkspace["dev"])
+        XCTAssertEqual(model.logsUnavailableWorkspaces, Set(["dev", "personal"]))
+        XCTAssertTrue(model.logsByWorkspace.isEmpty)
         XCTAssertNil(model.detailError)
         XCTAssertFalse(model.isDetailLoading)
 
-        model.loadMetrics(for: .dev)
+        model.loadLogs(for: workspaces)
         XCTAssertFalse(model.isDetailLoading)
         XCTAssertNil(model.detailError)
     }
