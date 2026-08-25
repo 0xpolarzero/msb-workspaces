@@ -223,12 +223,13 @@ final class MSWMonitorUITests: XCTestCase {
         assertText("Network", identifier: "details.section-title", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.ports"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
-        for workspace in ["dev", "playgrounds", "personal"] {
-            XCTAssertTrue(
-                app.descendants(matching: .any)["network.workspace.\(workspace)"]
-                    .waitForExistence(timeout: 2)
-            )
-        }
+        XCTAssertTrue(
+            app.descendants(matching: .any)["network.workspace.dev"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["network.workspace.playgrounds"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["network.workspace.personal"].exists)
+        XCTAssertTrue(app.staticTexts["Active"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.descendants(matching: .any)["network.dev.port.3000.open"]
                 .waitForExistence(timeout: 2)
@@ -236,6 +237,12 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["network.dev.port.3000.copy"]
                 .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["network.dev.port.5173.open"].exists
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["network.dev.port.5173.copy"].exists
         )
 
         let activity = app.buttons["Activity"]
@@ -258,6 +265,7 @@ final class MSWMonitorUITests: XCTestCase {
         let generalTab = app.toolbars.buttons["General"]
         XCTAssertTrue(generalTab.waitForExistence(timeout: 2))
         generalTab.click()
+
         XCTAssertTrue(app.windows["General"].waitForExistence(timeout: 2))
 
         app.typeKey("w", modifierFlags: .command)
@@ -266,6 +274,39 @@ final class MSWMonitorUITests: XCTestCase {
         statusItem.click()
         app.buttons["quit.button"].click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+    func testNetworkShowsActivePortsFirst() {
+        let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 2))
+
+        XCTAssertTrue(app.toolbars.buttons["Workspaces"].waitForExistence(timeout: 2))
+        app.toolbars.buttons["Workspaces"].click()
+        XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Network"].waitForExistence(timeout: 2))
+        app.buttons["Network"].click()
+
+        assertText("Network", identifier: "details.section-title", in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["network.workspace.dev"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["network.workspace.playgrounds"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["network.workspace.personal"].exists)
+        XCTAssertTrue(app.staticTexts["Active"].waitForExistence(timeout: 2))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["network.dev.port.3000.open"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["network.dev.port.3000.copy"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["network.dev.port.5173.open"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["network.dev.port.5173.copy"].exists)
     }
 
     private func assertDirectFolderPicker(in app: XCUIApplication) {

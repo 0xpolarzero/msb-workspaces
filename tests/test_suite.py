@@ -2922,6 +2922,45 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(all(not event["gh_token_present"] for event in credential_events), credential_events)
         self.assertTrue(all(not sandbox["running"] for sandbox in self.env.state()["sandboxes"].values()))
 
+    def test_app_ports_reports_per_workspace_listeners_without_starting_guests(self) -> None:
+        self.env.msw("start", "dev")
+        self.env.msw("start", "playgrounds")
+        before = len(self.env.state().get("events", []))
+        fixture = json.dumps({"dev": [5173, 3000], "playgrounds": [3000]})
+
+        document = json.loads(self.env.msw(
+            "app", "ports", "--format", "json",
+            extra_env={"MSW_FAKE_LISTENING_PORTS": fixture},
+        ).stdout)
+        self.assertTrue(document["ok"])
+        snapshots = {
+            item["workspace"]: item for item in document["result"]["workspaces"]
+        }
+        self.assertEqual(set(snapshots), {"dev", "playgrounds", "personal"})
+        self.assertEqual(snapshots["dev"]["lifecycle"], "Running")
+        self.assertEqual(snapshots["dev"]["host"], "dev.msw.test")
+        dev_ports = {item["port"]: item["listening"] for item in snapshots["dev"]["ports"]}
+        self.assertTrue(dev_ports["3000"])
+        self.assertTrue(dev_ports["5173"])
+        self.assertFalse(dev_ports["8080"])
+        playground_ports = {
+            item["port"]: item["listening"] for item in snapshots["playgrounds"]["ports"]
+        }
+        self.assertTrue(playground_ports["3000"])
+        self.assertTrue(all(
+            item["listening"] is False for item in snapshots["personal"]["ports"]
+        ))
+        events = self.env.state().get("events", [])[before:]
+        self.assertFalse(any(event.get("event") == "start" for event in events), events)
+
+        degraded = json.loads(self.env.msw(
+            "app", "ports", "--workspace", "dev", "--format", "json",
+            extra_env={"MSW_FAKE_LISTENING_PORTS": "not-json"},
+        ).stdout)
+        dev = degraded["result"]["workspaces"][0]
+        self.assertEqual(dev["listeningState"], "unknown")
+        self.assertTrue(all(item["listening"] is None for item in dev["ports"]))
+
     def test_app_directory_protocol_is_bounded_safe_and_does_not_start_stopped_workspaces(self) -> None:
         before = len(self.env.state().get("events", []))
         stopped = self.env.msw(

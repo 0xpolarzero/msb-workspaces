@@ -1160,12 +1160,41 @@ final class AppModel {
         workspaces[index].nextAction = "Open Terminal"
         portsSnapshot = MSWPortsResponse(
             workspace: "all",
-            published: [
-                .init(port: "3000", configured: true),
-                .init(port: "5173", configured: true),
-                .init(port: "8080", configured: true)
+            workspaces: [
+                .init(
+                    workspace: "dev",
+                    lifecycle: .running,
+                    host: "dev.msw.test",
+                    listeningState: .known,
+                    ports: [
+                        .init(port: "3000", configured: true, listening: true),
+                        .init(port: "5173", configured: true, listening: false),
+                        .init(port: "8080", configured: true, listening: false)
+                    ]
+                ),
+                .init(
+                    workspace: "playgrounds",
+                    lifecycle: .stopped,
+                    host: "playgrounds.msw.test",
+                    listeningState: .known,
+                    ports: [
+                        .init(port: "3000", configured: true, listening: false),
+                        .init(port: "5173", configured: true, listening: false),
+                        .init(port: "8080", configured: true, listening: false)
+                    ]
+                ),
+                .init(
+                    workspace: "personal",
+                    lifecycle: .stopped,
+                    host: "personal.msw.test",
+                    listeningState: .known,
+                    ports: [
+                        .init(port: "3000", configured: true, listening: false),
+                        .init(port: "5173", configured: true, listening: false),
+                        .init(port: "8080", configured: true, listening: false)
+                    ]
+                )
             ],
-            activeListening: "fixture",
             freshness: .fresh
         )
         directoryFixture = [

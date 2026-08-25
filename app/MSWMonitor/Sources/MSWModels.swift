@@ -438,14 +438,30 @@ struct MSWActionCapabilities: Codable, Sendable, Equatable {
 
 struct MSWPortsResponse: Codable, Sendable {
     let workspace: String
-    let published: [Port]
-    let activeListening: String
+    let workspaces: [WorkspacePorts]
     let freshness: MSWFreshness
+
+    struct WorkspacePorts: Codable, Identifiable, Sendable {
+        let workspace: String
+        let lifecycle: MSWLifecycle
+        let host: String
+        let listeningState: ListeningState
+        let ports: [Port]
+
+        var id: String { workspace }
+    }
 
     struct Port: Codable, Identifiable, Sendable {
         let port: String
         let configured: Bool
+        let listening: Bool?
+
         var id: String { port }
+    }
+
+    enum ListeningState: String, Codable, Sendable {
+        case known
+        case unknown
     }
 }
 

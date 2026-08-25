@@ -173,6 +173,22 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.isSystemHealthLoading)
     }
 
+    func testPortsProtocolDecodesPerWorkspaceListeningState() throws {
+        let payload = Data(#"{"schemaVersion":1,"requestId":"ports","ok":true,"command":"ports","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"all","workspaces":[{"workspace":"dev","lifecycle":"Running","host":"dev.msw.test","listeningState":"known","ports":[{"port":"3000","configured":true,"listening":true},{"port":"5173","configured":true,"listening":false}]},{"workspace":"personal","lifecycle":"Unknown","host":"personal.msw.test","listeningState":"unknown","ports":[{"port":"3000","configured":true,"listening":null}]}],"freshness":"fresh"},"warnings":[],"error":null}"#.utf8)
+
+        let envelope = try MSWProtocolDecoder.decodeEnvelope(
+            payload,
+            as: MSWPortsResponse.self,
+            expectedCommand: "ports"
+        )
+        let result = try XCTUnwrap(envelope.result)
+
+        XCTAssertEqual(result.workspaces.map(\.workspace), ["dev", "personal"])
+        XCTAssertEqual(result.workspaces[0].ports.map(\.listening), [true, false])
+        XCTAssertEqual(result.workspaces[1].listeningState, .unknown)
+        XCTAssertNil(result.workspaces[1].ports[0].listening)
+    }
+
     func testUnavailableLogsBecomeQuietPerWorkspaceCapabilityState() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-logs-capability-\(UUID().uuidString)", isDirectory: true)

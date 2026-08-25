@@ -5744,8 +5744,31 @@ app_cmd_metrics() {
   app_emit_success metrics "{\"workspace\":$(app_json_string "$box"),\"available\":true,\"lifecycle\":\"Running\",\"freshness\":\"fresh\",\"snapshot\":$raw}"
 }
 
+app_listening_ports_for_workspace() {
+  local box="$1"; shift
+  local script
+  read -r -d '' script <<'SCRIPT' || true
+# MSW app listening-port probe
+set -Eeuo pipefail
+command -v ss >/dev/null 2>&1 || exit 69
+listeners="$(ss -H -ltn 2>/dev/null)" || exit 69
+for port in "$@"; do
+  case "$port" in ""|*[!0-9]*) exit 64 ;; esac
+  found=0
+  while read -r state recv_q send_q local_address peer_address rest; do
+    case "$local_address" in *":$port") found=1; break ;; esac
+  done <<<"$listeners"
+  (( found == 0 )) || printf '%s\n' "$port"
+done
+SCRIPT
+  printf '%s\n' "$script" |
+    workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$@"
+}
+
 app_cmd_ports() {
-  local target="all" box ports_json="" port
+  local target="all" box port status host listening listening_state listening_json
+  local workspaces_json="" ports_json="" active
+  local -a configured_ports=()
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error ports "missing value for --workspace"; target="$2"; shift 2 ;;
@@ -5758,10 +5781,38 @@ app_cmd_ports() {
   fi
   app_require_config ports
   while IFS= read -r port; do
-    [[ -n "$ports_json" ]] && ports_json+=","
-    ports_json+="{\"port\":$(app_json_string "$port"),\"configured\":true}"
+    [[ -n "$port" ]] && configured_ports+=("$port")
   done < <(expand_ports)
-  app_emit_success ports "{\"workspace\":$(app_json_string "$target"),\"published\":[$ports_json],\"activeListening\":\"unknown\",\"freshness\":\"fresh\"}"
+
+  while IFS= read -r box; do
+    status="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
+    host="$(workspace_host "$box")"
+    listening=""; listening_state=unknown
+    if [[ "$status" == Running ]]; then
+      if listening="$(app_listening_ports_for_workspace "$box" "${configured_ports[@]}" 2>/dev/null)"; then
+        listening_state=known
+      fi
+    elif [[ "$status" == Stopped || "$status" == Exited ]]; then
+      listening_state=known
+    fi
+
+    ports_json=""
+    for port in "${configured_ports[@]}"; do
+      listening_json=null
+      if [[ "$listening_state" == known ]]; then
+        listening_json=false
+        while IFS= read -r active; do
+          if [[ "$active" == "$port" ]]; then listening_json=true; break; fi
+        done <<<"$listening"
+      fi
+      [[ -n "$ports_json" ]] && ports_json+=","
+      ports_json+="{\"port\":$(app_json_string "$port"),\"configured\":true,\"listening\":$listening_json}"
+    done
+
+    [[ -n "$workspaces_json" ]] && workspaces_json+=","
+    workspaces_json+="{\"workspace\":$(app_json_string "$box"),\"lifecycle\":$(app_json_string "$status"),\"host\":$(app_json_string "$host"),\"listeningState\":$(app_json_string "$listening_state"),\"ports\":[$ports_json]}"
+  done < <(for_targets "$target")
+  app_emit_success ports "{\"workspace\":$(app_json_string "$target"),\"workspaces\":[$workspaces_json],\"freshness\":\"fresh\"}"
 }
 
 app_cmd_github_state() {

@@ -294,6 +294,18 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     # Setup/bootstrap and deep-check scripts are exercised semantically by the simulator.
     if command[:2] == ["bash", "-s"] or command[:3] == ["bash", "-s", "--"]:
         text = stdin_data.decode("utf-8", errors="replace")
+        if "MSW app listening-port probe" in text:
+            configured = set(command[3:]) if command[:3] == ["bash", "-s", "--"] else set(command[2:])
+            listening = set(sb.get("port_content", {}).keys())
+            fixture = os.environ.get("MSW_FAKE_LISTENING_PORTS", "")
+            if fixture:
+                try:
+                    listening.update(str(port) for port in json.loads(fixture).get(box, []))
+                except (json.JSONDecodeError, AttributeError, TypeError):
+                    return fail("invalid MSW_FAKE_LISTENING_PORTS", 64)
+            for port in sorted(configured & listening, key=int):
+                print(port)
+            return 0
         if "Installing Ubuntu development packages" in text:
             sb["bootstrapped"] = True
             save(state)

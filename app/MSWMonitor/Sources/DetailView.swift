@@ -58,6 +58,7 @@ struct DetailView: View {
     @State private var maintenanceOperation: MaintenanceOperation?
     @State private var hiddenLogWorkspaces: Set<Workspace.ID> = []
     @State private var hiddenActivityWorkspaces: Set<Workspace.ID> = []
+    @State private var expandedInactivePortWorkspaces: Set<String> = []
 
     init(
         model: AppModel,
@@ -1017,22 +1018,26 @@ private extension DetailView {
 
     private var ports: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Each workspace has its own .msw.test address, so the same port can be used in multiple workspaces.")
+            Text("Each workspace has its own .msw.test address, so the same port can be active in multiple workspaces.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let snapshot = model.portsSnapshot {
                 FreshnessNotice(freshness: snapshot.freshness, observedAt: nil, reason: nil)
-                if snapshot.published.isEmpty {
+                if visibleNetworkSnapshots(snapshot).isEmpty {
                     ContentUnavailableView(
-                        "No published ports",
+                        "No active services",
                         systemImage: "network.slash",
-                        description: Text("No ports are configured for workspace forwarding.")
+                        description: Text("Start a workspace service to see it here. Inactive configured ports stay hidden.")
                     )
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(model.workspaces) { workspace in
-                                networkRow(workspace: workspace, ports: snapshot.published)
+                            ForEach(visibleNetworkSnapshots(snapshot)) { workspacePorts in
+                                if let workspace = model.workspaces.first(where: {
+                                    $0.id.rawValue == workspacePorts.workspace
+                                }) {
+                                    networkRow(workspace: workspace, snapshot: workspacePorts)
+                                }
                             }
                         }
                     }
@@ -1047,78 +1052,173 @@ private extension DetailView {
         .accessibilityIdentifier("details.ports")
     }
 
+    private func visibleNetworkSnapshots(
+        _ response: MSWPortsResponse
+    ) -> [MSWPortsResponse.WorkspacePorts] {
+        response.workspaces
+            .filter { snapshot in
+                let workspace = model.workspaces.first { $0.id.rawValue == snapshot.workspace }
+                let hasWarning = workspace?.portWarning?.isEmpty == false
+                let isStopped = snapshot.lifecycle == .stopped || snapshot.lifecycle == .exited
+                return activePorts(snapshot).isEmpty == false || hasWarning || !isStopped
+            }
+            .sorted { lhs, rhs in
+                let leftActive = activePorts(lhs).count
+                let rightActive = activePorts(rhs).count
+                if leftActive != rightActive { return leftActive > rightActive }
+                if lhs.lifecycle == .running, rhs.lifecycle != .running { return true }
+                if rhs.lifecycle == .running, lhs.lifecycle != .running { return false }
+                return lhs.workspace < rhs.workspace
+            }
+    }
+
     private func networkRow(
         workspace: Workspace,
-        ports: [MSWPortsResponse.Port]
+        snapshot: MSWPortsResponse.WorkspacePorts
     ) -> some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
+        let active = activePorts(snapshot)
+        let inactive = inactivePorts(snapshot)
+        return GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
                 if let warning = workspace.portWarning, !warning.isEmpty {
                     Label(warning, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(ports) { port in
-                            HStack(spacing: 6) {
-                                Text(port.port)
-                                    .font(.callout.monospacedDigit().weight(.medium))
-                                if canOpen(port: port, in: workspace) {
-                                    Button("Open") {
-                                        model.openSite(for: workspace.id, port: port.port)
-                                    }
-                                    .controlSize(.small)
-                                    .accessibilityIdentifier(
-                                        "network.\(workspace.id.rawValue).port.\(port.port).open"
-                                    )
-                                }
-                                if let url = networkURL(workspace: workspace, port: port.port) {
-                                    Button {
-                                        copyToPasteboard(url)
-                                    } label: {
-                                        Label("Copy URL", systemImage: "doc.on.doc")
-                                            .labelStyle(.iconOnly)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .help("Copy \(url)")
-                                    .accessibilityIdentifier(
-                                        "network.\(workspace.id.rawValue).port.\(port.port).copy"
-                                    )
-                                }
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 7))
-                        }
+                if !active.isEmpty {
+                    Label("Active", systemImage: "circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                    portStrip(active, workspace: workspace, snapshot: snapshot, active: true)
+                } else if snapshot.listeningState == .unknown {
+                    Label(
+                        "Listening state unavailable",
+                        systemImage: "questionmark.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text("No active services")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !inactive.isEmpty {
+                    DisclosureGroup(
+                        snapshot.listeningState == .known
+                            ? "Other configured ports (\(inactive.count))"
+                            : "Configured ports (\(inactive.count))",
+                        isExpanded: inactivePortsBinding(snapshot.workspace)
+                    ) {
+                        portStrip(
+                            inactive,
+                            workspace: workspace,
+                            snapshot: snapshot,
+                            active: false
+                        )
+                        .padding(.top, 6)
                     }
+                    .font(.caption)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
             HStack {
-                Text(workspace.id.rawValue)
-                if let host = workspace.networkHost {
-                    Text(host)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Address unavailable")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(snapshot.workspace)
+                Text(snapshot.host)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Text(workspace.state.rawValue)
+                Text(snapshot.lifecycle.rawValue)
                     .foregroundStyle(.secondary)
             }
         }
-        .accessibilityIdentifier("network.workspace.\(workspace.id.rawValue)")
+        .accessibilityIdentifier("network.workspace.\(snapshot.workspace)")
+    }
+
+    private func portStrip(
+        _ ports: [MSWPortsResponse.Port],
+        workspace: Workspace,
+        snapshot: MSWPortsResponse.WorkspacePorts,
+        active: Bool
+    ) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(ports) { port in
+                    HStack(spacing: 6) {
+                        Text(port.port)
+                            .font(.callout.monospacedDigit().weight(.medium))
+                        if active && canOpen(port: port, in: workspace) {
+                            Button("Open") {
+                                model.openSite(for: workspace.id, port: port.port)
+                            }
+                            .controlSize(.small)
+                            .accessibilityIdentifier(
+                                "network.\(workspace.id.rawValue).port.\(port.port).open"
+                            )
+                        }
+                        let url = networkURL(host: snapshot.host, port: port.port)
+                        Button {
+                            copyToPasteboard(url)
+                        } label: {
+                            Label("Copy URL", systemImage: "doc.on.doc")
+                                .labelStyle(.iconOnly)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("Copy \(url)")
+                        .accessibilityIdentifier(
+                            "network.\(workspace.id.rawValue).port.\(port.port).copy"
+                        )
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        active ? Color.green.opacity(0.09) : Color.secondary.opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+                }
+            }
+        }
+    }
+
+    private func activePorts(
+        _ snapshot: MSWPortsResponse.WorkspacePorts
+    ) -> [MSWPortsResponse.Port] {
+        snapshot.ports
+            .filter { $0.listening == true }
+            .sorted(by: portOrder)
+    }
+
+    private func inactivePorts(
+        _ snapshot: MSWPortsResponse.WorkspacePorts
+    ) -> [MSWPortsResponse.Port] {
+        snapshot.ports
+            .filter { $0.listening != true }
+            .sorted(by: portOrder)
+    }
+
+    private func portOrder(_ lhs: MSWPortsResponse.Port, _ rhs: MSWPortsResponse.Port) -> Bool {
+        (Int(lhs.port) ?? .max) < (Int(rhs.port) ?? .max)
+    }
+
+    private func inactivePortsBinding(_ workspace: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedInactivePortWorkspaces.contains(workspace) },
+            set: { expanded in
+                if expanded {
+                    expandedInactivePortWorkspaces.insert(workspace)
+                } else {
+                    expandedInactivePortWorkspaces.remove(workspace)
+                }
+            }
+        )
     }
 
     private func canOpen(port: MSWPortsResponse.Port, in workspace: Workspace) -> Bool {
         port.configured &&
+            port.listening == true &&
             workspace.state == .running &&
             workspace.freshness == .fresh &&
             workspace.networkHost != nil &&
@@ -1126,14 +1226,13 @@ private extension DetailView {
             !(workspace.skippedPorts ?? []).contains(Int(port.port) ?? -1)
     }
 
-    private func networkURL(workspace: Workspace, port: String) -> String? {
-        guard let host = workspace.networkHost else { return nil }
-        return "http://\(host):\(port)"
+    private func networkURL(host: String, port: String) -> String {
+        "http://\(host):\(port)"
     }
 
     private func copyToPasteboard(_ value: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
+        _ = NSPasteboard.general.setString(value, forType: .string)
     }
 
 

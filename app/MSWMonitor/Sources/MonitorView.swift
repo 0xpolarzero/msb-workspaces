@@ -28,7 +28,7 @@ struct MonitorView: View {
                 WorkspaceRow(
                     workspace: workspace,
                     operation: currentOperation(for: workspace),
-                    publishedSitePorts: publishedSitePorts(for: workspace),
+                    activeSitePorts: activeSitePorts(for: workspace),
                     model: model,
                     openRoute: openRoute
                 )
@@ -163,12 +163,16 @@ struct MonitorView: View {
             .max { $0.updatedAt < $1.updatedAt }
     }
 
-    private func publishedSitePorts(for workspace: Workspace) -> [String] {
-        guard let snapshot = model.portsSnapshot,
-              snapshot.workspace == workspace.id.rawValue else {
+    private func activeSitePorts(for workspace: Workspace) -> [String] {
+        guard let workspacePorts = model.portsSnapshot?.workspaces.first(where: {
+            $0.workspace == workspace.id.rawValue
+        }) else {
             return []
         }
-        return snapshot.published.map(\.port).filter { !$0.isEmpty && $0 != "3000" }
+        return workspacePorts.ports
+            .filter { $0.listening == true }
+            .map(\.port)
+            .sorted { (Int($0) ?? .max) < (Int($1) ?? .max) }
     }
 
     private func color(for severity: MonitorHealth.Severity) -> Color {
@@ -184,7 +188,7 @@ struct MonitorView: View {
 private struct WorkspaceRow: View {
     let workspace: Workspace
     let operation: MSWOperationState?
-    let publishedSitePorts: [String]
+    let activeSitePorts: [String]
     @Bindable var model: AppModel
     let openRoute: (AppRoute) -> Void
     @State private var isFolderPickerPresented = false
@@ -313,9 +317,12 @@ private struct WorkspaceRow: View {
                 .disabled(!canOpenWorkspace)
                 .accessibilityIdentifier("workspace.\(workspace.id.rawValue).open-editor")
             Menu("Open Site") {
-                Button("Port 3000") { model.openSite(for: workspace.id, port: "3000") }
-                ForEach(publishedSitePorts, id: \.self) { port in
-                    Button("Port \(port)") { model.openSite(for: workspace.id, port: port) }
+                if activeSitePorts.isEmpty {
+                    Text("No active sites")
+                } else {
+                    ForEach(activeSitePorts, id: \.self) { port in
+                        Button("Port \(port)") { model.openSite(for: workspace.id, port: port) }
+                    }
                 }
                 Divider()
                 Button("Choose Port…") {

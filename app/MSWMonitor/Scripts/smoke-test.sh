@@ -24,11 +24,14 @@ case "${1:-}" in
   --navigation-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testUnifiedWindowUsesTopTabsAndWorkspaceSections"
     ;;
+  --network-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testNetworkShowsActivePortsFirst"
+    ;;
   --failure-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--network-only|--failure-only]"
     exit 64
     ;;
 esac
