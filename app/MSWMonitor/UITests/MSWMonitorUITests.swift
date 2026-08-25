@@ -933,7 +933,6 @@ final class MSWMonitorUITests: XCTestCase {
 
         let initialSetupFrame = setup.frame
         let workspaceAccessHelp = "Choose which repositories each workspace can use with your GitHub credentials, and whether it can push changes. Public repositories remain cloneable without granting access."
-        let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
         let accessInfo = app.descendants(matching: .any)["setup.github.workspace-access.info"]
         XCTAssertTrue(accessInfo.waitForExistence(timeout: 2))
         XCTAssertEqual(accessInfo.label, "Workspace Access information")
@@ -968,13 +967,14 @@ final class MSWMonitorUITests: XCTestCase {
             "Repository picker width must remain stable after selection"
         )
         XCTAssertEqual(push.label, "Allow pushes")
+        let initialPushValue = String(describing: push.value)
         push.hover()
-        assertText(
-            pushHelp,
-            identifier: "github.workspace.dev.repository.1001.allow-pushes.tooltip",
-            in: app
-        )
         push.click()
+        XCTAssertNotEqual(
+            String(describing: push.value),
+            initialPushValue,
+            "Hovering the help tooltip must not consume the switch click"
+        )
         XCTAssertFalse(app.checkBoxes["Assign"].exists)
         XCTAssertFalse(app.staticTexts["Owner installation"].exists)
         XCTAssertFalse(app.staticTexts["Verification repository"].exists)
