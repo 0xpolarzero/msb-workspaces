@@ -238,36 +238,70 @@ final class MSWMonitorUITests: XCTestCase {
         logs.click()
         assertWorkspaceSection("Logs", in: app)
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
-        let logDocument = app.staticTexts["logs.document"]
-        XCTAssertTrue(logDocument.waitForExistence(timeout: 2))
-        let copyAllLogs = app.descendants(matching: .any)["logs.copy.all"]
-        XCTAssertTrue(copyAllLogs.waitForExistence(timeout: 2))
-        let workspacesWindow = app.windows["Workspaces"]
-        XCTAssertLessThan(logDocument.frame.minX - workspacesWindow.frame.minX, 80)
-        XCTAssertLessThan(logDocument.frame.minY - copyAllLogs.frame.maxY, 28)
-        let filteredLogText = logDocument.value as? String ?? ""
-        XCTAssertFalse(filteredLogText.contains("Development service ready"))
-        XCTAssertTrue(filteredLogText.contains("playgrounds │"))
-        XCTAssertTrue(filteredLogText.contains("personal    │"))
-        XCTAssertFalse(filteredLogText.contains("bounded logs"))
+        let logTable = app.descendants(matching: .any)["logs.table"]
+        XCTAssertTrue(logTable.waitForExistence(timeout: 2))
+        let logSearch = app.textFields["logs.search"]
+        XCTAssertTrue(logSearch.waitForExistence(timeout: 2))
+        let followLogs = app.descendants(matching: .any)["logs.follow"]
+        XCTAssertTrue(followLogs.waitForExistence(timeout: 2))
+        XCTAssertEqual(followLogs.label, "Pause")
+        let wrapLogs = app.descendants(matching: .any)["logs.wrap"]
+        XCTAssertTrue(wrapLogs.waitForExistence(timeout: 2))
+        let copySelectedLogs = app.descendants(matching: .any)["logs.copy.selected"]
+        XCTAssertTrue(copySelectedLogs.waitForExistence(timeout: 2))
+        XCTAssertFalse(copySelectedLogs.isEnabled)
+        let copyVisibleLogs = app.descendants(matching: .any)["logs.copy.visible"]
+        XCTAssertTrue(copyVisibleLogs.waitForExistence(timeout: 2))
+        XCTAssertTrue(copyVisibleLogs.isEnabled)
+
+        let playgroundLog = app.descendants(matching: .any)["logs.row.playgrounds.0.message"]
+        let personalLog = app.descendants(matching: .any)["logs.row.personal.0.message"]
+        XCTAssertTrue(playgroundLog.waitForExistence(timeout: 2))
+        XCTAssertTrue(personalLog.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.descendants(matching: .any)["logs.row.dev.0.message"].exists)
+        XCTAssertEqual(playgroundLog.value as? String, "Playground task completed")
+        XCTAssertEqual(personalLog.value as? String, "Personal task completed")
+        XCTAssertFalse((playgroundLog.value as? String ?? "").contains("bounded logs"))
+
+        logSearch.click()
+        logSearch.typeText("Playground")
+        XCTAssertTrue(playgroundLog.waitForExistence(timeout: 2))
+        XCTAssertFalse(personalLog.exists)
+        logSearch.typeKey("a", modifierFlags: .command)
+        logSearch.typeKey(.delete, modifierFlags: [])
 
         app.descendants(matching: .any)["workspace.filter.dev"].click()
-        let devLogAppeared = expectation(
-            for: NSPredicate(
-                format: "value CONTAINS %@",
-                "Development service ready"
-            ),
-            evaluatedWith: logDocument
-        )
-        wait(for: [devLogAppeared], timeout: 2)
-        let visibleLogText = logDocument.value as? String ?? ""
-        XCTAssertTrue(visibleLogText.contains("dev         │"))
-        XCTAssertFalse(visibleLogText.contains("HHHHHHHH"))
-        XCTAssertFalse(app.descendants(matching: .any)["logs.copy.selected"].exists)
+        let devLog = app.descendants(matching: .any)["logs.row.dev.0.message"]
+        XCTAssertTrue(devLog.waitForExistence(timeout: 2))
+        XCTAssertEqual(devLog.value as? String, "Development service ready")
+        XCTAssertFalse((devLog.value as? String ?? "").contains("HHHHHHHH"))
         XCTAssertFalse(app.descendants(matching: .any)["logs.select.dev.0"].exists)
 
-        XCTAssertTrue(copyAllLogs.exists)
-        copyAllLogs.click()
+        let structuredLog = app.descendants(matching: .any)["logs.row.dev.1.message"]
+        XCTAssertTrue(structuredLog.waitForExistence(timeout: 2))
+        XCTAssertEqual(
+            structuredLog.value as? String,
+            #"{"event":"build","level":"info","ok":true}"#
+        )
+        app.descendants(matching: .any)["logs.row.dev.1.timestamp"].click()
+        XCTAssertTrue(copySelectedLogs.isEnabled)
+        XCTAssertTrue(app.descendants(matching: .any)["logs.inspector"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["JSON details"].waitForExistence(timeout: 2))
+
+        followLogs.click()
+        XCTAssertEqual(followLogs.label, "Follow")
+        followLogs.click()
+        XCTAssertEqual(followLogs.label, "Pause")
+        wrapLogs.click()
+        copyVisibleLogs.click()
+
+        let workspacesWindow = app.windows["Workspaces"]
+        XCTAssertLessThan(logTable.frame.minX - workspacesWindow.frame.minX, 80)
+        XCTAssertLessThan(logTable.frame.minY - logSearch.frame.maxY, 36)
+        let logViewerScreenshot = XCTAttachment(screenshot: app.screenshot())
+        logViewerScreenshot.name = "Native workspace log viewer"
+        logViewerScreenshot.lifetime = .keepAlways
+        add(logViewerScreenshot)
 
         let network = app.buttons["Network"]
         XCTAssertTrue(network.waitForExistence(timeout: 2))

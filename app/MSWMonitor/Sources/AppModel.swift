@@ -1274,7 +1274,14 @@ final class AppModel {
                 lines: [
                     MSWLogEntry(
                         workspace: "dev",
+                        observedAt: Date(timeIntervalSince1970: 1_786_118_400),
                         message: "Development service ready",
+                        safeForDisplay: true
+                    ),
+                    MSWLogEntry(
+                        workspace: "dev",
+                        observedAt: Date(timeIntervalSince1970: 1_786_118_403),
+                        message: #"{"event":"build","level":"info","ok":true}"#,
                         safeForDisplay: true
                     )
                 ]
@@ -1288,6 +1295,7 @@ final class AppModel {
                 lines: [
                     MSWLogEntry(
                         workspace: "playgrounds",
+                        observedAt: Date(timeIntervalSince1970: 1_786_118_401),
                         message: "Playground task completed",
                         safeForDisplay: true
                     )
@@ -1302,6 +1310,7 @@ final class AppModel {
                 lines: [
                     MSWLogEntry(
                         workspace: "personal",
+                        observedAt: Date(timeIntervalSince1970: 1_786_118_402),
                         message: "Personal task completed",
                         safeForDisplay: true
                     )

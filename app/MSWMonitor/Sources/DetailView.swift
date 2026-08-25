@@ -58,6 +58,10 @@ struct DetailView: View {
     @State private var hiddenWorkspaces: Set<Workspace.ID> = []
     @State private var expandedInactivePortWorkspaces: Set<String> = []
     @State private var visitedWorkspaceSections: Set<WorkspaceSection>
+    @State private var logSearch = ""
+    @State private var logSelection: Set<LogRowID> = []
+    @State private var followsLogs = true
+    @State private var wrapsLogs = false
 
     init(
         model: AppModel,
@@ -155,7 +159,9 @@ struct DetailView: View {
         }
         .task(id: routeIdentity) {
             model.clearDetailError()
-            loadSelectedSection()
+            if navigation.workspaceSection != .logs || followsLogs {
+                loadSelectedSection()
+            }
             while automaticallyRefreshesSelectedSection {
                 do {
                     try await Task.sleep(for: .seconds(15))
@@ -170,12 +176,14 @@ struct DetailView: View {
 
     private var routeIdentity: String {
         let hidden = hiddenWorkspaces.map(\.rawValue).sorted().joined(separator: ",")
-        return "\(navigation.workspaceSection.rawValue):\(hidden)"
+        let follow = navigation.workspaceSection == .logs ? followsLogs.description : ""
+        return "\(navigation.workspaceSection.rawValue):\(hidden):\(follow)"
     }
 
     private var automaticallyRefreshesSelectedSection: Bool {
         switch navigation.workspaceSection {
-        case .files, .logs, .ports: return true
+        case .files, .ports: return true
+        case .logs: return followsLogs
         case .activity: return false
         }
     }
@@ -314,13 +322,28 @@ struct DetailView: View {
     }
 
 
-    private struct TaggedLogLine {
+    private struct LogRowID: Hashable {
         let workspace: Workspace.ID
-        let message: String
+        let observedAt: Date
+        let ordinal: Int
     }
 
+    private struct TaggedLogLine: Identifiable {
+        let id: LogRowID
+        let workspace: Workspace.ID
+        let observedAt: Date
+        let timestamp: String
+        let message: String
+        let prettyJSON: String?
+    }
+
+    @ViewBuilder
     private var logs: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let allRows = visibleLogLines
+        let rows = Self.filteredLogLines(allRows, query: logSearch)
+        let selectedRows = rows.filter { logSelection.contains($0.id) }
+
+        VStack(alignment: .leading, spacing: 10) {
             if let failure = model.latestOperationFailure,
                failure.workspace.map({ !hiddenWorkspaces.contains($0) }) ?? true {
                 HStack(alignment: .top, spacing: 10) {
@@ -341,44 +364,108 @@ struct DetailView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("details.latest-operation-error")
             }
+
             if visibleWorkspaces.isEmpty {
                 ContentUnavailableView(
                     "No workspaces selected",
                     systemImage: "line.3.horizontal.decrease.circle",
                     description: Text("Select at least one workspace to see its logs.")
                 )
-            } else if visibleLogLines.isEmpty {
-                ContentUnavailableView(
-                    "No logs yet",
-                    systemImage: "text.alignleft",
-                    description: Text("Logs from the selected workspaces will appear here.")
-                )
             } else {
-                HStack(spacing: 8) {
-                    Text("\(visibleLogLines.count) lines")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Copy All Logs") {
-                        copyToPasteboard(logDocumentText)
-                    }
-                    .accessibilityIdentifier("logs.copy.all")
-                }
-                .controlSize(.small)
+                logToolbar(rows: rows, selectedRows: selectedRows)
 
-                GeometryReader { viewport in
-                    ScrollView([.vertical, .horizontal]) {
-                        Text(logDocumentText)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .frame(
-                                minWidth: viewport.size.width,
-                                minHeight: viewport.size.height,
-                                alignment: .topLeading
-                            )
-                            .padding(.vertical, 4)
-                            .accessibilityIdentifier("logs.document")
+                if allRows.isEmpty, model.isDetailLoading {
+                    logLoadingSkeleton
+                } else if allRows.isEmpty {
+                    ContentUnavailableView(
+                        "No logs yet",
+                        systemImage: "text.alignleft",
+                        description: Text("Logs from the selected workspaces will appear here.")
+                    )
+                } else if rows.isEmpty {
+                    ContentUnavailableView.search(text: logSearch)
+                } else {
+                    ScrollViewReader { proxy in
+                        Table(rows, selection: $logSelection) {
+                            TableColumn("Timestamp") { row in
+                                Text(row.timestamp)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .accessibilityIdentifier(
+                                        "logs.row.\(row.workspace.rawValue).\(row.id.ordinal).timestamp"
+                                    )
+                            }
+                            .width(min: 84, ideal: 92, max: 112)
+
+                            TableColumn("Workspace") { row in
+                                Text(row.workspace.rawValue)
+                                    .font(.system(.caption, design: .monospaced).weight(.medium))
+                                    .lineLimit(1)
+                            }
+                            .width(min: 88, ideal: 104, max: 140)
+
+                            TableColumn("Message") { row in
+                                Text(row.message)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .lineLimit(wrapsLogs ? nil : 1)
+                                    .fixedSize(horizontal: false, vertical: wrapsLogs)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .accessibilityIdentifier(
+                                        "logs.row.\(row.workspace.rawValue).\(row.id.ordinal).message"
+                                    )
+                            }
+                        }
+                        .tableStyle(.inset(alternatesRowBackgrounds: true))
+                        .environment(\.defaultMinListRowHeight, wrapsLogs ? 28 : 22)
+                        .accessibilityIdentifier("logs.table")
+                        .contextMenu(forSelectionType: LogRowID.self) { identifiers in
+                            if let row = rows.first(where: { identifiers.contains($0.id) }) {
+                                Button("Copy Message") {
+                                    copyToPasteboard(row.message)
+                                }
+                                Button("Copy Row") {
+                                    copyToPasteboard(Self.formattedLogText([row]))
+                                }
+                                Divider()
+                                Button("Include Workspace") {
+                                    hiddenWorkspaces = Set(
+                                        model.workspaces.map(\.id).filter { $0 != row.workspace }
+                                    )
+                                }
+                                Button("Exclude Workspace") {
+                                    hiddenWorkspaces.insert(row.workspace)
+                                }
+                            }
+                        }
+                        .onAppear {
+                            if followsLogs, let last = rows.last {
+                                proxy.scrollTo(last.id, anchor: .bottom)
+                            }
+                        }
+                        .onChange(of: rows.last?.id) { _, lastID in
+                            if followsLogs, let lastID {
+                                proxy.scrollTo(lastID, anchor: .bottom)
+                            }
+                        }
+                        .onChange(of: followsLogs) { _, follows in
+                            if follows, let last = rows.last {
+                                proxy.scrollTo(last.id, anchor: .bottom)
+                            }
+                        }
+                    }
+                    .inspector(isPresented: Binding(
+                        get: { selectedRows.count == 1 },
+                        set: { if !$0 { logSelection.removeAll() } }
+                    )) {
+                        if let row = selectedRows.first {
+                            logInspector(row)
+                                .inspectorColumnWidth(min: 240, ideal: 300, max: 420)
+                        }
+                    }
+                    .onChange(of: Set(rows.map(\.id))) { _, visibleIDs in
+                        logSelection.formIntersection(visibleIDs)
                     }
                 }
             }
@@ -386,18 +473,169 @@ struct DetailView: View {
         }
     }
 
-    private var logDocumentText: String {
-        let workspaceWidth = visibleLogLines
-            .map { $0.workspace.rawValue.count }
-            .max() ?? 0
-        return visibleLogLines.map { line in
-            let workspace = line.workspace.rawValue
-            let workspacePadding = String(
-                repeating: " ",
-                count: max(0, workspaceWidth - workspace.count)
+    private func logToolbar(
+        rows: [TaggedLogLine],
+        selectedRows: [TaggedLogLine]
+    ) -> some View {
+        HStack(spacing: 8) {
+            TextField("Search logs", text: $logSearch)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                .accessibilityIdentifier("logs.search")
+
+            Button {
+                followsLogs.toggle()
+            } label: {
+                Label(followsLogs ? "Pause" : "Follow", systemImage: followsLogs ? "pause" : "arrow.down.to.line")
+            }
+            .accessibilityIdentifier("logs.follow")
+
+            Toggle(isOn: $wrapsLogs) {
+                Label("Wrap", systemImage: "text.justify")
+            }
+            .toggleStyle(.button)
+            .accessibilityIdentifier("logs.wrap")
+
+            Spacer()
+
+            if model.isDetailLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Refreshing logs")
+            }
+            Text("\(rows.count) lines")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Copy Selected") {
+                copyToPasteboard(Self.formattedLogText(selectedRows))
+            }
+            .disabled(selectedRows.isEmpty)
+            .accessibilityIdentifier("logs.copy.selected")
+
+            Button("Copy Visible") {
+                copyToPasteboard(Self.formattedLogText(rows))
+            }
+            .disabled(rows.isEmpty)
+            .accessibilityIdentifier("logs.copy.visible")
+        }
+        .controlSize(.small)
+    }
+
+    private func logInspector(_ row: TaggedLogLine) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(row.prettyJSON == nil ? "Log details" : "JSON details")
+                .font(.headline)
+            LabeledContent("Timestamp", value: row.observedAt.formatted())
+            LabeledContent("Workspace", value: row.workspace.rawValue)
+            Divider()
+            ScrollView {
+                Text(row.prettyJSON ?? row.message)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            HStack {
+                Button("Copy Message") {
+                    copyToPasteboard(row.message)
+                }
+                Button("Copy Row") {
+                    copyToPasteboard(Self.formattedLogText([row]))
+                }
+            }
+            .controlSize(.small)
+        }
+        .padding()
+        .accessibilityIdentifier("logs.inspector")
+    }
+
+    private var logLoadingSkeleton: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(0..<8, id: \.self) { index in
+                HStack(spacing: 12) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(.quaternary)
+                        .frame(width: 84, height: 10)
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(.quaternary)
+                        .frame(width: 96, height: 10)
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(.quaternary)
+                        .frame(width: index.isMultiple(of: 3) ? 260 : 420, height: 10)
+                }
+            }
+        }
+        .padding(.top, 8)
+        .accessibilityHidden(true)
+    }
+
+    private var visibleLogLines: [TaggedLogLine] {
+        var result: [TaggedLogLine] = []
+        for workspace in visibleWorkspaces {
+            guard let response = model.logsByWorkspace[workspace.id.rawValue] else {
+                continue
+            }
+            let startIndex = max(0, response.lines.count - 100)
+            for (offset, line) in response.lines.suffix(100).enumerated() where line.safeForDisplay {
+                let message = Self.cleanedLogMessage(line.message)
+                guard !message.isEmpty else { continue }
+                result.append(
+                    TaggedLogLine(
+                        id: LogRowID(
+                            workspace: workspace.id,
+                            observedAt: line.observedAt,
+                            ordinal: startIndex + offset
+                        ),
+                        workspace: workspace.id,
+                        observedAt: line.observedAt,
+                        timestamp: line.observedAt.formatted(date: .omitted, time: .standard),
+                        message: message,
+                        prettyJSON: Self.prettyJSON(from: message)
+                    )
+                )
+            }
+        }
+        result.sort {
+            if $0.observedAt != $1.observedAt {
+                return $0.observedAt < $1.observedAt
+            }
+            if $0.workspace != $1.workspace {
+                return $0.workspace.rawValue < $1.workspace.rawValue
+            }
+            return $0.id.ordinal < $1.id.ordinal
+        }
+        return result
+    }
+
+    private static func filteredLogLines(
+        _ lines: [TaggedLogLine],
+        query: String
+    ) -> [TaggedLogLine] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return lines }
+        return lines.filter {
+            $0.timestamp.localizedCaseInsensitiveContains(query)
+                || $0.workspace.rawValue.localizedCaseInsensitiveContains(query)
+                || $0.message.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private static func formattedLogText(_ lines: [TaggedLogLine]) -> String {
+        let timestampWidth = lines.map(\.timestamp.count).max() ?? 0
+        let workspaceWidth = lines.map(\.workspace.rawValue.count).max() ?? 0
+        return lines.map { line in
+            let timestamp = line.timestamp.padding(
+                toLength: timestampWidth,
+                withPad: " ",
+                startingAt: 0
             )
-            let firstPrefix = "\(workspace)\(workspacePadding) │ "
-            let continuationPrefix = "\(String(repeating: " ", count: workspaceWidth)) │ "
+            let workspace = line.workspace.rawValue.padding(
+                toLength: workspaceWidth,
+                withPad: " ",
+                startingAt: 0
+            )
+            let firstPrefix = "\(timestamp) │ \(workspace) │ "
+            let continuationPrefix = "\(String(repeating: " ", count: timestampWidth)) │ \(String(repeating: " ", count: workspaceWidth)) │ "
             return line.message
                 .split(separator: "\n", omittingEmptySubsequences: false)
                 .enumerated()
@@ -409,40 +647,22 @@ struct DetailView: View {
         .joined(separator: "\n")
     }
 
-    private var visibleLogLines: [TaggedLogLine] {
-        var result: [TaggedLogLine] = []
-        for workspace in visibleWorkspaces {
-            guard let response = model.logsByWorkspace[workspace.id.rawValue] else {
-                continue
-            }
-            for line in response.lines.suffix(100) where line.safeForDisplay {
-                let message = Self.prettyLogMessage(line.message)
-                guard !message.isEmpty else { continue }
-                result.append(
-                    TaggedLogLine(
-                        workspace: workspace.id,
-                        message: message
-                    )
-                )
-            }
-        }
-        return result
+    private static func cleanedLogMessage(_ message: String) -> String {
+        strippingRepeatedPrefix(from: message)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func prettyLogMessage(_ message: String) -> String {
-        let normalized = strippingRepeatedPrefix(from: message)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = normalized.data(using: .utf8),
+    private static func prettyJSON(from message: String) -> String? {
+        guard let data = message.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
               JSONSerialization.isValidJSONObject(object),
               let prettyData = try? JSONSerialization.data(
                   withJSONObject: object,
                   options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-              ),
-              let pretty = String(data: prettyData, encoding: .utf8) else {
-            return normalized
+              ) else {
+            return nil
         }
-        return pretty
+        return String(data: prettyData, encoding: .utf8)
     }
 
     private static func strippingRepeatedPrefix(from message: String) -> String {

@@ -154,10 +154,18 @@ actor MSWClient {
         for record in decoded.dropFirst().dropLast() {
             switch record.type {
             case "log":
-                guard let message = record.message else {
+                guard let observedAt = record.observedAt,
+                      let message = record.message else {
                     throw MSWClientError.unavailable("MSW returned a malformed log entry.")
                 }
-                lines.append(MSWLogEntry(workspace: workspace, message: message, safeForDisplay: true))
+                lines.append(
+                    MSWLogEntry(
+                        workspace: workspace,
+                        observedAt: observedAt,
+                        message: message,
+                        safeForDisplay: true
+                    )
+                )
             case "failed":
                 throw MSWClientError.unavailable(record.message ?? "The MSW log stream failed.")
             default:

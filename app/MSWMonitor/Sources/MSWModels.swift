@@ -485,6 +485,7 @@ struct MSWLogsResponse: Codable, Sendable {
 
 struct MSWLogEntry: Codable, Sendable {
     let workspace: String
+    let observedAt: Date
     let message: String
     let safeForDisplay: Bool
 }

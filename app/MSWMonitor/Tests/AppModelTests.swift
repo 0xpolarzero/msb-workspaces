@@ -237,6 +237,51 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.detailError)
     }
 
+    func testLogStreamPreservesPerLineObservedAt() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-logs-timestamps-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let stream = """
+        {"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:00Z","available":true,"lifecycle":"Running","freshness":"fresh","reason":null,"safeForDisplay":true}
+        {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","message":"repeated message","safeForDisplay":true}
+        {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","message":"repeated message","safeForDisplay":true}
+        {"schemaVersion":1,"type":"stream-end","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:02Z","safeForDisplay":true}
+        """
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "logs" ]; then
+            cat <<'EOF'
+        \(stream)
+        EOF
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let response = try await client.logs(workspace: "dev")
+
+        XCTAssertEqual(response.lines.count, 2)
+        XCTAssertEqual(response.lines.map(\.message), ["repeated message", "repeated message"])
+        XCTAssertEqual(
+            response.lines.map(\.observedAt),
+            [
+                Date(timeIntervalSince1970: 1_787_681_401.125),
+                Date(timeIntervalSince1970: 1_787_681_401.125)
+            ]
+        )
+    }
+
     func testAppNavigationAppliesRouteWithoutDroppingWorkspaceContext() {
         let navigation = AppNavigationState(
             tab: .workspaces,
