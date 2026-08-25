@@ -240,6 +240,11 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         let logDocument = app.staticTexts["logs.document"]
         XCTAssertTrue(logDocument.waitForExistence(timeout: 2))
+        let copyAllLogs = app.descendants(matching: .any)["logs.copy.all"]
+        XCTAssertTrue(copyAllLogs.waitForExistence(timeout: 2))
+        let workspacesWindow = app.windows["Workspaces"]
+        XCTAssertLessThan(logDocument.frame.minX - workspacesWindow.frame.minX, 80)
+        XCTAssertLessThan(logDocument.frame.minY - copyAllLogs.frame.maxY, 28)
         let filteredLogText = logDocument.value as? String ?? ""
         XCTAssertFalse(filteredLogText.contains("Development service ready"))
         XCTAssertTrue(filteredLogText.contains("playgrounds │"))
@@ -261,8 +266,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["logs.copy.selected"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["logs.select.dev.0"].exists)
 
-        let copyAllLogs = app.descendants(matching: .any)["logs.copy.all"]
-        XCTAssertTrue(copyAllLogs.waitForExistence(timeout: 2))
+        XCTAssertTrue(copyAllLogs.exists)
         copyAllLogs.click()
 
         let network = app.buttons["Network"]

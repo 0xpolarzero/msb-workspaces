@@ -366,14 +366,20 @@ struct DetailView: View {
                 }
                 .controlSize(.small)
 
-                ScrollView([.vertical, .horizontal]) {
-                    Text(logDocumentText)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: true, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .padding(.vertical, 4)
-                        .accessibilityIdentifier("logs.document")
+                GeometryReader { viewport in
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(logDocumentText)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: true)
+                            .frame(
+                                minWidth: viewport.size.width,
+                                minHeight: viewport.size.height,
+                                alignment: .topLeading
+                            )
+                            .padding(.vertical, 4)
+                            .accessibilityIdentifier("logs.document")
+                    }
                 }
             }
             detailError
