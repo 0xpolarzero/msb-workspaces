@@ -744,6 +744,17 @@ final class AppModel {
         case push
     }
 
+    private struct DirectoryCacheKey: Hashable {
+        let workspace: Workspace.ID
+        let path: String
+        let query: String?
+    }
+
+    private struct CachedDirectoryResponse {
+        let response: MSWDirectoryResponse
+        let cachedAt: Date
+    }
+
     private var startupRecoveryRetry: (() -> Void)?
     private let client: MSWClient?
     let applicationPreferences: ApplicationPreferenceStore
@@ -763,6 +774,7 @@ final class AppModel {
     private var detailRequestGeneration = 0
     private var systemHealthGeneration = 0
     private var directoryFixture: [MSWDirectoryResponse] = []
+    private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
         case applied(MSWStateResponse)
@@ -858,6 +870,7 @@ final class AppModel {
         isDetailLoading = false
         detailError = nil
         logsUnavailableWorkspaces.removeAll()
+        directoryCache.removeAll()
         let ids = configurations.compactMap { Workspace.ID(rawValue: $0.name) }
         let previous = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         configuredWorkspaceIDs = ids
@@ -1107,6 +1120,16 @@ final class AppModel {
                     .joined(separator: " ")
             )
         }
+        let normalizedQuery = query?.isEmpty == false ? query : nil
+        let cacheKey = DirectoryCacheKey(
+            workspace: id,
+            path: path,
+            query: normalizedQuery
+        )
+        if let cached = directoryCache[cacheKey],
+           Date().timeIntervalSince(cached.cachedAt) < 60 {
+            return cached.response
+        }
         if client == nil, !directoryFixture.isEmpty {
             let fixture = directoryFixture.first { value in
                 value.workspace == id.rawValue && value.path == path && value.query == query
@@ -1131,6 +1154,10 @@ final class AppModel {
             if ProcessInfo.processInfo.arguments.contains("--ui-test-folder-loading-skeleton") {
                 try await Task.sleep(for: .seconds(3))
             }
+            directoryCache[cacheKey] = CachedDirectoryResponse(
+                response: fixture,
+                cachedAt: Date()
+            )
             return fixture
         }
         guard let client else {
@@ -1139,11 +1166,17 @@ final class AppModel {
         let response = try await client.directories(
             workspace: id.rawValue,
             path: path,
-            query: query?.isEmpty == false ? query : nil
+            query: normalizedQuery
         )
         guard let result = response.result else {
-            throw MSWClientError.missingResult(command: query == nil ? "directory-list" : "directory-search")
+            throw MSWClientError.missingResult(
+                command: normalizedQuery == nil ? "directory-list" : "directory-search"
+            )
         }
+        directoryCache[cacheKey] = CachedDirectoryResponse(
+            response: result,
+            cachedAt: Date()
+        )
         return result
     }
 

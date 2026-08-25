@@ -59,6 +59,7 @@ struct DetailView: View {
     @State private var hiddenLogWorkspaces: Set<Workspace.ID> = []
     @State private var hiddenActivityWorkspaces: Set<Workspace.ID> = []
     @State private var expandedInactivePortWorkspaces: Set<String> = []
+    @State private var visitedWorkspaceSections: Set<WorkspaceSection>
 
     init(
         model: AppModel,
@@ -68,6 +69,7 @@ struct DetailView: View {
         self.model = model
         self.navigation = navigation
         self.mode = mode
+        _visitedWorkspaceSections = State(initialValue: [navigation.workspaceSection])
     }
 
     var body: some View {
@@ -159,6 +161,9 @@ struct DetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(20)
         }
+        .onChange(of: navigation.workspaceSection) { _, section in
+            visitedWorkspaceSections.insert(section)
+        }
         .task(id: routeIdentity) {
             if navigation.workspaceSection.requiresWorkspace && navigation.workspace == nil {
                 navigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
@@ -210,6 +215,7 @@ struct DetailView: View {
             HStack(spacing: 4) {
                 ForEach(WorkspaceSection.allCases) { section in
                     Button {
+                        visitedWorkspaceSections.insert(section)
                         navigation.workspaceSection = section
                     } label: {
                         Label(section.rawValue, systemImage: section.symbol)
@@ -243,9 +249,23 @@ struct DetailView: View {
         )
     }
 
-    @ViewBuilder
     private var sectionContent: some View {
-        switch navigation.workspaceSection {
+        ZStack {
+            ForEach(
+                WorkspaceSection.allCases.filter { visitedWorkspaceSections.contains($0) }
+            ) { section in
+                workspaceSectionContent(section)
+                    .opacity(navigation.workspaceSection == section ? 1 : 0)
+                    .allowsHitTesting(navigation.workspaceSection == section)
+                    .accessibilityHidden(navigation.workspaceSection != section)
+                    .zIndex(navigation.workspaceSection == section ? 1 : 0)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func workspaceSectionContent(_ section: WorkspaceSection) -> some View {
+        switch section {
         case .files: filesAndRepositories
         case .logs: logs
         case .activity: activity

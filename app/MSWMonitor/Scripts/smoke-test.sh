@@ -27,11 +27,14 @@ case "${1:-}" in
   --network-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testNetworkShowsActivePortsFirst"
     ;;
+  --files-cache-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testFilesStayCachedAcrossWorkspaceTabs"
+    ;;
   --failure-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--network-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--network-only|--files-cache-only|--failure-only]"
     exit 64
     ;;
 esac

@@ -313,6 +313,34 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["network.dev.port.5173.copy"].exists)
     }
 
+    func testFilesStayCachedAcrossWorkspaceTabs() {
+        let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.toolbars.buttons["Workspaces"].waitForExistence(timeout: 2))
+        app.toolbars.buttons["Workspaces"].click()
+
+        let folderTree = app.descendants(matching: .any)["folders.tree"]
+        XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["folders.entry.Projects"].waitForExistence(timeout: 2))
+
+        XCTAssertTrue(app.buttons["Logs"].waitForExistence(timeout: 2))
+        app.buttons["Logs"].click()
+        assertText("Logs", identifier: "details.section-title", in: app)
+        XCTAssertFalse(folderTree.exists)
+
+        XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 2))
+        app.buttons["Files"].click()
+        assertText("Files", identifier: "details.section-title", in: app)
+        XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["folders.entry.Projects"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["folders.loading-skeleton"].exists)
+        XCTAssertFalse(app.progressIndicators["Loading folders…"].exists)
+    }
+
     private func assertDirectFolderPicker(in app: XCUIApplication) {
         let terminalName = defaultApplicationName(for: .unixExecutable)
         XCTAssertTrue(app.buttons["workspace.dev.open-terminal"].waitForExistence(timeout: 2))
