@@ -6102,7 +6102,7 @@ app_apply_lock_all() {
       fi
     fi
     if ! eval "exec ${fd}>>\"$lock\""; then app_apply_release_all; return 1; fi
-    if ! "$LOCKF_BIN" -s -t 0 "$fd"; then
+    if ! "$LOCKF_BIN" -s -t 30 "$fd"; then
       eval "exec ${fd}>&-"
       app_apply_release_all
       return 1

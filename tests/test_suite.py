@@ -7559,6 +7559,42 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertIn('"status":"committed"', journal)
         self.assertNotIn('"status":"failed"', journal)
 
+    def test_policy_apply_waits_for_transient_workspace_lock(self) -> None:
+        lock = self.github_meta_dir / "dev.lock"
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        holder = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                f'exec 9>>"{lock}"; /usr/bin/lockf -s -t 0 9 && echo READY; sleep 1',
+            ],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert holder.stdout is not None
+            self.assertEqual(holder.stdout.readline().strip(), "READY")
+            desired = {
+                "schemaVersion": 1,
+                "workspaces": {
+                    "dev": {
+                        "repos": [
+                            {"canonical": "acme/demo", "mode": "read-write"},
+                        ],
+                    },
+                },
+            }
+            started = time.monotonic()
+            proc = self._apply(desired)
+            elapsed = time.monotonic() - started
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertGreaterEqual(elapsed, 0.75)
+            self.assertTrue(json.loads(proc.stdout)["result"]["committed"])
+        finally:
+            holder.wait(timeout=5)
+            if holder.stdout is not None:
+                holder.stdout.close()
+
     def test_policy_apply_idempotent_preserves_capabilities(self) -> None:
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},

@@ -152,6 +152,8 @@ final class GitHubSettingsState {
     private var hasLoaded = false
     private var isRefreshing = false
     private var pollingTask: Task<Void, Never>?
+    private var pollingVisible = false
+    private var pollingSuspensionCount = 0
 
     init(
         authorizationCoordinator: GitHubAuthorizationCoordinator?,
@@ -166,6 +168,7 @@ final class GitHubSettingsState {
     func configure(provider: (any GitHubProviding)?) {
         pollingTask?.cancel()
         pollingTask = nil
+        pollingSuspensionCount = 0
         self.provider = provider
         hasLoaded = false
         isRefreshing = false
@@ -179,7 +182,10 @@ final class GitHubSettingsState {
     }
 
     func setPollingVisible(_ visible: Bool) {
+        pollingVisible = visible
         pollingTask?.cancel()
+        pollingTask = nil
+        guard pollingSuspensionCount == 0 else { return }
         let configuredCadence = UserDefaults.standard.double(forKey: "pollingCadence")
         let hiddenCadence = configuredCadence > 0 ? min(max(configuredCadence, 15), 60) : 30
         let interval: Duration = visible ? .seconds(5) : .seconds(hiddenCadence)
@@ -197,9 +203,23 @@ final class GitHubSettingsState {
         }
     }
 
-    func stopPolling() {
+    func suspendPollingForMutation() {
+        pollingSuspensionCount += 1
         pollingTask?.cancel()
         pollingTask = nil
+    }
+
+    func waitForRefreshToFinish() async {
+        while isRefreshing {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+    }
+
+    func resumePollingAfterMutation() {
+        pollingSuspensionCount = max(0, pollingSuspensionCount - 1)
+        if pollingSuspensionCount == 0 {
+            setPollingVisible(pollingVisible)
+        }
     }
 
     func refresh() async {
@@ -901,7 +921,9 @@ struct SettingsView: View {
         guard let provider, !isUpdatingGitHub, githubEditorWorkspaces.isEmpty else { return }
         isUpdatingGitHub = true
         githubError = nil
+        githubState.suspendPollingForMutation()
         Task {
+            await githubState.waitForRefreshToFinish()
             do {
                 let policy: [GitHubWorkspacePolicy]
                 if isGitHubAccessTemporarilyDisabled {
@@ -942,6 +964,7 @@ struct SettingsView: View {
                 githubError = "GitHub access stayed unchanged: \(error.localizedDescription)"
             }
             isUpdatingGitHub = false
+            githubState.resumePollingAfterMutation()
         }
     }
 
@@ -1030,7 +1053,9 @@ struct SettingsView: View {
         }
         isUpdatingGitHub = true
         githubError = nil
+        githubState.suspendPollingForMutation()
         Task {
+            await githubState.waitForRefreshToFinish()
             do {
                 if accessMode == .local {
                     guard let provider else {
@@ -1061,6 +1086,7 @@ struct SettingsView: View {
                 githubError = "GitHub access stayed unchanged: \(error.localizedDescription)"
             }
             isUpdatingGitHub = false
+            githubState.resumePollingAfterMutation()
         }
     }
 
