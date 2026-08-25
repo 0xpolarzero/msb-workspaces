@@ -471,6 +471,7 @@ struct DetailView: View {
             }
             detailError
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func logToolbar(
