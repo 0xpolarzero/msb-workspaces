@@ -222,13 +222,10 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertFalse(app.textFields["folders.search.field"].exists)
 
-        let actions = app.menuButtons["workspace.dev.actions"]
-        XCTAssertTrue(actions.waitForExistence(timeout: 2))
-        actions.click()
-        let editorAction = app.menuItems["workspace.dev.open-editor"]
-        XCTAssertTrue(editorAction.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.menuItems["Open in Unsupported Editor…"].exists)
-        editorAction.click()
+        let editorShortcut = app.buttons["workspace.dev.open-editor-shortcut"]
+        XCTAssertTrue(editorShortcut.waitForExistence(timeout: 2))
+        XCTAssertEqual(editorShortcut.label, "Open in Unsupported Editor…")
+        editorShortcut.click()
 
         assertText("dev folders", identifier: "folders.popover.title", in: app)
         let pathBar = app.descendants(matching: .any)["folders.path-bar"]

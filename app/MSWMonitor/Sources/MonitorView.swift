@@ -235,6 +235,9 @@ private struct WorkspaceRow: View {
                     .accessibilityLabel("\(workspace.id.rawValue) \(operation?.action ?? "workspace") in progress")
             } else {
                 primaryAction
+                if canOpenWorkspace {
+                    editorShortcut
+                }
             }
 
             actionsMenu
@@ -283,6 +286,17 @@ private struct WorkspaceRow: View {
                 openDetails(DetailRoute(workspace: workspace.id, section: .overview))
             }
         }
+    }
+
+    private var editorShortcut: some View {
+        compactButton(
+            model.editorActionTitle,
+            systemImage: "chevron.left.forwardslash.chevron.right"
+        ) {
+            model.selectedWorkspace = workspace.id
+            isFolderPickerPresented = true
+        }
+        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).open-editor-shortcut")
     }
 
     private func compactButton(

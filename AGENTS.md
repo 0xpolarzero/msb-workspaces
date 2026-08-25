@@ -186,7 +186,7 @@ Use accessibility identifiers rather than screen coordinates:
 | `folders.tree` / `folders.entry.<safe-path>.expand` | Lazy folder tree | Selects, expands, or double-clicks a real VM directory |
 | `folders.open.button` | Editor handoff | Opens the exact selected folder in the resolved editor adapter |
 | `settings.applications.terminal.picker` / `.editor.picker` | App-specific launch preferences | Defaults to the discovered macOS app and allows a supported override |
-| `workspace.<id>.open-terminal` / `.open-editor` | Dynamic app actions | Labels use the resolved system default or MSW Monitor override |
+| `workspace.<id>.open-terminal` / `.open-editor-shortcut` / `.open-editor` | Dynamic app actions | Direct terminal/editor shortcuts and the action menu use the resolved app override |
 
 The Quit button defines the `Command-Q` keyboard shortcut. Prefer semantic UI
 queries and waits over fixed sleeps or pixel coordinates. The test intentionally
