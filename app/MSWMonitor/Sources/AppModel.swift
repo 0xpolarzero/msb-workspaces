@@ -727,7 +727,8 @@ final class AppModel {
     private(set) var isDetailLoading = false
     private(set) var logsByWorkspace: [String: MSWLogsResponse] = [:]
     private(set) var logsUnavailableWorkspaces: Set<String> = []
-    private(set) var diagnosticChecks: [MSWDiagnosticCheck] = []
+    private(set) var systemHealthChecks: [MSWPreflightCheck] = []
+    private(set) var isSystemHealthLoading = false
     private(set) var backupResult: MSWBackupResult?
     private(set) var maintenanceMessage: String?
     var selectedWorkspace: Workspace.ID?
@@ -749,6 +750,7 @@ final class AppModel {
     private let operationCoordinator: MSWOperationCoordinator?
     private let operationService: MSWOperationService?
     private let diagnostics: MSWDiagnostics?
+    private var systemHealthCoordinator: (any MSWBootstrapCoordinating)?
     private let provider: (any GitHubProviding)?
     let accessMode: GitHubAccessMode
     private let activityStore: MSWActivityStore
@@ -759,6 +761,7 @@ final class AppModel {
     private var sustainedUnavailableNotified = false
     private var notificationGeneration = 0
     private var detailRequestGeneration = 0
+    private var systemHealthGeneration = 0
     private var directoryFixture: [MSWDirectoryResponse] = []
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
@@ -1605,27 +1608,23 @@ final class AppModel {
         }
     }
 
-    func runDiagnostics() {
-        let operationCheck = latestOperationFailure.map { failure in
-            MSWDiagnosticCheck(
-                id: "latest-operation",
-                title: failure.title,
-                status: .failed,
-                detail: failure.reason,
-                recovery: failure.recovery
-            )
-        }
-        guard let diagnostics else {
-            diagnosticChecks = operationCheck.map { [$0] } ?? []
-            detailError = "Runtime diagnostics are unavailable in fixture mode."
-            return
-        }
-        let request = beginDetailRequest()
+    func configureSystemHealthChecks(using coordinator: (any MSWBootstrapCoordinating)?) {
+        systemHealthGeneration &+= 1
+        systemHealthCoordinator = coordinator
+        systemHealthChecks = []
+        isSystemHealthLoading = false
+    }
+
+    func runSystemHealthChecks() {
+        guard let systemHealthCoordinator, !isSystemHealthLoading else { return }
+        systemHealthGeneration &+= 1
+        let generation = systemHealthGeneration
+        isSystemHealthLoading = true
         Task { [weak self] in
-            let result = await diagnostics.checks()
-            guard let self, request == self.detailRequestGeneration else { return }
-            self.diagnosticChecks = operationCheck.map { [$0] + result } ?? result
-            self.finishDetailRequest(request)
+            let checks = await systemHealthCoordinator.preflight()
+            guard let self, generation == self.systemHealthGeneration else { return }
+            self.systemHealthChecks = checks
+            self.isSystemHealthLoading = false
         }
     }
 

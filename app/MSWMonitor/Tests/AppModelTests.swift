@@ -154,6 +154,25 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppNavigationState().workspaceSection, .files)
     }
 
+    func testSystemHealthUsesSetupPreflightChecks() async throws {
+        let model = AppModel()
+        let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")
+        model.configureSystemHealthChecks(using: coordinator)
+
+        model.runSystemHealthChecks()
+        for _ in 0..<100 {
+            if !model.isSystemHealthLoading { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(
+            model.systemHealthChecks.map(\.id),
+            ["macos-version", "architecture", "disk-space", "memory"]
+        )
+        XCTAssertTrue(model.systemHealthChecks.allSatisfy { $0.status == .pass })
+        XCTAssertFalse(model.isSystemHealthLoading)
+    }
+
     func testUnavailableLogsBecomeQuietPerWorkspaceCapabilityState() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-logs-capability-\(UUID().uuidString)", isDirectory: true)

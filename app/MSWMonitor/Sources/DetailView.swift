@@ -1304,33 +1304,28 @@ private extension DetailView {
                     .accessibilityIdentifier("maintenance.repair.button")
                 }
                 Button("Run checks") {
-                    model.runDiagnostics()
+                    model.runSystemHealthChecks()
                 }
-                .disabled(model.isDetailLoading)
+                .disabled(model.isSystemHealthLoading)
                 .accessibilityIdentifier("overview.run-checks.button")
             }
-            Text("Checks the local MSW protocol, runtime, and credential broker without exposing credentials.")
+            Text("Runs the same dependency checks as setup: macOS, Apple Silicon, disk, memory, required tools, MSW runtime, and host integration.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if model.diagnosticChecks.isEmpty && !model.isDetailLoading {
-                Text("Run checks when setup, runtime access, or workspace actions are not working.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(model.diagnosticChecks) { check in
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Label(check.title, systemImage: diagnosticSymbol(check.status))
-                                .font(.body.weight(.medium))
-                            Spacer()
-                            Text(check.status.rawValue.capitalized)
-                                .foregroundStyle(diagnosticColor(check.status))
-                        }
-                        Text(check.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if let recovery = check.recovery {
+            ForEach(model.systemHealthChecks) { check in
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Label(check.title, systemImage: diagnosticSymbol(check.status))
+                            .font(.body.weight(.medium))
+                        Spacer()
+                        Text(healthStatusTitle(check.status))
+                            .foregroundStyle(diagnosticColor(check.status))
+                    }
+                    Text(check.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let recovery = check.remediation {
                             Text(recovery)
                                 .font(.caption)
                                 .foregroundStyle(.orange)
@@ -1341,13 +1336,12 @@ private extension DetailView {
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("diagnostics.\(check.id)")
                 }
-            }
 
-            if model.isDetailLoading {
+            if model.isSystemHealthLoading {
                 OperationRow(
                     phase: "Running checks",
                     scope: nil,
-                    detail: "Checking protocol, runtime, and credential-broker availability."
+                    detail: "Checking the same system dependencies used during setup."
                 )
             }
         }
@@ -1355,8 +1349,11 @@ private extension DetailView {
     }
 
     private var needsInstallationRepair: Bool {
-        model.startupRecoveryBlockedReason != nil || model.diagnosticChecks.contains { check in
-            (check.id == "handshake" || check.id == "quick-check") && check.status != .pass
+        model.startupRecoveryBlockedReason != nil || model.systemHealthChecks.contains { check in
+            let repairable = check.id == "msw-runtime" ||
+                check.id == "host-integration" ||
+                check.id.hasPrefix("tool-")
+            return repairable && check.status != .pass
         }
     }
 
@@ -1456,19 +1453,27 @@ private extension DetailView {
     }
 
 
-    private func diagnosticSymbol(_ status: MSWDiagnosticCheck.Status) -> String {
+    private func diagnosticSymbol(_ status: MSWPreflightCheck.Status) -> String {
         switch status {
         case .pass: return "checkmark.circle.fill"
-        case .failed: return "xmark.circle.fill"
+        case .needsAction: return "exclamationmark.triangle.fill"
         case .unavailable: return "questionmark.circle.fill"
         }
     }
 
-    private func diagnosticColor(_ status: MSWDiagnosticCheck.Status) -> Color {
+    private func diagnosticColor(_ status: MSWPreflightCheck.Status) -> Color {
         switch status {
         case .pass: return .green
-        case .failed: return .red
-        case .unavailable: return .orange
+        case .needsAction: return .orange
+        case .unavailable: return .secondary
+        }
+    }
+
+    private func healthStatusTitle(_ status: MSWPreflightCheck.Status) -> String {
+        switch status {
+        case .pass: return "Passed"
+        case .needsAction: return "Needs action"
+        case .unavailable: return "Unavailable"
         }
     }
 }

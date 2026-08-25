@@ -358,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hostService: MSWHostServiceController()
             )
         }
+        model.configureSystemHealthChecks(using: bootstrap)
         statusBarController?.tearDown()
         let controller = StatusBarController(
             model: model,

@@ -110,6 +110,7 @@ actor MSWOperationService {
 }
 
 
+
 struct MSWDiagnosticCheck: Codable, Sendable, Equatable, Identifiable {
     enum Status: String, Codable, Sendable { case pass, failed, unavailable }
     let id: String
@@ -133,32 +134,6 @@ actor MSWDiagnostics {
         self.client = client
     }
 
-    func checks() async -> [MSWDiagnosticCheck] {
-        var result: [MSWDiagnosticCheck] = []
-        do {
-            let handshake = try await client.handshake()
-            if let value = handshake.result {
-                result.append(MSWDiagnosticCheck(id: "handshake", title: "MSW protocol", status: .pass, detail: "Protocol v\(value.protocolVersion), MSW \(value.mswVersion).", recovery: nil))
-            } else {
-                result.append(MSWDiagnosticCheck(id: "handshake", title: "MSW protocol", status: .failed, detail: "MSW returned no handshake result.", recovery: "Repair the MSW runtime."))
-            }
-        } catch {
-            result.append(MSWDiagnosticCheck(id: "handshake", title: "MSW protocol", status: .unavailable, detail: error.localizedDescription, recovery: "Run setup or repair the MSW runtime."))
-        }
-        do {
-            let check = try await client.check()
-            if let value = check.result, value.passed {
-                result.append(contentsOf: value.checks)
-            } else {
-                result.append(MSWDiagnosticCheck(id: "quick-check", title: "MSW quick check", status: .failed, detail: "MSW returned no successful quick-check result.", recovery: "Repair the MSW runtime or host integration, then retry."))
-            }
-        } catch {
-            result.append(MSWDiagnosticCheck(id: "quick-check", title: "MSW quick check", status: .unavailable, detail: error.localizedDescription, recovery: "Repair the MSW runtime or host integration, then retry."))
-        }
-        let keychain = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/Keychains/login.keychain-db")
-        result.append(MSWDiagnosticCheck(id: "keychain", title: "Credential broker", status: keychain ? .pass : .unavailable, detail: keychain ? "The login Keychain is available." : "The login Keychain could not be located.", recovery: keychain ? nil : "Sign in to macOS and retry."))
-        return result
-    }
 
     func backup(to directory: URL) async throws -> MSWBackupResult {
         try validateDirectory(directory)
