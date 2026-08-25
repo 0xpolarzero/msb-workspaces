@@ -1264,6 +1264,50 @@ final class AppModel {
             worktreeStatusIncluded: true,
             notice: nil
         )
+        logsByWorkspace = [
+            "dev": MSWLogsResponse(
+                workspace: "dev",
+                available: true,
+                lifecycle: .running,
+                freshness: .fresh,
+                reason: nil,
+                lines: [
+                    MSWLogEntry(
+                        workspace: "dev",
+                        message: "Development service ready",
+                        safeForDisplay: true
+                    )
+                ]
+            ),
+            "playgrounds": MSWLogsResponse(
+                workspace: "playgrounds",
+                available: true,
+                lifecycle: .stopped,
+                freshness: .fresh,
+                reason: nil,
+                lines: [
+                    MSWLogEntry(
+                        workspace: "playgrounds",
+                        message: "Playground task completed",
+                        safeForDisplay: true
+                    )
+                ]
+            ),
+            "personal": MSWLogsResponse(
+                workspace: "personal",
+                available: true,
+                lifecycle: .stopped,
+                freshness: .fresh,
+                reason: nil,
+                lines: [
+                    MSWLogEntry(
+                        workspace: "personal",
+                        message: "Personal task completed",
+                        safeForDisplay: true
+                    )
+                ]
+            )
+        ]
         directoryFixture = [
             MSWDirectoryResponse(
                 workspace: "dev",

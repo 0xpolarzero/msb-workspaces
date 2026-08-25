@@ -236,15 +236,25 @@ final class MSWMonitorUITests: XCTestCase {
         assertText("Logs", identifier: "details.section-title", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.logs"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["logs.workspace.dev"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["logs.tag.dev"].exists)
         for workspace in ["playgrounds", "personal"] {
             XCTAssertTrue(
-                app.descendants(matching: .any)["logs.workspace.\(workspace)"]
+                app.descendants(matching: .any)["logs.tag.\(workspace)"]
                     .waitForExistence(timeout: 2)
             )
         }
+        XCTAssertEqual(
+            app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS[c] %@", "bounded logs")
+            ).count,
+            0
+        )
         app.descendants(matching: .any)["workspace.filter.dev"].click()
-        XCTAssertTrue(app.descendants(matching: .any)["logs.workspace.dev"].waitForExistence(timeout: 2))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["logs.tag.dev"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(app.staticTexts["Development service ready"].exists)
 
         let network = app.buttons["Network"]
         XCTAssertTrue(network.waitForExistence(timeout: 2))

@@ -349,6 +349,12 @@ struct DetailView: View {
     }
 
 
+    private struct TaggedLogLine: Identifiable {
+        let id: String
+        let workspace: Workspace.ID
+        let message: String
+    }
+
     private var logs: some View {
         VStack(alignment: .leading, spacing: 12) {
             if visibleWorkspaces.isEmpty {
@@ -357,11 +363,38 @@ struct DetailView: View {
                     systemImage: "line.3.horizontal.decrease.circle",
                     description: Text("Select at least one workspace to see its logs.")
                 )
+            } else if visibleLogLines.isEmpty {
+                ContentUnavailableView(
+                    "No logs yet",
+                    systemImage: "text.alignleft",
+                    description: Text("Logs from the selected workspaces will appear here.")
+                )
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(visibleWorkspaces) { workspace in
-                            logSection(for: workspace)
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(visibleLogLines) { line in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                Text(line.workspace.rawValue)
+                                    .font(.caption2.monospaced().weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(
+                                        Color.secondary.opacity(0.1),
+                                        in: Capsule()
+                                    )
+                                    .accessibilityIdentifier(
+                                        "logs.tag.\(line.workspace.rawValue)"
+                                    )
+                                Text(line.message)
+                                    .font(.caption.monospaced())
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.vertical, 6)
+                            .accessibilityElement(children: .contain)
+                            .accessibilityIdentifier("logs.line.\(line.id)")
+                            Divider()
                         }
                     }
                 }
@@ -371,69 +404,27 @@ struct DetailView: View {
         .accessibilityIdentifier("details.logs")
     }
 
-
-    @ViewBuilder
-    private func logSection(for workspace: Workspace) -> some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
-                if let failure = model.latestOperationFailure, failure.workspace == workspace.id {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label(failure.reason, systemImage: "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                        Text(failure.recovery)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("View system health") {
-                            navigation.tab = .overview
-                        }
-                        .accessibilityIdentifier("details.latest-operation-error.action")
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("details.latest-operation-error")
-                }
-                if model.logsUnavailableWorkspaces.contains(workspace.id.rawValue) {
-                    Text(workspace.state == .running
-                         ? "Bounded logs are not available from this runtime."
-                         : "Logs are not available while this workspace is stopped.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("logs.\(workspace.id.rawValue).unavailable")
-                } else if let value = model.logsByWorkspace[workspace.id.rawValue] {
-                    FreshnessNotice(
-                        freshness: value.freshness,
-                        observedAt: workspace.observedAt,
-                        reason: value.reason
-                    )
-                    if value.lines.isEmpty {
-                        Text("No log lines")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(value.lines.suffix(100).enumerated()), id: \.offset) { _, line in
-                            Text(line.message)
-                                .font(.caption.monospaced())
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                } else {
-                    Text("No logs yet")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+    private var visibleLogLines: [TaggedLogLine] {
+        var result: [TaggedLogLine] = []
+        for workspace in visibleWorkspaces {
+            guard let response = model.logsByWorkspace[workspace.id.rawValue] else {
+                continue
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } label: {
-            HStack {
-                Text(workspace.id.rawValue)
-                Spacer()
-                Text(workspace.state.rawValue)
-                    .foregroundStyle(.secondary)
+            for (offset, line) in response.lines.suffix(100).enumerated()
+            where line.safeForDisplay {
+                result.append(
+                    TaggedLogLine(
+                        id: "\(workspace.id.rawValue).\(offset)",
+                        workspace: workspace.id,
+                        message: line.message
+                    )
+                )
             }
         }
-        .accessibilityIdentifier("logs.workspace.\(workspace.id.rawValue)")
+        return result
     }
+
+
 
 
     private var visibleWorkspaces: [Workspace] {
