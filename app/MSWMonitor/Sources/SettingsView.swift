@@ -233,7 +233,6 @@ struct SettingsView: View {
 
                     VStack(spacing: 0) {
                         workspaceSectionMenu
-                        Divider()
                         DetailView(model: model, navigation: navigation, mode: .workspaces)
                     }
                     .tabItem {
@@ -319,7 +318,7 @@ struct SettingsView: View {
     }
 
     private var workspaceSectionMenu: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 8) {
             ForEach(WorkspaceSection.allCases) { section in
                 let isSelected = navigation.workspaceSection == section
                 Button {
@@ -331,19 +330,12 @@ struct SettingsView: View {
                         Text(section.rawValue)
                             .font(.caption)
                     }
-                    .frame(minWidth: 76)
-                    .padding(.vertical, 6)
+                    .frame(width: 82, height: 42)
                     .contentShape(Rectangle())
-                    .overlay(alignment: .bottom) {
-                        if isSelected {
-                            Capsule()
-                                .fill(Color.accentColor)
-                                .frame(width: 24, height: 2)
-                        }
-                    }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .help(section.rawValue)
                 .accessibilityIdentifier("workspace.section.\(section.rawValue)")
                 .accessibilityValue(isSelected ? "Selected" : "Not selected")
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -351,8 +343,7 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 20)
-        .padding(.vertical, 4)
-        .background(.bar)
+        .padding(.vertical, 2)
     }
 
     private var generalSettings: some View {
