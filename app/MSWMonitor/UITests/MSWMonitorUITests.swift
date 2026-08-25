@@ -117,18 +117,13 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertFalse(app.staticTexts["Loading GitHub status…"].exists)
 
-        let editAccess = app.buttons["settings.github.setup.button"]
-        XCTAssertTrue(editAccess.waitForExistence(timeout: 2))
-        editAccess.click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["settings.github.editor"]
-                .waitForExistence(timeout: 2)
-        )
+        XCTAssertFalse(app.buttons["settings.github.setup.button"].exists)
+        XCTAssertTrue(app.buttons["settings.github.disable-all"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["settings.github.reset"].waitForExistence(timeout: 2))
+        let workspaceAccess = app.descendants(matching: .any)["settings.github.workspace-access"]
+        XCTAssertTrue(workspaceAccess.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.buttons["settings.github.editor.save"].exists)
         XCTAssertFalse(app.windows["setup.window"].exists)
-        let editorScreenshot = XCTAttachment(screenshot: app.screenshot())
-        editorScreenshot.name = "GitHub settings repository editor"
-        editorScreenshot.lifetime = .keepAlways
-        add(editorScreenshot)
 
         let repositoryPicker = app.buttons["github.workspace.dev.repository-picker.button"]
         XCTAssertTrue(repositoryPicker.waitForExistence(timeout: 2))
@@ -137,15 +132,42 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(repository.waitForExistence(timeout: 2))
         repository.click()
 
+        XCTAssertTrue(app.staticTexts["Unsaved"].waitForExistence(timeout: 2))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.github.unsaved"]
+                .waitForExistence(timeout: 2)
+        )
+        repository.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.github.unsaved"]
+                .waitForNonExistence(timeout: 2)
+        )
+        repository.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.github.unsaved"]
+                .waitForExistence(timeout: 2)
+        )
+        app.typeKey(.escape, modifierFlags: [])
         let save = app.buttons["settings.github.editor.save"]
         XCTAssertTrue(save.waitForExistence(timeout: 2))
         XCTAssertTrue(save.isEnabled)
-        app.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: 600)
+        let editorScreenshot = XCTAttachment(screenshot: app.screenshot())
+        editorScreenshot.name = "GitHub settings unsaved workspace access"
+        editorScreenshot.lifetime = .keepAlways
+        add(editorScreenshot)
+
         save.click()
         XCTAssertTrue(
-            app.descendants(matching: .any)["settings.github.editor"]
+            app.descendants(matching: .any)["settings.github.unsaved"]
                 .waitForNonExistence(timeout: 3)
         )
+        XCTAssertTrue(workspaceAccess.exists)
+        let disable = app.buttons["settings.github.disable-all"]
+        disable.click()
+        XCTAssertTrue(app.buttons["Enable Access"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Access disabled"].exists)
+        app.buttons["Enable Access"].click()
+        XCTAssertTrue(app.buttons["Disable Access"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.windows["setup.window"].exists)
     }
 

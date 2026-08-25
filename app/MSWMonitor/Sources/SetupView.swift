@@ -3788,6 +3788,9 @@ struct RepositoryWorkspacePolicyEditor: View {
     @Binding var editedWorkspaces: Set<String>
     let disabled: Bool
     let onEdit: () -> Void
+    var showsHeading = true
+    var highlightsEdits = false
+    var usesContainerBackground = true
     private static let workspaceAccessHelp = "Choose which repositories each workspace can use with your GitHub credentials, and whether it can push changes. Public repositories remain cloneable without granting access."
     private static let pushHelp = "Push to GitHub from inside this workspace's VM. You can always push from outside the VM using MSW Monitor."
     private static let pushDeniedHelp = "GitHub does not grant push access to this repository. Neither the VM nor MSW Monitor can push until that access changes."
@@ -3802,20 +3805,25 @@ struct RepositoryWorkspacePolicyEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 5) {
-                Text("Workspace Access").font(.headline)
-                InformationTooltip(
-                    text: Self.workspaceAccessHelp,
-                    accessibilityLabel: "Workspace Access information",
-                    accessibilityIdentifier: "setup.github.workspace-access.info"
-                )
+            if showsHeading {
+                HStack(spacing: 5) {
+                    Text("Workspace Access").font(.headline)
+                    InformationTooltip(
+                        text: Self.workspaceAccessHelp,
+                        accessibilityLabel: "Workspace Access information",
+                        accessibilityIdentifier: "setup.github.workspace-access.info"
+                    )
+                }
             }
             ForEach(workspaces, id: \.self) { workspace in
                 workspaceSection(workspace)
             }
         }
-        .padding(10)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .padding(usesContainerBackground ? 10 : 0)
+        .background(
+            usesContainerBackground ? Color(nsColor: .controlBackgroundColor) : .clear,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
         .accessibilityElement(children: .contain)
     }
 
@@ -3825,6 +3833,11 @@ struct RepositoryWorkspacePolicyEditor: View {
             HStack {
                 Text(workspace).font(.callout.weight(.semibold))
                 Spacer()
+                if highlightsEdits, editedWorkspaces.contains(workspace) {
+                    Text("Unsaved")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
                 Button {
                     searchQueries[workspace] = ""
                     openPicker = workspace
@@ -3857,7 +3870,12 @@ struct RepositoryWorkspacePolicyEditor: View {
             }
         }
         .padding(8)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .background(
+            highlightsEdits && editedWorkspaces.contains(workspace)
+                ? Color.accentColor.opacity(0.10)
+                : Color(nsColor: .windowBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 6)
+        )
     }
 
     @ViewBuilder

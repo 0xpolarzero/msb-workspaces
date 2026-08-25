@@ -292,6 +292,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startupRecoveryBlockedReason: String? = nil
     ) {
         let arguments = ProcessInfo.processInfo.arguments
+        if fixtureMode {
+            UserDefaults.standard.removeObject(forKey: "github.settings.access-disabled")
+            UserDefaults.standard.removeObject(forKey: "github.settings.disabled-policy")
+        }
         let uiTestGitHubScenario = arguments.compactMap { argument -> String? in
             let prefix = "--ui-test-github-"
             return argument.hasPrefix(prefix) ? String(argument.dropFirst(prefix.count)) : nil

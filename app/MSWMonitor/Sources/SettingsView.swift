@@ -335,7 +335,11 @@ struct SettingsView: View {
     @State private var isPreparingGitHubEditor = false
     @State private var githubEditorSessionID: UUID?
     @State private var githubEditorDrafts: [String: WorkspaceRepositoryDraft] = [:]
+    @State private var githubSavedEditorDrafts: [String: WorkspaceRepositoryDraft] = [:]
     @State private var githubEditorWorkspaces: Set<String> = []
+    @State private var isGitHubAccessTemporarilyDisabled = UserDefaults.standard.bool(
+        forKey: "github.settings.access-disabled"
+    )
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var enabledNotificationCategories: Set<MSWNotificationCategory> = []
     @State private var notificationMessage: String?
@@ -588,9 +592,7 @@ struct SettingsView: View {
         Form {
             if accessMode == .local {
                 localGitHubAccountSection
-                if !isEditingGitHubAccess, !isPreparingGitHubEditor {
-                    localGitHubAccessSection
-                }
+                localGitHubAccessSection
             } else {
                 Section("Account") {
                     if let connectedAccount {
@@ -639,14 +641,24 @@ struct SettingsView: View {
                 }
                 }
             }
-            if isEditingGitHubAccess || isPreparingGitHubEditor {
+            if accessMode == .connect,
+               isEditingGitHubAccess || isPreparingGitHubEditor {
                 githubAccessEditorSection
             }
         }
         .formStyle(.grouped)
         .accessibilityIdentifier("settings.github")
+        .onAppear {
+            isGitHubAccessTemporarilyDisabled = UserDefaults.standard.bool(
+                forKey: "github.settings.access-disabled"
+            )
+            synchronizeLocalGitHubEditorIfClean()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .githubPolicyDidChange)) { _ in
-            Task { await loadGitHubState() }
+            Task {
+                await loadGitHubState()
+                synchronizeLocalGitHubEditorIfClean()
+            }
         }
     }
 
@@ -658,10 +670,7 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.github.status")
             case .ready(let account, _, _):
                 if let account {
-                    Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Connected as @\(account.login)")
-                        .accessibilityIdentifier("settings.github.status")
+                    localGitHubConnectedAccountRow(account)
                 } else {
                     LabeledContent("Status", value: githubStatusText)
                         .accessibilityIdentifier("settings.github.status")
@@ -677,10 +686,6 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.github.status")
             }
             localGitHubPrimaryAction
-            Button("Remove all GitHub access…", role: .destructive) {
-                destructiveAction = .disconnect([], connectedAccount)
-            }
-            .disabled(!githubFeatureAvailable || isUpdatingGitHub)
             if let githubError {
                 recoveryMessage(githubError)
                 Button("Retry GitHub status") {
@@ -688,6 +693,36 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    private func localGitHubConnectedAccountRow(_ account: GitHubAccount) -> some View {
+        HStack(spacing: 10) {
+            Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityLabel("Connected as @\(account.login)")
+                .accessibilityIdentifier("settings.github.status")
+            if isGitHubAccessTemporarilyDisabled {
+                Text("Access disabled")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
+            Spacer()
+            Button(isGitHubAccessTemporarilyDisabled ? "Enable Access" : "Disable Access") {
+                toggleTemporaryGitHubAccess()
+            }
+            .disabled(isUpdatingGitHub || !githubEditorWorkspaces.isEmpty)
+            .accessibilityIdentifier("settings.github.disable-all")
+            Button("Reset…", role: .destructive) {
+                destructiveAction = .disconnect([], connectedAccount)
+            }
+            .disabled(
+                !githubFeatureAvailable ||
+                    isUpdatingGitHub ||
+                    !githubEditorWorkspaces.isEmpty
+            )
+            .accessibilityIdentifier("settings.github.reset")
+        }
+        .controlSize(.small)
     }
 
     @ViewBuilder
@@ -708,68 +743,58 @@ struct SettingsView: View {
             .disabled(isUpdatingGitHub)
             .accessibilityIdentifier("settings.github.retry.button")
         case .ready:
-            Button("Choose repository access…", action: beginEditingGitHubAccess)
-                .buttonStyle(.borderedProminent)
-                .disabled(isUpdatingGitHub)
-                .accessibilityIdentifier("settings.github.setup.button")
+            EmptyView()
         default:
             EmptyView()
         }
     }
 
+    @ViewBuilder
     private var localGitHubAccessSection: some View {
-        Section("Repository access") {
-            let workspaceNames = localPolicy.map { Array($0.workspaces.keys) } ?? []
-            let workspaces = workspaceNames.sorted().compactMap(Workspace.ID.init(rawValue:))
-            if workspaces.isEmpty {
-                ContentUnavailableView(
-                    "No repository access",
-                    systemImage: "lock.shield",
-                    description: Text("Choose repository access for each workspace here.")
+        if case .ready = githubConnectionState {
+            Section("Repository access") {
+                RepositoryWorkspacePolicyEditor(
+                    workspaces: githubWorkspaceNames,
+                    installations: githubState.installations,
+                    repositoriesByInstallation: githubState.repositoriesByInstallation,
+                    accessMode: accessMode,
+                    drafts: $githubEditorDrafts,
+                    editedWorkspaces: $githubEditorWorkspaces,
+                    disabled: isUpdatingGitHub || isGitHubAccessTemporarilyDisabled,
+                    onEdit: reconcileGitHubEditorDirtyState,
+                    showsHeading: false,
+                    highlightsEdits: true,
+                    usesContainerBackground: false
                 )
-            } else {
-                ForEach(workspaces, id: \.rawValue) { workspace in
-                    localWorkspaceAccessRow(workspace)
-                }
-            }
-        }
-    }
+                .accessibilityIdentifier("settings.github.workspace-access")
 
-    private func localWorkspaceAccessRow(_ workspace: Workspace.ID) -> some View {
-        let repos = localPolicy?.workspaces[workspace.rawValue]?.repos ?? []
-        return VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(workspace.rawValue).font(.body.weight(.semibold))
-                Spacer()
-                Text(repos.isEmpty ? "No access" : "\(repos.count) repositor\(repos.count == 1 ? "y" : "ies")")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-            if repos.isEmpty {
-                Text("No repositories are assigned to this workspace.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(repos.map { "\($0.canonical) — \($0.mode.label)" }.joined(separator: "\n"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Button("Edit \(workspace.rawValue)", action: beginEditingGitHubAccess)
-                    .disabled(isUpdatingGitHub)
-                Button("Remove \(workspace.rawValue) access…", role: .destructive) {
-                    destructiveAction = .remove(WorkspaceGrantGroup(
-                        workspace: workspace.rawValue,
-                        entries: [],
-                        repositoryNames: repos.map(\.canonical)
-                    ))
+                if !githubEditorWorkspaces.isEmpty {
+                    HStack {
+                        Label(
+                            "\(githubEditorWorkspaces.count) unsaved workspace change\(githubEditorWorkspaces.count == 1 ? "" : "s")",
+                            systemImage: "circle.fill"
+                        )
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("settings.github.unsaved")
+                        Spacer()
+                        Button("Cancel", action: cancelLocalGitHubAccessChanges)
+                            .disabled(isUpdatingGitHub)
+                        Button("Save Changes", action: saveGitHubAccessChanges)
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isUpdatingGitHub)
+                            .accessibilityIdentifier("settings.github.editor.save")
+                    }
+                    .controlSize(.small)
                 }
-                .disabled(isUpdatingGitHub)
+            }
+            .onAppear {
+                synchronizeLocalGitHubEditorIfClean()
+            }
+            .onChange(of: localPolicy) { _, _ in
+                synchronizeLocalGitHubEditorIfClean()
             }
         }
-        .padding(.vertical, 4)
     }
 
     @ViewBuilder
@@ -787,7 +812,7 @@ struct SettingsView: View {
                     drafts: $githubEditorDrafts,
                     editedWorkspaces: $githubEditorWorkspaces,
                     disabled: isUpdatingGitHub,
-                    onEdit: {}
+                    onEdit: reconcileGitHubEditorDirtyState
                 )
                 .accessibilityIdentifier("settings.github.editor")
 
@@ -811,22 +836,118 @@ struct SettingsView: View {
             : names
     }
 
+    private func synchronizeLocalGitHubEditorIfClean() {
+        guard accessMode == .local, githubEditorWorkspaces.isEmpty else { return }
+        var drafts = Dictionary(
+            uniqueKeysWithValues: githubWorkspaceNames.map { ($0, WorkspaceRepositoryDraft.initial($0)) }
+        )
+        if isGitHubAccessTemporarilyDisabled, let backup = disabledGitHubPolicyBackup {
+            for policy in backup where drafts[policy.workspace] != nil {
+                drafts[policy.workspace]?.repositoryModes = Dictionary(
+                    uniqueKeysWithValues: policy.repositories.map {
+                        (GitHubLocalProvider.canonicalize($0.fullName), $0.mode)
+                    }
+                )
+            }
+        } else {
+            for workspace in githubWorkspaceNames {
+                guard let policyWorkspace = localPolicy?.workspaces[workspace] else { continue }
+                drafts[workspace]?.repositoryModes = SetupView.localPolicyPrefill(
+                    policyWorkspace: policyWorkspace
+                )
+            }
+        }
+        githubEditorDrafts = drafts
+        githubSavedEditorDrafts = drafts
+    }
+
+    private func reconcileGitHubEditorDirtyState() {
+        githubEditorWorkspaces = Set(githubWorkspaceNames.filter {
+            githubEditorDrafts[$0] != githubSavedEditorDrafts[$0]
+        })
+    }
+
+    private func cancelLocalGitHubAccessChanges() {
+        githubEditorDrafts = githubSavedEditorDrafts
+        githubEditorWorkspaces.removeAll()
+    }
+
+    private var allLocalGitHubPolicies: [GitHubWorkspacePolicy] {
+        githubWorkspaceNames.map { workspace in
+            let draft = githubEditorDrafts[workspace] ?? .initial(workspace)
+            return GitHubWorkspacePolicy(
+                workspace: workspace,
+                repositories: SetupView.repositoryPolicyEntries(
+                    workspace: workspace,
+                    draft: draft,
+                    installations: githubState.installations,
+                    repositoriesByInstallation: githubState.repositoriesByInstallation,
+                    accessMode: .local
+                )
+            )
+        }
+    }
+
+    private var disabledGitHubPolicyBackup: [GitHubWorkspacePolicy]? {
+        guard let data = UserDefaults.standard.data(
+            forKey: "github.settings.disabled-policy"
+        ) else {
+            return nil
+        }
+        return try? JSONDecoder().decode([GitHubWorkspacePolicy].self, from: data)
+    }
+
+    private func toggleTemporaryGitHubAccess() {
+        guard let provider, !isUpdatingGitHub, githubEditorWorkspaces.isEmpty else { return }
+        isUpdatingGitHub = true
+        githubError = nil
+        Task {
+            do {
+                let policy: [GitHubWorkspacePolicy]
+                if isGitHubAccessTemporarilyDisabled {
+                    guard let backup = disabledGitHubPolicyBackup else {
+                        throw GitHubCatalogError.unavailable(
+                            "The saved repository access needed to re-enable GitHub is unavailable."
+                        )
+                    }
+                    policy = backup
+                } else {
+                    synchronizeLocalGitHubEditorIfClean()
+                    let backup = allLocalGitHubPolicies
+                    let data = try JSONEncoder().encode(backup)
+                    UserDefaults.standard.set(data, forKey: "github.settings.disabled-policy")
+                    policy = githubWorkspaceNames.map {
+                        GitHubWorkspacePolicy(workspace: $0, repositories: [])
+                    }
+                }
+
+                let progress = try await provider.beginPolicyApply(policy)
+                if progress.isInFlight {
+                    try await provider.waitForCurrentPolicyApply()
+                }
+                isGitHubAccessTemporarilyDisabled.toggle()
+                UserDefaults.standard.set(
+                    isGitHubAccessTemporarilyDisabled,
+                    forKey: "github.settings.access-disabled"
+                )
+                if !isGitHubAccessTemporarilyDisabled {
+                    UserDefaults.standard.removeObject(
+                        forKey: "github.settings.disabled-policy"
+                    )
+                }
+                await githubState.refresh()
+                githubEditorWorkspaces.removeAll()
+                synchronizeLocalGitHubEditorIfClean()
+            } catch {
+                githubError = "GitHub access stayed unchanged: \(error.localizedDescription)"
+            }
+            isUpdatingGitHub = false
+        }
+    }
+
     private func beginEditingGitHubAccess() {
         guard !isPreparingGitHubEditor, !isEditingGitHubAccess else { return }
         githubError = nil
-        if accessMode == .local {
-            if case .loading = githubConnectionState {
-                isPreparingGitHubEditor = true
-                Task {
-                    await githubState.refresh()
-                    isPreparingGitHubEditor = false
-                    configureLocalGitHubEditor()
-                }
-            } else {
-                configureLocalGitHubEditor()
-            }
-            return
-        }
 
         guard let authorizationCoordinator else {
             githubError = GitHubFeatureAvailability.unavailableNotice
@@ -861,45 +982,34 @@ struct SettingsView: View {
         }
     }
 
-    private func configureLocalGitHubEditor() {
-        githubEditorSessionID = nil
-        configureGitHubEditorDrafts()
-        isEditingGitHubAccess = true
-    }
 
     private func configureGitHubEditorDrafts() {
         var drafts = Dictionary(
-            uniqueKeysWithValues: githubWorkspaceNames.map { ($0, WorkspaceRepositoryDraft.initial($0)) }
-        )
-        if accessMode == .local {
-            for workspace in githubWorkspaceNames {
-                guard let policyWorkspace = localPolicy?.workspaces[workspace] else { continue }
-                drafts[workspace]?.repositoryModes = SetupView.localPolicyPrefill(
-                    policyWorkspace: policyWorkspace
-                )
+            uniqueKeysWithValues: githubWorkspaceNames.map {
+                ($0, WorkspaceRepositoryDraft.initial($0))
             }
-        } else {
-            for workspace in githubWorkspaceNames {
-                let entries = metadata.filter { $0.workspace == workspace }
-                guard let installationID = entries.compactMap(\.installationID).first else { continue }
-                let available = githubState.repositoriesByInstallation[installationID] ?? []
-                let byID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
-                var modes: [String: GitHubRepositoryAccessMode] = [:]
-                for entry in entries {
-                    for repositoryID in entry.repositoryIDs {
-                        guard let repository = byID[repositoryID] else { continue }
-                        let canonical = GitHubLocalProvider.canonicalize(repository.fullName)
-                        let mode: GitHubRepositoryAccessMode = entry.role == .host ? .readWrite : .readOnly
-                        if modes[canonical] != .readWrite {
-                            modes[canonical] = mode
-                        }
+        )
+        for workspace in githubWorkspaceNames {
+            let entries = metadata.filter { $0.workspace == workspace }
+            guard let installationID = entries.compactMap(\.installationID).first else { continue }
+            let available = githubState.repositoriesByInstallation[installationID] ?? []
+            let byID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
+            var modes: [String: GitHubRepositoryAccessMode] = [:]
+            for entry in entries {
+                for repositoryID in entry.repositoryIDs {
+                    guard let repository = byID[repositoryID] else { continue }
+                    let canonical = GitHubLocalProvider.canonicalize(repository.fullName)
+                    let mode: GitHubRepositoryAccessMode = entry.role == .host ? .readWrite : .readOnly
+                    if modes[canonical] != .readWrite {
+                        modes[canonical] = mode
                     }
                 }
-                drafts[workspace]?.installationID = installationID
-                drafts[workspace]?.repositoryModes = modes
             }
+            drafts[workspace]?.installationID = installationID
+            drafts[workspace]?.repositoryModes = modes
         }
         githubEditorDrafts = drafts
+        githubSavedEditorDrafts = drafts
         githubEditorWorkspaces.removeAll()
     }
 
@@ -941,7 +1051,12 @@ struct SettingsView: View {
                 }
                 await githubState.refresh()
                 NotificationCenter.default.post(name: .githubPolicyDidChange, object: nil)
-                closeGitHubAccessEditor()
+                if accessMode == .local {
+                    githubEditorWorkspaces.removeAll()
+                    synchronizeLocalGitHubEditorIfClean()
+                } else {
+                    closeGitHubAccessEditor()
+                }
             } catch {
                 githubError = "GitHub access stayed unchanged: \(error.localizedDescription)"
             }
@@ -954,6 +1069,7 @@ struct SettingsView: View {
         isPreparingGitHubEditor = false
         githubEditorSessionID = nil
         githubEditorDrafts.removeAll()
+        githubSavedEditorDrafts.removeAll()
         githubEditorWorkspaces.removeAll()
     }
 
@@ -1270,10 +1386,13 @@ struct SettingsView: View {
             Task {
                 do {
                     try await provider.removeAllAccess()
+                    isGitHubAccessTemporarilyDisabled = false
+                    UserDefaults.standard.removeObject(forKey: "github.settings.access-disabled")
+                    UserDefaults.standard.removeObject(forKey: "github.settings.disabled-policy")
+                    githubEditorWorkspaces.removeAll()
+                    await githubState.refresh()
+                    synchronizeLocalGitHubEditorIfClean()
                     isUpdatingGitHub = false
-                    localPolicy = await provider.currentPolicy()
-                    connectedAccount = nil
-                    githubConnectionState = .ready(account: nil, owners: [], policy: localPolicy)
                 } catch {
                     isUpdatingGitHub = false
                     githubError = "Removal could not be applied. Repository access remains unchanged: \(error.localizedDescription)"
