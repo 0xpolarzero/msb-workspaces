@@ -3228,13 +3228,23 @@ class PackagedBehaviorTests(MSWTestCase):
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
             extra_env={
                 "MSW_FAKE_LOGS_JSONL_FAIL": "1",
-                "MSW_FAKE_LOGS": "demo service listening on port 3000",
+                "MSW_FAKE_LOGS": "\n".join([
+                    ("H" * 32) + '{"path":".","query":null,"entries":[],"truncated":false}',
+                    ("H" * 32) + '{"event":"service-ready"}',
+                    "demo service listening on port 3000",
+                ]),
             },
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
-        self.assertEqual([line["type"] for line in lines], ["stream-start", "log", "stream-end"])
-        self.assertEqual(lines[1]["message"], "demo service listening on port 3000")
+        self.assertEqual(
+            [line["type"] for line in lines],
+            ["stream-start", "log", "log", "stream-end"],
+        )
+        self.assertEqual(lines[1]["message"], '{"event":"service-ready"}')
+        self.assertEqual(lines[2]["message"], "demo service listening on port 3000")
         self.assertTrue(lines[1]["safeForDisplay"])
+        self.assertNotIn('"entries"', document.stdout)
+        self.assertNotIn("HHHH", document.stdout)
 
 
     def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
