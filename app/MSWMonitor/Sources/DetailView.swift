@@ -240,16 +240,17 @@ struct DetailView: View {
 
 
     private var overviewDashboard: some View {
-        Form {
-            Section("Workspaces") {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Workspaces")
+                    .font(.headline)
                 workspaceSummary
-            }
-
-            Section("System health") {
+                Divider()
                 systemHealth
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
         }
-        .formStyle(.grouped)
         .accessibilityIdentifier("details.overview")
     }
 
@@ -1866,6 +1867,8 @@ private extension DetailView {
     private var systemHealth: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
+                Text("System health")
+                    .font(.headline)
                 Spacer()
                 if needsInstallationRepair {
                     Button("Repair MSW installation…") {
@@ -1879,9 +1882,6 @@ private extension DetailView {
                 .disabled(model.isSystemHealthLoading)
                 .accessibilityIdentifier("overview.run-checks.button")
             }
-            Text("Runs the same dependency checks as setup: macOS, Apple Silicon, disk, memory, required tools, MSW runtime, and host integration.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             ForEach(model.systemHealthChecks) { check in
                 VStack(alignment: .leading, spacing: 5) {
