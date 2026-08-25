@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MSW Monitor Log Viewer — UX Research and Direction</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --text: #17191d;
+    --muted: #656b75;
+    --line: #dfe2e7;
+    --accent: #1677ff;
+    --accent-soft: #e9f2ff;
+    --danger: #b42318;
+    --code: #f1f3f6;
+    --shadow: 0 16px 42px rgba(20, 28, 42, .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171a;
+      --surface: #1d2024;
+      --surface-2: #24282d;
+      --text: #f3f4f6;
+      --muted: #a8adb6;
+      --line: #353a41;
+      --accent: #68a7ff;
+      --accent-soft: #1c3558;
+      --danger: #ff8a80;
+      --code: #252a30;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif;
+  }
+  main { max-width: 1160px; margin: 0 auto; padding: 64px 28px 96px; }
+  h1, h2, h3 { line-height: 1.15; letter-spacing: -.025em; }
+  h1 { margin: 14px 0 18px; font-size: clamp(36px, 6vw, 64px); max-width: 900px; }
+  h2 { margin: 0 0 18px; font-size: 28px; }
+  h3 { margin: 0 0 8px; font-size: 18px; }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .eyebrow { color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+  .lede { max-width: 850px; color: var(--muted); font-size: 20px; }
+  .verdict {
+    margin: 34px 0 44px;
+    padding: 22px 24px;
+    background: var(--surface);
+    border-left: 4px solid var(--accent);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    font-size: 17px;
+  }
+  section { margin-top: 54px; }
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; }
+  .card {
+    grid-column: span 6;
+    padding: 22px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+  }
+  .card p, .card li { color: var(--muted); }
+  .card strong { color: var(--text); }
+  .problem { grid-column: span 4; }
+  .number { display: inline-grid; place-items: center; width: 28px; height: 28px; margin-bottom: 14px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  th, td { padding: 14px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { color: var(--muted); background: var(--surface-2); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: 0; }
+  .mock {
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+  }
+  .toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+  .search { flex: 1; max-width: 360px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--surface); }
+  .button { padding: 7px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); font-size: 13px; }
+  .button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+  .log-head, .log-row { display: grid; grid-template-columns: 86px 116px minmax(0, 1fr) 34px; gap: 12px; align-items: start; padding: 9px 14px; }
+  .log-head { color: var(--muted); background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+  .log-row { border-bottom: 1px solid var(--line); font: 13px/1.45 ui-monospace, "SFMono-Regular", Menlo, monospace; }
+  .log-row:hover { background: var(--accent-soft); }
+  .tag { width: fit-content; padding: 2px 7px; border-radius: 999px; background: var(--code); color: var(--muted); font: 11px/1.4 -apple-system, sans-serif; }
+  .copy { opacity: .45; text-align: center; }
+  .log-row:hover .copy { opacity: 1; }
+  .callout { padding: 18px 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+  .good { color: #16803c; font-weight: 650; }
+  .bad { color: var(--danger); font-weight: 650; }
+  code { padding: 2px 6px; background: var(--code); border-radius: 5px; font: 13px ui-monospace, monospace; }
+  ol.steps { padding-left: 22px; }
+  ol.steps li { margin: 12px 0; padding-left: 6px; }
+  .sources li { margin-bottom: 10px; }
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  @media (max-width: 780px) { .card, .problem { grid-column: 1 / -1; } .log-head, .log-row { grid-template-columns: 72px 92px minmax(180px, 1fr) 28px; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">MSW Monitor · Log viewer research</div>
+  <h1>Logs should behave like a native data browser, not a centered text poster.</h1>
+  <p class="lede">The current screen has the right raw ingredients—workspace filters, monospaced messages, and copy—but the interaction hierarchy is wrong. Mature desktop log tools use a dense, top-aligned row model with native selection, search, context actions, and structured details.</p>
+
+  <div class="verdict"><strong>Recommendation:</strong> replace the single text document with a native macOS table. Keep message text selectable, make rows selectable with standard click / Shift-click / Command-click, and provide <strong>Copy Selected</strong> plus <strong>Copy Visible</strong>. Use a details inspector for pretty JSON instead of expanding large payloads inline.</div>
+
+  <section>
+    <h2>Why the current screen looks wrong</h2>
+    <div class="grid">
+      <article class="card problem"><div class="number">1</div><h3>No scan structure</h3><p>A large undifferentiated text block gives the eye no stable timestamp, source, severity, or message columns. Even aligned monospace text reads like terminal output rather than an inspectable macOS data view.</p></article>
+      <article class="card problem"><div class="number">2</div><h3>Actions are detached</h3><p>The line count and copy button float far away from the content. Mature tools keep search, wrap, follow, and copy controls in one compact toolbar immediately above the rows.</p></article>
+      <article class="card problem"><div class="number">3</div><h3>Selection is ambiguous</h3><p>Text dragging is useful for fragments, but it does not replace row selection. A desktop viewer should support both native text selection and native multi-row selection.</p></article>
+      <article class="card problem"><div class="number">4</div><h3>Structured data dominates</h3><p>Pretty-printing JSON directly in the stream makes rows unexpectedly tall. Established viewers keep the stream compact, then reveal structured fields in a side panel or expandable details view.</p></article>
+      <article class="card problem"><div class="number">5</div><h3>Data quality leaks through</h3><p>Heartbeat characters, probe ports, and partial JSON delimiters destroy trust. Transport cleanup must happen before rendering; the viewer should never be responsible for making protocol debris look acceptable.</p></article>
+      <article class="card problem"><div class="number">6</div><h3>No operational rhythm</h3><p>Logs normally need search, pause/follow, wrap, clear, context, and level/source filters. A static text surface cannot communicate whether it is live, paused, filtered, or complete.</p></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reference patterns</h2>
+    <table>
+      <thead><tr><th>Reference</th><th>Pattern worth copying</th><th>MSW implication</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Apple Console</strong></td><td>Tabular messages, standard selection, Command-C, Command-F, and a separate information pane.</td><td>Use a native table and inspector. Do not invent mobile selection controls.</td></tr>
+        <tr><td><strong>Apple HIG</strong></td><td>macOS tables use familiar row selection, sortable/resizable columns where useful, and system focus/accent behavior.</td><td>Let AppKit/SwiftUI own selection and inactive-window styling.</td></tr>
+        <tr><td><strong>Grafana Explore</strong></td><td>Per-line menu, copy line, show surrounding context, wrap toggle, and JSON prettification.</td><td>Put row actions on hover/context menu; make wrapping explicit.</td></tr>
+        <tr><td><strong>Elastic Discover</strong></td><td>Compact document table, expandable details, include/exclude filters, configurable columns, copy as text/JSON/Markdown.</td><td>Keep rows compact and move structured fields to details.</td></tr>
+        <tr><td><strong>Datadog Log Explorer</strong></td><td>Search/facets, context, side panel, attribute filtering, and clipboard shortcuts.</td><td>Workspace is a filterable field, not layout chrome repeated around every message.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Recommended MSW layout</h2>
+    <div class="mock" aria-label="Recommended log viewer mockup">
+      <div class="toolbar">
+        <div class="search">Search logs…</div>
+        <div class="button">Follow</div>
+        <div class="button">Wrap</div>
+        <div class="button">Copy Visible</div>
+        <div class="button primary">Copy Selected</div>
+      </div>
+      <div class="log-head"><div>Time</div><div>Workspace</div><div>Message</div><div></div></div>
+      <div class="log-row"><div>19:48:21</div><div><span class="tag">dev</span></div><div>Server listening on 0.0.0.0:3000</div><div class="copy">⌘C</div></div>
+      <div class="log-row"><div>19:48:24</div><div><span class="tag">playgrounds</span></div><div>Vite development server ready</div><div class="copy">⌘C</div></div>
+      <div class="log-row"><div>19:48:29</div><div><span class="tag">dev</span></div><div>GET /api/health 200 12ms</div><div class="copy">⌘C</div></div>
+      <div class="log-row"><div>19:48:31</div><div><span class="tag">personal</span></div><div>Worker completed background task</div><div class="copy">⌘C</div></div>
+    </div>
+    <p style="margin-top:12px;color:var(--muted)">Click selects one row. Shift-click selects a range. Command-click toggles rows. Dragging inside the message selects text. Double-click or Return opens details. Right-click exposes Copy Message, Copy Row, Show Context, Include Workspace, and Exclude Workspace.</p>
+  </section>
+
+  <section>
+    <h2>Copy behavior</h2>
+    <div class="grid">
+      <article class="card"><h3>Native text copy</h3><p>Users drag across message text and press <code>⌘C</code>. This is best for fragments and should work without entering a special mode.</p></article>
+      <article class="card"><h3>Native row copy</h3><p>Click, Shift-click, and Command-click use standard macOS table selection. <code>⌘C</code> copies selected rows as aligned plain text.</p></article>
+      <article class="card"><h3>Copy Visible</h3><p>Copies the current filtered result set—not hidden workspaces and not lines outside the current query. Label it explicitly.</p></article>
+      <article class="card"><h3>Structured copy</h3><p>The detail inspector offers Copy Message, Copy JSON, and Copy Row with timestamp and workspace metadata.</p></article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Data contract required</h2>
+    <div class="callout"><p><strong>The current model discards per-line timestamps.</strong> The adapter emits <code>observedAt</code>, but <code>MSWLogEntry</code> only retains workspace, message, and display safety. A credible table needs at least timestamp, workspace, message, and optional severity/source. Preserve timestamp before redesigning the table; otherwise it cannot sort or merge workspace streams correctly.</p></div>
+  </section>
+
+  <section>
+    <h2>Implementation sequence</h2>
+    <ol class="steps">
+      <li><strong>Fix the stream contract.</strong> Preserve per-line timestamps; classify and suppress internal transport/probe noise before it reaches the model.</li>
+      <li><strong>Build a native table.</strong> Columns: Time, Workspace, Message. Use a selection set and standard macOS multi-selection behavior.</li>
+      <li><strong>Add the compact toolbar.</strong> Search, Follow/Pause, Wrap, Copy Selected, Copy Visible. Keep workspace chips in the shared workspace filter row.</li>
+      <li><strong>Add row affordances.</strong> Hover copy action and context menu; no persistent icon clutter.</li>
+      <li><strong>Add structured details.</strong> Inspector/flyout with pretty JSON, raw message, metadata, and copy variants.</li>
+      <li><strong>Then optimize.</strong> Keep the latest bounded window in memory, preserve scroll position, and only auto-scroll while Follow is enabled.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>What not to do</h2>
+    <table>
+      <tbody>
+        <tr><td class="bad">Avoid</td><td>One centered text document with controls at opposite edges.</td></tr>
+        <tr><td class="bad">Avoid</td><td>Checkbox/circle selection controls permanently attached to every row.</td></tr>
+        <tr><td class="bad">Avoid</td><td>Pretty-printing every JSON payload inline by default.</td></tr>
+        <tr><td class="bad">Avoid</td><td>Calling copied data “all” when it is actually filtered or bounded.</td></tr>
+        <tr><td class="good">Prefer</td><td>Dense native table, ordinary macOS selection, clear copy scope, and a details inspector.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Primary references</h2>
+    <ul class="sources">
+      <li><a href="https://support.apple.com/guide/console/welcome/mac">Apple Console User Guide</a> — native log browsing, search, selection, and details.</li>
+      <li><a href="https://support.apple.com/en-lamr/guide/console/cnsl99a72ebe/mac">Apple Console keyboard shortcuts</a> — Command-C and search behavior.</li>
+      <li><a href="https://developer.apple.com/design/human-interface-guidelines/lists-and-tables">Apple HIG: Lists and tables</a> — macOS table structure and selection.</li>
+      <li><a href="https://developer.apple.com/design/human-interface-guidelines/focus-and-selection/">Apple HIG: Focus and selection</a> — native focused/inactive selection treatment.</li>
+      <li><a href="https://developer.apple.com/design/human-interface-guidelines/search-fields">Apple HIG: Search fields</a> — toolbar search placement.</li>
+      <li><a href="https://grafana.com/docs/grafana/latest/visualizations/explore/logs-integration/">Grafana: Logs in Explore</a> — copy line, context, wrapping, JSON prettification.</li>
+      <li><a href="https://www.elastic.co/guide/en/observability/current/explore-logs.html">Elastic: Explore logs in Discover</a> — table, details, field filters.</li>
+      <li><a href="https://www.elastic.co/docs/explore-analyze/discover/discover-get-started">Elastic Discover</a> — copy text/JSON/Markdown and document details.</li>
+      <li><a href="https://docs.datadoghq.com/logs/explorer/side_panel/">Datadog: Log side panel</a> — context, fields, copy, and filtering actions.</li>
+      <li><a href="https://docs.datadoghq.com/logs/explorer/facets/">Datadog: Log facets</a> — field-based filtering.</li>
+    </ul>
+  </section>
+
+  <footer>Prepared for the MSW Monitor native macOS app. Recommendation prioritizes familiar desktop interaction, compact scanability, and explicit copy semantics.</footer>
+</main>
+</body>
+</html>
