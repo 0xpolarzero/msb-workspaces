@@ -142,9 +142,9 @@ struct DetailView: View {
 
     private var workspacePane: some View {
         VStack(alignment: .leading, spacing: 0) {
-            workspaceToolbar
+            workspaceFilterBar
                 .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                .padding(.vertical, 10)
             Divider()
             sectionContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -180,41 +180,6 @@ struct DetailView: View {
         }
     }
 
-    private var workspaceToolbar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(navigation.workspaceSection.rawValue)
-                    .font(.headline)
-                    .accessibilityIdentifier("details.section-title")
-                Spacer()
-            }
-            HStack(spacing: 4) {
-                ForEach(WorkspaceSection.allCases) { section in
-                    Button {
-                        visitedWorkspaceSections.insert(section)
-                        navigation.workspaceSection = section
-                    } label: {
-                        Label(section.rawValue, systemImage: section.symbol)
-                            .frame(maxWidth: .infinity)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.roundedRectangle)
-                    .tint(
-                        navigation.workspaceSection == section
-                            ? Color.accentColor
-                            : Color.secondary
-                    )
-                    .accessibilityIdentifier("workspace.section.\(section.rawValue)")
-                    .accessibilityAddTraits(
-                        navigation.workspaceSection == section ? .isSelected : []
-                    )
-                }
-            }
-            .accessibilityIdentifier("workspace.section-picker")
-            workspaceFilterBar
-        }
-    }
 
 
     private var sectionContent: some View {
@@ -357,6 +322,26 @@ struct DetailView: View {
 
     private var logs: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let failure = model.latestOperationFailure,
+               failure.workspace.map({ !hiddenWorkspaces.contains($0) }) ?? true {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(failure.reason)
+                            .font(.caption.weight(.semibold))
+                        Text(failure.recovery)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("View system health") {
+                            navigation.tab = .overview
+                        }
+                        .accessibilityIdentifier("details.latest-operation-error.action")
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("details.latest-operation-error")
+            }
             if visibleWorkspaces.isEmpty {
                 ContentUnavailableView(
                     "No workspaces selected",

@@ -136,7 +136,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.descendants(matching: .any)["details.sidebar"].exists)
-        assertText("Logs", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Logs", in: app)
         let failurePanel = app.descendants(matching: .any)["details.latest-operation-error"]
         XCTAssertTrue(failurePanel.waitForExistence(timeout: 2))
         let systemHealth = app.buttons["View system health"]
@@ -167,7 +167,7 @@ final class MSWMonitorUITests: XCTestCase {
                 .waitForExistence(timeout: 2)
         )
         XCTAssertTrue(app.buttons["Run checks"].waitForExistence(timeout: 2))
-        XCTAssertFalse(app.descendants(matching: .any)["workspace.section-picker"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Files"].exists)
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
 
         let expectedStates = ["dev": "Running", "playgrounds": "Stopped", "personal": "Stopped"]
@@ -188,11 +188,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(workspacesTab.waitForExistence(timeout: 2))
         workspacesTab.click()
         XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.descendants(matching: .any)["workspace.section-picker"].waitForExistence(timeout: 2))
+        assertWorkspaceSection("Files", in: app)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Summary"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Repositories"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Maintenance"].exists)
-        assertText("Files", identifier: "details.section-title", in: app)
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         assertText("Repositories", identifier: "files.repositories.title", in: app)
         assertText("File tree", identifier: "files.tree.title", in: app)
@@ -233,7 +232,7 @@ final class MSWMonitorUITests: XCTestCase {
         let logs = app.buttons["Logs"]
         XCTAssertTrue(logs.waitForExistence(timeout: 2))
         logs.click()
-        assertText("Logs", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Logs", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.logs"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["logs.tag.dev"].exists)
@@ -259,7 +258,7 @@ final class MSWMonitorUITests: XCTestCase {
         let network = app.buttons["Network"]
         XCTAssertTrue(network.waitForExistence(timeout: 2))
         network.click()
-        assertText("Network", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Network", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.ports"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         XCTAssertTrue(
@@ -287,7 +286,7 @@ final class MSWMonitorUITests: XCTestCase {
         let activity = app.buttons["Activity"]
         XCTAssertTrue(activity.waitForExistence(timeout: 2))
         activity.click()
-        assertText("Activity", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Activity", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.activity"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         for workspace in ["dev", "playgrounds", "personal"] {
@@ -325,7 +324,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Network"].waitForExistence(timeout: 2))
         app.buttons["Network"].click()
 
-        assertText("Network", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Network", in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["network.workspace.dev"]
                 .waitForExistence(timeout: 2)
@@ -384,13 +383,13 @@ final class MSWMonitorUITests: XCTestCase {
 
         XCTAssertTrue(app.buttons["Logs"].waitForExistence(timeout: 2))
         app.buttons["Logs"].click()
-        assertText("Logs", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Logs", in: app)
         XCTAssertFalse(folderTree.exists)
         XCTAssertFalse(combinedFileTree.exists)
 
         XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 2))
         app.buttons["Files"].click()
-        assertText("Files", identifier: "details.section-title", in: app)
+        assertWorkspaceSection("Files", in: app)
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
         XCTAssertTrue(combinedFileTree.waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["folders.entry.Projects"].exists)
@@ -1239,6 +1238,15 @@ final class MSWMonitorUITests: XCTestCase {
     private func assertIdentifier(_ identifier: String, in app: XCUIApplication) {
         let element = app.descendants(matching: .any)[identifier]
         XCTAssertTrue(element.waitForExistence(timeout: 2), "Missing \(identifier)")
+    }
+
+    private func assertWorkspaceSection(
+        _ section: String,
+        in app: XCUIApplication
+    ) {
+        let item = app.descendants(matching: .any)["workspace.section.\(section)"]
+        XCTAssertTrue(item.waitForExistence(timeout: 2), "Missing \(section) workspace submenu item")
+        XCTAssertEqual(item.value as? String, "Selected")
     }
 
     private func assertText(_ text: String, identifier: String, in app: XCUIApplication) {

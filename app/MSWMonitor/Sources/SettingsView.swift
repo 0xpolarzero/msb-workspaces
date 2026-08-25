@@ -231,11 +231,15 @@ struct SettingsView: View {
                         }
                         .tag(AppTab.overview)
 
-                    DetailView(model: model, navigation: navigation, mode: .workspaces)
-                        .tabItem {
-                            Label("Workspaces", systemImage: "square.grid.3x3")
-                        }
-                        .tag(AppTab.workspaces)
+                    VStack(spacing: 0) {
+                        workspaceSectionMenu
+                        Divider()
+                        DetailView(model: model, navigation: navigation, mode: .workspaces)
+                    }
+                    .tabItem {
+                        Label("Workspaces", systemImage: "square.grid.3x3")
+                    }
+                    .tag(AppTab.workspaces)
 
                     githubSettings
                         .tabItem {
@@ -312,6 +316,43 @@ struct SettingsView: View {
                 )
             }
         }
+    }
+
+    private var workspaceSectionMenu: some View {
+        HStack(spacing: 24) {
+            ForEach(WorkspaceSection.allCases) { section in
+                let isSelected = navigation.workspaceSection == section
+                Button {
+                    navigation.workspaceSection = section
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: section.symbol)
+                            .font(.body)
+                        Text(section.rawValue)
+                            .font(.caption)
+                    }
+                    .frame(minWidth: 76)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .bottom) {
+                        if isSelected {
+                            Capsule()
+                                .fill(Color.accentColor)
+                                .frame(width: 24, height: 2)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .accessibilityIdentifier("workspace.section.\(section.rawValue)")
+                .accessibilityValue(isSelected ? "Selected" : "Not selected")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 4)
+        .background(.bar)
     }
 
     private var generalSettings: some View {
