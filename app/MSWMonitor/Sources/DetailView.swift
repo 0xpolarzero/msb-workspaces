@@ -525,12 +525,6 @@ struct FolderBrowserView: View {
                 .accessibilityIdentifier("folders.search.field")
 
             browserContent
-                .frame(
-                    minHeight: compact ? 190 : 240,
-                    idealHeight: compact ? 190 : 320,
-                    maxHeight: compact ? 190 : .infinity,
-                    alignment: .center
-                )
 
             if snapshot?.truncated == true {
                 Text("Results reached the bounded response limit. Refine the search to see a narrower set.")
@@ -633,7 +627,7 @@ struct FolderBrowserView: View {
                 folderUnavailableView(
                     title: folderSearch.isEmpty ? "No folders" : "No matching folders",
                     systemImage: "folder",
-                    description: "Only real directories rooted under /workspace are shown.",
+                    description: "",
                     accessibilityIdentifier: "folders.empty"
                 )
             } else if folderSearch.isEmpty {
@@ -866,16 +860,20 @@ struct FolderBrowserView: View {
         accessibilityIdentifier: String
     ) -> some View {
         if compact {
-            VStack(alignment: .leading, spacing: 5) {
-                Label(title, systemImage: systemImage)
-                    .font(.headline)
-                Text(description)
-                    .font(.caption)
+            HStack(spacing: 7) {
+                Image(systemName: systemImage)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(title)
+                    .font(.callout.weight(.medium))
+                if !description.isEmpty {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
-            .padding(.vertical, 4)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier(accessibilityIdentifier)
         } else {

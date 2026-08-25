@@ -277,6 +277,9 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["folders.breadcrumb.Scratch"].waitForExistence(timeout: 2))
         let emptyState = app.descendants(matching: .any)["folders.empty"]
         XCTAssertTrue(emptyState.waitForExistence(timeout: 2))
+        let emptySearchField = app.textFields["folders.search.field"]
+        XCTAssertLessThan(emptyState.frame.minY - emptySearchField.frame.maxY, 30)
+        XCTAssertLessThan(emptyState.frame.height, 30)
         XCTAssertLessThan(pickerContent.frame.maxY - pathBar.frame.maxY, 36)
         let emptyScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         emptyScreenshot.name = "Direct status-popover empty folder — compact top-aligned layout"

@@ -361,7 +361,8 @@ private struct WorkspaceRow: View {
                 onClose: { isFolderPickerPresented = false }
             )
             .padding(14)
-            .frame(width: 500, height: 350, alignment: .topLeading)
+            .frame(width: 500, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("folders.popover.content")
         }
