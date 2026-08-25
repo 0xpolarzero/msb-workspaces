@@ -168,40 +168,6 @@ struct ApplicationPreferenceFields: View {
     }
 }
 
-private struct SettingsToolbarSeparatorController: NSViewRepresentable {
-    let hidden: Bool
-
-    func makeNSView(context: Context) -> SettingsToolbarSeparatorView {
-        SettingsToolbarSeparatorView()
-    }
-
-    func updateNSView(_ view: SettingsToolbarSeparatorView, context: Context) {
-        view.hidesSeparator = hidden
-    }
-
-    static func dismantleNSView(
-        _ view: SettingsToolbarSeparatorView,
-        coordinator: ()
-    ) {
-        view.hidesSeparator = false
-    }
-}
-
-private final class SettingsToolbarSeparatorView: NSView {
-    var hidesSeparator = false {
-        didSet { applySeparatorStyle() }
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        applySeparatorStyle()
-    }
-
-    private func applySeparatorStyle() {
-        guard let window else { return }
-        window.titlebarSeparatorStyle = hidesSeparator ? .none : .automatic
-    }
-}
 
 struct SettingsView: View {
     @Bindable private var navigation: AppNavigationState
@@ -214,6 +180,7 @@ struct SettingsView: View {
     private let notificationCoordinator: NotificationCoordinator
 
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.controlActiveState) private var controlActiveState
     @AppStorage("pollingCadence") private var pollingCadence = 30.0
     @AppStorage("reducedMotion") private var reducedMotion = false
 
@@ -318,10 +285,10 @@ struct SettingsView: View {
             applicationState.model?.setPollingVisible(false)
         }
         .frame(minWidth: 820, idealWidth: 900, minHeight: 600, idealHeight: 680)
-        .background {
-            SettingsToolbarSeparatorController(hidden: navigation.tab == .workspaces)
-                .frame(width: 0, height: 0)
-        }
+        .toolbarBackgroundVisibility(
+            navigation.tab == .workspaces ? .hidden : .automatic,
+            for: .windowToolbar
+        )
         .transaction { transaction in
             if effectiveReducedMotion {
                 transaction.disablesAnimations = true
@@ -373,7 +340,11 @@ struct SettingsView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .foregroundStyle(
+                    isSelected
+                        ? workspaceSubmenuSelectionColor
+                        : Color.secondary.opacity(0.72)
+                )
                 .help(section.rawValue)
                 .accessibilityIdentifier("workspace.section.\(section.rawValue)")
                 .accessibilityValue(isSelected ? "Selected" : "Not selected")
@@ -383,6 +354,10 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 20)
         .padding(.vertical, 2)
+    }
+
+    private var workspaceSubmenuSelectionColor: Color {
+        controlActiveState == .inactive ? Color.secondary : Color.accentColor
     }
 
     private var generalSettings: some View {

@@ -189,6 +189,10 @@ final class MSWMonitorUITests: XCTestCase {
         workspacesTab.click()
         XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
         assertWorkspaceSection("Files", in: app)
+        let navigationScreenshot = XCTAttachment(screenshot: app.screenshot())
+        navigationScreenshot.name = "Workspace primary and secondary navigation"
+        navigationScreenshot.lifetime = .keepAlways
+        add(navigationScreenshot)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Summary"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Repositories"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Maintenance"].exists)
