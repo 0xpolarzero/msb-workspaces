@@ -11,7 +11,6 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    var requiresWorkspace: Bool { self == .files }
 
     var symbol: String {
         switch self {
@@ -56,8 +55,7 @@ struct DetailView: View {
     @State private var restoreConfirmation = ""
     @State private var pushConfirmation = ""
     @State private var maintenanceOperation: MaintenanceOperation?
-    @State private var hiddenLogWorkspaces: Set<Workspace.ID> = []
-    @State private var hiddenActivityWorkspaces: Set<Workspace.ID> = []
+    @State private var hiddenWorkspaces: Set<Workspace.ID> = []
     @State private var expandedInactivePortWorkspaces: Set<String> = []
     @State private var visitedWorkspaceSections: Set<WorkspaceSection>
 
@@ -148,27 +146,14 @@ struct DetailView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
             Divider()
-            Group {
-                if navigation.workspaceSection.requiresWorkspace && navigation.workspace == nil {
-                    ContentUnavailableView(
-                        "Choose a workspace",
-                        systemImage: "square.stack.3d.up.badge.a"
-                    )
-                } else {
-                    sectionContent
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(20)
+            sectionContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(20)
         }
         .onChange(of: navigation.workspaceSection) { _, section in
             visitedWorkspaceSections.insert(section)
         }
         .task(id: routeIdentity) {
-            if navigation.workspaceSection.requiresWorkspace && navigation.workspace == nil {
-                navigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
-                model.selectedWorkspace = navigation.workspace
-            }
             model.clearDetailError()
             loadSelectedSection()
             while automaticallyRefreshesSelectedSection {
@@ -184,7 +169,8 @@ struct DetailView: View {
     }
 
     private var routeIdentity: String {
-        "\(navigation.workspaceSection.rawValue):\(navigation.workspace?.rawValue ?? "none")"
+        let hidden = hiddenWorkspaces.map(\.rawValue).sorted().joined(separator: ",")
+        return "\(navigation.workspaceSection.rawValue):\(hidden)"
     }
 
     private var automaticallyRefreshesSelectedSection: Bool {
@@ -201,16 +187,6 @@ struct DetailView: View {
                     .font(.headline)
                     .accessibilityIdentifier("details.section-title")
                 Spacer()
-                if navigation.workspaceSection.requiresWorkspace {
-                    Picker("Workspace", selection: workspaceBinding) {
-                        ForEach(model.workspaces.map(\.id), id: \.rawValue) { id in
-                            Text(id.rawValue).tag(Optional(id))
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 140)
-                    .accessibilityIdentifier("details.workspace-picker")
-                }
             }
             HStack(spacing: 4) {
                 ForEach(WorkspaceSection.allCases) { section in
@@ -236,18 +212,10 @@ struct DetailView: View {
                 }
             }
             .accessibilityIdentifier("workspace.section-picker")
+            workspaceFilterBar
         }
     }
 
-    private var workspaceBinding: Binding<Workspace.ID?> {
-        Binding(
-            get: { navigation.workspace },
-            set: { value in
-                navigation.workspace = value
-                model.selectedWorkspace = value
-            }
-        )
-    }
 
     private var sectionContent: some View {
         ZStack {
@@ -276,11 +244,11 @@ struct DetailView: View {
     private func loadSelectedSection() {
         switch navigation.workspaceSection {
         case .files:
-            if let workspace = navigation.workspace {
-                model.loadRepositories(for: workspace, clearsError: false)
+            for workspace in visibleWorkspaces {
+                model.loadRepositories(for: workspace.id, clearsError: false)
             }
         case .logs:
-            model.loadLogs(for: model.workspaces.map(\.id), clearsError: false)
+            model.loadLogs(for: visibleWorkspaces.map(\.id), clearsError: false)
         case .ports:
             model.loadPorts(clearsError: false)
         case .activity:
@@ -288,12 +256,6 @@ struct DetailView: View {
         }
     }
 
-    private var selectedWorkspace: Workspace? {
-        guard let id = navigation.workspace else { return nil }
-        return model.workspaces.first { $0.id == id }
-    }
-
-    private var selectedWorkspaceID: Workspace.ID? { navigation.workspace }
 
 
     private var overviewDashboard: some View {
@@ -316,7 +278,7 @@ struct DetailView: View {
                     model: model,
                     latestError: latestError(for: workspace),
                     openLogs: {
-                        hiddenLogWorkspaces = Set(model.workspaces.map(\.id).filter { $0 != workspace.id })
+                        hiddenWorkspaces = Set(model.workspaces.map(\.id).filter { $0 != workspace.id })
                         navigation.tab = .workspaces
                         navigation.workspaceSection = .logs
                     },
@@ -350,7 +312,13 @@ struct DetailView: View {
 
     @ViewBuilder
     private var filesAndRepositories: some View {
-        if let workspace = selectedWorkspaceID {
+        if visibleWorkspaces.isEmpty {
+            ContentUnavailableView(
+                "No workspaces selected",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: Text("Select at least one workspace to browse its files and repositories.")
+            )
+        } else {
             HSplitView {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Repositories")
@@ -362,33 +330,65 @@ struct DetailView: View {
                 .padding(.trailing, 12)
                 .frame(minWidth: 300, idealWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
 
-                FolderBrowserView(
-                    model: model,
-                    workspace: workspace,
-                    title: "File tree"
-                )
-                .id(workspace)
-                .padding(.horizontal, 16)
-                .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+                workspaceFileTrees
+                    .padding(.horizontal, 16)
+                    .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
             }
             .accessibilityIdentifier("details.files")
         }
     }
 
+    private var workspaceFileTrees: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("File tree")
+                .font(.headline)
+                .accessibilityIdentifier("files.tree.title")
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(visibleWorkspaces) { workspace in
+                        workspaceFileTree(for: workspace)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func workspaceFileTree(for workspace: Workspace) -> some View {
+        if workspace.state == .running && workspace.canOpenTerminal {
+            FolderBrowserView(
+                model: model,
+                workspace: workspace.id,
+                compact: true,
+                title: workspace.id.rawValue
+            )
+            .id(workspace.id)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(workspace.id.rawValue)
+                    .font(.headline)
+                Text(workspace.state == .stopped ? "Workspace is stopped" : "File browsing is unavailable")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("files.tree.workspace.\(workspace.id.rawValue)")
+        }
+    }
+
     private var logs: some View {
         VStack(alignment: .leading, spacing: 12) {
-            workspaceFilterBar(hidden: $hiddenLogWorkspaces, identifierPrefix: "logs.filter")
-            Divider()
-            if visibleLogWorkspaces.isEmpty {
+            if visibleWorkspaces.isEmpty {
                 ContentUnavailableView(
                     "No workspaces selected",
                     systemImage: "line.3.horizontal.decrease.circle",
-                    description: Text("Include at least one workspace to see its logs.")
+                    description: Text("Select at least one workspace to see its logs.")
                 )
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(visibleLogWorkspaces) { workspace in
+                        ForEach(visibleWorkspaces) { workspace in
                             logSection(for: workspace)
                         }
                     }
@@ -399,9 +399,6 @@ struct DetailView: View {
         .accessibilityIdentifier("details.logs")
     }
 
-    private var visibleLogWorkspaces: [Workspace] {
-        model.workspaces.filter { !hiddenLogWorkspaces.contains($0.id) }
-    }
 
     @ViewBuilder
     private func logSection(for workspace: Workspace) -> some View {
@@ -467,34 +464,43 @@ struct DetailView: View {
     }
 
 
-    private func workspaceFilterBar(
-        hidden: Binding<Set<Workspace.ID>>,
-        identifierPrefix: String
-    ) -> some View {
+    private var visibleWorkspaces: [Workspace] {
+        model.workspaces.filter { !hiddenWorkspaces.contains($0.id) }
+    }
+
+    private var workspaceFilterBar: some View {
         HStack(spacing: 8) {
             Text("Workspaces")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+            Button("All") {
+                hiddenWorkspaces.removeAll()
+            }
+            .disabled(hiddenWorkspaces.isEmpty)
+            .accessibilityIdentifier("workspace.filter.all")
+            Button("Clear") {
+                hiddenWorkspaces = Set(model.workspaces.map(\.id))
+            }
+            .disabled(visibleWorkspaces.isEmpty)
+            .accessibilityIdentifier("workspace.filter.clear")
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(model.workspaces) { workspace in
                         Toggle(
                             workspace.id.rawValue,
                             isOn: Binding(
-                                get: { !hidden.wrappedValue.contains(workspace.id) },
+                                get: { !hiddenWorkspaces.contains(workspace.id) },
                                 set: { isIncluded in
-                                    var updated = hidden.wrappedValue
                                     if isIncluded {
-                                        updated.remove(workspace.id)
+                                        hiddenWorkspaces.remove(workspace.id)
                                     } else {
-                                        updated.insert(workspace.id)
+                                        hiddenWorkspaces.insert(workspace.id)
                                     }
-                                    hidden.wrappedValue = updated
                                 }
                             )
                         )
                         .toggleStyle(.checkbox)
-                        .accessibilityIdentifier("\(identifierPrefix).\(workspace.id.rawValue)")
+                        .accessibilityIdentifier("workspace.filter.\(workspace.id.rawValue)")
                     }
                 }
             }
@@ -503,28 +509,55 @@ struct DetailView: View {
     }
 
     private var repositories: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let id = selectedWorkspaceID, let value = model.repositoriesByWorkspace[id.rawValue] {
-                FreshnessNotice(freshness: value.freshness, observedAt: newestRepositoryDate(value), reason: value.notice)
-                if value.repositories.isEmpty {
-                    ContentUnavailableView(value.needsStart ? "Workspace is stopped" : "No repositories reported", systemImage: "shippingbox", description: Text(value.needsStart ? "Start the selected workspace, then retry repository inspection." : "The runtime returned no repository records."))
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(value.repositories) { repository in
-                                RepositoryRow(repository: repository) {
-                                    model.reviewPush(for: repository, workspace: id)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 4)
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(visibleWorkspaces) { workspace in
+                        repositorySection(for: workspace)
                     }
                 }
-            } else {
-                ContentUnavailableView("No repository snapshot", systemImage: "shippingbox", description: Text("Repository state appears here when available."))
+                .padding(.vertical, 4)
             }
             detailError
         }
+    }
+
+    @ViewBuilder
+    private func repositorySection(for workspace: Workspace) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(workspace.id.rawValue)
+                    .font(.headline)
+                Spacer()
+                Text(workspace.state.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let value = model.repositoriesByWorkspace[workspace.id.rawValue] {
+                FreshnessNotice(
+                    freshness: value.freshness,
+                    observedAt: newestRepositoryDate(value),
+                    reason: value.notice
+                )
+                if value.repositories.isEmpty {
+                    Text(value.needsStart ? "Workspace is stopped" : "No repositories")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(value.repositories) { repository in
+                        RepositoryRow(repository: repository) {
+                            model.reviewPush(for: repository, workspace: workspace.id)
+                        }
+                    }
+                }
+            } else {
+                Text(workspace.state == .stopped ? "Workspace is stopped" : "Loading repositories…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("repositories.workspace.\(workspace.id.rawValue)")
     }
 
 }
@@ -1070,34 +1103,42 @@ private extension DetailView {
 
     private var ports: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Each workspace has its own .msw.test address, so the same port can be active in multiple workspaces.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let snapshot = model.portsSnapshot {
-                FreshnessNotice(freshness: snapshot.freshness, observedAt: nil, reason: nil)
-                if visibleNetworkSnapshots(snapshot).isEmpty {
-                    ContentUnavailableView(
-                        "No active services",
-                        systemImage: "network.slash",
-                        description: Text("Start a workspace service to see it here. Inactive configured ports stay hidden.")
-                    )
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(visibleNetworkSnapshots(snapshot)) { workspacePorts in
-                                if let workspace = model.workspaces.first(where: {
-                                    $0.id.rawValue == workspacePorts.workspace
-                                }) {
-                                    networkRow(workspace: workspace, snapshot: workspacePorts)
+            if visibleWorkspaces.isEmpty {
+                ContentUnavailableView(
+                    "No workspaces selected",
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    description: Text("Select at least one workspace to see its network services.")
+                )
+            } else {
+                Text("Each workspace has its own .msw.test address, so the same port can be active in multiple workspaces.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let snapshot = model.portsSnapshot {
+                    FreshnessNotice(freshness: snapshot.freshness, observedAt: nil, reason: nil)
+                    if visibleNetworkSnapshots(snapshot).isEmpty {
+                        ContentUnavailableView(
+                            "No active services",
+                            systemImage: "network.slash",
+                            description: Text("Start a workspace service to see it here. Inactive configured ports stay hidden.")
+                        )
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(visibleNetworkSnapshots(snapshot)) { workspacePorts in
+                                    if let workspace = model.workspaces.first(where: {
+                                        $0.id.rawValue == workspacePorts.workspace
+                                    }) {
+                                        networkRow(workspace: workspace, snapshot: workspacePorts)
+                                    }
                                 }
                             }
                         }
                     }
+                } else {
+                    Text("Port information is not available yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            } else {
-                Text("Port information is not available yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             detailError
         }
@@ -1109,7 +1150,11 @@ private extension DetailView {
     ) -> [MSWPortsResponse.WorkspacePorts] {
         response.workspaces
             .filter { snapshot in
-                let workspace = model.workspaces.first { $0.id.rawValue == snapshot.workspace }
+                guard let id = Workspace.ID(rawValue: snapshot.workspace),
+                      !hiddenWorkspaces.contains(id) else {
+                    return false
+                }
+                let workspace = model.workspaces.first { $0.id == id }
                 let hasWarning = workspace?.portWarning?.isEmpty == false
                 let isStopped = snapshot.lifecycle == .stopped || snapshot.lifecycle == .exited
                 return activePorts(snapshot).isEmpty == false || hasWarning || !isStopped
@@ -1290,45 +1335,51 @@ private extension DetailView {
 
     private var activity: some View {
         VStack(alignment: .leading, spacing: 12) {
-            workspaceFilterBar(hidden: $hiddenActivityWorkspaces, identifierPrefix: "activity.filter")
-            Divider()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    if filteredActivities.isEmpty {
-                        ContentUnavailableView(
-                            "No recent activity",
-                            systemImage: "clock",
-                            description: Text("Actions for the included workspaces will appear here.")
-                        )
-                    } else {
-                        ForEach(filteredActivities.prefix(50)) { entry in
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: entry.isFailure ? "xmark.circle.fill" : "checkmark.circle")
-                                    .foregroundStyle(entry.isFailure ? .red : .secondary)
-                                    .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack {
-                                        Text(entry.title).font(.body.weight(.medium))
-                                        Spacer()
-                                        Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let workspace = entry.workspace {
-                                        Text(workspace)
-                                            .font(.caption.weight(.medium))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let detail = entry.detail {
-                                        Text(detail)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(2)
+            if visibleWorkspaces.isEmpty {
+                ContentUnavailableView(
+                    "No workspaces selected",
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    description: Text("Select at least one workspace to see its activity.")
+                )
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if filteredActivities.isEmpty {
+                            ContentUnavailableView(
+                                "No recent activity",
+                                systemImage: "clock",
+                                description: Text("Actions for the selected workspaces will appear here.")
+                            )
+                        } else {
+                            ForEach(filteredActivities.prefix(50)) { entry in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: entry.isFailure ? "xmark.circle.fill" : "checkmark.circle")
+                                        .foregroundStyle(entry.isFailure ? .red : .secondary)
+                                        .accessibilityHidden(true)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack {
+                                            Text(entry.title).font(.body.weight(.medium))
+                                            Spacer()
+                                            Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if let workspace = entry.workspace {
+                                            Text(workspace)
+                                                .font(.caption.weight(.medium))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if let detail = entry.detail {
+                                            Text(detail)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
                                     }
                                 }
+                                .accessibilityElement(children: .combine)
+                                Divider()
                             }
-                            .accessibilityElement(children: .combine)
-                            Divider()
                         }
                     }
                 }
@@ -1343,7 +1394,7 @@ private extension DetailView {
                   let id = Workspace.ID(rawValue: workspace) else {
                 return true
             }
-            return !hiddenActivityWorkspaces.contains(id)
+            return !hiddenWorkspaces.contains(id)
         }
     }
 
