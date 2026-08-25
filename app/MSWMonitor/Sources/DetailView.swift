@@ -560,12 +560,6 @@ struct FolderBrowserView: View {
 
             browserContent
 
-            if snapshot?.truncated == true {
-                Text("Results reached the bounded response limit. Refine the search to see a narrower set.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("folders.truncated")
-            }
 
             if let editorError {
                 Label(editorError, systemImage: "exclamationmark.triangle.fill")
@@ -1019,11 +1013,6 @@ private struct FolderTreeBranch: View {
                     onExpand: onExpand,
                     onNavigate: onNavigate
                 )
-            }
-            if truncatedPaths.contains(entry.path) {
-                Text("More folders exist. Navigate into this folder to refine the view.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }

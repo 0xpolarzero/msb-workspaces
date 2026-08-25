@@ -379,7 +379,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(pathBar.waitForExistence(timeout: 2))
         let rootBreadcrumb = app.buttons["folders.breadcrumb.root"]
         XCTAssertTrue(rootBreadcrumb.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.descendants(matching: .any)["folders.truncated"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.descendants(matching: .any)["folders.truncated"].exists)
         let pickerContent = app.descendants(matching: .any)["folders.popover.content"]
         let pickerTitle = app.staticTexts["folders.popover.title"]
         let folderTree = app.descendants(matching: .any)["folders.tree"]
