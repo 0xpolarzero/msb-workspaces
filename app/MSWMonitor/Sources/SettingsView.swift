@@ -168,6 +168,41 @@ struct ApplicationPreferenceFields: View {
     }
 }
 
+private struct SettingsToolbarSeparatorController: NSViewRepresentable {
+    let hidden: Bool
+
+    func makeNSView(context: Context) -> SettingsToolbarSeparatorView {
+        SettingsToolbarSeparatorView()
+    }
+
+    func updateNSView(_ view: SettingsToolbarSeparatorView, context: Context) {
+        view.hidesSeparator = hidden
+    }
+
+    static func dismantleNSView(
+        _ view: SettingsToolbarSeparatorView,
+        coordinator: ()
+    ) {
+        view.hidesSeparator = false
+    }
+}
+
+private final class SettingsToolbarSeparatorView: NSView {
+    var hidesSeparator = false {
+        didSet { applySeparatorStyle() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applySeparatorStyle()
+    }
+
+    private func applySeparatorStyle() {
+        guard let window else { return }
+        window.titlebarSeparatorStyle = hidesSeparator ? .none : .automatic
+    }
+}
+
 struct SettingsView: View {
     @Bindable private var navigation: AppNavigationState
     @Bindable private var applicationState: ApplicationState
@@ -283,6 +318,10 @@ struct SettingsView: View {
             applicationState.model?.setPollingVisible(false)
         }
         .frame(minWidth: 820, idealWidth: 900, minHeight: 600, idealHeight: 680)
+        .background {
+            SettingsToolbarSeparatorController(hidden: navigation.tab == .workspaces)
+                .frame(width: 0, height: 0)
+        }
         .transaction { transaction in
             if effectiveReducedMotion {
                 transaction.disablesAnimations = true
