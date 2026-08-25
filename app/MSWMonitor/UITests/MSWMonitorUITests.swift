@@ -415,6 +415,16 @@ final class MSWMonitorUITests: XCTestCase {
         for workspace in ["dev", "playgrounds", "personal"] {
             XCTAssertTrue(app.descendants(matching: .any)["workspace.filter.\(workspace)"].exists)
         }
+
+        let backupTab = app.toolbars.buttons["Backup"]
+        XCTAssertTrue(backupTab.waitForExistence(timeout: 2))
+        backupTab.click()
+        XCTAssertTrue(app.windows["Backup"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Archive scope"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Backup and restore"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Review New Backup…"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Choose Restore Archive…"].waitForExistence(timeout: 2))
+
         let githubTab = app.toolbars.buttons["GitHub"]
         XCTAssertTrue(githubTab.waitForExistence(timeout: 2))
         githubTab.click()
