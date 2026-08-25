@@ -84,6 +84,18 @@ changes, use the focused flow so onboarding is not replayed:
 app/MSWMonitor/Scripts/smoke-test.sh --monitor-only
 ```
 
+For the status-popover folder browser, run only its Finder-style interaction:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --picker-only
+```
+
+For terminal/editor preference changes, run only the settings-to-status flow:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --preferences-only
+```
+
 For detail-window navigation changes, use the focused detail flow:
 
 ```bash
@@ -169,6 +181,12 @@ Use accessibility identifiers rather than screen coordinates:
 | `details.button` | Overview shortcut | Opens the detail window |
 | `settings.button` | Settings shortcut | Opens settings |
 | `quit.button` | Quit button | Terminates the app |
+| `details.section.Files` | Files sidebar item | Opens the VM folder browser |
+| `folders.path-bar` / `folders.search.field` | Folder scope and search | Clickable `/workspace` breadcrumbs and bounded search |
+| `folders.tree` / `folders.entry.<safe-path>.expand` | Lazy folder tree | Selects, expands, or double-clicks a real VM directory |
+| `folders.open.button` | Editor handoff | Opens the exact selected folder in the resolved editor adapter |
+| `settings.applications.terminal.picker` / `.editor.picker` | App-specific launch preferences | Defaults to the discovered macOS app and allows a supported override |
+| `workspace.<id>.open-terminal` / `.open-editor` | Dynamic app actions | Labels use the resolved system default or MSW Monitor override |
 
 The Quit button defines the `Command-Q` keyboard shortcut. Prefer semantic UI
 queries and waits over fixed sleeps or pixel coordinates. The test intentionally
@@ -352,9 +370,11 @@ unredacted system logs.
   `Test session results, code coverage, and logs:` path printed by that run.
 - The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`;
   `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` runs
-  `testStatusItemMinimalPopoverAndQuit()`; `--details-only` runs
-  `testDetailSidebarRemainsVisibleAcrossGlobalSections()`; and
-  `--failure-only` runs `testOperationFailureOpensDetailedLogs()`. A bare
+  `testStatusItemMinimalPopoverAndQuit()`; `--picker-only` runs
+  `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs
+  `testApplicationPreferencesUpdateWorkspaceActions()`; `--details-only` runs
+  `testDetailSidebarRemainsVisibleAcrossGlobalSections()`; and `--failure-only`
+  runs `testOperationFailureOpensDetailedLogs()`. A bare
   `xcodebuild test` is a different, broader operation and is not a replacement
   for the documented checks.
 - UI automation requires an interactive GUI session and may require narrowly

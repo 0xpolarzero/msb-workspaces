@@ -14,6 +14,7 @@ final class StatusBarController {
     private let accessMode: GitHubAccessMode
     private let commandRunner: MSWCommandRunner
     private let settingsNavigation: SettingsNavigationState
+    private let applicationPreferences: ApplicationPreferenceStore
     private let startupRecoveryBlockedReason: String?
     private let retryStartupRecovery: () -> Void
     private var detailWindowController: DetailWindowController?
@@ -28,6 +29,7 @@ final class StatusBarController {
         accessMode: GitHubAccessMode = .local,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
         settingsNavigation: SettingsNavigationState = SettingsNavigationState(),
+        applicationPreferences: ApplicationPreferenceStore,
         startupRecoveryBlockedReason: String? = nil,
         retryStartupRecovery: @escaping () -> Void = {}
     ) {
@@ -39,6 +41,7 @@ final class StatusBarController {
         self.accessMode = accessMode
         self.commandRunner = commandRunner
         self.settingsNavigation = settingsNavigation
+        self.applicationPreferences = applicationPreferences
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.retryStartupRecovery = retryStartupRecovery
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -170,6 +173,7 @@ final class StatusBarController {
                 provider: provider,
                 accessMode: accessMode,
                 commandRunner: commandRunner,
+                applicationPreferences: applicationPreferences,
                 openSettings: { [weak self] section in
                     self?.showSettings(section: section, dismissingSetup: false)
                 },

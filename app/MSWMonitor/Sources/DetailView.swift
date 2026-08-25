@@ -8,6 +8,7 @@ enum DetailSection: String, CaseIterable, Identifiable {
     case metrics = "Metrics"
     case logs = "Logs"
     case repositories = "Repositories"
+    case files = "Files"
     case ports = "Ports and tunnels"
     case github = "GitHub Access"
     case activity = "Activity"
@@ -18,7 +19,7 @@ enum DetailSection: String, CaseIterable, Identifiable {
 
     var requiresWorkspace: Bool {
         switch self {
-        case .metrics, .logs, .repositories:
+        case .metrics, .logs, .repositories, .files:
             return true
         default:
             return false
@@ -30,6 +31,7 @@ enum DetailSection: String, CaseIterable, Identifiable {
         case "metrics": self = .metrics
         case "logs": self = .logs
         case "repositories": self = .repositories
+        case "files", "folders": self = .files
         case "ports": self = .ports
         case "github", "github-access": self = .github
         case "activity": self = .activity
@@ -319,6 +321,11 @@ struct DetailView: View {
         case .metrics: metrics
         case .logs: logs
         case .repositories: repositories
+        case .files:
+            if let workspace = selectedWorkspaceID {
+                FolderBrowserView(model: model, workspace: workspace)
+                    .id(workspace)
+            }
         case .ports: ports
         case .github: github
         case .activity: activity
@@ -485,6 +492,521 @@ struct DetailView: View {
             detailError
         }
     }
+
+}
+
+struct FolderBrowserView: View {
+    @Bindable var model: AppModel
+    let workspace: Workspace.ID
+    var compact = false
+    var title: String?
+    var onClose: (() -> Void)?
+    @State private var folderPath = "."
+    @State private var folderSearch = ""
+    @State private var selectedFolderPath: String?
+    @State private var snapshot: MSWDirectoryResponse?
+    @State private var directoryError: String?
+    @State private var editorError: String?
+    @State private var isDirectoryLoading = false
+    @State private var isEditorOpening = false
+    @State private var editorOpenRequestID: UUID?
+    @State private var childrenByPath: [String: [MSWDirectoryResponse.Entry]] = [:]
+    @State private var expandedPaths: Set<String> = []
+    @State private var loadingChildPaths: Set<String> = []
+    @State private var childErrors: [String: String] = [:]
+    @State private var truncatedChildPaths: Set<String> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+
+            TextField("Search folders", text: $folderSearch)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("folders.search.field")
+
+            browserContent
+                .frame(
+                    minHeight: compact ? 190 : 240,
+                    idealHeight: compact ? 190 : 320,
+                    maxHeight: compact ? 190 : .infinity,
+                    alignment: .center
+                )
+
+            if snapshot?.truncated == true {
+                Text("Results reached the bounded response limit. Refine the search to see a narrower set.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("folders.truncated")
+            }
+
+            if let editorError {
+                Label(editorError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("folders.error")
+            }
+
+            breadcrumbBar
+        }
+        .frame(maxWidth: .infinity, maxHeight: compact ? nil : .infinity, alignment: .topLeading)
+        .task(id: requestIdentity) {
+            editorOpenRequestID = nil
+            editorError = nil
+            isEditorOpening = false
+            selectedFolderPath = nil
+            directoryError = nil
+
+            if folderSearch.isEmpty, let cachedEntries = childrenByPath[folderPath] {
+                snapshot = cachedSnapshot(path: folderPath, entries: cachedEntries)
+                isDirectoryLoading = false
+                return
+            }
+
+            snapshot = nil
+            isDirectoryLoading = true
+            if !folderSearch.isEmpty {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+            }
+            do {
+                let result = try await model.directories(
+                    for: workspace,
+                    path: folderPath,
+                    query: folderSearch.isEmpty ? nil : folderSearch
+                )
+                guard !Task.isCancelled else { return }
+                snapshot = result
+                if folderSearch.isEmpty {
+                    childrenByPath[folderPath] = result.entries
+                    hydratePrefetchedTree(result.entries)
+                    if result.truncated {
+                        truncatedChildPaths.insert(folderPath)
+                    } else {
+                        truncatedChildPaths.remove(folderPath)
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                directoryError = error.localizedDescription
+            }
+            isDirectoryLoading = false
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            if let title {
+                Text(title)
+                    .font(.headline)
+                    .accessibilityIdentifier("folders.popover.title")
+            }
+            Spacer()
+            if let onClose {
+                Button("Close", action: onClose)
+                    .accessibilityIdentifier("folders.popover.close")
+            }
+            editorButton
+        }
+    }
+
+    private var editorButton: some View {
+        Button(model.editorOpenActionTitle) {
+            let path = selectedFolderPath ?? folderPath
+            Task { await openSelectedFolder(path) }
+        }
+        .disabled(isDirectoryLoading || snapshot == nil || isEditorOpening)
+        .accessibilityIdentifier("folders.open.button")
+        .accessibilityValue(selectedFolderAccessibilityPath)
+    }
+
+    @ViewBuilder
+    private var browserContent: some View {
+        if isDirectoryLoading {
+            OperationRow(
+                phase: folderSearch.isEmpty ? "Listing folders" : "Searching folders",
+                scope: workspace.rawValue,
+                detail: "Reading a bounded folder snapshot from the running VM."
+            )
+        } else if let snapshot {
+            if snapshot.entries.isEmpty {
+                folderUnavailableView(
+                    title: folderSearch.isEmpty ? "No folders" : "No matching folders",
+                    systemImage: "folder",
+                    description: "Only real directories rooted under /workspace are shown.",
+                    accessibilityIdentifier: "folders.empty"
+                )
+            } else if folderSearch.isEmpty {
+                folderTree(entries: snapshot.entries)
+            } else {
+                searchResults(entries: snapshot.entries)
+            }
+        } else if let directoryError {
+            folderUnavailableView(
+                title: "Couldn’t load folders",
+                systemImage: "exclamationmark.triangle",
+                description: directoryError,
+                accessibilityIdentifier: "folders.load-error"
+            )
+        } else {
+            folderUnavailableView(
+                title: "Folder browser unavailable",
+                systemImage: "folder.badge.questionmark",
+                description: "Start the selected workspace, then retry.",
+                accessibilityIdentifier: "folders.unavailable"
+            )
+        }
+    }
+
+    private func folderTree(entries: [MSWDirectoryResponse.Entry]) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(entries) { entry in
+                    FolderTreeBranch(
+                        entry: entry,
+                        childrenByPath: $childrenByPath,
+                        expandedPaths: $expandedPaths,
+                        loadingPaths: $loadingChildPaths,
+                        errorsByPath: $childErrors,
+                        truncatedPaths: $truncatedChildPaths,
+                        selection: $selectedFolderPath,
+                        onExpand: loadChildren,
+                        onNavigate: navigateToFolder
+                    )
+                }
+            }
+            .padding(6)
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+        }
+        .frame(
+            minHeight: compact ? 170 : 240,
+            idealHeight: compact ? 190 : 320,
+            maxHeight: compact ? 210 : .infinity
+        )
+        .accessibilityIdentifier("folders.tree")
+    }
+
+    private func searchResults(entries: [MSWDirectoryResponse.Entry]) -> some View {
+        List(entries) { entry in
+            Button {
+                selectedFolderPath = entry.path
+            } label: {
+                HStack {
+                    Label(entry.name, systemImage: "folder")
+                    Spacer()
+                    Text(entry.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .simultaneousGesture(
+                TapGesture(count: 2).onEnded {
+                    selectedFolderPath = entry.path
+                    navigateToFolder(entry.path)
+                }
+            )
+            .accessibilityIdentifier("folders.entry.\(entry.path)")
+        }
+        .listStyle(.inset)
+        .frame(
+            minHeight: compact ? 170 : 240,
+            idealHeight: compact ? 190 : 320,
+            maxHeight: compact ? 210 : .infinity
+        )
+        .accessibilityIdentifier("folders.search-results")
+    }
+
+    private var breadcrumbBar: some View {
+        VStack(spacing: 5) {
+            Divider()
+            ScrollView(.horizontal) {
+                HStack(spacing: 5) {
+                    Button {
+                        navigateToFolder(".")
+                    } label: {
+                        Label("workspace", systemImage: "externaldrive")
+                            .font(.caption.monospaced())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("folders.breadcrumb.root")
+
+                    ForEach(Array(breadcrumbComponents.enumerated()), id: \.offset) { _, component in
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
+                        Button(component.name) {
+                            navigateToFolder(component.path)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.monospaced())
+                        .accessibilityIdentifier("folders.breadcrumb.\(component.path)")
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("folders.path-bar")
+        .accessibilityValue(currentFolderAccessibilityPath)
+    }
+
+    private var breadcrumbComponents: [(name: String, path: String)] {
+        guard folderPath != "." else { return [] }
+        var path = ""
+        return folderPath
+            .split(separator: "/")
+            .map { component in
+                path = path.isEmpty ? String(component) : "\(path)/\(component)"
+                return (String(component), path)
+            }
+    }
+
+    private var currentFolderAccessibilityPath: String {
+        folderPath == "." ? "/workspace" : "/workspace/\(folderPath)"
+    }
+
+    private var selectedFolderAccessibilityPath: String {
+        let path = selectedFolderPath ?? folderPath
+        return path == "." ? "/workspace" : "/workspace/\(path)"
+    }
+    private func navigateToFolder(_ path: String) {
+        folderSearch = ""
+        selectedFolderPath = nil
+        if let cachedEntries = childrenByPath[path] {
+            snapshot = cachedSnapshot(path: path, entries: cachedEntries)
+            directoryError = nil
+            isDirectoryLoading = false
+        } else {
+            snapshot = nil
+            isDirectoryLoading = true
+        }
+        folderPath = path
+    }
+ 
+    private func cachedSnapshot(
+        path: String,
+        entries: [MSWDirectoryResponse.Entry]
+    ) -> MSWDirectoryResponse {
+        MSWDirectoryResponse(
+            workspace: workspace.rawValue,
+            path: path,
+            query: nil,
+            entries: entries,
+            truncated: truncatedChildPaths.contains(path)
+        )
+    }
+
+    private func loadChildren(_ path: String) {
+        guard childrenByPath[path] == nil, !loadingChildPaths.contains(path) else { return }
+        loadingChildPaths.insert(path)
+        childErrors[path] = nil
+        Task {
+            do {
+                let result = try await model.directories(for: workspace, path: path)
+                guard !Task.isCancelled else { return }
+                childrenByPath[path] = result.entries
+                hydratePrefetchedTree(result.entries)
+                if result.truncated {
+                    truncatedChildPaths.insert(path)
+                } else {
+                    truncatedChildPaths.remove(path)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                childErrors[path] = error.localizedDescription
+            }
+            loadingChildPaths.remove(path)
+        }
+    }
+
+    private func hydratePrefetchedTree(_ entries: [MSWDirectoryResponse.Entry]) {
+        for entry in entries {
+            if !entry.hasChildren || !entry.children.isEmpty {
+                childrenByPath[entry.path] = entry.children
+            }
+            if entry.childrenTruncated {
+                truncatedChildPaths.insert(entry.path)
+            } else {
+                truncatedChildPaths.remove(entry.path)
+            }
+            hydratePrefetchedTree(entry.children)
+        }
+    }
+
+    private func openSelectedFolder(_ path: String) async {
+        let requestID = UUID()
+        editorOpenRequestID = requestID
+        editorError = nil
+        isEditorOpening = true
+        let error = await model.openEditor(for: workspace, path: path)
+        guard editorOpenRequestID == requestID else { return }
+        editorError = error
+        isEditorOpening = false
+    }
+
+
+    private var requestIdentity: String {
+        "\(workspace.rawValue):\(folderPath):\(folderSearch)"
+    }
+
+    @ViewBuilder
+    private func folderUnavailableView(
+        title: String,
+        systemImage: String,
+        description: String,
+        accessibilityIdentifier: String
+    ) -> some View {
+        if compact {
+            VStack(alignment: .leading, spacing: 5) {
+                Label(title, systemImage: systemImage)
+                    .font(.headline)
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(accessibilityIdentifier)
+        } else {
+            ContentUnavailableView(
+                title,
+                systemImage: systemImage,
+                description: Text(description)
+            )
+            .accessibilityIdentifier(accessibilityIdentifier)
+        }
+    }
+}
+
+private struct FolderTreeBranch: View {
+    let entry: MSWDirectoryResponse.Entry
+    @Binding var childrenByPath: [String: [MSWDirectoryResponse.Entry]]
+    @Binding var expandedPaths: Set<String>
+    @Binding var loadingPaths: Set<String>
+    @Binding var errorsByPath: [String: String]
+    @Binding var truncatedPaths: Set<String>
+    @Binding var selection: String?
+    let onExpand: (String) -> Void
+    let onNavigate: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 3) {
+                if !entry.hasChildren {
+                    Color.clear
+                        .frame(width: 16, height: 16)
+                        .accessibilityHidden(true)
+                } else {
+                    Button {
+                        expansionBinding.wrappedValue.toggle()
+                    } label: {
+                        Image(systemName: expandedPaths.contains(entry.path) ? "chevron.down" : "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier("folders.entry.\(entry.path).expand")
+                    .accessibilityLabel(expandedPaths.contains(entry.path) ? "Collapse \(entry.name)" : "Expand \(entry.name)")
+                }
+                folderLabel
+            }
+
+            if expandedPaths.contains(entry.path) {
+                childContent
+                    .padding(.leading, 18)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var childContent: some View {
+        if loadingPaths.contains(entry.path) {
+            ProgressView("Loading folders…")
+                .controlSize(.small)
+        } else if let error = errorsByPath[entry.path] {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.red)
+        } else if let children = childrenByPath[entry.path] {
+            ForEach(children) { child in
+                FolderTreeBranch(
+                    entry: child,
+                    childrenByPath: $childrenByPath,
+                    expandedPaths: $expandedPaths,
+                    loadingPaths: $loadingPaths,
+                    errorsByPath: $errorsByPath,
+                    truncatedPaths: $truncatedPaths,
+                    selection: $selection,
+                    onExpand: onExpand,
+                    onNavigate: onNavigate
+                )
+            }
+            if truncatedPaths.contains(entry.path) {
+                Text("More folders exist. Navigate into this folder to refine the view.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var folderLabel: some View {
+        Button {
+            selection = entry.path
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+                Text(entry.name)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(
+                selection == entry.path ? Color.accentColor.opacity(0.18) : .clear,
+                in: RoundedRectangle(cornerRadius: 5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                selection = entry.path
+                onNavigate(entry.path)
+            }
+        )
+        .accessibilityIdentifier("folders.entry.\(entry.path)")
+        .accessibilityValue(selection == entry.path ? "Selected" : "")
+    }
+
+    private var expansionBinding: Binding<Bool> {
+        Binding(
+            get: { expandedPaths.contains(entry.path) },
+            set: { expanded in
+                if expanded {
+                    expandedPaths.insert(entry.path)
+                    onExpand(entry.path)
+                } else {
+                    expandedPaths.remove(entry.path)
+                }
+            }
+        )
+    }
+}
+
+private extension DetailView {
 
     private func newestRepositoryDate(_ value: MSWRepositoriesResponse) -> Date? {
         value.repositories.compactMap(\.checkedAt).max()
@@ -877,6 +1399,7 @@ struct DetailView: View {
         case .metrics: return "gauge.with.dots.needle.67percent"
         case .logs: return "text.alignleft"
         case .repositories: return "shippingbox"
+        case .files: return "folder"
         case .ports: return "network"
         case .github: return "person.crop.circle.badge.checkmark"
         case .activity: return "clock"
@@ -968,7 +1491,7 @@ private struct DetailWorkspaceCard: View {
                 }
                 Button("Repositories", action: openRepositories)
                 Spacer()
-                Text("Next: \(workspace.nextAction)").font(.caption).foregroundStyle(.secondary)
+                Text("Next: \(model.nextActionTitle(for: workspace))").font(.caption).foregroundStyle(.secondary)
             }
         }
         .padding(14)

@@ -482,6 +482,83 @@ struct MSWRepositoriesResponse: Codable, Sendable {
     let notice: String?
 }
 
+struct MSWDirectoryResponse: Codable, Sendable, Equatable {
+    let workspace: String
+    let path: String
+    let query: String?
+    let entries: [Entry]
+    let truncated: Bool
+
+    struct Entry: Codable, Sendable, Equatable, Identifiable {
+        let name: String
+        let path: String
+        let kind: String
+        let hasChildren: Bool
+        let children: [Entry]
+        let childrenTruncated: Bool
+
+        init(
+            name: String,
+            path: String,
+            kind: String,
+            hasChildren: Bool = false,
+            children: [Entry] = [],
+            childrenTruncated: Bool = false
+        ) {
+            self.name = name
+            self.path = path
+            self.kind = kind
+            self.hasChildren = hasChildren
+            self.children = children
+            self.childrenTruncated = childrenTruncated
+        }
+
+        var id: String { path }
+    }
+}
+
+struct MSWEditorTarget: Codable, Sendable, Equatable {
+    let workspace: String
+    let path: String
+    let host: String
+
+    var isValid: Bool {
+        WorkspaceID.isValid(workspace) &&
+            host == "\(workspace).msb" &&
+            Self.isSafeRelativePath(path)
+    }
+
+    var remoteURL: URL? {
+        guard isValid else { return nil }
+        var components = URLComponents()
+        components.scheme = "ssh"
+        components.user = "root"
+        components.host = host
+        components.path = path == "." ? "/workspace" : "/workspace/\(path)"
+        return components.url
+    }
+
+    var zedRemoteURL: URL? {
+        guard isValid else { return nil }
+        var components = URLComponents()
+        components.scheme = "zed"
+        components.host = "ssh"
+        components.path = "/root@\(host)" + (path == "." ? "/workspace" : "/workspace/\(path)")
+        return components.url
+    }
+
+    private static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, path.count <= 1_024, !path.hasPrefix("/"),
+              path.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7f }) else {
+            return false
+        }
+        if path == "." { return true }
+        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".."
+        }
+    }
+}
+
 struct MSWRepositorySnapshot: Codable, Identifiable, Sendable {
     let path: String
     let canonicalRemote: String?

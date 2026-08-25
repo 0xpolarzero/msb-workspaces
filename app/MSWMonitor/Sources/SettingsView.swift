@@ -69,8 +69,43 @@ private enum GitHubConnectionState: Equatable {
     case ready(account: GitHubAccount?, owners: [String], policy: GitHubPolicyFile?)
 }
 
+struct ApplicationPreferenceFields: View {
+    @Bindable var applicationPreferences: ApplicationPreferenceStore
+    let accessibilityPrefix: String
+
+    var body: some View {
+        Group {
+            Picker("Terminal", selection: $applicationPreferences.terminalSelection) {
+                Text(applicationPreferences.systemDefaultTerminalLabel).tag("")
+                ForEach(applicationPreferences.catalog.terminals, id: \.bundleIdentifier) { application in
+                    Text(application.displayName).tag(application.bundleIdentifier)
+                }
+            }
+            .accessibilityIdentifier("\(accessibilityPrefix).applications.terminal.picker")
+            .onAppear { applicationPreferences.refreshInstalledApplications() }
+
+
+            Picker("Code editor", selection: $applicationPreferences.sourceEditorSelection) {
+                Text(applicationPreferences.systemDefaultSourceEditorLabel).tag("")
+                ForEach(applicationPreferences.catalog.sourceEditors, id: \.bundleIdentifier) { application in
+                    Text(application.displayName).tag(application.bundleIdentifier)
+                }
+            }
+            .accessibilityIdentifier("\(accessibilityPrefix).applications.editor.picker")
+
+
+            Text("System Default follows the app macOS currently chooses. An override applies only in MSW Monitor; choosing System Default clears it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("\(accessibilityPrefix).applications.help")
+        }
+    }
+}
+
 struct SettingsView: View {
     @Bindable private var navigation: SettingsNavigationState
+    @Bindable private var applicationPreferences: ApplicationPreferenceStore
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let provider: (any GitHubProviding)?
     let accessMode: GitHubAccessMode
@@ -101,6 +136,7 @@ struct SettingsView: View {
 
     init(
         navigation: SettingsNavigationState,
+        applicationPreferences: ApplicationPreferenceStore,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
@@ -110,6 +146,7 @@ struct SettingsView: View {
         }
     ) {
         self.navigation = navigation
+        self.applicationPreferences = applicationPreferences
         self.authorizationCoordinator = authorizationCoordinator
         self.provider = provider
         self.accessMode = accessMode
@@ -213,6 +250,13 @@ struct SettingsView: View {
                     Text("60 seconds").tag(60.0)
                 }
                 LabeledContent("Current value", value: "Every \(Int(pollingCadence)) seconds")
+            }
+
+            Section("Applications") {
+                ApplicationPreferenceFields(
+                    applicationPreferences: applicationPreferences,
+                    accessibilityPrefix: "settings"
+                )
             }
 
             Section("Accessibility") {

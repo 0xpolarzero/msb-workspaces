@@ -44,25 +44,6 @@ actor MSWClient {
         configuredWorkspaces = configurations.map(\.name)
     }
 
-    func openInZed(workspace: String) async throws {
-        guard WorkspaceID.isValid(workspace) else {
-            throw MSWClientError.invalidArguments
-        }
-        let request = try await runner.makeMSWCommand(
-            arguments: ["zed", workspace],
-            timeout: .seconds(30)
-        )
-        let output = try await runner.run(request)
-        guard output.status == 0 else {
-            let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw MSWClientError.processFailed(
-                command: "zed",
-                status: output.status,
-                message: message.isEmpty ? nil : message
-            )
-        }
-    }
-
     func handshake() async throws -> MSWEnvelope<MSWHandshake> {
         try await execute(arguments: ["app", "handshake", "--format", "json"], as: MSWHandshake.self, command: "handshake")
     }
@@ -205,6 +186,67 @@ actor MSWClient {
             credentialsFor: workspace,
             includeGuestCredentials: true
         )
+    }
+
+    func directories(
+        workspace: String,
+        path: String = ".",
+        query: String? = nil,
+        limit: Int = 100
+    ) async throws -> MSWEnvelope<MSWDirectoryResponse> {
+        guard WorkspaceID.isValid(workspace), Self.isSafeRelativePath(path),
+              (1...200).contains(limit),
+              query.map({ !$0.isEmpty && $0.count <= 128 && Self.isControlFree($0) }) ?? true else {
+            throw MSWClientError.invalidArguments
+        }
+        let command = query == nil ? "directory-list" : "directory-search"
+        var arguments = ["app", command, "--workspace", workspace, "--path", path]
+        if let query { arguments += ["--query", query] }
+        arguments += ["--limit", String(limit), "--format", "json"]
+        let envelope = try await execute(
+            arguments: arguments,
+            as: MSWDirectoryResponse.self,
+            command: command,
+            timeout: .seconds(20)
+        )
+        guard let result = envelope.result else {
+            throw MSWClientError.malformedJSON(command: command)
+        }
+        let flattenedEntries = Self.flattenedDirectoryEntries(result.entries)
+        guard result.workspace == workspace,
+              result.path == path,
+              result.query == query,
+              flattenedEntries.count <= limit,
+              Set(flattenedEntries.map(\.path)).count == flattenedEntries.count,
+              Self.directoryEntriesAreValid(
+                  result.entries,
+                  within: path,
+                  recursive: query != nil
+              ) else {
+            throw MSWClientError.malformedJSON(command: command)
+        }
+        return envelope
+    }
+
+    func editorTarget(workspace: String, path: String = ".") async throws -> MSWEnvelope<MSWEditorTarget> {
+        guard WorkspaceID.isValid(workspace), Self.isSafeRelativePath(path) else {
+            throw MSWClientError.invalidArguments
+        }
+        let envelope = try await execute(
+            arguments: ["app", "editor-target", "--workspace", workspace, "--path", path, "--format", "json"],
+            as: MSWEditorTarget.self,
+            command: "editor-target",
+            timeout: .seconds(20)
+        )
+        guard let result = envelope.result,
+              result.workspace == workspace,
+              result.path == path,
+              result.host == "\(workspace).msb",
+              result.isValid,
+              result.remoteURL != nil else {
+            throw MSWClientError.malformedJSON(command: "editor-target")
+        }
+        return envelope
     }
 
     func githubState(workspace: String? = nil) async throws -> MSWEnvelope<MSWGitHubStateResponse> {
@@ -912,14 +954,62 @@ actor MSWClient {
     }
 
     private static func isSafeRelativePath(_ path: String) -> Bool {
-        guard !path.isEmpty, !path.hasPrefix("/"),
-              !path.contains("\n"), !path.contains("\r"), !path.contains("\t") else {
+        guard !path.isEmpty, path.count <= 1_024, !path.hasPrefix("/"),
+              isControlFree(path) else {
             return false
         }
         if path == "." { return true }
         return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
             !$0.isEmpty && $0 != "." && $0 != ".."
         }
+    }
+
+    private static func isControlFree(_ value: String) -> Bool {
+        value.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7f }
+    }
+
+    private static func flattenedDirectoryEntries(
+        _ entries: [MSWDirectoryResponse.Entry]
+    ) -> [MSWDirectoryResponse.Entry] {
+        entries.flatMap { entry in
+            [entry] + flattenedDirectoryEntries(entry.children)
+        }
+    }
+
+    private static func directoryEntriesAreValid(
+        _ entries: [MSWDirectoryResponse.Entry],
+        within scope: String,
+        recursive: Bool
+    ) -> Bool {
+        entries.allSatisfy { entry in
+            entry.kind == "directory" &&
+                !entry.name.isEmpty &&
+                entry.name.count <= 255 &&
+                isControlFree(entry.name) &&
+                entry.path.count <= 1_024 &&
+                isSafeRelativePath(entry.path) &&
+                entry.name == entry.path.split(separator: "/").last.map(String.init) &&
+                isDirectoryEntryPath(entry.path, within: scope, recursive: recursive) &&
+                (entry.children.isEmpty || entry.hasChildren) &&
+                (!entry.childrenTruncated || entry.hasChildren) &&
+                (recursive
+                    ? entry.children.isEmpty && !entry.childrenTruncated
+                    : directoryEntriesAreValid(entry.children, within: entry.path, recursive: false))
+        }
+    }
+
+    private static func isDirectoryEntryPath(
+        _ entry: String,
+        within scope: String,
+        recursive: Bool
+    ) -> Bool {
+        let scopeComponents = scope == "." ? [] : scope.split(separator: "/")
+        let entryComponents = entry.split(separator: "/")
+        guard entryComponents.count > scopeComponents.count,
+              entryComponents.prefix(scopeComponents.count).elementsEqual(scopeComponents) else {
+            return false
+        }
+        return recursive || entryComponents.count == scopeComponents.count + 1
     }
 
     private struct LogEnvelopeHeader: Decodable {

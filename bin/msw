@@ -4650,7 +4650,7 @@ Backup / reference
   msw version
   msw help
 Machine-readable app integration
-  msw app handshake|state|metrics|logs|repositories|ports|github-state
+  msw app handshake|state|metrics|logs|repositories|directory-list|directory-search|editor-target|ports|github-state
   msw app github-policy-get|github-policy-set|github-policy-apply
   msw app url|clone|pull|identity|disk|resize|clean|upgrade|update
   msw app check|backup|restore|push-plan|plan|apply|bootstrap|help
@@ -5050,18 +5050,287 @@ app_workspace_json() {
 }
 app_valid_control_free() {
   local value="${1-}"
-  [[ "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]]
+  [[ ! "$value" =~ [[:cntrl:]] ]]
 }
 
 app_valid_relative_path() {
   local path="${1-}" component
-  [[ -n "$path" && "$path" != /* ]] || return 1
+  [[ -n "$path" && ${#path} -le 1024 && "$path" != /* ]] || return 1
   app_valid_control_free "$path" || return 1
   [[ "$path" == "." ]] && return 0
   IFS='/' read -r -a _app_parts <<<"$path"
   for component in "${_app_parts[@]}"; do
     [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || return 1
   done
+}
+
+app_valid_directory_query() {
+  local query="${1-}"
+  [[ -n "$query" && ${#query} -le 128 ]] || return 1
+  app_valid_control_free "$query"
+}
+
+app_guest_directory_query() {
+  local box="$1" mode="$2" path="$3" query="$4" limit="$5" script
+  script='import json, os, sys
+root_arg, mode, relative, query, raw_limit = sys.argv[1:]
+root = os.path.realpath(root_arg)
+limit = int(raw_limit)
+prefetch_depth = 4
+
+def resolve_folder(value):
+    candidate = root if value == "." else os.path.join(root, *value.split("/"))
+    resolved = os.path.realpath(candidate)
+    if resolved != root and not resolved.startswith(root + os.sep):
+        raise ValueError("outside-root")
+    if not os.path.isdir(resolved):
+        raise FileNotFoundError(value)
+    return resolved
+
+def relative_path(value):
+    path = os.path.relpath(value, root)
+    return "." if path == "." else path
+
+def directory_candidates(folder):
+    candidates = []
+    with os.scandir(folder) as iterator:
+        for item in iterator:
+            if item.is_symlink():
+                continue
+            try:
+                if item.is_dir(follow_symlinks=False):
+                    candidates.append((item.name, item.path))
+            except OSError:
+                continue
+    candidates.sort(key=lambda item: (item[0].casefold(), item[0]))
+    return candidates
+
+folder = resolve_folder(relative)
+entries = []
+truncated = False
+emitted = 0
+
+def build_entry(name, full_path, depth, count_self=True):
+    global emitted, truncated
+    if count_self:
+        emitted += 1
+    candidates = directory_candidates(full_path)
+    has_children = bool(candidates)
+    children = []
+    children_truncated = False
+    if depth < prefetch_depth:
+        for child_name, child_path in candidates:
+            if emitted >= limit:
+                children_truncated = True
+                truncated = True
+                break
+            children.append(build_entry(child_name, child_path, depth + 1))
+    elif has_children:
+        children_truncated = True
+        truncated = True
+    return {
+        "name": name,
+        "path": relative_path(full_path),
+        "kind": "directory",
+        "hasChildren": has_children,
+        "children": children,
+        "childrenTruncated": children_truncated,
+    }
+
+if mode == "list":
+    candidates = directory_candidates(folder)
+    selected_candidates = candidates[:limit]
+    emitted = len(selected_candidates)
+    truncated = len(candidates) > len(selected_candidates)
+    for name, full_path in selected_candidates:
+        entries.append(build_entry(name, full_path, 1, count_self=False))
+else:
+    needle = query.casefold()
+    visited = 0
+    for current, directories, _ in os.walk(folder, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            [name for name in directories if not os.path.islink(os.path.join(current, name))],
+            key=lambda name: (name.casefold(), name),
+        )
+        depth = relative_path(current).count("/") + (0 if current == root else 1)
+        if depth >= 12:
+            directories[:] = []
+        for name in directories:
+            visited += 1
+            candidate = os.path.join(current, name)
+            path = relative_path(candidate)
+            if needle in name.casefold() or needle in path.casefold():
+                if len(entries) >= limit:
+                    truncated = True
+                    directories[:] = []
+                    break
+                entries.append({
+                    "name": name,
+                    "path": path,
+                    "kind": "directory",
+                    "hasChildren": bool(directory_candidates(candidate)),
+                    "children": [],
+                    "childrenTruncated": False,
+                })
+            if visited >= 5000:
+                truncated = True
+                directories[:] = []
+                break
+        if truncated and (len(entries) >= limit or visited >= 5000):
+            break
+
+print(json.dumps({
+    "path": relative_path(folder),
+    "query": query if mode == "search" else None,
+    "entries": entries,
+    "truncated": truncated,
+}, ensure_ascii=True, separators=(",", ":")))'
+  workspace_msb "$box" exec --no-tty "$box" -- \
+    python3 -c "$script" /workspace "$mode" "$path" "$query" "$limit"
+}
+
+app_directory_result_is_valid() {
+  local json="$1" limit="$2" expected_path="$3" expected_query="$4" recursive="$5"
+  "$JQ_BIN" -e \
+    --argjson limit "$limit" \
+    --arg expectedPath "$expected_path" \
+    --arg expectedQuery "$expected_query" \
+    --argjson recursive "$recursive" '
+    def safe_relative:
+      type == "string" and length > 0 and length <= 1024 and
+      (test("[[:cntrl:]]") | not) and
+      ((. == ".") or
+        ((startswith("/") | not) and
+         (split("/") | all(. != "" and . != "." and . != ".."))));
+    def components:
+      if . == "." then [] else split("/") end;
+    def within_scope($scope; $is_recursive):
+      (. | components) as $entryParts |
+      ($scope | components) as $scopeParts |
+      ($entryParts | length) > ($scopeParts | length) and
+      $entryParts[0:($scopeParts | length)] == $scopeParts and
+      ($is_recursive or (($entryParts | length) == (($scopeParts | length) + 1)));
+    def valid_entry($parent; $is_recursive):
+      . as $entry |
+      type == "object" and
+      keys == ["children", "childrenTruncated", "hasChildren", "kind", "name", "path"] and
+      (.name | type == "string" and length > 0 and length <= 255 and (test("[[:cntrl:]]") | not)) and
+      (.path | safe_relative and . != ".") and
+      (.path as $path | .name == ($path | split("/") | last)) and
+      (.path | within_scope($parent; $is_recursive)) and
+      .kind == "directory" and
+      (.hasChildren | type == "boolean") and
+      (.childrenTruncated | type == "boolean") and
+      (.children | type == "array") and
+      (((.children | length) == 0) or .hasChildren) and
+      ((.childrenTruncated | not) or .hasChildren) and
+      (if $is_recursive then
+         (.children | length) == 0 and (.childrenTruncated | not)
+       else
+         ([.children[] | valid_entry($entry.path; false)] | all)
+       end);
+    type == "object" and keys == ["entries", "path", "query", "truncated"] and
+    .path == $expectedPath and (.path | safe_relative) and
+    (if $recursive then
+       .query == $expectedQuery and
+       (.query | type == "string" and length > 0 and length <= 128 and (test("[[:cntrl:]]") | not))
+     else
+       .query == null
+     end) and
+    (.truncated | type == "boolean") and
+    (.entries | type == "array") and
+    (([.entries[] | recurse(.children[]?)] | length) <= $limit) and
+    ([.entries[] | valid_entry($expectedPath; $recursive)] | all)
+  ' >/dev/null <<<"$json"
+}
+
+app_cmd_directory_query() {
+  local command="$1" mode="$2"; shift 2
+  local box="" path="." query="" limit="100" status="" result=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error "$command"; box="$2"; shift 2 ;;
+      --path) [[ $# -ge 2 ]] || app_usage_error "$command"; path="$2"; shift 2 ;;
+      --query) [[ $# -ge 2 ]] || app_usage_error "$command"; query="$2"; shift 2 ;;
+      --limit) [[ $# -ge 2 ]] || app_usage_error "$command"; limit="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error "$command"; shift 2 ;;
+      *) app_usage_error "$command" ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error "$command"
+  app_valid_relative_path "$path" || app_usage_error "$command"
+  [[ "$limit" =~ ^[0-9]+$ ]] && (( 10#$limit >= 1 && 10#$limit <= 200 )) || app_usage_error "$command"
+  if [[ "$mode" == search ]]; then
+    app_valid_directory_query "$query" || app_usage_error "$command"
+  elif [[ -n "$query" ]]; then
+    app_usage_error "$command"
+  fi
+  app_require_config "$command"
+  app_require_runtime "$command"
+  if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error "$command" "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
+  fi
+  if [[ "$status" != Running ]]; then
+    app_emit_error "$command" "MSW_WORKSPACE_STOPPED" "Workspace folders are unavailable while the workspace is stopped." "Start the workspace, then retry folder browsing." "$box" false 69
+  fi
+  if ! result="$(app_guest_directory_query "$box" "$mode" "$path" "$query" "$limit" 2>/dev/null)"; then
+    app_emit_error "$command" "MSW_DIRECTORY_UNAVAILABLE" "The requested folder is unavailable." "Choose a folder under /workspace and retry." "$box" true 69
+  fi
+  result="$(app_redact "$result")"
+  result="$("$JQ_BIN" -c '
+    def safe_entries:
+      map(
+        select(
+          (.name | contains("[REDACTED]") | not) and
+          (.path | contains("[REDACTED]") | not)
+        ) |
+        .children |= safe_entries
+      );
+    .entries |= safe_entries
+  ' <<<"$result")"
+  if [[ "$("$JQ_BIN" -r '.path, (.query // "")' <<<"$result")" == *"[REDACTED]"* ]]; then
+    app_emit_error "$command" "MSW_DIRECTORY_UNAVAILABLE" "The requested folder or search cannot be displayed safely." "Choose a different folder or search term." "$box" false 69
+  fi
+  app_directory_result_is_valid \
+    "$result" "$limit" "$path" "$query" "$([[ "$mode" == search ]] && printf true || printf false)" || \
+    app_emit_error "$command" "MSW_SCHEMA_MISMATCH" "The workspace returned an invalid directory response." "Update or repair the MSW runtime adapter." "$box" false 78
+  result="$("$JQ_BIN" -c --arg workspace "$box" '. + {workspace:$workspace}' <<<"$result")"
+  app_emit_success "$command" "$result"
+}
+
+app_cmd_editor_target() {
+  local box="" path="." status="" result="" canonical_path=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --workspace) [[ $# -ge 2 ]] || app_usage_error editor-target; box="$2"; shift 2 ;;
+      --path) [[ $# -ge 2 ]] || app_usage_error editor-target; path="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error editor-target; shift 2 ;;
+      *) app_usage_error editor-target ;;
+    esac
+  done
+  is_workspace "$box" || app_usage_error editor-target
+  app_valid_relative_path "$path" || app_usage_error editor-target
+  app_require_config editor-target
+  app_require_runtime editor-target
+  if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
+    app_emit_error editor-target "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
+  fi
+  if [[ "$status" != Running ]]; then
+    app_emit_error editor-target "MSW_WORKSPACE_STOPPED" "The source-code editor cannot open a stopped workspace." "Start the workspace, then retry." "$box" false 69
+  fi
+  if ! result="$(app_guest_directory_query "$box" list "$path" "" 1 2>/dev/null)"; then
+    app_emit_error editor-target "MSW_DIRECTORY_UNAVAILABLE" "The requested folder is unavailable." "Choose an existing folder under /workspace and retry." "$box" false 69
+  fi
+  result="$(app_redact "$result")"
+  if [[ "$("$JQ_BIN" -r '.path' <<<"$result")" == *"[REDACTED]"* ]]; then
+    app_emit_error editor-target "MSW_DIRECTORY_UNAVAILABLE" "The requested folder cannot be displayed safely." "Choose a different folder." "$box" false 69
+  fi
+  app_directory_result_is_valid "$result" 1 "$path" "" false || \
+    app_emit_error editor-target "MSW_SCHEMA_MISMATCH" "The workspace returned an invalid directory response." "Update or repair the MSW runtime adapter." "$box" false 78
+  canonical_path="$("$JQ_BIN" -r '.path' <<<"$result")"
+  [[ "$canonical_path" == "." ]] && canonical_path=""
+  app_emit_success editor-target \
+    "{\"workspace\":$(app_json_string "$box"),\"path\":$(app_json_string "${canonical_path:-.}"),\"host\":$(app_json_string "$(workspace_ssh_host "$box")")}"
 }
 
 app_valid_repository() {
@@ -7223,6 +7492,9 @@ Machine-readable MSW Monitor commands:
   msw app metrics --workspace WORKSPACE --format json --once
   msw app logs --workspace WORKSPACE --format jsonl
   msw app repositories --workspace WORKSPACE [--if-running] --format json
+  msw app directory-list --workspace WORKSPACE [--path PATH] [--limit 1..200] --format json
+  msw app directory-search --workspace WORKSPACE [--path PATH] --query QUERY [--limit 1..200] --format json
+  msw app editor-target --workspace WORKSPACE [--path PATH] --format json
   msw app push-plan --workspace WORKSPACE --repositories PATH... --format json
   msw app ports [--workspace WORKSPACE] --format json
   msw app github-state [--workspace WORKSPACE] --format json
@@ -7279,6 +7551,9 @@ cmd_app() {
     metrics) app_cmd_metrics "$@" ;;
     logs) app_cmd_logs "$@" ;;
     repositories) app_cmd_repositories "$@" ;;
+    directory-list) app_cmd_directory_query directory-list list "$@" ;;
+    directory-search) app_cmd_directory_query directory-search search "$@" ;;
+    editor-target) app_cmd_editor_target "$@" ;;
     ports) app_cmd_ports "$@" ;;
     github-state) app_cmd_github_state "$@" ;;
     github-policy-get) app_cmd_github_policy_get "$@" ;;

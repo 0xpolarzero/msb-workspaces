@@ -207,6 +207,7 @@ private struct WorkspaceRow: View {
     @Bindable var model: AppModel
     let openDetails: (DetailRoute) -> Void
     let openSetup: (() -> Void)?
+    @State private var isFolderPickerPresented = false
 
 
     var body: some View {
@@ -268,9 +269,10 @@ private struct WorkspaceRow: View {
                 }
             }
         } else if canOpenWorkspace {
-            compactButton("Open Terminal", systemImage: "terminal") {
+            compactButton(model.terminalActionTitle, systemImage: "terminal") {
                 model.openTerminal(for: workspace.id)
             }
+            .accessibilityIdentifier("workspace.\(workspace.id.rawValue).open-terminal")
         } else if workspace.canStart && workspace.state != .running {
             compactButton("Start", systemImage: "play.fill") {
                 model.start(workspace.id)
@@ -311,10 +313,15 @@ private struct WorkspaceRow: View {
                 Divider()
             }
 
-            Button("Open Terminal") { model.openTerminal(for: workspace.id) }
+            Button(model.terminalActionTitle) { model.openTerminal(for: workspace.id) }
                 .disabled(!canOpenWorkspace)
-            Button("Open in Zed") { model.openZed(for: workspace.id) }
+                .accessibilityIdentifier("workspace.\(workspace.id.rawValue).open-terminal")
+            Button(model.editorActionTitle) {
+                model.selectedWorkspace = workspace.id
+                isFolderPickerPresented = true
+            }
                 .disabled(!canOpenWorkspace)
+                .accessibilityIdentifier("workspace.\(workspace.id.rawValue).open-editor")
             Menu("Open Site") {
                 Button("Port 3000") { model.openSite(for: workspace.id, port: "3000") }
                 ForEach(publishedSitePorts, id: \.self) { port in
@@ -345,6 +352,19 @@ private struct WorkspaceRow: View {
         .fixedSize()
         .accessibilityIdentifier("workspace.\(workspace.id.rawValue).actions")
         .help("More actions")
+        .popover(isPresented: $isFolderPickerPresented, arrowEdge: .trailing) {
+            FolderBrowserView(
+                model: model,
+                workspace: workspace.id,
+                compact: true,
+                title: "\(workspace.id.rawValue) folders",
+                onClose: { isFolderPickerPresented = false }
+            )
+            .padding(14)
+            .frame(width: 500, height: 350, alignment: .topLeading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("folders.popover.content")
+        }
     }
 
     private var canOpenWorkspace: Bool {
@@ -368,4 +388,3 @@ private struct WorkspaceRow: View {
         }
     }
 }
-

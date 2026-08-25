@@ -11,6 +11,7 @@ struct MSWMonitorApp: App {
         Settings {
             SettingsView(
                 navigation: appDelegate.settingsNavigation,
+                applicationPreferences: appDelegate.applicationPreferences,
                 authorizationCoordinator: appDelegate.authorizationCoordinator,
                 provider: appDelegate.provider,
                 accessMode: appDelegate.accessMode,
@@ -28,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: MSWClient
     let settingsNavigation = SettingsNavigationState()
+    let applicationPreferences: ApplicationPreferenceStore
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let githubInstallationURL: URL?
     let accessMode: GitHubAccessMode
@@ -58,11 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     init(
         connectConfiguration: MSWConnectConfiguration,
         policyStore: GitHubPolicyStore?,
+        applicationPreferences: ApplicationPreferenceStore? = nil,
         makeBroker: () -> CredentialBroker? = { try? CredentialBroker() }
     ) {
         let accessMode: GitHubAccessMode = connectConfiguration.hasTrustedScopeAttestation ? .connect : .local
         self.accessMode = accessMode
         self.githubInstallationURL = connectConfiguration.installationURL
+        self.applicationPreferences = applicationPreferences ?? Self.makeApplicationPreferences()
         let runner = MSWCommandRunner()
         self.runner = runner
         if accessMode == .connect {
@@ -109,6 +113,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store.startWatching()
         }
         super.init()
+    }
+
+    private static func makeApplicationPreferences() -> ApplicationPreferenceStore {
+        let arguments = ProcessInfo.processInfo.arguments
+        let folderBrowserFixture = arguments.contains("--ui-test-folder-browser")
+        let preferencesFixture = arguments.contains("--ui-test-app-preferences")
+        guard folderBrowserFixture || preferencesFixture else {
+            return ApplicationPreferenceStore()
+        }
+
+        let suiteName = "org.microsandbox.MSWMonitor.ApplicationPreferencesUITests"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removeObject(forKey: ApplicationPreferenceStore.terminalOverrideKey)
+        defaults.removeObject(forKey: ApplicationPreferenceStore.sourceEditorOverrideKey)
+        return ApplicationPreferenceStore(userDefaults: defaults) {
+            if preferencesFixture {
+                let defaultTerminal = SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/Fixture Terminal.app"),
+                    bundleIdentifier: "org.microsandbox.fixture.default-terminal",
+                    displayName: "Fixture Terminal"
+                )
+                let defaultEditor = SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/Xcode.app"),
+                    bundleIdentifier: "com.apple.dt.Xcode",
+                    displayName: "Xcode"
+                )
+                let ghostty = SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/Ghostty.app"),
+                    bundleIdentifier: "com.mitchellh.ghostty",
+                    displayName: "Ghostty"
+                )
+                let zed = SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/Zed.app"),
+                    bundleIdentifier: "dev.zed.Zed",
+                    displayName: "Zed"
+                )
+                return SystemApplicationCatalog(
+                    defaults: SystemApplicationDefaults(
+                        terminal: defaultTerminal,
+                        sourceEditor: defaultEditor
+                    ),
+                    terminals: [ghostty],
+                    sourceEditors: [zed]
+                )
+            }
+
+            let discovered = SystemApplicationCatalog.discover()
+            let unsupported = SystemApplication(
+                url: URL(fileURLWithPath: "/Applications/Unsupported Editor.app"),
+                bundleIdentifier: "org.microsandbox.fixture.unsupported-editor",
+                displayName: "Unsupported Editor"
+            )
+            return SystemApplicationCatalog(
+                defaults: SystemApplicationDefaults(
+                    terminal: discovered.defaults.terminal,
+                    sourceEditor: unsupported
+                ),
+                terminals: discovered.terminals,
+                sourceEditors: discovered.sourceEditors
+            )
+        }
     }
 
     /// Reads the Connect build configuration from Info.plist. Reading the
@@ -165,6 +230,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
             arguments.contains("--ui-test-setup-reconnect") ||
+            arguments.contains("--ui-test-folder-browser") ||
+            arguments.contains("--ui-test-app-preferences") ||
             arguments.contains(where: { $0.hasPrefix("--ui-test-github-") }) ||
             isTestHost
         if fixtureMode {
@@ -236,6 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             : nil
         let model: AppModel
+        let folderBrowserFixture = arguments.contains("--ui-test-folder-browser")
         let configuredWorkspaces = fixtureMode
             ? SetupWorkspaceConfiguration.defaults
             : BootstrapStateStore.persistedWorkspaceConfigurations()
@@ -250,7 +318,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 workspaceConfigurations: configuredWorkspaces,
                 startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
                 startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry,
-                initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil
+                initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil,
+                applicationPreferences: applicationPreferences
             )
             operationCoordinator = nil
         } else {
@@ -264,8 +333,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 diagnostics: diagnostics,
                 provider: provider,
                 accessMode: accessMode,
-                workspaceConfigurations: configuredWorkspaces
+                workspaceConfigurations: configuredWorkspaces,
+                applicationPreferences: applicationPreferences
             )
+        }
+        if folderBrowserFixture {
+            model.installDirectoryUITestFixture()
         }
         let bootstrap: (any MSWBootstrapCoordinating)?
         if ProcessInfo.processInfo.arguments.contains("--ui-test-setup-reconnect") {
@@ -289,6 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             accessMode: accessMode,
             commandRunner: runner,
             settingsNavigation: settingsNavigation,
+            applicationPreferences: applicationPreferences,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,
             retryStartupRecovery: retryStartupRecovery
         )

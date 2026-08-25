@@ -1,22 +1,12 @@
+import AppKit
+import UniformTypeIdentifiers
 import XCTest
 
 @MainActor
 final class MSWMonitorUITests: XCTestCase {
     func testStatusItemMinimalPopoverAndQuit() {
-        let appURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appending(path: "build/MSWMonitor.app")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
-
-        let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
-        app.launchArguments = ["--ui-test-open-popover"]
-        app.launch()
+        let app = launchFixture(["--ui-test-open-popover"])
+        defer { terminateIfNeeded(app) }
 
         let statusItem = app.statusItems["statusItem.button"]
         XCTAssertTrue(statusItem.waitForExistence(timeout: 3))
@@ -29,7 +19,6 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.menuItems["Hide MSW Monitor"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.menuItems["Quit MSW Monitor"].waitForExistence(timeout: 2))
         app.typeKey(.escape, modifierFlags: [])
-
 
         assertText("MSW Monitor", identifier: "monitor.title", in: app)
         assertText("Not observed", identifier: "monitor.health", in: app)
@@ -50,6 +39,72 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(quit.label, "Quit")
         quit.click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
+    func testDirectFolderPickerFromStatusPopover() {
+        let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
+        defer { terminateIfNeeded(app) }
+
+        assertDirectFolderPicker(in: app)
+        app.buttons["folders.popover.close"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["monitor.title"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["details.sidebar"].exists)
+        app.buttons["quit.button"].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
+    func testApplicationPreferencesUpdateWorkspaceActions() {
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-folder-browser",
+            "--ui-test-app-preferences"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertEqual(app.buttons["workspace.dev.open-terminal"].label, "Open in Fixture Terminal")
+        app.buttons["settings.button"].click()
+        let terminalPicker = app.popUpButtons["settings.applications.terminal.picker"]
+        let editorPicker = app.popUpButtons["settings.applications.editor.picker"]
+        XCTAssertTrue(terminalPicker.waitForExistence(timeout: 3))
+        XCTAssertTrue(editorPicker.waitForExistence(timeout: 2))
+        XCTAssertEqual(terminalPicker.value as? String, "System Default — Fixture Terminal")
+        XCTAssertEqual(editorPicker.value as? String, "System Default — Xcode")
+        terminalPicker.click()
+        terminalPicker.menuItems["Ghostty"].click()
+        editorPicker.click()
+        editorPicker.menuItems["Zed"].click()
+        XCTAssertEqual(terminalPicker.value as? String, "Ghostty")
+        XCTAssertEqual(editorPicker.value as? String, "Zed")
+
+        app.typeKey("w", modifierFlags: .command)
+        let preferenceStatusItem = app.statusItems["statusItem.button"]
+        XCTAssertTrue(preferenceStatusItem.waitForExistence(timeout: 2))
+        preferenceStatusItem.click()
+        XCTAssertEqual(app.buttons["workspace.dev.open-terminal"].label, "Open in Ghostty")
+        let actions = app.menuButtons["workspace.dev.actions"]
+        actions.click()
+        XCTAssertTrue(app.menuItems["Open in Zed…"].waitForExistence(timeout: 2))
+        app.typeKey(.escape, modifierFlags: [])
+        app.buttons["quit.button"].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
+    private func launchFixture(_ arguments: [String]) -> XCUIApplication {
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "build/MSWMonitor.app")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+        let app = XCUIApplication(url: appURL)
+        app.launchArguments = arguments
+        app.launch()
+        return app
+    }
+
+    private func terminateIfNeeded(_ app: XCUIApplication) {
+        if app.state != .notRunning {
+            app.terminate()
+        }
     }
     func testOperationFailureOpensDetailedLogs() {
         let appURL = URL(fileURLWithPath: #filePath)
@@ -106,15 +161,13 @@ final class MSWMonitorUITests: XCTestCase {
                 app.terminate()
             }
         }
-        app.launchArguments = ["--ui-test-open-popover"]
+        app.launchArguments = ["--ui-test-open-popover", "--ui-test-folder-browser"]
         app.launch()
 
-        let details = app.buttons["details.button"]
-        XCTAssertTrue(details.waitForExistence(timeout: 3))
-        details.click()
-
+        app.buttons["details.button"].click()
         let sidebar = app.descendants(matching: .any)["details.sidebar"]
         XCTAssertTrue(sidebar.waitForExistence(timeout: 3))
+        assertText("Overview", identifier: "details.section-title", in: app)
 
         let github = app.descendants(matching: .any)["details.section.GitHub Access"]
         XCTAssertTrue(github.waitForExistence(timeout: 2))
@@ -127,6 +180,142 @@ final class MSWMonitorUITests: XCTestCase {
         diagnostics.click()
         assertText("Diagnostics and Maintenance", identifier: "details.section-title", in: app)
         XCTAssertTrue(sidebar.exists)
+
+        let workspacePicker = app.popUpButtons["details.workspace-picker"]
+        XCTAssertTrue(workspacePicker.waitForExistence(timeout: 2))
+        workspacePicker.click()
+        app.menuItems["dev"].click()
+
+        let files = app.descendants(matching: .any)["details.section.Files"]
+        XCTAssertTrue(files.waitForExistence(timeout: 2))
+        files.click()
+        assertText("Files", identifier: "details.section-title", in: app)
+        let detailPathBar = app.descendants(matching: .any)["folders.path-bar"]
+        XCTAssertTrue(detailPathBar.waitForExistence(timeout: 2))
+        XCTAssertEqual(app.buttons["folders.open.button"].label, "Open in Unsupported Editor")
+
+        let projects = app.buttons["folders.entry.Projects"]
+        XCTAssertTrue(projects.waitForExistence(timeout: 2))
+        projects.doubleClick()
+        XCTAssertTrue(app.buttons["folders.breadcrumb.Projects"].waitForExistence(timeout: 2))
+
+        let search = app.textFields["folders.search.field"]
+        XCTAssertTrue(search.waitForExistence(timeout: 2))
+        search.click()
+        search.typeText("Demo")
+        let demo = app.buttons["folders.entry.Projects/Demo"]
+        XCTAssertTrue(demo.waitForExistence(timeout: 3))
+        demo.click()
+        app.buttons["folders.open.button"].click()
+        let folderError = app.staticTexts["folders.error"]
+        XCTAssertTrue(folderError.waitForExistence(timeout: 2))
+        XCTAssertTrue((folderError.value as? String)?.contains("Unsupported Editor") == true)
+        XCTAssertTrue((folderError.value as? String)?.contains("no fallback was opened") == true)
+    }
+
+    private func assertDirectFolderPicker(in app: XCUIApplication) {
+        let terminalName = defaultApplicationName(for: .unixExecutable)
+        XCTAssertTrue(app.buttons["workspace.dev.open-terminal"].waitForExistence(timeout: 2))
+        XCTAssertEqual(
+            app.buttons["workspace.dev.open-terminal"].label,
+            terminalName.map { "Open in \($0)" } ?? "Open in Default Terminal"
+        )
+        XCTAssertFalse(app.textFields["folders.search.field"].exists)
+
+        let actions = app.menuButtons["workspace.dev.actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 2))
+        actions.click()
+        let editorAction = app.menuItems["workspace.dev.open-editor"]
+        XCTAssertTrue(editorAction.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.menuItems["Open in Unsupported Editor…"].exists)
+        editorAction.click()
+
+        assertText("dev folders", identifier: "folders.popover.title", in: app)
+        let pathBar = app.descendants(matching: .any)["folders.path-bar"]
+        XCTAssertTrue(pathBar.waitForExistence(timeout: 2))
+        let rootBreadcrumb = app.buttons["folders.breadcrumb.root"]
+        XCTAssertTrue(rootBreadcrumb.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["folders.truncated"].waitForExistence(timeout: 2))
+        let pickerContent = app.descendants(matching: .any)["folders.popover.content"]
+        let pickerTitle = app.staticTexts["folders.popover.title"]
+        let folderTree = app.descendants(matching: .any)["folders.tree"]
+        XCTAssertTrue(pickerContent.waitForExistence(timeout: 2))
+        XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
+        let closePicker = app.buttons["folders.popover.close"]
+        let headerOpen = app.buttons["folders.open.button"]
+        XCTAssertTrue(closePicker.waitForExistence(timeout: 2))
+        XCTAssertTrue(headerOpen.waitForExistence(timeout: 2))
+        XCTAssertLessThan(closePicker.frame.maxX, headerOpen.frame.minX)
+        XCTAssertEqual(closePicker.frame.midY, headerOpen.frame.midY, accuracy: 1)
+        XCTAssertLessThan(pickerTitle.frame.minY - pickerContent.frame.minY, 36)
+        XCTAssertGreaterThan(folderTree.frame.height, 150)
+        XCTAssertLessThan(pickerContent.frame.maxY - pathBar.frame.maxY, 36)
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "Direct status-popover folder picker — compact top-aligned layout"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        XCTAssertTrue(app.descendants(matching: .any)["monitor.title"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["details.sidebar"].exists)
+
+        let projectsExpand = app.descendants(matching: .any)["folders.entry.Projects.expand"]
+        XCTAssertTrue(projectsExpand.waitForExistence(timeout: 2))
+        projectsExpand.click()
+        XCTAssertTrue(app.buttons["folders.entry.Projects/Demo"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.descendants(matching: .any)["folders.entry.Scratch.expand"].exists)
+
+        let projects = app.buttons["folders.entry.Projects"]
+        XCTAssertTrue(projects.waitForExistence(timeout: 2))
+        projects.doubleClick()
+        XCTAssertTrue(app.buttons["folders.breadcrumb.Projects"].waitForExistence(timeout: 2))
+        rootBreadcrumb.click()
+        XCTAssertFalse(app.buttons["folders.breadcrumb.Projects"].exists)
+        XCTAssertFalse(app.buttons["folders.up.button"].exists)
+
+        let scratch = app.buttons["folders.entry.Scratch"]
+        XCTAssertTrue(scratch.waitForExistence(timeout: 2))
+        scratch.doubleClick()
+        XCTAssertTrue(app.buttons["folders.breadcrumb.Scratch"].waitForExistence(timeout: 2))
+        let emptyState = app.descendants(matching: .any)["folders.empty"]
+        XCTAssertTrue(emptyState.waitForExistence(timeout: 2))
+        XCTAssertLessThan(pickerContent.frame.maxY - pathBar.frame.maxY, 36)
+        let emptyScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        emptyScreenshot.name = "Direct status-popover empty folder — compact top-aligned layout"
+        emptyScreenshot.lifetime = .keepAlways
+        add(emptyScreenshot)
+
+        rootBreadcrumb.click()
+        XCTAssertFalse(app.buttons["folders.breadcrumb.Scratch"].exists)
+        app.buttons["folders.entry.Projects"].doubleClick()
+        XCTAssertTrue(app.buttons["folders.breadcrumb.Projects"].waitForExistence(timeout: 2))
+
+        let search = app.textFields["folders.search.field"]
+        XCTAssertTrue(search.waitForExistence(timeout: 2))
+        search.click()
+        search.typeText("Demo")
+        let demo = app.buttons["folders.entry.Projects/Demo"]
+        XCTAssertTrue(demo.waitForExistence(timeout: 3))
+        demo.click()
+        let openFolder = app.buttons["folders.open.button"]
+        XCTAssertEqual(openFolder.label, "Open in Unsupported Editor")
+        XCTAssertEqual(openFolder.value as? String, "/workspace/Projects/Demo")
+        openFolder.click()
+        let folderError = app.staticTexts["folders.error"]
+        XCTAssertTrue(folderError.waitForExistence(timeout: 2))
+        XCTAssertTrue((folderError.value as? String)?.contains("Unsupported Editor") == true)
+        XCTAssertTrue((folderError.value as? String)?.contains("no fallback was opened") == true)
+    }
+
+    private func defaultApplicationName(for type: UTType) -> String? {
+        NSWorkspace.shared.urlForApplication(toOpen: type).flatMap(applicationName(at:))
+    }
+
+    private func applicationName(at url: URL) -> String? {
+        guard let bundle = Bundle(url: url) else { return nil }
+        return (bundle.localizedInfoDictionary?["CFBundleDisplayName"] as? String)
+            ?? (bundle.localizedInfoDictionary?["CFBundleName"] as? String)
+            ?? (bundle.infoDictionary?["CFBundleDisplayName"] as? String)
+            ?? (bundle.infoDictionary?["CFBundleName"] as? String)
+            ?? url.deletingPathExtension().lastPathComponent
     }
     func testSetupCanReviewAndFinishInFixtureMode() {
         let appURL = URL(fileURLWithPath: #filePath)
@@ -141,7 +330,11 @@ final class MSWMonitorUITests: XCTestCase {
                 app.terminate()
             }
         }
-        app.launchArguments = ["--ui-test-setup", "--ui-test-github-disconnected"]
+        app.launchArguments = [
+            "--ui-test-setup",
+            "--ui-test-github-disconnected",
+            "--ui-test-app-preferences"
+        ]
         app.launch()
 
         let setup = app.windows["setup.window"]
@@ -165,6 +358,18 @@ final class MSWMonitorUITests: XCTestCase {
 
         let preflight = app.descendants(matching: .any)["setup.preflight"]
         XCTAssertTrue(preflight.waitForExistence(timeout: 2))
+        let setupTerminalPicker = app.popUpButtons["setup.applications.terminal.picker"]
+        let setupEditorPicker = app.popUpButtons["setup.applications.editor.picker"]
+        XCTAssertTrue(setupTerminalPicker.waitForExistence(timeout: 2))
+        XCTAssertTrue(setupEditorPicker.waitForExistence(timeout: 2))
+        XCTAssertEqual(setupTerminalPicker.value as? String, "System Default — Fixture Terminal")
+        XCTAssertEqual(setupEditorPicker.value as? String, "System Default — Xcode")
+        setupTerminalPicker.click()
+        setupTerminalPicker.menuItems["Ghostty"].click()
+        setupEditorPicker.click()
+        setupEditorPicker.menuItems["Zed"].click()
+        XCTAssertEqual(setupTerminalPicker.value as? String, "Ghostty")
+        XCTAssertEqual(setupEditorPicker.value as? String, "Zed")
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForNonExistence(timeout: 2)
@@ -350,6 +555,14 @@ final class MSWMonitorUITests: XCTestCase {
             "100 GB runtime storage; playgrounds: 4/12 CPU, 32/48 GB memory, " +
             "60 GB workspace storage, 60 GB runtime storage; personal: 6/12 CPU, " +
             "16/32 GB memory, 100 GB workspace storage, 80 GB runtime storage"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.final-review.terminal"].value as? String,
+            "Ghostty"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["setup.final-review.editor"].value as? String,
+            "Zed"
         )
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
@@ -801,6 +1014,8 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["setup.final-review.title"].waitForExistence(timeout: 2))
         assertText("Review setup", identifier: "setup.final-review.title", in: app)
+        assertIdentifier("setup.final-review.terminal", in: app)
+        assertIdentifier("setup.final-review.editor", in: app)
     }
 
 

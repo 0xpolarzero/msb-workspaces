@@ -2922,6 +2922,145 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(all(not event["gh_token_present"] for event in credential_events), credential_events)
         self.assertTrue(all(not sandbox["running"] for sandbox in self.env.state()["sandboxes"].values()))
 
+    def test_app_directory_protocol_is_bounded_safe_and_does_not_start_stopped_workspaces(self) -> None:
+        before = len(self.env.state().get("events", []))
+        stopped = self.env.msw(
+            "app", "directory-list", "--workspace", "dev", "--path", ".",
+            "--limit", "100", "--format", "json", check=False,
+        )
+        self.assertFailed(stopped, "MSW_WORKSPACE_STOPPED")
+        stopped_target = self.env.msw(
+            "app", "editor-target", "--workspace", "dev", "--path", ".",
+            "--format", "json", check=False,
+        )
+        self.assertFailed(stopped_target, "MSW_WORKSPACE_STOPPED")
+        invalid_workspace = self.env.msw(
+            "app", "directory-list", "--workspace", "unknown", "--format", "json",
+            check=False,
+        )
+        self.assertFailed(invalid_workspace, "MSW_INVALID_REQUEST")
+        self.assertFalse(any(
+            event.get("event") == "start"
+            for event in self.env.state().get("events", [])[before:]
+        ))
+
+        for path in [
+            "../outside", "/tmp", "safe//nested", "safe/./nested",
+            "bad\x1bpath", "x" * 1025,
+        ]:
+            rejected = self.env.msw(
+                "app", "directory-list", "--workspace", "dev", "--path", path,
+                "--format", "json", check=False,
+            )
+            self.assertFailed(rejected, "MSW_INVALID_REQUEST")
+        for limit in ["0", "201", "not-a-number"]:
+            rejected = self.env.msw(
+                "app", "directory-list", "--workspace", "dev", "--limit", limit,
+                "--format", "json", check=False,
+            )
+            self.assertFailed(rejected, "MSW_INVALID_REQUEST")
+
+        self.env.msw("start", "dev")
+        root = self.env.workspace("dev")
+        (root / "Projects" / "Demo" / "Sources").mkdir(parents=True)
+        (root / "Scratch").mkdir()
+        (root / "not-a-folder.txt").write_text("fixture")
+        outside = self.env.root / "outside-folder"
+        outside.mkdir()
+        (root / "Escape").symlink_to(outside, target_is_directory=True)
+        (root / "ghp_sensitivefixture").mkdir()
+
+        listed = json.loads(self.env.msw(
+            "app", "directory-list", "--workspace", "dev", "--path", ".",
+            "--limit", "100", "--format", "json",
+        ).stdout)
+        result = listed["result"]
+        self.assertEqual(result["workspace"], "dev")
+        self.assertEqual(result["path"], ".")
+        self.assertIsNone(result["query"])
+        self.assertEqual([entry["name"] for entry in result["entries"]], [
+            "Projects", "Scratch",
+        ])
+        self.assertTrue(all(entry["kind"] == "directory" for entry in result["entries"]))
+        self.assertNotIn("sensitivefixture", json.dumps(listed))
+        self.assertNotIn("Escape", [entry["name"] for entry in result["entries"]])
+        projects, scratch = result["entries"]
+        self.assertTrue(projects["hasChildren"])
+        self.assertEqual([entry["name"] for entry in projects["children"]], ["Demo"])
+        demo = projects["children"][0]
+        self.assertTrue(demo["hasChildren"])
+        self.assertEqual([entry["name"] for entry in demo["children"]], ["Sources"])
+        self.assertFalse(demo["children"][0]["hasChildren"])
+        self.assertEqual(demo["children"][0]["children"], [])
+        self.assertFalse(scratch["hasChildren"])
+        self.assertEqual(scratch["children"], [])
+
+        searched = json.loads(self.env.msw(
+            "app", "directory-search", "--workspace", "dev", "--path", ".",
+            "--query", "demo", "--limit", "10", "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(searched["query"], "demo")
+        self.assertEqual(
+            [entry["path"] for entry in searched["entries"]],
+            ["Projects/Demo", "Projects/Demo/Sources"],
+        )
+
+        target = json.loads(self.env.msw(
+            "app", "editor-target", "--workspace", "dev", "--path", "Projects/Demo",
+            "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(target, {
+            "workspace": "dev",
+            "path": "Projects/Demo",
+            "host": "dev.msb",
+        })
+
+        missing = self.env.msw(
+            "app", "directory-list", "--workspace", "dev", "--path", "Missing",
+            "--format", "json", check=False,
+        )
+        self.assertFailed(missing, "MSW_DIRECTORY_UNAVAILABLE")
+        missing_target = self.env.msw(
+            "app", "editor-target", "--workspace", "dev", "--path", "Missing",
+            "--format", "json", check=False,
+        )
+        self.assertFailed(missing_target, "MSW_DIRECTORY_UNAVAILABLE")
+
+    def test_app_directory_search_rejects_malformed_queries_and_caps_results(self) -> None:
+        self.env.msw("start", "dev")
+        root = self.env.workspace("dev")
+        for index in range(200):
+            (root / f"match-{index:03d}").mkdir()
+
+        exact = json.loads(self.env.msw(
+            "app", "directory-search", "--workspace", "dev", "--query", "match-",
+            "--limit", "200", "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(len(exact["entries"]), 200)
+        self.assertFalse(exact["truncated"])
+
+        for index in range(200, 205):
+            (root / f"match-{index:03d}").mkdir()
+        bounded = json.loads(self.env.msw(
+            "app", "directory-search", "--workspace", "dev", "--query", "match-",
+            "--limit", "200", "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(len(bounded["entries"]), 200)
+        self.assertTrue(bounded["truncated"])
+
+        for query in ["", "x" * 129, "bad\nquery", "bad\x1bquery"]:
+            rejected = self.env.msw(
+                "app", "directory-search", "--workspace", "dev", "--query", query,
+                "--format", "json", check=False,
+            )
+            self.assertFailed(rejected, "MSW_INVALID_REQUEST")
+
+        unavailable = self.env.msw(
+            "app", "directory-list", "--workspace", "dev", "--format", "json",
+            extra_env={"MSW_FAKE_STATUS_JSON": "not-json"}, check=False,
+        )
+        self.assertFailed(unavailable, "MSW_STATE_UNAVAILABLE")
+
     def test_app_state_preserves_unknown_for_malformed_or_unrecognized_runtime_state(self) -> None:
         malformed = json.loads(self.env.msw(
             "app", "state", "--workspace", "dev", "--format", "json",

@@ -12,6 +12,7 @@ final class SetupWindowController {
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
+        applicationPreferences: ApplicationPreferenceStore,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void = { _ in },
         uiTestMode: Bool = false,
@@ -32,6 +33,7 @@ final class SetupWindowController {
                 provider: provider,
                 accessMode: accessMode,
                 commandRunner: commandRunner,
+                applicationPreferences: applicationPreferences,
                 openSettings: openSettings,
                 closeSetup: closeSetup,
                 uiTestMode: uiTestMode,
@@ -255,6 +257,7 @@ struct SetupView: View {
     let provider: (any GitHubProviding)?
     let accessMode: GitHubAccessMode
     let commandRunner: MSWCommandRunner
+    @Bindable var applicationPreferences: ApplicationPreferenceStore
     let openSettings: (SettingsSection) -> Void
     let closeSetup: ([SetupWorkspaceConfiguration]) -> Void
     let uiTestMode: Bool
@@ -346,6 +349,7 @@ struct SetupView: View {
         provider: (any GitHubProviding)?,
         accessMode: GitHubAccessMode,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
+        applicationPreferences: ApplicationPreferenceStore,
         openSettings: @escaping (SettingsSection) -> Void,
         closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void,
         uiTestMode: Bool,
@@ -361,6 +365,7 @@ struct SetupView: View {
         self.provider = provider
         self.accessMode = accessMode
         self.commandRunner = commandRunner
+        self.applicationPreferences = applicationPreferences
         self.openSettings = openSettings
         self.closeSetup = closeSetup
         self.uiTestMode = uiTestMode
@@ -713,6 +718,7 @@ struct SetupView: View {
             switch activeStep {
             case .dependencies:
                 requirementsCard
+                applicationPreferencesCard
                 preflight
             case .workspaces:
                 workspaceConfigurationStep
@@ -1064,6 +1070,24 @@ struct SetupView: View {
                 .font(.headline)
         }
         .accessibilityIdentifier("setup.requirements")
+    }
+
+    private var applicationPreferencesCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Applications")
+                .font(.title3.weight(.semibold))
+            Text("Use the detected defaults, or choose applications just for MSW Monitor. You can change these later in General Settings.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ApplicationPreferenceFields(
+                applicationPreferences: applicationPreferences,
+                accessibilityPrefix: "setup"
+            )
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.applications")
     }
 
     private var preflight: some View {
@@ -1895,6 +1919,18 @@ struct SetupView: View {
             reviewStatusLine(
                 title: "Name for Git changes",
                 ready: identityDecisionMade
+            )
+            reviewStatusLine(
+                title: "Terminal",
+                value: applicationPreferences.resolvedTerminalName,
+                ready: true,
+                accessibilityIdentifier: "setup.final-review.terminal"
+            )
+            reviewStatusLine(
+                title: "Code editor",
+                value: applicationPreferences.resolvedSourceEditorName,
+                ready: true,
+                accessibilityIdentifier: "setup.final-review.editor"
             )
         }
         .padding(14)

@@ -132,7 +132,7 @@ enum WorkspaceAction: Equatable, Sendable {
     case stop
     case restart
     case openTerminal
-    case openZed
+    case openEditor
     case openSite
     case push
 
@@ -142,7 +142,7 @@ enum WorkspaceAction: Equatable, Sendable {
         case .stop: return "Stop"
         case .restart: return "Restart"
         case .openTerminal: return "Open Terminal"
-        case .openZed: return "Open in Zed"
+        case .openEditor: return "Open in source-code editor"
         case .openSite: return "Open Site"
         case .push: return "Push"
         }
@@ -168,14 +168,18 @@ struct WorkspaceActionAvailability: Equatable, Sendable {
 }
 
 extension Workspace {
-    func actionAvailability(for action: WorkspaceAction) -> WorkspaceActionAvailability {
+    func actionAvailability(
+        for action: WorkspaceAction,
+        title: String? = nil
+    ) -> WorkspaceActionAvailability {
+        let actionTitle = title ?? action.title
         guard freshness == .fresh else {
             return WorkspaceActionAvailability(
                 isAllowed: false,
                 reason: freshness == .neverObserved
                     ? "No authoritative state has been observed for \(id.rawValue)."
                     : "The last known state for \(id.rawValue) is not fresh.",
-                recovery: "Retry the observation before attempting \(action.title.lowercased())."
+                recovery: "Retry the observation before attempting \(actionTitle.lowercased())."
             )
         }
         guard state != .unknown, state != .unavailable else {
@@ -188,7 +192,7 @@ extension Workspace {
         if action != .stop, state == .quarantined || credential == .quarantined {
             return WorkspaceActionAvailability(
                 isAllowed: false,
-                reason: "\(action.title) is blocked because \(id.rawValue) is quarantined. \(quarantineReason ?? "Workspace safety state could not be verified.")",
+                reason: "\(actionTitle) is blocked because \(id.rawValue) is quarantined. \(quarantineReason ?? "Workspace safety state could not be verified.")",
                 recovery: serverCapabilities.recovery ?? recoveryAction
             )
         }
@@ -198,12 +202,12 @@ extension Workspace {
         case .start: capability = serverCapabilities.canStart
         case .stop: capability = serverCapabilities.canStop
         case .restart: capability = serverCapabilities.canRestart
-        case .openTerminal, .openZed, .openSite: capability = serverCapabilities.canOpenTerminal
+        case .openTerminal, .openEditor, .openSite: capability = serverCapabilities.canOpenTerminal
         case .push: capability = serverCapabilities.canPush
         }
         return WorkspaceActionAvailability(
             isAllowed: capability,
-            reason: capability ? nil : (serverCapabilities.reason ?? "MSW did not authorize \(action.title.lowercased()) for \(id.rawValue)."),
+            reason: capability ? nil : (serverCapabilities.reason ?? "MSW did not authorize \(actionTitle.lowercased()) for \(id.rawValue)."),
             recovery: capability ? nil : (serverCapabilities.recovery ?? recoveryAction)
         )
     }
@@ -231,7 +235,246 @@ struct MSWOperationFailureNotice: Equatable, Sendable {
     let workspace: Workspace.ID?
 }
 @MainActor
+struct SystemApplication: Equatable, Sendable {
+    let url: URL
+    let bundleIdentifier: String
+    let displayName: String
+
+    init?(url: URL) {
+        guard let bundle = Bundle(url: url),
+              let bundleIdentifier = bundle.bundleIdentifier else { return nil }
+        let displayName = [
+            bundle.localizedInfoDictionary?["CFBundleDisplayName"] as? String,
+            bundle.localizedInfoDictionary?["CFBundleName"] as? String,
+            bundle.infoDictionary?["CFBundleDisplayName"] as? String,
+            bundle.infoDictionary?["CFBundleName"] as? String,
+            url.deletingPathExtension().lastPathComponent
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        guard let displayName else { return nil }
+        self.url = url
+        self.bundleIdentifier = bundleIdentifier
+        self.displayName = displayName
+    }
+
+    init(url: URL, bundleIdentifier: String, displayName: String) {
+        self.url = url
+        self.bundleIdentifier = bundleIdentifier
+        self.displayName = displayName
+    }
+}
+
+@MainActor
+struct SystemApplicationDefaults: Equatable, Sendable {
+    let terminal: SystemApplication?
+    let sourceEditor: SystemApplication?
+
+    static func discover(workspace: NSWorkspace = .shared) -> Self {
+        Self(
+            terminal: workspace.urlForApplication(toOpen: .unixExecutable).flatMap(SystemApplication.init(url:)),
+            sourceEditor: workspace.urlForApplication(toOpen: .sourceCode).flatMap(SystemApplication.init(url:))
+        )
+    }
+}
+
+@MainActor
+struct SystemApplicationCatalog: Equatable, Sendable {
+    let defaults: SystemApplicationDefaults
+    let terminals: [SystemApplication]
+    let sourceEditors: [SystemApplication]
+
+    private static let terminalBundleIdentifiers = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty"
+    ]
+
+    static func discover(workspace: NSWorkspace = .shared) -> Self {
+        let defaults = SystemApplicationDefaults.discover(workspace: workspace)
+        return Self(
+            defaults: defaults,
+            terminals: applications(
+                bundleIdentifiers: terminalBundleIdentifiers,
+                workspace: workspace
+            ),
+            sourceEditors: applications(
+                bundleIdentifiers: SourceEditorLauncher.supportedBundleIdentifiers,
+                workspace: workspace
+            )
+        )
+    }
+
+    func normalized() -> Self {
+        Self(
+            defaults: defaults,
+            terminals: Self.deduplicatedAndSorted(terminals),
+            sourceEditors: Self.deduplicatedAndSorted(sourceEditors)
+        )
+    }
+
+    private static func applications(
+        bundleIdentifiers: [String],
+        workspace: NSWorkspace
+    ) -> [SystemApplication] {
+        var byBundleIdentifier: [String: SystemApplication] = [:]
+        for bundleIdentifier in bundleIdentifiers {
+            guard let url = workspace.urlForApplication(withBundleIdentifier: bundleIdentifier),
+                  let application = SystemApplication(url: url) else { continue }
+            byBundleIdentifier[application.bundleIdentifier] = application
+        }
+        return deduplicatedAndSorted(Array(byBundleIdentifier.values))
+    }
+
+    private static func deduplicatedAndSorted(_ applications: [SystemApplication]) -> [SystemApplication] {
+        let byBundleIdentifier = Dictionary(
+            applications.map { ($0.bundleIdentifier, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return byBundleIdentifier.values.sorted {
+            let nameOrder = $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
+            if nameOrder == .orderedSame {
+                return $0.bundleIdentifier < $1.bundleIdentifier
+            }
+            return nameOrder == .orderedAscending
+        }
+    }
+}
+
+@Observable
+@MainActor
+final class ApplicationPreferenceStore {
+    static let terminalOverrideKey = "applications.terminal.bundleIdentifier"
+    static let sourceEditorOverrideKey = "applications.sourceEditor.bundleIdentifier"
+
+    private let userDefaults: UserDefaults
+    private let catalogProvider: @MainActor () -> SystemApplicationCatalog
+    private(set) var catalog: SystemApplicationCatalog
+    private(set) var terminalOverrideBundleIdentifier: String?
+    private(set) var sourceEditorOverrideBundleIdentifier: String?
+
+    init(
+        userDefaults: UserDefaults = .standard,
+        catalogProvider: @escaping @MainActor () -> SystemApplicationCatalog = {
+            SystemApplicationCatalog.discover()
+        }
+    ) {
+        self.userDefaults = userDefaults
+        self.catalogProvider = catalogProvider
+        self.catalog = catalogProvider().normalized()
+        self.terminalOverrideBundleIdentifier = userDefaults.string(forKey: Self.terminalOverrideKey)
+        self.sourceEditorOverrideBundleIdentifier = userDefaults.string(forKey: Self.sourceEditorOverrideKey)
+        discardMissingOverrides()
+    }
+
+    var resolvedTerminal: SystemApplication? {
+        resolvedApplication(
+            overrideBundleIdentifier: terminalOverrideBundleIdentifier,
+            choices: catalog.terminals,
+            systemDefault: catalog.defaults.terminal
+        )
+    }
+
+    var resolvedSourceEditor: SystemApplication? {
+        resolvedApplication(
+            overrideBundleIdentifier: sourceEditorOverrideBundleIdentifier,
+            choices: catalog.sourceEditors,
+            systemDefault: catalog.defaults.sourceEditor
+        )
+    }
+
+    var terminalSelection: String {
+        get { terminalOverrideBundleIdentifier ?? "" }
+        set { setTerminalOverride(newValue.isEmpty ? nil : newValue) }
+    }
+
+    var sourceEditorSelection: String {
+        get { sourceEditorOverrideBundleIdentifier ?? "" }
+        set { setSourceEditorOverride(newValue.isEmpty ? nil : newValue) }
+    }
+
+    var systemDefaultTerminalLabel: String {
+        systemDefaultLabel(for: catalog.defaults.terminal)
+    }
+
+    var systemDefaultSourceEditorLabel: String {
+        systemDefaultLabel(for: catalog.defaults.sourceEditor)
+    }
+
+    var resolvedTerminalName: String {
+        resolvedTerminal?.displayName ?? "Unavailable"
+    }
+
+    var resolvedSourceEditorName: String {
+        resolvedSourceEditor?.displayName ?? "Unavailable"
+    }
+
+    func setTerminalOverride(_ bundleIdentifier: String?) {
+        terminalOverrideBundleIdentifier = validOverride(bundleIdentifier, choices: catalog.terminals)
+        persist(terminalOverrideBundleIdentifier, key: Self.terminalOverrideKey)
+    }
+
+    func setSourceEditorOverride(_ bundleIdentifier: String?) {
+        sourceEditorOverrideBundleIdentifier = validOverride(bundleIdentifier, choices: catalog.sourceEditors)
+        persist(sourceEditorOverrideBundleIdentifier, key: Self.sourceEditorOverrideKey)
+    }
+
+    func refreshInstalledApplications() {
+        catalog = catalogProvider().normalized()
+        discardMissingOverrides()
+    }
+
+    private func resolvedApplication(
+        overrideBundleIdentifier: String?,
+        choices: [SystemApplication],
+        systemDefault: SystemApplication?
+    ) -> SystemApplication? {
+        guard let overrideBundleIdentifier else { return systemDefault }
+        return choices.first { $0.bundleIdentifier == overrideBundleIdentifier } ?? systemDefault
+    }
+
+    private func validOverride(
+        _ bundleIdentifier: String?,
+        choices: [SystemApplication]
+    ) -> String? {
+        guard let bundleIdentifier,
+              choices.contains(where: { $0.bundleIdentifier == bundleIdentifier }) else { return nil }
+        return bundleIdentifier
+    }
+
+    private func discardMissingOverrides() {
+        let terminal = validOverride(terminalOverrideBundleIdentifier, choices: catalog.terminals)
+        if terminal != terminalOverrideBundleIdentifier {
+            terminalOverrideBundleIdentifier = terminal
+            persist(nil, key: Self.terminalOverrideKey)
+        }
+        let editor = validOverride(sourceEditorOverrideBundleIdentifier, choices: catalog.sourceEditors)
+        if editor != sourceEditorOverrideBundleIdentifier {
+            sourceEditorOverrideBundleIdentifier = editor
+            persist(nil, key: Self.sourceEditorOverrideKey)
+        }
+    }
+
+    private func persist(_ value: String?, key: String) {
+        if let value {
+            userDefaults.set(value, forKey: key)
+        } else {
+            userDefaults.removeObject(forKey: key)
+        }
+    }
+
+    private func systemDefaultLabel(for application: SystemApplication?) -> String {
+        "System Default — \(application?.displayName ?? "Unavailable")"
+    }
+}
+
+@MainActor
 struct TerminalLauncher {
+    enum HandoffAdapter: Equatable {
+        case ghosttyNativeTab
+        case commandFile
+    }
+
     enum LaunchError: LocalizedError {
         case noDefaultTerminal
         case openFailed(String)
@@ -241,16 +484,20 @@ struct TerminalLauncher {
             case .noDefaultTerminal:
                 return "No default terminal app is configured."
             case .openFailed(let message):
-                return "The default terminal could not open a new tab: \(message)"
+                return "The selected terminal could not open a new tab: \(message)"
             }
         }
     }
 
-    func open(executableURL: URL, workspaceID: String, executableSearchPath: String) async throws {
-        guard let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: .unixExecutable) else {
-            throw LaunchError.noDefaultTerminal
-        }
-        if Bundle(url: applicationURL)?.bundleIdentifier == "com.mitchellh.ghostty" {
+    func open(
+        applicationURL: URL,
+        executableURL: URL,
+        workspaceID: String,
+        executableSearchPath: String
+    ) async throws {
+        if Self.handoffAdapter(
+            bundleIdentifier: Bundle(url: applicationURL)?.bundleIdentifier
+        ) == .ghosttyNativeTab {
             try openGhostty(
                 executableURL: executableURL,
                 workspaceID: workspaceID,
@@ -302,6 +549,10 @@ struct TerminalLauncher {
             try? await Task.sleep(for: .seconds(30))
             try? FileManager.default.removeItem(at: scriptURL)
         }
+    }
+
+    static func handoffAdapter(bundleIdentifier: String?) -> HandoffAdapter {
+        bundleIdentifier == "com.mitchellh.ghostty" ? .ghosttyNativeTab : .commandFile
     }
 
     static func ghosttyScript(
@@ -373,6 +624,88 @@ struct TerminalLauncher {
     }
 }
 
+@MainActor
+struct SourceEditorLauncher {
+    nonisolated static let supportedBundleIdentifiers = [
+        "dev.zed.Zed",
+        "dev.zed.Zed-Preview",
+        "dev.zed.Zed-Nightly",
+        "dev.zed.Zed-Dev"
+    ]
+
+    enum LaunchError: LocalizedError {
+        case noDefaultEditor
+        case unsupportedEditor(String)
+        case invalidTarget
+        case openFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noDefaultEditor:
+                return "No default source-code editor is configured."
+            case .unsupportedEditor(let name):
+                return "\(name) is the default source-code editor, but MSW Monitor has no verified remote-workspace adapter for it. Choose a supported editor as the macOS default; no fallback was opened."
+            case .invalidTarget:
+                return "MSW returned an invalid remote folder target."
+            case .openFailed(let message):
+                return "The selected source-code editor could not open the selected folder: \(message)"
+            }
+        }
+    }
+
+    private enum Adapter {
+        case zed
+
+        init?(bundleIdentifier: String) {
+            switch bundleIdentifier {
+            case let identifier where SourceEditorLauncher.supportedBundleIdentifiers.contains(identifier):
+                self = .zed
+            default: return nil
+            }
+        }
+
+        func remoteURL(for target: MSWEditorTarget) -> URL? {
+            switch self {
+            case .zed: return target.zedRemoteURL
+            }
+        }
+    }
+
+    func validate(application: SystemApplication?) throws -> SystemApplication {
+        guard let application else { throw LaunchError.noDefaultEditor }
+        guard Adapter(bundleIdentifier: application.bundleIdentifier) != nil else {
+            throw LaunchError.unsupportedEditor(application.displayName)
+        }
+        return application
+    }
+
+    func open(application: SystemApplication?, target: MSWEditorTarget?) async throws {
+        let application = try validate(application: application)
+        guard let target,
+              let adapter = Adapter(bundleIdentifier: application.bundleIdentifier),
+              let remoteURL = adapter.remoteURL(for: target) else {
+            throw LaunchError.invalidTarget
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.promptsUserIfNeeded = false
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                NSWorkspace.shared.open(
+                    [remoteURL],
+                    withApplicationAt: application.url,
+                    configuration: configuration
+                ) { _, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                }
+            }
+        } catch {
+            throw LaunchError.openFailed(error.localizedDescription)
+        }
+    }
+}
+
 
 @Observable
 @MainActor
@@ -405,13 +738,14 @@ final class AppModel {
     private enum SafetyAction {
         case lifecycle(MSWLifecycleAction)
         case terminal
-        case zed
+        case editor
         case site
         case push
     }
 
     private var startupRecoveryRetry: (() -> Void)?
     private let client: MSWClient?
+    let applicationPreferences: ApplicationPreferenceStore
     private let operationCoordinator: MSWOperationCoordinator?
     private let operationService: MSWOperationService?
     private let diagnostics: MSWDiagnostics?
@@ -425,6 +759,7 @@ final class AppModel {
     private var sustainedUnavailableNotified = false
     private var notificationGeneration = 0
     private var detailRequestGeneration = 0
+    private var directoryFixture: [MSWDirectoryResponse] = []
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
         case applied(MSWStateResponse)
@@ -445,7 +780,9 @@ final class AppModel {
         workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil,
         startupRecoveryBlockedReason: String? = nil,
         startupRecoveryRetry: (() -> Void)? = nil,
-        initialOperationFailure: MSWOperationFailureNotice? = nil
+        initialOperationFailure: MSWOperationFailureNotice? = nil,
+        applicationPreferences: ApplicationPreferenceStore? = nil,
+        applicationDefaults: SystemApplicationDefaults? = nil
     ) {
         self.client = client
         self.operationCoordinator = operationCoordinator
@@ -457,6 +794,12 @@ final class AppModel {
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.startupRecoveryRetry = startupRecoveryRetry
         self.latestOperationFailure = initialOperationFailure
+        self.applicationPreferences = applicationPreferences ?? ApplicationPreferenceStore(
+            catalogProvider: {
+                let defaults = applicationDefaults ?? .discover()
+                return SystemApplicationCatalog(defaults: defaults, terminals: [], sourceEditors: [])
+            }
+        )
         let configured = workspaceConfigurations ?? SetupWorkspaceConfiguration.defaults
         let resolvedWorkspaceIDs = configured.compactMap { Workspace.ID(rawValue: $0.name) }
         let initialWorkspaceIDs = resolvedWorkspaceIDs
@@ -550,6 +893,18 @@ final class AppModel {
 
     var aggregateDetail: String {
         health.detail
+    }
+
+    var terminalActionTitle: String {
+        applicationPreferences.resolvedTerminal.map { "Open in \($0.displayName)" } ?? "Open in Default Terminal"
+    }
+
+    var editorActionTitle: String {
+        applicationPreferences.resolvedSourceEditor.map { "Open in \($0.displayName)…" } ?? "Open in Default Source-Code Editor…"
+    }
+
+    var editorOpenActionTitle: String {
+        applicationPreferences.resolvedSourceEditor.map { "Open in \($0.displayName)" } ?? "Open in Default Source-Code Editor"
     }
 
     var health: MonitorHealth {
@@ -661,14 +1016,19 @@ final class AppModel {
     }
 
     func openTerminal(for id: Workspace.ID) {
-        guard requireActionSafety(for: id, action: .terminal, operation: "Open Terminal") else { return }
+        guard requireActionSafety(for: id, action: .terminal, operation: terminalActionTitle) else { return }
         guard let workspace = workspaces.first(where: { $0.id == id }),
               workspace.state == .running else {
-            lastError = "Open Terminal requires a freshly observed running workspace."
+            lastError = "\(terminalActionTitle) requires a freshly observed running workspace."
             return
         }
         guard let client else {
             lastError = "MSW is unavailable in fixture mode."
+            return
+        }
+        applicationPreferences.refreshInstalledApplications()
+        guard let terminal = applicationPreferences.resolvedTerminal else {
+            lastError = TerminalLauncher.LaunchError.noDefaultTerminal.localizedDescription
             return
         }
         Task { [weak self] in
@@ -679,6 +1039,7 @@ final class AppModel {
             do {
                 let executableSearchPath = await client.executableSearchPath()
                 try await TerminalLauncher().open(
+                    applicationURL: terminal.url,
                     executableURL: executable,
                     workspaceID: id.rawValue,
                     executableSearchPath: executableSearchPath
@@ -689,24 +1050,147 @@ final class AppModel {
         }
     }
 
-    func openZed(for id: Workspace.ID) {
-        guard requireActionSafety(for: id, action: .zed, operation: "Open in Zed") else { return }
+    func openEditor(for id: Workspace.ID, path: String = ".") async -> String? {
+        guard requireActionSafety(for: id, action: .editor, operation: editorActionTitle) else {
+            return lastError
+        }
         guard let workspace = workspaces.first(where: { $0.id == id }),
               workspace.state == .running else {
-            lastError = "Open in Zed requires a freshly observed running workspace."
-            return
+            lastError = "\(editorActionTitle) requires a freshly observed running workspace."
+            return lastError
+        }
+        let editor: SystemApplication
+        do {
+            applicationPreferences.refreshInstalledApplications()
+            editor = try SourceEditorLauncher().validate(application: applicationPreferences.resolvedSourceEditor)
+        } catch {
+            lastError = error.localizedDescription
+            return lastError
         }
         guard let client else {
-            lastError = "MSW is unavailable in fixture mode."
-            return
+            let message = "MSW is unavailable in fixture mode."
+            lastError = message
+            return message
         }
-        Task { [weak self] in
-            do {
-                try await client.openInZed(workspace: id.rawValue)
-            } catch {
-                self?.lastError = "Could not open Zed: \(error.localizedDescription)"
+        do {
+            let envelope = try await client.editorTarget(workspace: id.rawValue, path: path)
+            guard let target = envelope.result else {
+                throw MSWClientError.missingResult(command: "editor-target")
             }
+            try await SourceEditorLauncher().open(application: editor, target: target)
+            return nil
+        } catch {
+            lastError = error.localizedDescription
+            return lastError
         }
+    }
+
+    func directories(
+        for id: Workspace.ID,
+        path: String = ".",
+        query: String? = nil
+    ) async throws -> MSWDirectoryResponse {
+        guard let workspace = workspaces.first(where: { $0.id == id }) else {
+            throw MSWClientError.unavailable(
+                "The selected workspace is unavailable. Refresh workspace state and select a valid workspace."
+            )
+        }
+        let availability = actionAvailability(for: workspace, action: .editor)
+        guard availability.isAllowed else {
+            throw MSWClientError.unavailable(
+                [availability.reason, availability.recovery]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+            )
+        }
+        if client == nil, !directoryFixture.isEmpty {
+            let fixture = directoryFixture.first { value in
+                value.workspace == id.rawValue && value.path == path && value.query == query
+            } ?? directoryFixture.first { value in
+                value.workspace == id.rawValue && value.path == path && value.query == nil
+            }.map { value in
+                guard let query, !query.isEmpty else { return value }
+                return MSWDirectoryResponse(
+                    workspace: value.workspace,
+                    path: value.path,
+                    query: query,
+                    entries: value.entries.filter {
+                        $0.name.localizedCaseInsensitiveContains(query) ||
+                            $0.path.localizedCaseInsensitiveContains(query)
+                    },
+                    truncated: false
+                )
+            }
+            guard let fixture else {
+                throw MSWClientError.unavailable("The requested fixture folder is unavailable.")
+            }
+            return fixture
+        }
+        guard let client else {
+            throw MSWClientError.unavailable("Folder browsing is unavailable in fixture mode.")
+        }
+        let response = try await client.directories(
+            workspace: id.rawValue,
+            path: path,
+            query: query?.isEmpty == false ? query : nil
+        )
+        guard let result = response.result else {
+            throw MSWClientError.missingResult(command: query == nil ? "directory-list" : "directory-search")
+        }
+        return result
+    }
+
+    func installDirectoryUITestFixture() {
+        guard let index = workspaces.firstIndex(where: { $0.id == .dev }) else { return }
+        workspaces[index].state = .running
+        workspaces[index].freshness = .fresh
+        workspaces[index].canOpenTerminal = true
+        workspaces[index].serverCapabilities = MSWActionCapabilities(
+            canStart: false,
+            canStop: true,
+            canRestart: true,
+            canOpenTerminal: true,
+            canPush: false
+        )
+        workspaces[index].nextAction = "Open Terminal"
+        directoryFixture = [
+            MSWDirectoryResponse(
+                workspace: "dev",
+                path: ".",
+                query: nil,
+                entries: [
+                    .init(
+                        name: "Projects",
+                        path: "Projects",
+                        kind: "directory",
+                        hasChildren: true,
+                        children: [
+                            .init(name: "Demo", path: "Projects/Demo", kind: "directory")
+                        ]
+                    ),
+                    .init(name: "Scratch", path: "Scratch", kind: "directory")
+                ],
+                truncated: true
+            ),
+            MSWDirectoryResponse(
+                workspace: "dev",
+                path: "Projects",
+                query: nil,
+                entries: [.init(name: "Demo", path: "Projects/Demo", kind: "directory")],
+                truncated: false
+            ),
+            MSWDirectoryResponse(
+                workspace: "dev",
+                path: "Scratch",
+                query: nil,
+                entries: [],
+                truncated: false
+            )
+        ]
+    }
+
+    func nextActionTitle(for workspace: Workspace) -> String {
+        workspace.nextAction == "Open Terminal" ? terminalActionTitle : workspace.nextAction
     }
 
     func openSite(for id: Workspace.ID, port: String = "3000") {
@@ -1261,7 +1745,7 @@ final class AppModel {
                 recovery: "Refresh workspace state and select a valid workspace."
             )
         }
-        return workspace.actionAvailability(for: action)
+        return workspace.actionAvailability(for: action, title: actionTitle(for: action))
     }
 
     private func actionAvailability(for workspace: Workspace, action: SafetyAction) -> WorkspaceActionAvailability {
@@ -1272,10 +1756,20 @@ final class AppModel {
             case .stop: return workspace.actionAvailability(for: .stop)
             case .restart: return workspace.actionAvailability(for: .restart)
             }
-        case .terminal: return workspace.actionAvailability(for: .openTerminal)
-        case .zed: return workspace.actionAvailability(for: .openZed)
+        case .terminal:
+            return workspace.actionAvailability(for: .openTerminal, title: terminalActionTitle)
+        case .editor:
+            return workspace.actionAvailability(for: .openEditor, title: editorOpenActionTitle)
         case .site: return workspace.actionAvailability(for: .openSite)
         case .push: return workspace.actionAvailability(for: .push)
+        }
+    }
+
+    private func actionTitle(for action: WorkspaceAction) -> String {
+        switch action {
+        case .openTerminal: return terminalActionTitle
+        case .openEditor: return editorOpenActionTitle
+        default: return action.title
         }
     }
 
@@ -1286,7 +1780,15 @@ final class AppModel {
         operation: String,
         detail: Bool = false
     ) -> Bool {
-        guard let workspace = workspaces.first(where: { $0.id == id }) else { return false }
+        guard let workspace = workspaces.first(where: { $0.id == id }) else {
+            let message = "The selected workspace is unavailable. Refresh workspace state and select a valid workspace."
+            if detail {
+                detailError = message
+            } else {
+                lastError = message
+            }
+            return false
+        }
         let availability = actionAvailability(for: workspace, action: action)
         guard availability.isAllowed else {
             let message = [availability.reason, availability.recovery]

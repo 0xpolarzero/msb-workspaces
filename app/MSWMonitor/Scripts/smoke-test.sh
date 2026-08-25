@@ -15,6 +15,12 @@ case "${1:-}" in
   --monitor-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testStatusItemMinimalPopoverAndQuit"
     ;;
+  --picker-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDirectFolderPickerFromStatusPopover"
+    ;;
+  --preferences-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testApplicationPreferencesUpdateWorkspaceActions"
+    ;;
   --details-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDetailSidebarRemainsVisibleAcrossGlobalSections"
     ;;
@@ -22,7 +28,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--details-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--details-only|--failure-only]"
     exit 64
     ;;
 esac

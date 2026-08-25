@@ -144,6 +144,326 @@ final class AppModelTests: XCTestCase {
         ))
     }
 
+    func testApplicationOverridesPersistByBundleIdentifierAndSystemDefaultClearsThem() throws {
+        let suiteName = "ApplicationPreferenceStoreTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let catalog = applicationCatalogFixture()
+
+        let preferences = ApplicationPreferenceStore(
+            userDefaults: defaults,
+            catalogProvider: { catalog }
+        )
+        preferences.setTerminalOverride("com.mitchellh.ghostty")
+        preferences.setSourceEditorOverride("dev.zed.Zed")
+
+        XCTAssertEqual(defaults.string(forKey: ApplicationPreferenceStore.terminalOverrideKey), "com.mitchellh.ghostty")
+        XCTAssertEqual(defaults.string(forKey: ApplicationPreferenceStore.sourceEditorOverrideKey), "dev.zed.Zed")
+        let restored = ApplicationPreferenceStore(userDefaults: defaults, catalogProvider: { catalog })
+        XCTAssertEqual(restored.resolvedTerminal?.displayName, "Ghostty")
+        XCTAssertEqual(restored.resolvedSourceEditor?.displayName, "Zed")
+
+        restored.terminalSelection = ""
+        restored.sourceEditorSelection = ""
+        XCTAssertNil(defaults.string(forKey: ApplicationPreferenceStore.terminalOverrideKey))
+        XCTAssertNil(defaults.string(forKey: ApplicationPreferenceStore.sourceEditorOverrideKey))
+        XCTAssertEqual(restored.resolvedTerminal?.displayName, "Fixture Terminal")
+        XCTAssertEqual(restored.resolvedSourceEditor?.displayName, "Xcode")
+    }
+
+    func testMissingApplicationOverrideIsClearedAndFallsBackToSystemDefault() throws {
+        let suiteName = "ApplicationPreferenceMissingTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("dev.zed.Zed-Nightly", forKey: ApplicationPreferenceStore.sourceEditorOverrideKey)
+
+        let preferences = ApplicationPreferenceStore(userDefaults: defaults) {
+            self.applicationCatalogFixture()
+        }
+
+        XCTAssertNil(preferences.sourceEditorOverrideBundleIdentifier)
+        XCTAssertEqual(preferences.sourceEditorSelection, "")
+        XCTAssertEqual(preferences.resolvedSourceEditor?.displayName, "Xcode")
+        XCTAssertEqual(preferences.systemDefaultSourceEditorLabel, "System Default — Xcode")
+        XCTAssertNil(defaults.string(forKey: ApplicationPreferenceStore.sourceEditorOverrideKey))
+    }
+
+    func testInstalledApplicationRefreshClearsAnUninstalledOverrideAndFallsBackLive() throws {
+        let suiteName = "ApplicationPreferenceRefreshTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var catalog = applicationCatalogFixture()
+        let preferences = ApplicationPreferenceStore(
+            userDefaults: defaults,
+            catalogProvider: { catalog }
+        )
+        preferences.setSourceEditorOverride("dev.zed.Zed")
+        XCTAssertEqual(preferences.resolvedSourceEditor?.displayName, "Zed")
+
+        catalog = SystemApplicationCatalog(
+            defaults: catalog.defaults,
+            terminals: catalog.terminals,
+            sourceEditors: []
+        )
+        preferences.refreshInstalledApplications()
+
+        XCTAssertNil(preferences.sourceEditorOverrideBundleIdentifier)
+        XCTAssertEqual(preferences.sourceEditorSelection, "")
+        XCTAssertEqual(preferences.resolvedSourceEditor?.displayName, "Xcode")
+        XCTAssertNil(defaults.string(forKey: ApplicationPreferenceStore.sourceEditorOverrideKey))
+    }
+
+    func testApplicationPreferenceChangesUpdateActionLabelsLive() throws {
+        let suiteName = "ApplicationPreferenceLabelTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let catalog = applicationCatalogFixture()
+        let preferences = ApplicationPreferenceStore(
+            userDefaults: defaults,
+            catalogProvider: { catalog }
+        )
+        let model = AppModel(applicationPreferences: preferences)
+
+        XCTAssertEqual(model.terminalActionTitle, "Open in Fixture Terminal")
+        XCTAssertEqual(model.editorActionTitle, "Open in Xcode…")
+        preferences.setTerminalOverride("com.mitchellh.ghostty")
+        preferences.setSourceEditorOverride("dev.zed.Zed")
+        XCTAssertEqual(model.terminalActionTitle, "Open in Ghostty")
+        XCTAssertEqual(model.editorActionTitle, "Open in Zed…")
+        XCTAssertEqual(model.editorOpenActionTitle, "Open in Zed")
+    }
+
+    func testResolvedLaunchTargetsUseSelectedAdaptersAndCatalogIsStable() throws {
+        let suiteName = "ApplicationPreferenceLaunchTargetTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let duplicateZed = SystemApplication(
+            url: URL(fileURLWithPath: "/Applications/Zed Duplicate.app"),
+            bundleIdentifier: "dev.zed.Zed",
+            displayName: "Zed Duplicate"
+        )
+        var catalog = applicationCatalogFixture()
+        catalog = SystemApplicationCatalog(
+            defaults: catalog.defaults,
+            terminals: Array(catalog.terminals.reversed()),
+            sourceEditors: [duplicateZed] + catalog.sourceEditors
+        )
+        let preferences = ApplicationPreferenceStore(
+            userDefaults: defaults,
+            catalogProvider: { catalog }
+        )
+        preferences.setTerminalOverride("com.mitchellh.ghostty")
+        preferences.setSourceEditorOverride("dev.zed.Zed")
+
+        XCTAssertEqual(preferences.catalog.terminals.map(\.displayName), ["Ghostty", "iTerm"])
+        XCTAssertEqual(preferences.catalog.sourceEditors.count, 1)
+        XCTAssertEqual(preferences.resolvedTerminal?.bundleIdentifier, "com.mitchellh.ghostty")
+        XCTAssertEqual(preferences.resolvedSourceEditor?.bundleIdentifier, "dev.zed.Zed")
+        XCTAssertEqual(
+            TerminalLauncher.handoffAdapter(bundleIdentifier: preferences.resolvedTerminal?.bundleIdentifier),
+            .ghosttyNativeTab
+        )
+        XCTAssertEqual(
+            TerminalLauncher.handoffAdapter(bundleIdentifier: "com.googlecode.iterm2"),
+            .commandFile
+        )
+    }
+
+    private func applicationCatalogFixture() -> SystemApplicationCatalog {
+        let terminal = SystemApplication(
+            url: URL(fileURLWithPath: "/Applications/Fixture Terminal.app"),
+            bundleIdentifier: "fixture.default-terminal",
+            displayName: "Fixture Terminal"
+        )
+        let xcode = SystemApplication(
+            url: URL(fileURLWithPath: "/Applications/Xcode.app"),
+            bundleIdentifier: "com.apple.dt.Xcode",
+            displayName: "Xcode"
+        )
+        return SystemApplicationCatalog(
+            defaults: SystemApplicationDefaults(terminal: terminal, sourceEditor: xcode),
+            terminals: [
+                SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/iTerm.app"),
+                    bundleIdentifier: "com.googlecode.iterm2",
+                    displayName: "iTerm"
+                ),
+                SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/Ghostty.app"),
+                    bundleIdentifier: "com.mitchellh.ghostty",
+                    displayName: "Ghostty"
+                )
+            ],
+            sourceEditors: [
+                SystemApplication(
+                    url: URL(fileURLWithPath: "/Applications/Zed.app"),
+                    bundleIdentifier: "dev.zed.Zed",
+                    displayName: "Zed"
+                )
+            ]
+        )
+    }
+
+    func testExternalApplicationActionTitlesUseDiscoveredBundleNames() {
+        let defaults = SystemApplicationDefaults(
+            terminal: SystemApplication(
+                url: URL(fileURLWithPath: "/Applications/ExampleTerminal.app"),
+                bundleIdentifier: "example.terminal",
+                displayName: "Example Terminal"
+            ),
+            sourceEditor: SystemApplication(
+                url: URL(fileURLWithPath: "/Applications/ExampleEditor.app"),
+                bundleIdentifier: "example.editor",
+                displayName: "Example Editor"
+            )
+        )
+        let model = AppModel(applicationDefaults: defaults)
+
+        XCTAssertEqual(model.terminalActionTitle, "Open in Example Terminal")
+        XCTAssertEqual(model.editorActionTitle, "Open in Example Editor…")
+        XCTAssertEqual(model.editorOpenActionTitle, "Open in Example Editor")
+        XCTAssertTrue(
+            model.actionAvailability(for: .dev, action: .openTerminal).recovery?
+                .contains("open in example terminal") == true
+        )
+        XCTAssertTrue(
+            model.actionAvailability(for: .dev, action: .openEditor).recovery?
+                .contains("open in example editor") == true
+        )
+    }
+
+    func testUnsupportedDefaultEditorFailsWithoutFallback() async {
+        let application = SystemApplication(
+            url: URL(fileURLWithPath: "/Applications/Xcode.app"),
+            bundleIdentifier: "com.apple.dt.Xcode",
+            displayName: "Xcode"
+        )
+        do {
+            try await SourceEditorLauncher().open(
+                application: application,
+                target: MSWEditorTarget(workspace: "dev", path: ".", host: "dev.msb")
+            )
+            XCTFail("An unverified editor must not be opened.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Xcode"))
+            XCTAssertTrue(error.localizedDescription.contains("no fallback was opened"))
+        }
+    }
+
+    func testZedIsAnExplicitVerifiedSourceEditorAdapter() throws {
+        for bundleIdentifier in [
+            "dev.zed.Zed",
+            "dev.zed.Zed-Preview",
+            "dev.zed.Zed-Nightly",
+            "dev.zed.Zed-Dev"
+        ] {
+            let application = SystemApplication(
+                url: URL(fileURLWithPath: "/Applications/Zed.app"),
+                bundleIdentifier: bundleIdentifier,
+                displayName: "Fixture Editor"
+            )
+
+            XCTAssertEqual(
+                try SourceEditorLauncher().validate(application: application),
+                application
+            )
+        }
+    }
+
+    func testEditorTargetEncodesExactFolderPathForVerifiedZedAdapter() throws {
+        let target = MSWEditorTarget(
+            workspace: "dev",
+            path: "Projects/Demo #1",
+            host: "dev.msb"
+        )
+
+        XCTAssertEqual(
+            try XCTUnwrap(target.remoteURL).absoluteString,
+            "ssh://root@dev.msb/workspace/Projects/Demo%20%231"
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(target.zedRemoteURL).absoluteString,
+            "zed://ssh/root@dev.msb/workspace/Projects/Demo%20%231"
+        )
+
+        for path in ["../escape", "/workspace", "safe//nested", "bad\u{7f}path"] {
+            let unsafe = MSWEditorTarget(workspace: "dev", path: path, host: "dev.msb")
+            XCTAssertFalse(unsafe.isValid)
+            XCTAssertNil(unsafe.remoteURL)
+            XCTAssertNil(unsafe.zedRemoteURL)
+        }
+    }
+
+    func testDirectoryClientRejectsUnsafeInputsAndMalformedResponsePaths() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-directory-client-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let executable = temporary.appendingPathComponent("msw")
+        let malformed = #"{"schemaVersion":1,"requestId":"directories","ok":true,"command":"directory-list","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":".","query":null,"entries":[{"name":"escape","path":"../escape","kind":"directory"}],"truncated":false},"warnings":[],"error":null}"#
+        let outOfScope = #"{"schemaVersion":1,"requestId":"directories","ok":true,"command":"directory-list","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":"Projects","query":null,"entries":[{"name":"Other","path":"Other","kind":"directory"}],"truncated":false},"warnings":[],"error":null}"#
+        let duplicate = #"{"schemaVersion":1,"requestId":"directories","ok":true,"command":"directory-list","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":"Duplicate","query":null,"entries":[{"name":"Child","path":"Duplicate/Child","kind":"directory"},{"name":"Child","path":"Duplicate/Child","kind":"directory"}],"truncated":false},"warnings":[],"error":null}"#
+        let malformedTarget = #"{"schemaVersion":1,"requestId":"editor-target","ok":true,"command":"editor-target","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":".","host":"personal.msb"},"warnings":[],"error":null}"#
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "directory-list" ]; then
+            if [ "$6" = "Projects" ]; then
+                printf '%s\n' '\(outOfScope)'
+            elif [ "$6" = "Duplicate" ]; then
+                printf '%s\n' '\(duplicate)'
+            else
+                printf '%s\n' '\(malformed)'
+            fi
+        elif [ "$1" = "app" ] && [ "$2" = "editor-target" ]; then
+            printf '%s\n' '\(malformedTarget)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+
+        do {
+            _ = try await client.directories(workspace: "dev", path: "../escape")
+            XCTFail("Traversal must be rejected before invoking MSW.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+        do {
+            _ = try await client.directories(workspace: "dev", path: String(repeating: "x", count: 1_025))
+            XCTFail("Oversized paths must be rejected before invoking MSW.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+        do {
+            _ = try await client.directories(workspace: "dev", query: "bad\u{1b}query")
+            XCTFail("Control characters in search queries must be rejected before invoking MSW.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+        do {
+            _ = try await client.directories(workspace: "dev", limit: 201)
+            XCTFail("Unbounded directory limits must be rejected.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+        do {
+            _ = try await client.directories(workspace: "dev")
+            XCTFail("Malformed returned paths must be rejected.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "directory-list")) }
+        do {
+            _ = try await client.directories(workspace: "dev", path: "Projects")
+            XCTFail("Nonrecursive listings must not return folders outside their requested scope.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "directory-list")) }
+        do {
+            _ = try await client.directories(workspace: "dev", path: "Duplicate")
+            XCTFail("Duplicate directory identities must be rejected before SwiftUI consumes them.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "directory-list")) }
+        do {
+            _ = try await client.editorTarget(workspace: "dev")
+            XCTFail("A target for another workspace must be rejected.")
+        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "editor-target")) }
+    }
+
     // MARK: - Local-mode init never builds Connect dependencies (blocker 7)
 
     func testAppDelegateLocalModeConstructsNoConnectDependencies() throws {
@@ -2596,6 +2916,7 @@ final class AppModelTests: XCTestCase {
             authorizationCoordinator: coordinator,
             provider: nil,
             accessMode: .connect,
+            applicationPreferences: ApplicationPreferenceStore(),
             openSettings: { _ in },
             closeSetup: { _ in },
             uiTestMode: false,
