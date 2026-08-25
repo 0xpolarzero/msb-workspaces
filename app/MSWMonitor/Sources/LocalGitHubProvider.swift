@@ -653,11 +653,21 @@ actor GitHubLocalProvider: GitHubProviding {
         _ request: MSWGitHubPolicyApplyRequest,
         with client: MSWClient
     ) async throws {
-        let result = try await client.githubPolicyApply(request)
-        guard result.applied == true, result.provisioned == true, result.committed == true else {
-            throw GitHubCatalogError.commitFailed(
-                "The CLI did not confirm the policy was provisioned and committed."
-            )
+        for attempt in 0..<3 {
+            do {
+                let result = try await client.githubPolicyApply(request)
+                guard result.applied == true,
+                      result.provisioned == true,
+                      result.committed == true else {
+                    throw GitHubCatalogError.commitFailed(
+                        "The CLI did not confirm the policy was provisioned and committed."
+                    )
+                }
+                return
+            } catch MSWClientError.protocolFailure(let error)
+                where error.code == "MSW_OPERATION_CONFLICT" && error.retryable && attempt < 2 {
+                try await Task.sleep(for: attempt == 0 ? .milliseconds(500) : .seconds(1))
+            }
         }
     }
 
@@ -998,8 +1008,13 @@ actor GitHubFixtureProvider: GitHubProviding {
 
     nonisolated var isAvailable: Bool { true }
 
+    func catalogLoadAttempts() -> Int { loadAttempts }
+
     func loadCatalog() async throws -> GitHubCatalog {
         loadAttempts += 1
+        if scenario == "slow-first-load", loadAttempts == 1 {
+            try await Task.sleep(for: .milliseconds(250))
+        }
         if scenario == "interaction-states", loadAttempts > 1 {
             try await Task.sleep(for: .seconds(2))
         }

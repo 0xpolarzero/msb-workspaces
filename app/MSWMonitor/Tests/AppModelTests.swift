@@ -181,6 +181,44 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(refreshedAccount?.login, "octocat")
     }
 
+    func testGitHubSettingsInitialLoadRetriesTransientFailure() async {
+        let provider = GitHubFixtureProvider(scenario: "cancel-retry")
+        let state = GitHubSettingsState(
+            authorizationCoordinator: nil,
+            provider: provider,
+            accessMode: .local
+        )
+
+        await state.refresh()
+
+        guard case .ready(let account, _, _) = state.connectionState else {
+            return XCTFail("A transient startup failure must recover before publishing an error state.")
+        }
+        XCTAssertEqual(account?.login, "octocat")
+        let attempts = await provider.catalogLoadAttempts()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertNil(state.error)
+    }
+
+    func testGitHubSettingsConcurrentRefreshesShareOneCatalogLoad() async {
+        let provider = GitHubFixtureProvider(scenario: "slow-first-load")
+        let state = GitHubSettingsState(
+            authorizationCoordinator: nil,
+            provider: provider,
+            accessMode: .local
+        )
+
+        async let first: Void = state.refresh()
+        async let second: Void = state.refresh()
+        _ = await (first, second)
+
+        let attempts = await provider.catalogLoadAttempts()
+        XCTAssertEqual(attempts, 1)
+        guard case .ready = state.connectionState else {
+            return XCTFail("The shared catalog load should publish one ready state.")
+        }
+    }
+
     func testSystemHealthUsesSetupPreflightChecks() async throws {
         let model = AppModel()
         let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")

@@ -27,6 +27,7 @@ final class GitHubLocalProviderTests: XCTestCase {
     private static let handshakeLine = #"{"schemaVersion":1,"requestId":"handshake","ok":true,"command":"handshake","observedAt":"2026-08-21T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
     private static let policyApplyLine = #"{"schemaVersion":1,"requestId":"apply","ok":true,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":{"applied":true,"provisioned":true,"committed":true,"workspaces":[{"workspace":"dev","capability":"0123456789abcdef0123456789abcdef0123456789abcdef","repos":[]}]},"warnings":[],"error":null}"#
+    private static let policyConflictLine = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Wait for it to finish, then retry the policy apply.","workspace":null,"retryable":true}}"#
 
     /// Single-quotes a value for /bin/sh so embedded JSON with apostrophes
     /// (e.g. remedies like "Run 'gh auth login'") cannot break the script.
@@ -50,6 +51,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         applyJSON: String? = nil,
         applyExit: Int32 = 0,
         applyDelay: TimeInterval = 0,
+        applyConflictsBeforeSuccess: Int = 0,
         identityJSON: String? = nil
     ) -> URL {
         let log = directory.appendingPathComponent("calls.log")
@@ -59,6 +61,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             "#!/bin/sh",
             "LOG=\"\(log.path)\"",
             "APPLY_STDIN=\"\(applyStdin.path)\"",
+            "APPLY_COUNT=\"\(directory.appendingPathComponent("apply.count").path)\"",
             "case \"$*\" in",
             "  \"app handshake\"*)",
             "    printf '%s\\n' \(Self.shellQuote(Self.handshakeLine))",
@@ -121,6 +124,18 @@ final class GitHubLocalProviderTests: XCTestCase {
                 "    echo \"policy-apply $*\" >> \"$LOG\"",
                 "    cat > \"$APPLY_STDIN\"",
             ]
+            if applyConflictsBeforeSuccess > 0 {
+                lines += [
+                    "    count=0",
+                    "    [ ! -f \"$APPLY_COUNT\" ] || count=$(cat \"$APPLY_COUNT\")",
+                    "    count=$((count + 1))",
+                    "    printf '%s\\n' \"$count\" > \"$APPLY_COUNT\"",
+                    "    if [ \"$count\" -le \(applyConflictsBeforeSuccess) ]; then",
+                    "      printf '%s\\n' \(Self.shellQuote(Self.policyConflictLine))",
+                    "      exit 73",
+                    "    fi",
+                ]
+            }
             if applyDelay > 0 {
                 lines.append("    sleep \(applyDelay)")
             }
@@ -543,6 +558,47 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertTrue(playgrounds.repos.isEmpty, "Edited workspace with no entries clears its access")
         let personal = try XCTUnwrap(payload.workspaces["personal"])
         XCTAssertTrue(personal.repos.isEmpty, "Untouched workspace with no prior entries stays empty")
+    }
+
+    func testCommitRetriesTransientOperationConflict() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: """
+        {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]}}}
+        """)
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyConflictsBeforeSuccess: 1
+        )
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: directory,
+            configuredExecutable: executable
+        ))
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: runner),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+        let ownerID = GitHubLocalProvider.stableID("acme")
+        let policy = [
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                GitHubRepositoryPolicy(
+                    workspace: "dev",
+                    repositoryID: GitHubLocalProvider.stableID("acme/one"),
+                    fullName: "acme/one",
+                    installationID: ownerID,
+                    ownerID: ownerID,
+                    ownerLogin: "acme",
+                    ownerType: nil,
+                    mode: .readWrite
+                )
+            ])
+        ]
+
+        try await provider.commit(policy)
+
+        XCTAssertEqual(applyCallCount(directory), 2)
     }
 
     func testCommitPreservesUntouchedWorkspaceEntries() async throws {

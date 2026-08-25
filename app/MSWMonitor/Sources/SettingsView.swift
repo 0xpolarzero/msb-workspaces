@@ -150,7 +150,8 @@ final class GitHubSettingsState {
     var repositoriesByInstallation: [Int: [GitHubRepository]] = [:]
 
     private var hasLoaded = false
-    private var isRefreshing = false
+    private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration = 0
     private var pollingTask: Task<Void, Never>?
     private var pollingVisible = false
     private var pollingSuspensionCount = 0
@@ -168,11 +169,12 @@ final class GitHubSettingsState {
     func configure(provider: (any GitHubProviding)?) {
         pollingTask?.cancel()
         pollingTask = nil
+        refreshGeneration &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
         pollingSuspensionCount = 0
         self.provider = provider
         hasLoaded = false
-        isRefreshing = false
-        metadata = []
         connectedAccount = nil
         connectionState = .loading
         error = nil
@@ -210,8 +212,8 @@ final class GitHubSettingsState {
     }
 
     func waitForRefreshToFinish() async {
-        while isRefreshing {
-            try? await Task.sleep(for: .milliseconds(25))
+        if let refreshTask {
+            await refreshTask.value
         }
     }
 
@@ -223,10 +225,25 @@ final class GitHubSettingsState {
     }
 
     func refresh() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        if let refreshTask {
+            await refreshTask.value
+            return
+        }
 
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performRefresh()
+        }
+        refreshTask = task
+        await task.value
+        if refreshGeneration == generation {
+            refreshTask = nil
+        }
+    }
+
+    private func performRefresh() async {
         if !hasLoaded {
             connectionState = .loading
         }
@@ -240,7 +257,7 @@ final class GitHubSettingsState {
                 return
             }
             do {
-                let catalog = try await provider.loadCatalog()
+                let catalog = try await loadLocalCatalogWithRetry(from: provider)
                 let policy = await provider.currentPolicy()
                 connectedAccount = catalog.account
                 localPolicy = policy
@@ -254,6 +271,10 @@ final class GitHubSettingsState {
                     )
                     : .noCredential(GitHubLocalStrings.settingsNoCredential)
                 hasLoaded = true
+            } catch is CancellationError {
+                return
+            } catch let clientError as MSWClientError where clientError == .cancelled {
+                return
             } catch {
                 if !hasLoaded {
                     connectedAccount = nil
@@ -294,6 +315,24 @@ final class GitHubSettingsState {
             connectionState = .connected
         }
         hasLoaded = true
+    }
+
+    private func loadLocalCatalogWithRetry(
+        from provider: any GitHubProviding
+    ) async throws -> GitHubCatalog {
+        var lastError: Error?
+        for attempt in 0..<3 {
+            try Task.checkCancellation()
+            do {
+                return try await provider.loadCatalog()
+            } catch {
+                lastError = error
+                guard attempt < 2 else { break }
+                let delay: Duration = attempt == 0 ? .milliseconds(250) : .milliseconds(750)
+                try await Task.sleep(for: delay)
+            }
+        }
+        throw lastError ?? GitHubCatalogError.unavailable("GitHub could not be loaded.")
     }
 }
 
