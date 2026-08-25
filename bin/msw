@@ -6921,7 +6921,7 @@ app_cmd_repositories() {
 app_redact() {
   local value="${1-}"
   printf '%s\n' "$value" | /usr/bin/sed -E \
-    -e 's/^H{16,}(\{|\[)/\1/' \
+    -e 's/^H+(\{|\[)/\1/' \
     -e 's#([Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+)[A-Za-z0-9._~+/-]+=*#\1[REDACTED]#g' \
     -e 's#([Bb][Aa][Ss][Ii][Cc][[:space:]]+)[A-Za-z0-9+/=]+#\1[REDACTED]#g' \
     -e 's#(gh[osuphr]_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
@@ -6933,7 +6933,14 @@ app_redact() {
 
 app_log_line_is_internal_snapshot() {
   local value="${1-}"
-  [[ "$value" == "[]" ]] && return 0
+  [[ -z "$value" || "$value" =~ ^H+$ ]] && return 0
+  case "$value" in
+    "["|"]"|"{"|"}"|"[]"|"{}") return 0 ;;
+  esac
+  local monitored_port
+  for monitored_port in "${internal_log_ports[@]}"; do
+    [[ "$value" == "$monitored_port" ]] && return 0
+  done
   [[ "$value" == *'"path":'* && "$value" == *'"query":'* &&
     "$value" == *'"entries":'* && "$value" == *'"truncated":'* ]] && return 0
   [[ "$value" == *'"worktreeState":'* && "$value" == *'"destinationState":'* &&
@@ -6942,7 +6949,8 @@ app_log_line_is_internal_snapshot() {
 }
 
 app_cmd_logs() {
-  local box="" status raw line safe reason_json="null"
+  local box="" status raw line safe reason_json="null" configured_port
+  local -a internal_log_ports=()
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error logs "missing value for --workspace"; box="$2"; shift 2 ;;
@@ -6954,6 +6962,9 @@ app_cmd_logs() {
   is_workspace "$box" || app_usage_error logs "workspace must be one of the configured workspaces"
   app_require_config logs
   app_require_runtime logs
+  while IFS= read -r configured_port; do
+    [[ -n "$configured_port" ]] && internal_log_ports+=("$configured_port")
+  done < <(expand_ports)
   if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
     app_emit_error logs "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
   fi
@@ -6979,6 +6990,7 @@ app_cmd_logs() {
     [[ -n "$line" ]] || continue
     if (( ${#line} > 262144 )); then line="${line:0:262144}"; fi
     safe="$(app_redact "$line")"
+    [[ -n "$safe" ]] || continue
     app_log_line_is_internal_snapshot "$safe" && continue
     MSW_APP_RESPONSE_EMITTED=1
     printf '{"schemaVersion":1,"type":"log","requestId":%s,"workspace":%s,"observedAt":%s,"message":%s,"safeForDisplay":true}\n' \

@@ -3229,6 +3229,10 @@ class PackagedBehaviorTests(MSWTestCase):
             extra_env={
                 "MSW_FAKE_LOGS_JSONL_FAIL": "1",
                 "MSW_FAKE_LOGS": "\n".join([
+                    "H" * 32,
+                    "H[]",
+                    "]",
+                    "3000",
                     ("H" * 32) + '{"path":".","query":null,"entries":[],"truncated":false}',
                     ("H" * 32) + '{"event":"service-ready"}',
                     "demo service listening on port 3000",
