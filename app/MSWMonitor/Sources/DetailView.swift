@@ -56,7 +56,6 @@ struct DetailView: View {
     @State private var pushConfirmation = ""
     @State private var maintenanceOperation: MaintenanceOperation?
     @State private var hiddenWorkspaces: Set<Workspace.ID> = []
-    @State private var selectedLogLineIDs: Set<String> = []
     @State private var expandedInactivePortWorkspaces: Set<String> = []
     @State private var visitedWorkspaceSections: Set<WorkspaceSection>
 
@@ -315,8 +314,7 @@ struct DetailView: View {
     }
 
 
-    private struct TaggedLogLine: Identifiable {
-        let id: String
+    private struct TaggedLogLine {
         let workspace: Workspace.ID
         let message: String
     }
@@ -356,107 +354,53 @@ struct DetailView: View {
                     description: Text("Logs from the selected workspaces will appear here.")
                 )
             } else {
-                logCopyToolbar
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(visibleLogLines) { line in
-                            logRow(line)
-                        }
+                HStack(spacing: 8) {
+                    Text("\(visibleLogLines.count) lines")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Copy All Logs") {
+                        copyToPasteboard(logDocumentText)
                     }
+                    .accessibilityIdentifier("logs.copy.all")
+                }
+                .controlSize(.small)
+
+                ScrollView([.vertical, .horizontal]) {
+                    Text(logDocumentText)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: true, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(.vertical, 4)
+                        .accessibilityIdentifier("logs.document")
                 }
             }
             detailError
         }
-        .onChange(of: visibleLogLines.map(\.id)) { _, visibleIDs in
-            selectedLogLineIDs.formIntersection(visibleIDs)
-        }
     }
 
-    private var logCopyToolbar: some View {
-        HStack(spacing: 8) {
-            Text("\(visibleLogLines.count) lines")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-            if !selectedVisibleLogLines.isEmpty {
-                Button("Copy Selected") {
-                    copyLogLines(selectedVisibleLogLines)
-                }
-                .accessibilityIdentifier("logs.copy.selected")
-            }
-            Button("Copy Visible") {
-                copyLogLines(visibleLogLines)
-            }
-            .accessibilityIdentifier("logs.copy.visible")
-        }
-        .controlSize(.small)
-    }
-
-    private func logRow(_ line: TaggedLogLine) -> some View {
-        let isSelected = selectedLogLineIDs.contains(line.id)
-        return HStack(alignment: .top, spacing: 9) {
-            Button {
-                if isSelected {
-                    selectedLogLineIDs.remove(line.id)
-                } else {
-                    selectedLogLineIDs.insert(line.id)
-                }
-            } label: {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-            }
-            .buttonStyle(.plain)
-            .help(isSelected ? "Remove from selection" : "Add to selection")
-            .accessibilityIdentifier("logs.select.\(line.id)")
-            .accessibilityValue(isSelected ? "Selected" : "Not selected")
-
-            Text(line.workspace.rawValue)
-                .font(.caption2.monospaced().weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.secondary.opacity(0.1), in: Capsule())
-                .accessibilityIdentifier("logs.tag.\(line.workspace.rawValue)")
-
-            Text(line.message)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Button {
-                copyLogLines([line])
-            } label: {
-                Image(systemName: "doc.on.doc")
-                    .labelStyle(.iconOnly)
-            }
-            .buttonStyle(.plain)
-            .help("Copy log line")
-            .accessibilityIdentifier("logs.copy.\(line.id)")
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .background(
-            isSelected ? Color.accentColor.opacity(0.08) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 6)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("logs.line.\(line.id)")
-    }
-
-    private var selectedVisibleLogLines: [TaggedLogLine] {
-        visibleLogLines.filter { selectedLogLineIDs.contains($0.id) }
-    }
-
-    private func copyLogLines(_ lines: [TaggedLogLine]) {
-        let output = lines.map { line in
-            let prefix = "[\(line.workspace.rawValue)] "
-            return prefix + line.message.replacingOccurrences(
-                of: "\n",
-                with: "\n\(prefix)"
+    private var logDocumentText: String {
+        let workspaceWidth = visibleLogLines
+            .map { $0.workspace.rawValue.count }
+            .max() ?? 0
+        return visibleLogLines.map { line in
+            let workspace = line.workspace.rawValue
+            let workspacePadding = String(
+                repeating: " ",
+                count: max(0, workspaceWidth - workspace.count)
             )
+            let firstPrefix = "\(workspace)\(workspacePadding) │ "
+            let continuationPrefix = "\(String(repeating: " ", count: workspaceWidth)) │ "
+            return line.message
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .enumerated()
+                .map { index, content in
+                    "\(index == 0 ? firstPrefix : continuationPrefix)\(content)"
+                }
+                .joined(separator: "\n")
         }
         .joined(separator: "\n")
-        copyToPasteboard(output)
     }
 
     private var visibleLogLines: [TaggedLogLine] {
@@ -465,13 +409,13 @@ struct DetailView: View {
             guard let response = model.logsByWorkspace[workspace.id.rawValue] else {
                 continue
             }
-            for (offset, line) in response.lines.suffix(100).enumerated()
-            where line.safeForDisplay {
+            for line in response.lines.suffix(100) where line.safeForDisplay {
+                let message = Self.prettyLogMessage(line.message)
+                guard !message.isEmpty else { continue }
                 result.append(
                     TaggedLogLine(
-                        id: "\(workspace.id.rawValue).\(offset)",
                         workspace: workspace.id,
-                        message: Self.prettyLogMessage(line.message)
+                        message: message
                     )
                 )
             }
@@ -503,11 +447,8 @@ struct DetailView: View {
             repeated += 1
             cursor = message.index(after: cursor)
         }
-        guard repeated >= 16, cursor < message.endIndex,
-              message[cursor] == "{" || message[cursor] == "[" else {
-            return message
-        }
-        return String(message[cursor...])
+        guard repeated >= 8 else { return message }
+        return cursor < message.endIndex ? String(message[cursor...]) : ""
     }
 
 

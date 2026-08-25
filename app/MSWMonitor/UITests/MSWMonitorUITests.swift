@@ -238,45 +238,32 @@ final class MSWMonitorUITests: XCTestCase {
         logs.click()
         assertWorkspaceSection("Logs", in: app)
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["logs.tag.dev"].exists)
-        for workspace in ["playgrounds", "personal"] {
-            XCTAssertTrue(
-                app.descendants(matching: .any)["logs.tag.\(workspace)"]
-                    .waitForExistence(timeout: 2)
-            )
-        }
-        XCTAssertEqual(
-            app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS[c] %@", "bounded logs")
-            ).count,
-            0
-        )
+        let logDocument = app.staticTexts["logs.document"]
+        XCTAssertTrue(logDocument.waitForExistence(timeout: 2))
+        let filteredLogText = logDocument.value as? String ?? ""
+        XCTAssertFalse(filteredLogText.contains("Development service ready"))
+        XCTAssertTrue(filteredLogText.contains("playgrounds │"))
+        XCTAssertTrue(filteredLogText.contains("personal    │"))
+        XCTAssertFalse(filteredLogText.contains("bounded logs"))
+
         app.descendants(matching: .any)["workspace.filter.dev"].click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["logs.tag.dev"]
-                .waitForExistence(timeout: 2)
+        let devLogAppeared = expectation(
+            for: NSPredicate(
+                format: "value CONTAINS %@",
+                "Development service ready"
+            ),
+            evaluatedWith: logDocument
         )
-        XCTAssertTrue(app.staticTexts["Development service ready"].exists)
-        XCTAssertTrue(
-            app.descendants(matching: .any)["logs.copy.visible"]
-                .waitForExistence(timeout: 2)
-        )
-        XCTAssertTrue(
-            app.descendants(matching: .any)["logs.copy.dev.0"]
-                .waitForExistence(timeout: 2)
-        )
-        let devLogSelection = app.descendants(matching: .any)["logs.select.dev.0"]
-        XCTAssertTrue(devLogSelection.waitForExistence(timeout: 2))
-        devLogSelection.click()
-        let copySelectedLogs = app.descendants(matching: .any)["logs.copy.selected"]
-        XCTAssertTrue(copySelectedLogs.waitForExistence(timeout: 2))
-        copySelectedLogs.click()
-        XCTAssertEqual(
-            app.staticTexts.matching(
-                NSPredicate(format: "label BEGINSWITH %@", "HHHHHHHH")
-            ).count,
-            0
-        )
+        wait(for: [devLogAppeared], timeout: 2)
+        let visibleLogText = logDocument.value as? String ?? ""
+        XCTAssertTrue(visibleLogText.contains("dev         │"))
+        XCTAssertFalse(visibleLogText.contains("HHHHHHHH"))
+        XCTAssertFalse(app.descendants(matching: .any)["logs.copy.selected"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["logs.select.dev.0"].exists)
+
+        let copyAllLogs = app.descendants(matching: .any)["logs.copy.all"]
+        XCTAssertTrue(copyAllLogs.waitForExistence(timeout: 2))
+        copyAllLogs.click()
 
         let network = app.buttons["Network"]
         XCTAssertTrue(network.waitForExistence(timeout: 2))
