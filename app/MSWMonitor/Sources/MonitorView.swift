@@ -112,7 +112,7 @@ struct MonitorView: View {
                             workspaceSection: .logs
                         ))
                     } else {
-                        openRoute(AppRoute(tab: .overview))
+                        openRoute(AppRoute(tab: .workspaces, workspaceSection: .diagnostics))
                     }
                 } label: {
                     Label("View Error Details", systemImage: "doc.text.magnifyingglass")
@@ -138,7 +138,7 @@ struct MonitorView: View {
     private var shortcuts: some View {
         HStack(spacing: 8) {
             Button {
-                openRoute(AppRoute(tab: .overview, workspace: model.selectedWorkspace))
+                openRoute(AppRoute(tab: .workspaces, workspace: model.selectedWorkspace, workspaceSection: .summary))
             } label: {
                 Label("Open MSW Monitor…", systemImage: "macwindow")
             }
@@ -259,7 +259,7 @@ private struct WorkspaceRow: View {
             .accessibilityIdentifier("workspace.\(workspace.id.rawValue).start")
         } else {
             compactButton("Open MSW Monitor", systemImage: "arrow.up.right") {
-                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
+                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .summary))
             }
         }
     }
@@ -332,7 +332,7 @@ private struct WorkspaceRow: View {
             }
             Button("Open MSW Monitor…") {
                 model.selectedWorkspace = workspace.id
-                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
+                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .summary))
             }
         } label: {
             Label("Actions for \(workspace.id.rawValue)", systemImage: "ellipsis")

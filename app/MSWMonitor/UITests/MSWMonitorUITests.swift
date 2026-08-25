@@ -162,21 +162,27 @@ final class MSWMonitorUITests: XCTestCase {
         openMonitor.click()
 
         XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.toolbars.buttons["Overview"].exists)
         XCTAssertFalse(app.buttons["Refresh"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["details.sidebar"].exists)
-
-        let workspacesTab = app.toolbars.buttons["Workspaces"]
-        XCTAssertTrue(workspacesTab.waitForExistence(timeout: 2))
-        workspacesTab.click()
-        XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.descendants(matching: .any)["workspace.section-picker"].waitForExistence(timeout: 2))
         assertText("Summary", identifier: "details.section-title", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["workspace.summary"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.staticTexts["Ready"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
+        XCTAssertFalse(app.buttons["Retry"].exists)
 
         let workspacePicker = app.popUpButtons["details.workspace-picker"]
         XCTAssertTrue(workspacePicker.waitForExistence(timeout: 2))
         workspacePicker.click()
         app.menuItems["dev"].click()
+
+        let activity = app.descendants(matching: .any)["workspace.section.Activity"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 2))
+        activity.click()
+        assertText("Activity", identifier: "details.section-title", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["details.activity"].waitForExistence(timeout: 2))
 
         let files = app.descendants(matching: .any)["workspace.section.Files"]
         XCTAssertTrue(files.waitForExistence(timeout: 2))

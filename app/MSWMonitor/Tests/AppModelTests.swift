@@ -135,8 +135,63 @@ final class AppModelTests: XCTestCase {
         let activity = try XCTUnwrap(AppRoute(
             deepLink: URL(string: "msw-monitor://workspace/dev?section=activity")!
         ))
-        XCTAssertEqual(activity.tab, .overview)
+        XCTAssertEqual(activity.tab, .workspaces)
         XCTAssertEqual(activity.workspace, .dev)
+        XCTAssertEqual(activity.workspaceSection, .activity)
+
+        let overview = try XCTUnwrap(AppRoute(
+            deepLink: URL(string: "msw-monitor://overview")!
+        ))
+        XCTAssertEqual(overview.tab, .workspaces)
+        XCTAssertEqual(overview.workspaceSection, .summary)
+        XCTAssertEqual(AppNavigationState().tab, .workspaces)
+    }
+
+    func testUnavailableMetricsBecomeQuietCapabilityState() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-metrics-capability-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let failure = #"{"schemaVersion":1,"requestId":"metrics-failed","ok":false,"command":"metrics","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_METRICS_UNAVAILABLE","message":"metrics unavailable","recovery":"Update the runtime.","workspace":"dev","retryable":true}}"#
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "metrics" ]; then
+            printf '%s\n' '\(failure)'
+            exit 69
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(
+            client: client,
+            operationService: MSWOperationService(client: client)
+        )
+
+        model.loadMetrics(for: .dev)
+        for _ in 0..<100 {
+            if !model.isDetailLoading { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertTrue(model.metricsUnavailableWorkspaces.contains("dev"))
+        XCTAssertNil(model.metricsByWorkspace["dev"])
+        XCTAssertNil(model.detailError)
+        XCTAssertFalse(model.isDetailLoading)
+
+        model.loadMetrics(for: .dev)
+        XCTAssertFalse(model.isDetailLoading)
+        XCTAssertNil(model.detailError)
     }
 
     func testAppNavigationAppliesRouteWithoutDroppingWorkspaceContext() {

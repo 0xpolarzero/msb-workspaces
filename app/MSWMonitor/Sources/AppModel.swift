@@ -721,6 +721,7 @@ final class AppModel {
     private(set) var setupState: MSWBootstrapState = .initial
     private(set) var startupRecoveryBlockedReason: String?
     private(set) var metricsByWorkspace: [String: MSWMetricsResponse] = [:]
+    private(set) var metricsUnavailableWorkspaces: Set<String> = []
     private(set) var repositoriesByWorkspace: [String: MSWRepositoriesResponse] = [:]
     private(set) var portsSnapshot: MSWPortsResponse?
     private(set) var githubSnapshot: MSWGitHubStateResponse?
@@ -854,6 +855,7 @@ final class AppModel {
         detailRequestGeneration &+= 1
         isDetailLoading = false
         detailError = nil
+        metricsUnavailableWorkspaces.removeAll()
         let ids = configurations.compactMap { Workspace.ID(rawValue: $0.name) }
         let previous = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         configuredWorkspaceIDs = ids
@@ -1337,10 +1339,12 @@ final class AppModel {
         pendingLifecyclePlan = nil
     }
 
-    private func beginDetailRequest() -> Int {
+    private func beginDetailRequest(clearsError: Bool = true) -> Int {
         detailRequestGeneration += 1
         isDetailLoading = true
-        detailError = nil
+        if clearsError {
+            detailError = nil
+        }
         return detailRequestGeneration
     }
 
@@ -1349,29 +1353,43 @@ final class AppModel {
         isDetailLoading = false
     }
 
-    func loadMetrics(for id: Workspace.ID) {
-        guard let operationService else { detailError = "MSW metrics are unavailable in fixture mode."; return }
-        let request = beginDetailRequest()
+    func loadMetrics(for id: Workspace.ID, clearsError: Bool = true) {
+        guard !metricsUnavailableWorkspaces.contains(id.rawValue) else { return }
+        guard let operationService else {
+            metricsUnavailableWorkspaces.insert(id.rawValue)
+            return
+        }
+        let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
             do {
                 let result = try await operationService.metrics(workspace: id.rawValue)
                 guard let self, request == self.detailRequestGeneration else { return }
+                self.metricsUnavailableWorkspaces.remove(id.rawValue)
                 self.metricsByWorkspace[id.rawValue] = result
+                self.detailError = nil
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
-                self.detailError = error.localizedDescription
+                if let clientError = error as? MSWClientError,
+                   case .protocolFailure(let protocolError) = clientError,
+                   protocolError.code == "MSW_METRICS_UNAVAILABLE" {
+                    self.metricsUnavailableWorkspaces.insert(id.rawValue)
+                    self.metricsByWorkspace.removeValue(forKey: id.rawValue)
+                } else {
+                    self.detailError = error.localizedDescription
+                }
             }
             self?.finishDetailRequest(request)
         }
     }
 
-    func loadRepositories(for id: Workspace.ID) {
+    func loadRepositories(for id: Workspace.ID, clearsError: Bool = true) {
         guard let operationService else { detailError = "Repository inspection is unavailable in fixture mode."; return }
-        let request = beginDetailRequest()
+        let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
             do {
                 let result = try await operationService.repositories(workspace: id.rawValue)
                 guard let self, request == self.detailRequestGeneration else { return }
+                self.detailError = nil
                 self.repositoriesByWorkspace[id.rawValue] = result
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
@@ -1456,14 +1474,15 @@ final class AppModel {
         pendingPushPlan = nil
     }
 
-    func loadPorts(for id: Workspace.ID? = nil) {
+    func loadPorts(for id: Workspace.ID? = nil, clearsError: Bool = true) {
         guard let operationService else { detailError = "Port inspection is unavailable in fixture mode."; return }
-        let request = beginDetailRequest()
+        let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
             do {
                 let result = try await operationService.ports(workspace: id?.rawValue)
                 guard let self, request == self.detailRequestGeneration else { return }
                 self.portsSnapshot = result
+                self.detailError = nil
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
                 self.detailError = error.localizedDescription
@@ -1551,17 +1570,18 @@ final class AppModel {
         return MSWGitHubStateResponse(workspaces: workspaces)
     }
 
-    func loadLogs(for id: Workspace.ID) {
+    func loadLogs(for id: Workspace.ID, clearsError: Bool = true) {
         guard let operationService else {
             detailError = "MSW logs are unavailable in fixture mode."
             return
         }
-        let request = beginDetailRequest()
+        let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
             do {
                 let result = try await operationService.logs(workspace: id.rawValue)
                 guard let self, request == self.detailRequestGeneration else { return }
                 self.logsByWorkspace[id.rawValue] = result
+                self.detailError = nil
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
                 self.detailError = error.localizedDescription

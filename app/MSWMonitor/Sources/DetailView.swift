@@ -7,6 +7,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     case summary = "Summary"
     case files = "Files"
     case logs = "Logs"
+    case activity = "Activity"
     case ports = "Network"
     case repositories = "Repositories"
     case diagnostics = "Maintenance"
@@ -15,7 +16,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 
     var requiresWorkspace: Bool {
         switch self {
-        case .summary, .logs, .repositories, .files:
+        case .summary, .logs, .activity, .repositories, .files:
             return true
         case .ports, .diagnostics:
             return false
@@ -26,6 +27,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         switch deepLinkValue.lowercased() {
         case "metrics", "summary", "overview": self = .summary
         case "logs": self = .logs
+        case "activity": self = .activity
         case "repositories": self = .repositories
         case "files", "folders": self = .files
         case "ports", "network": self = .ports
@@ -36,7 +38,6 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 }
 
 enum DetailMode {
-    case overview
     case workspaces
     case backup
 }
@@ -66,7 +67,6 @@ struct DetailView: View {
     var body: some View {
         Group {
             switch mode {
-            case .overview: overview
             case .workspaces: workspacePane
             case .backup: backup
             }
@@ -157,12 +157,29 @@ struct DetailView: View {
                 navigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
                 model.selectedWorkspace = navigation.workspace
             }
+            model.clearDetailError()
             loadSelectedSection()
+            while automaticallyRefreshesSelectedSection {
+                do {
+                    try await Task.sleep(for: .seconds(15))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                loadSelectedSection()
+            }
         }
     }
 
     private var routeIdentity: String {
         "\(navigation.workspaceSection.rawValue):\(navigation.workspace?.rawValue ?? "none")"
+    }
+
+    private var automaticallyRefreshesSelectedSection: Bool {
+        switch navigation.workspaceSection {
+        case .summary, .logs, .repositories, .ports: return true
+        case .activity, .files, .diagnostics: return false
+        }
     }
 
     private var workspaceToolbar: some View {
@@ -209,6 +226,7 @@ struct DetailView: View {
         switch navigation.workspaceSection {
         case .summary: workspaceSummary
         case .logs: logs
+        case .activity: activity
         case .repositories: repositories
         case .files:
             if let workspace = selectedWorkspaceID {
@@ -221,17 +239,23 @@ struct DetailView: View {
     }
 
     private func loadSelectedSection() {
-        model.clearDetailError()
         switch navigation.workspaceSection {
         case .summary:
-            if let workspace = navigation.workspace { model.loadMetrics(for: workspace) }
+            if let workspace = navigation.workspace {
+                model.loadMetrics(for: workspace, clearsError: false)
+            }
         case .logs:
-            if let workspace = navigation.workspace { model.loadLogs(for: workspace) }
+            if let workspace = navigation.workspace {
+                model.loadLogs(for: workspace, clearsError: false)
+            }
         case .repositories:
-            if let workspace = navigation.workspace { model.loadRepositories(for: workspace) }
-        case .ports: model.loadPorts(for: navigation.workspace)
+            if let workspace = navigation.workspace {
+                model.loadRepositories(for: workspace, clearsError: false)
+            }
+        case .ports:
+            model.loadPorts(for: navigation.workspace, clearsError: false)
         case .diagnostics: model.runDiagnostics()
-        case .files: break
+        case .activity, .files: break
         }
     }
 
@@ -242,43 +266,12 @@ struct DetailView: View {
 
     private var selectedWorkspaceID: Workspace.ID? { navigation.workspace }
 
-    private var overview: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                AggregateStatusView(model: model)
-                ForEach(model.workspaces) { workspace in
-                    DetailWorkspaceCard(
-                        workspace: workspace,
-                        model: model,
-                        openRepositories: {
-                            navigation.tab = .workspaces
-                            navigation.workspace = workspace.id
-                            model.selectedWorkspace = workspace.id
-                            navigation.workspaceSection = .repositories
-                        }
-                    )
-                }
-                Divider()
-                Text("Recent activity")
-                    .font(.headline)
-                activity
-            }
-            .padding(20)
-        }
-        .accessibilityIdentifier("details.overview")
-    }
 
     private var workspaceSummary: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let workspace = selectedWorkspace {
-                    DetailWorkspaceCard(
-                        workspace: workspace,
-                        model: model,
-                        openRepositories: {
-                            navigation.workspaceSection = .repositories
-                        }
-                    )
+                    DetailWorkspaceCard(workspace: workspace, model: model)
                 }
                 metrics
             }
@@ -287,11 +280,14 @@ struct DetailView: View {
 
     private var metrics: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionToolbar(actionTitle: "Refresh") {
-                if let id = selectedWorkspaceID { model.loadMetrics(for: id) }
-            }
-            if let id = selectedWorkspaceID, let value = model.metricsByWorkspace[id.rawValue] {
-                FreshnessNotice(freshness: value.freshness, observedAt: selectedWorkspace?.observedAt, reason: value.reason)
+            if let id = selectedWorkspaceID,
+               !model.metricsUnavailableWorkspaces.contains(id.rawValue),
+               let value = model.metricsByWorkspace[id.rawValue] {
+                FreshnessNotice(
+                    freshness: value.freshness,
+                    observedAt: selectedWorkspace?.observedAt,
+                    reason: value.reason
+                )
                 LabeledContent("Lifecycle", value: value.lifecycle.rawValue)
                 LabeledContent("Available", value: value.available ? "Yes" : "No")
                 if let snapshot = value.snapshot {
@@ -304,11 +300,6 @@ struct DetailView: View {
                     .padding(10)
                     .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
                 }
-                loadingOverlay("Updating metrics snapshot")
-            } else if model.isDetailLoading {
-                OperationRow(phase: "Requesting metrics", scope: navigation.workspace?.rawValue, detail: "Waiting for a bounded metrics snapshot.")
-            } else {
-                ContentUnavailableView("No metrics snapshot", systemImage: "gauge", description: Text("Metrics are available only while the selected workspace is running."))
             }
             detailError
         }
@@ -316,9 +307,6 @@ struct DetailView: View {
 
     private var logs: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionToolbar(actionTitle: "Refresh") {
-                if let id = selectedWorkspaceID { model.loadLogs(for: id) }
-            }
             Text("Current operation errors appear first. Runtime logs below are bounded and redacted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -359,11 +347,8 @@ struct DetailView: View {
                     }
                     .listStyle(.inset)
                 }
-                loadingOverlay("Updating bounded logs")
-            } else if model.isDetailLoading {
-                OperationRow(phase: "Requesting logs", scope: navigation.workspace?.rawValue, detail: "Waiting for sanitized log lines.")
             } else {
-                ContentUnavailableView("No log snapshot", systemImage: "text.alignleft", description: Text("Refresh to inspect the bounded, redacted log stream."))
+                ContentUnavailableView("No log snapshot", systemImage: "text.alignleft", description: Text("Bounded, redacted logs appear here when available."))
             }
             detailError
         }
@@ -371,9 +356,6 @@ struct DetailView: View {
 
     private var repositories: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionToolbar(actionTitle: "Refresh") {
-                if let id = selectedWorkspaceID { model.loadRepositories(for: id) }
-            }
             if let id = selectedWorkspaceID, let value = model.repositoriesByWorkspace[id.rawValue] {
                 FreshnessNotice(freshness: value.freshness, observedAt: newestRepositoryDate(value), reason: value.notice)
                 if value.repositories.isEmpty {
@@ -386,11 +368,8 @@ struct DetailView: View {
                     }
                     .listStyle(.inset)
                 }
-                loadingOverlay("Updating repository state")
-            } else if model.isDetailLoading {
-                OperationRow(phase: "Inspecting repositories", scope: navigation.workspace?.rawValue, detail: "Checking branches, worktrees, and destinations.")
             } else {
-                ContentUnavailableView("No repository snapshot", systemImage: "shippingbox", description: Text("Refresh to inspect repository state."))
+                ContentUnavailableView("No repository snapshot", systemImage: "shippingbox", description: Text("Repository state appears here when available."))
             }
             detailError
         }
@@ -915,7 +894,6 @@ private extension DetailView {
 
     private var ports: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionToolbar(actionTitle: "Refresh") { model.loadPorts(for: navigation.workspace) }
             if let warning = scopedPortWarning {
                 Label(warning, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -951,11 +929,8 @@ private extension DetailView {
                     }
                     .listStyle(.inset)
                 }
-                loadingOverlay("Updating ports")
-            } else if model.isDetailLoading {
-                OperationRow(phase: "Inspecting ports", scope: navigation.workspace?.rawValue, detail: "Requesting configured ports and active listeners.")
             } else {
-                ContentUnavailableView("No port snapshot", systemImage: "network", description: Text("Refresh to inspect configured ports and active listeners."))
+                ContentUnavailableView("No port snapshot", systemImage: "network", description: Text("Configured ports and active listeners appear here when available."))
             }
             detailError
         }
@@ -973,44 +948,48 @@ private extension DetailView {
 
 
     private var activity: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if model.activities.isEmpty {
-                Text("No recent activity")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(Array(model.activities.prefix(10))) { entry in
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: entry.isFailure ? "xmark.circle.fill" : "checkmark.circle")
-                            .foregroundStyle(entry.isFailure ? .red : .secondary)
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(entry.title).font(.body.weight(.medium))
-                                Spacer()
-                                Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let workspace = entry.workspace {
-                                Text(workspace)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let detail = entry.detail {
-                                Text(detail)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if scopedActivities.isEmpty {
+                    ContentUnavailableView(
+                        "No recent activity",
+                        systemImage: "clock",
+                        description: Text("Actions for this workspace will appear here.")
+                    )
+                } else {
+                    ForEach(scopedActivities.prefix(20)) { entry in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: entry.isFailure ? "xmark.circle.fill" : "checkmark.circle")
+                                .foregroundStyle(entry.isFailure ? .red : .secondary)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Text(entry.title).font(.body.weight(.medium))
+                                    Spacer()
+                                    Text(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let detail = entry.detail {
+                                    Text(detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
                             }
                         }
+                        .accessibilityElement(children: .combine)
+                        Divider()
                     }
-                    .accessibilityElement(children: .combine)
-                    Divider()
                 }
             }
         }
         .accessibilityIdentifier("details.activity")
+    }
+
+    private var scopedActivities: [MSWActivity] {
+        guard let workspace = selectedWorkspaceID else { return [] }
+        return model.activities.filter { $0.workspace == workspace.rawValue }
     }
 
     private var backup: some View {
@@ -1162,12 +1141,6 @@ private extension DetailView {
         }
     }
 
-    @ViewBuilder
-    private func loadingOverlay(_ phase: String) -> some View {
-        if model.isDetailLoading {
-            OperationRow(phase: phase, scope: navigation.workspace?.rawValue, detail: "Cached content remains visible while the request is in progress.")
-        }
-    }
 
     @ViewBuilder
     private var detailError: some View {
@@ -1281,55 +1254,46 @@ private extension DetailView {
     }
 }
 
-private struct AggregateStatusView: View {
-    @Bindable var model: AppModel
-
-    var body: some View {
-        let health = model.health
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: health.symbol)
-                .font(.title2)
-                .foregroundStyle(color(health.severity))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(health.title).font(.headline)
-                Text(health.detail).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(color(health.severity).opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .accessibilityElement(children: .combine)
-    }
-
-    private func color(_ severity: MonitorHealth.Severity) -> Color {
-        switch severity {
-        case .normal: return .green
-        case .neutral: return .secondary
-        case .attention: return .orange
-        case .critical: return .red
-        }
-    }
-}
 
 private struct DetailWorkspaceCard: View {
     let workspace: Workspace
     @Bindable var model: AppModel
-    let openRepositories: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(workspace.id.rawValue).font(.headline)
-                    Text(workspace.purpose).font(.caption).foregroundStyle(.secondary)
+                    Text(workspace.id.rawValue)
+                        .font(.title3.weight(.semibold))
+                    Text(workspace.purpose)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(workspace.state.rawValue).font(.body.weight(.medium))
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(stateColor)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(workspace.state.rawValue)
+                        .font(.body.weight(.medium))
+                }
             }
-            HStack {
-                LabeledContent("Freshness", value: workspace.freshness.rawValue)
-                LabeledContent("Credential", value: workspace.credential.rawValue)
+            if workspace.freshness != .fresh {
+                Label(
+                    "Workspace information is \(workspace.freshness.rawValue.lowercased()).",
+                    systemImage: "clock.badge.exclamationmark"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+            }
+            if workspace.credential.needsAttention {
+                Label(
+                    "GitHub access: \(workspace.credential.rawValue)",
+                    systemImage: "exclamationmark.shield"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
             if let reason = workspace.quarantineReason {
                 Label(reason, systemImage: "exclamationmark.octagon.fill")
@@ -1338,20 +1302,30 @@ private struct DetailWorkspaceCard: View {
             }
             HStack {
                 if workspace.canStart && workspace.state != .running {
-                    Button("Start \(workspace.id.rawValue)") { model.start(workspace.id) }
+                    Button("Start") { model.start(workspace.id) }
                         .buttonStyle(.borderedProminent)
                 }
                 if workspace.canStop && (workspace.state == .running || workspace.state == .quarantined) {
-                    Button("Stop \(workspace.id.rawValue)") { model.stop(workspace.id) }
+                    Button("Stop") { model.stop(workspace.id) }
                 }
-                Button("Repositories", action: openRepositories)
-                Spacer()
-                Text("Next: \(model.nextActionTitle(for: workspace))").font(.caption).foregroundStyle(.secondary)
+                if workspace.canRestart && workspace.state == .running {
+                    Button("Restart") { model.restart(workspace.id) }
+                }
             }
         }
         .padding(14)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("workspace.summary")
+    }
+
+    private var stateColor: Color {
+        switch workspace.state {
+        case .running: return .green
+        case .quarantined: return .red
+        case .starting, .stopping, .restarting, .exited, .unavailable, .unknown: return .orange
+        case .stopped: return .secondary
+        }
     }
 }
 
