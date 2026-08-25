@@ -3935,10 +3935,7 @@ struct RepositoryWorkspacePolicyEditor: View {
             .accessibilityLabel("Allow pushes")
             .controlSize(.small)
             .disabled(disabled || repository.canPush == false)
-            .hoverTooltip(
-                repository.canPush == false ? Self.pushDeniedHelp : Self.pushHelp,
-                accessibilityIdentifier: "github.workspace.\(workspace).repository.\(repository.id).allow-pushes.tooltip"
-            )
+            .help(repository.canPush == false ? Self.pushDeniedHelp : Self.pushHelp)
             .accessibilityIdentifier("github.workspace.\(workspace).repository.\(repository.id).allow-pushes")
         }
         .padding(.leading, 4)
