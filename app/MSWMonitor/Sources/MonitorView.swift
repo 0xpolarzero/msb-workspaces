@@ -5,22 +5,16 @@ struct MonitorView: View {
 
     @Bindable var model: AppModel
     let quit: () -> Void
-    let openDetails: (DetailRoute) -> Void
-    let openSettings: () -> Void
-    let openSetup: (() -> Void)?
+    let openRoute: (AppRoute) -> Void
 
     init(
         model: AppModel,
         quit: @escaping () -> Void,
-        openDetails: @escaping (DetailRoute) -> Void = { _ in },
-        openSettings: @escaping () -> Void = {},
-        openSetup: (() -> Void)? = nil
+        openRoute: @escaping (AppRoute) -> Void = { _ in }
     ) {
         self.model = model
         self.quit = quit
-        self.openDetails = openDetails
-        self.openSettings = openSettings
-        self.openSetup = openSetup
+        self.openRoute = openRoute
     }
 
     var body: some View {
@@ -36,8 +30,7 @@ struct MonitorView: View {
                     operation: currentOperation(for: workspace),
                     publishedSitePorts: publishedSitePorts(for: workspace),
                     model: model,
-                    openDetails: openDetails,
-                    openSetup: openSetup
+                    openRoute: openRoute
                 )
 
                 if index < model.workspaces.count - 1 {
@@ -112,10 +105,15 @@ struct MonitorView: View {
                 .accessibilityIdentifier("monitor.health")
             if let failure = model.latestOperationFailure {
                 Button {
-                    openDetails(DetailRoute(
-                        workspace: failure.workspace,
-                        section: failure.workspace == nil ? .activity : .logs
-                    ))
+                    if let workspace = failure.workspace {
+                        openRoute(AppRoute(
+                            tab: .workspaces,
+                            workspace: workspace,
+                            workspaceSection: .logs
+                        ))
+                    } else {
+                        openRoute(AppRoute(tab: .overview))
+                    }
                 } label: {
                     Label("View Error Details", systemImage: "doc.text.magnifyingglass")
                         .labelStyle(.iconOnly)
@@ -140,30 +138,13 @@ struct MonitorView: View {
     private var shortcuts: some View {
         HStack(spacing: 8) {
             Button {
-                openDetails(DetailRoute(workspace: model.selectedWorkspace, section: .overview))
+                openRoute(AppRoute(tab: .overview, workspace: model.selectedWorkspace))
             } label: {
-                Label("Overview", systemImage: "rectangle.split.2x1")
+                Label("Open MSW Monitor…", systemImage: "macwindow")
             }
-            .accessibilityIdentifier("details.button")
+            .accessibilityIdentifier("open-monitor.button")
 
             Spacer()
-
-
-            Button(action: openSettings) {
-                Label("Settings", systemImage: "gearshape")
-                    .labelStyle(.iconOnly)
-            }
-            .accessibilityIdentifier("settings.button")
-            .help("Open settings")
-
-            if let openSetup {
-                Button(action: openSetup) {
-                    Label("Setup", systemImage: "wrench.and.screwdriver")
-                        .labelStyle(.iconOnly)
-                }
-                .accessibilityIdentifier("setup.button")
-                .help("Review setup")
-            }
 
             Button(action: quit) {
                 Label("Quit", systemImage: "power")
@@ -205,8 +186,7 @@ private struct WorkspaceRow: View {
     let operation: MSWOperationState?
     let publishedSitePorts: [String]
     @Bindable var model: AppModel
-    let openDetails: (DetailRoute) -> Void
-    let openSetup: (() -> Void)?
+    let openRoute: (AppRoute) -> Void
     @State private var isFolderPickerPresented = false
 
 
@@ -253,7 +233,7 @@ private struct WorkspaceRow: View {
     private var primaryAction: some View {
         if workspace.state == .quarantined {
             compactButton("Review", systemImage: "exclamationmark.triangle") {
-                openDetails(DetailRoute(workspace: workspace.id, section: .diagnostics))
+                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .diagnostics))
             }
         } else if workspace.freshness != .fresh || workspace.state == .unknown || workspace.state == .unavailable {
             compactButton("Retry", systemImage: "arrow.clockwise") {
@@ -265,11 +245,7 @@ private struct WorkspaceRow: View {
             }
         } else if workspace.credential.needsAttention {
             compactButton("Review access", systemImage: "exclamationmark.shield") {
-                if let openSetup {
-                    openSetup()
-                } else {
-                    openDetails(DetailRoute(workspace: workspace.id, section: .github))
-                }
+                openRoute(AppRoute(tab: .github, workspace: workspace.id))
             }
         } else if canOpenWorkspace {
             compactButton(model.terminalActionTitle, systemImage: "terminal") {
@@ -282,8 +258,8 @@ private struct WorkspaceRow: View {
             }
             .accessibilityIdentifier("workspace.\(workspace.id.rawValue).start")
         } else {
-            compactButton("View Details", systemImage: "arrow.up.right") {
-                openDetails(DetailRoute(workspace: workspace.id, section: .overview))
+            compactButton("Open MSW Monitor", systemImage: "arrow.up.right") {
+                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
             }
         }
     }
@@ -344,7 +320,7 @@ private struct WorkspaceRow: View {
                 Divider()
                 Button("Choose Port…") {
                     model.selectedWorkspace = workspace.id
-                    openDetails(DetailRoute(workspace: workspace.id, section: .ports))
+                    openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .ports))
                 }
             }
             .disabled(!canOpenSite)
@@ -352,11 +328,11 @@ private struct WorkspaceRow: View {
             Divider()
             Button("Repositories") {
                 model.selectedWorkspace = workspace.id
-                openDetails(DetailRoute(workspace: workspace.id, section: .repositories))
+                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .repositories))
             }
-            Button("Details") {
+            Button("Open MSW Monitor…") {
                 model.selectedWorkspace = workspace.id
-                openDetails(DetailRoute(workspace: workspace.id, section: .overview))
+                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
             }
         } label: {
             Label("Actions for \(workspace.id.rawValue)", systemImage: "ellipsis")

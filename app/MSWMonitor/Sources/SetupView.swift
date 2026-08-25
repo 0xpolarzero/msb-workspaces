@@ -13,7 +13,7 @@ final class SetupWindowController {
         accessMode: GitHubAccessMode = .local,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
         applicationPreferences: ApplicationPreferenceStore,
-        openSettings: @escaping (SettingsSection) -> Void,
+        openSettings: @escaping (AppTab) -> Void,
         closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void = { _ in },
         uiTestMode: Bool = false,
         uiTestStartsInReview: Bool = false,
@@ -258,7 +258,7 @@ struct SetupView: View {
     let accessMode: GitHubAccessMode
     let commandRunner: MSWCommandRunner
     @Bindable var applicationPreferences: ApplicationPreferenceStore
-    let openSettings: (SettingsSection) -> Void
+    let openSettings: (AppTab) -> Void
     let closeSetup: ([SetupWorkspaceConfiguration]) -> Void
     let uiTestMode: Bool
     let uiTestStartsInReview: Bool
@@ -350,7 +350,7 @@ struct SetupView: View {
         accessMode: GitHubAccessMode,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
         applicationPreferences: ApplicationPreferenceStore,
-        openSettings: @escaping (SettingsSection) -> Void,
+        openSettings: @escaping (AppTab) -> Void,
         closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void,
         uiTestMode: Bool,
         uiTestStartsInReview: Bool,

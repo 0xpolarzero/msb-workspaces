@@ -13,11 +13,10 @@ final class StatusBarController {
     private let provider: (any GitHubProviding)?
     private let accessMode: GitHubAccessMode
     private let commandRunner: MSWCommandRunner
-    private let settingsNavigation: SettingsNavigationState
+    private let appNavigation: AppNavigationState
     private let applicationPreferences: ApplicationPreferenceStore
     private let startupRecoveryBlockedReason: String?
     private let retryStartupRecovery: () -> Void
-    private var detailWindowController: DetailWindowController?
     private var setupWindowController: SetupWindowController?
 
     init(
@@ -28,7 +27,7 @@ final class StatusBarController {
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
-        settingsNavigation: SettingsNavigationState = SettingsNavigationState(),
+        appNavigation: AppNavigationState = AppNavigationState(),
         applicationPreferences: ApplicationPreferenceStore,
         startupRecoveryBlockedReason: String? = nil,
         retryStartupRecovery: @escaping () -> Void = {}
@@ -40,7 +39,7 @@ final class StatusBarController {
         self.provider = provider
         self.accessMode = accessMode
         self.commandRunner = commandRunner
-        self.settingsNavigation = settingsNavigation
+        self.appNavigation = appNavigation
         self.applicationPreferences = applicationPreferences
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.retryStartupRecovery = retryStartupRecovery
@@ -49,13 +48,7 @@ final class StatusBarController {
         let content = MonitorView(
             model: model,
             quit: { NSApplication.shared.terminate(nil) },
-            openDetails: { [weak self] route in self?.showDetails(route: route) },
-            openSettings: { [weak self] in
-                self?.showSettings(section: .general, dismissingSetup: true)
-            },
-            openSetup: (bootstrapCoordinator != nil || startupRecoveryBlockedReason != nil)
-                ? { [weak self] in self?.showSetup() }
-                : nil
+            openRoute: { [weak self] route in self?.showMain(route: route) }
         )
         popover.behavior = ProcessInfo.processInfo.arguments.contains("--ui-test-open-popover") ? .applicationDefined : .transient
         popover.animates = false
@@ -100,22 +93,38 @@ final class StatusBarController {
             model.setPollingVisible(true)
         }
     }
+    func closePopover() {
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+        model.setPollingVisible(false)
+    }
 
-    private func showDetails(route: DetailRoute) {
+    func showMain(route: AppRoute, dismissingSetup: Bool = true) {
         popover.performClose(nil)
         model.setPollingVisible(false)
-        if detailWindowController == nil {
-            detailWindowController = DetailWindowController(
-                model: model,
-                openSettings: { [weak self] section in
-                    self?.showSettings(section: section, dismissingSetup: true)
-                },
-                openSetup: { [weak self] in self?.showSetup() },
-                onClose: { [weak model] in model?.setPollingVisible(false) }
-            )
+        appNavigation.apply(route)
+        if let workspace = route.workspace {
+            model.selectedWorkspace = workspace
         }
-        detailWindowController?.show(route: route)
-        model.setPollingVisible(true)
+        if dismissingSetup {
+            setupWindowController?.close()
+            setupWindowController = nil
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async {
+            let settingsItem = NSApp.mainMenu?.items
+                .compactMap(\.submenu)
+                .flatMap(\.items)
+                .first { $0.title == "Settings…" }
+            if let settingsItem, let action = settingsItem.action {
+                NSApp.sendAction(action, to: settingsItem.target, from: settingsItem)
+            }
+            DispatchQueue.main.async {
+                self.appNavigation.pendingPresentation = false
+                NSApp.keyWindow?.title = "MSW Monitor"
+            }
+        }
     }
 
     func showSetupForFirstLaunch() {
@@ -126,35 +135,9 @@ final class StatusBarController {
         showSetup()
     }
 
-    func showDetails(for deepLink: URL) {
-        guard let route = DetailRoute(deepLink: deepLink) else { return }
-        showDetails(route: route)
-    }
-
-    private func showSettings(section: SettingsSection, dismissingSetup: Bool) {
-        popover.performClose(nil)
-        model.setPollingVisible(false)
-        settingsNavigation.section = section
-        if dismissingSetup {
-            setupWindowController?.close()
-            setupWindowController = nil
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        // Use the Settings scene's real application-menu action. Dispatching
-        // lets SwiftUI present and select the requested Settings pane after
-        // the navigation state changes. Setup-originated actions retain their
-        // window so onboarding can resume when Settings is closed.
-        DispatchQueue.main.async {
-            let settingsItem = NSApp.mainMenu?.items
-                .compactMap(\.submenu)
-                .flatMap(\.items)
-                .first { $0.title == "Settings…" }
-            if let settingsItem, let action = settingsItem.action {
-                NSApp.sendAction(action, to: settingsItem.target, from: settingsItem)
-            } else {
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            }
-        }
+    func showMain(for deepLink: URL) {
+        guard let route = AppRoute(deepLink: deepLink) else { return }
+        showMain(route: route)
     }
 
     private func showSetup() {
@@ -174,8 +157,8 @@ final class StatusBarController {
                 accessMode: accessMode,
                 commandRunner: commandRunner,
                 applicationPreferences: applicationPreferences,
-                openSettings: { [weak self] section in
-                    self?.showSettings(section: section, dismissingSetup: false)
+                openSettings: { [weak self] tab in
+                    self?.showMain(route: AppRoute(tab: tab), dismissingSetup: false)
                 },
                 closeSetup: { [weak self] configurations in
                     self?.setupWindowController?.close()

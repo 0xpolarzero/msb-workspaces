@@ -30,9 +30,12 @@ final class MSWMonitorUITests: XCTestCase {
         assertText("Stopped", identifier: "workspace.personal.state", in: app)
         XCTAssertFalse(app.descendants(matching: .any)["observation.value"].exists)
         XCTAssertFalse(app.buttons["refresh.button"].exists)
-        XCTAssertTrue(app.buttons["details.button"].waitForExistence(timeout: 2))
-        XCTAssertEqual(app.buttons["details.button"].label, "Overview")
-        XCTAssertTrue(app.buttons["settings.button"].exists)
+        let openMonitor = app.buttons["open-monitor.button"]
+        XCTAssertTrue(openMonitor.waitForExistence(timeout: 2))
+        XCTAssertEqual(openMonitor.label, "Open MSW Monitor…")
+        XCTAssertFalse(app.buttons["details.button"].exists)
+        XCTAssertFalse(app.buttons["settings.button"].exists)
+        XCTAssertFalse(app.buttons["setup.button"].exists)
 
         let quit = app.buttons["quit.button"]
         XCTAssertTrue(quit.waitForExistence(timeout: 2))
@@ -62,7 +65,7 @@ final class MSWMonitorUITests: XCTestCase {
         defer { terminateIfNeeded(app) }
 
         XCTAssertEqual(app.buttons["workspace.dev.open-terminal"].label, "Open in Fixture Terminal")
-        app.buttons["settings.button"].click()
+        app.typeKey(",", modifierFlags: .command)
         let terminalPicker = app.popUpButtons["settings.applications.terminal.picker"]
         let editorPicker = app.popUpButtons["settings.applications.editor.picker"]
         XCTAssertTrue(terminalPicker.waitForExistence(timeout: 3))
@@ -127,7 +130,9 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(details.waitForExistence(timeout: 2))
         details.click()
 
-        XCTAssertTrue(app.descendants(matching: .any)["details.sidebar"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.descendants(matching: .any)["details.sidebar"].exists)
+        assertText("Logs", identifier: "details.section-title", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["details.latest-operation-error"].waitForExistence(timeout: 2))
         assertText(
             "The runtime rejected the start request.",
@@ -142,75 +147,59 @@ final class MSWMonitorUITests: XCTestCase {
         let diagnostics = app.buttons["Run Diagnostics"]
         XCTAssertTrue(diagnostics.waitForExistence(timeout: 2))
         diagnostics.click()
-        assertText("Diagnostics and Maintenance", identifier: "details.section-title", in: app)
+        assertText("Maintenance", identifier: "details.section-title", in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["diagnostics.latest-operation"]
                 .waitForExistence(timeout: 2)
         )
     }
-    func testDetailSidebarRemainsVisibleAcrossGlobalSections() {
-        let appURL = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appending(path: "build/MSWMonitor.app")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+    func testUnifiedWindowUsesTopTabsAndWorkspaceSections() {
+        let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
+        defer { terminateIfNeeded(app) }
 
-        let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
-        app.launchArguments = ["--ui-test-open-popover", "--ui-test-folder-browser"]
-        app.launch()
+        let openMonitor = app.buttons["open-monitor.button"]
+        XCTAssertTrue(openMonitor.waitForExistence(timeout: 2))
+        openMonitor.click()
 
-        app.buttons["details.button"].click()
-        let sidebar = app.descendants(matching: .any)["details.sidebar"]
-        XCTAssertTrue(sidebar.waitForExistence(timeout: 3))
-        assertText("Overview", identifier: "details.section-title", in: app)
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.buttons["Refresh"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["details.sidebar"].exists)
 
-        let github = app.descendants(matching: .any)["details.section.GitHub Access"]
-        XCTAssertTrue(github.waitForExistence(timeout: 2))
-        github.click()
-        assertText("GitHub Access", identifier: "details.section-title", in: app)
-        XCTAssertTrue(sidebar.exists)
-
-        let diagnostics = app.descendants(matching: .any)["details.section.Diagnostics and Maintenance"]
-        XCTAssertTrue(diagnostics.waitForExistence(timeout: 2))
-        diagnostics.click()
-        assertText("Diagnostics and Maintenance", identifier: "details.section-title", in: app)
-        XCTAssertTrue(sidebar.exists)
+        let workspacesTab = app.toolbars.buttons["Workspaces"]
+        XCTAssertTrue(workspacesTab.waitForExistence(timeout: 2))
+        workspacesTab.click()
+        XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.descendants(matching: .any)["workspace.section-picker"].waitForExistence(timeout: 2))
+        assertText("Summary", identifier: "details.section-title", in: app)
 
         let workspacePicker = app.popUpButtons["details.workspace-picker"]
         XCTAssertTrue(workspacePicker.waitForExistence(timeout: 2))
         workspacePicker.click()
         app.menuItems["dev"].click()
 
-        let files = app.descendants(matching: .any)["details.section.Files"]
+        let files = app.descendants(matching: .any)["workspace.section.Files"]
         XCTAssertTrue(files.waitForExistence(timeout: 2))
         files.click()
         assertText("Files", identifier: "details.section-title", in: app)
-        let detailPathBar = app.descendants(matching: .any)["folders.path-bar"]
-        XCTAssertTrue(detailPathBar.waitForExistence(timeout: 2))
-        XCTAssertEqual(app.buttons["folders.open.button"].label, "Open in Unsupported Editor")
+        XCTAssertTrue(app.descendants(matching: .any)["folders.path-bar"].waitForExistence(timeout: 2))
 
-        let projects = app.buttons["folders.entry.Projects"]
-        XCTAssertTrue(projects.waitForExistence(timeout: 2))
-        projects.doubleClick()
-        XCTAssertTrue(app.buttons["folders.breadcrumb.Projects"].waitForExistence(timeout: 2))
+        let githubTab = app.toolbars.buttons["GitHub"]
+        XCTAssertTrue(githubTab.waitForExistence(timeout: 2))
+        githubTab.click()
+        XCTAssertTrue(app.windows["GitHub"].waitForExistence(timeout: 2))
 
-        let search = app.textFields["folders.search.field"]
-        XCTAssertTrue(search.waitForExistence(timeout: 2))
-        search.click()
-        search.typeText("Demo")
-        let demo = app.buttons["folders.entry.Projects/Demo"]
-        XCTAssertTrue(demo.waitForExistence(timeout: 3))
-        demo.click()
-        app.buttons["folders.open.button"].click()
-        let folderError = app.staticTexts["folders.error"]
-        XCTAssertTrue(folderError.waitForExistence(timeout: 2))
-        XCTAssertTrue((folderError.value as? String)?.contains("Unsupported Editor") == true)
-        XCTAssertTrue((folderError.value as? String)?.contains("no fallback was opened") == true)
+        let generalTab = app.toolbars.buttons["General"]
+        XCTAssertTrue(generalTab.waitForExistence(timeout: 2))
+        generalTab.click()
+        XCTAssertTrue(app.windows["General"].waitForExistence(timeout: 2))
+
+        app.typeKey("w", modifierFlags: .command)
+        let statusItem = app.statusItems["statusItem.button"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 2))
+        statusItem.click()
+        app.buttons["quit.button"].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
 
     private func assertDirectFolderPicker(in app: XCUIApplication) {

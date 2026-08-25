@@ -18,15 +18,15 @@ Run commands from the repository root unless a command says otherwise.
 
 - The local app bundle is `app/MSWMonitor/build/MSWMonitor.app`.
 - The app is a regular macOS application with a normal `MSW Monitor` application
-  menu and Dock/Cmd-Tab presence. Its primary monitor UI remains the `MSW` status
-  item and transient popover; setup, detail, and settings windows may also open.
+  menu and Dock/Cmd-Tab presence. The `MSW` status item and transient popover
+  provide quick actions. One unified `MSW Monitor` window uses top tabs for
+  Overview, Workspaces, GitHub, Notifications, Backup, and General. Setup is a
+  first-run or explicitly requested repair flow, not permanent navigation.
 - The source of truth is `app/MSWMonitor/Sources/`, especially
-  `MSWMonitorApp.swift`, `StatusBarController.swift`, `MonitorView.swift`, and
-  `AppModel.swift`.
-- `AppModel` is currently a deterministic scaffold. `dev`, `playgrounds`, and
-  `personal` are always `Stopped`; `refresh()` only advances the visible
-  observation counter. There is no `msw` subprocess, VM telemetry, or start/stop
-  action integration yet. Do not report static UI values as live sandbox state.
+  `MSWMonitorApp.swift`, `StatusBarController.swift`, `MonitorView.swift`,
+  `SettingsView.swift`, `DetailView.swift`, and `AppModel.swift`.
+- UI-test workspace values are deterministic fixtures, not live sandbox
+  telemetry. Production state comes through the typed MSW app protocol.
 - Generated bundles, DerivedData, test results, and logs are under
   `app/MSWMonitor/build/`. The app-local `.gitignore` ignores that directory;
   never commit generated artifacts.
@@ -96,10 +96,10 @@ For terminal/editor preference changes, run only the settings-to-status flow:
 app/MSWMonitor/Scripts/smoke-test.sh --preferences-only
 ```
 
-For detail-window navigation changes, use the focused detail flow:
+For unified top-tab and workspace navigation changes, use:
 
 ```bash
-app/MSWMonitor/Scripts/smoke-test.sh --details-only
+app/MSWMonitor/Scripts/smoke-test.sh --navigation-only
 ```
 
 For operation-failure presentation and error-detail routing, use:
@@ -178,10 +178,10 @@ Use accessibility identifiers rather than screen coordinates:
 | `workspace.dev.name` / `.state` | dev row | `dev` / `Stopped` |
 | `workspace.playgrounds.name` / `.state` | playgrounds row | `playgrounds` / `Stopped` |
 | `workspace.personal.name` / `.state` | personal row | `personal` / `Stopped` |
-| `details.button` | Overview shortcut | Opens the detail window |
-| `settings.button` | Settings shortcut | Opens settings |
+| `open-monitor.button` | Unified-window shortcut | Opens the Overview top tab |
 | `quit.button` | Quit button | Terminates the app |
-| `details.section.Files` | Files sidebar item | Opens the VM folder browser |
+| `settings.tabs` | Unified window | Hosts all top-level destinations |
+| `workspace.section-picker` / `workspace.section.<name>` | Workspace tools | Switches Summary, Files, Logs, Network, Repositories, and Maintenance |
 | `folders.path-bar` / `folders.search.field` | Folder scope and search | Clickable `/workspace` breadcrumbs and bounded search |
 | `folders.tree` / `folders.entry.<safe-path>.expand` | Lazy folder tree | Selects, expands, or double-clicks a real VM directory |
 | `folders.open.button` | Editor handoff | Opens the exact selected folder in the resolved editor adapter |
@@ -343,7 +343,8 @@ was verified:
 - `workspace.dev.name/state`: `dev` / `Stopped`;
   `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`;
   `workspace.personal.name/state`: `personal` / `Stopped`.
-- `details.button`: `Overview`; `settings.button`: `Settings`.
+- `open-monitor.button`: `Open MSW Monitor…`; separate Overview, Settings, and
+  Setup shortcuts must be absent.
 - `quit.button`: `Quit`; clicking it must reach app state `notRunning`.
 
 Keep generated logs and result bundles under `app/MSWMonitor/build/`. Do not
@@ -372,9 +373,9 @@ unredacted system logs.
   `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` runs
   `testStatusItemMinimalPopoverAndQuit()`; `--picker-only` runs
   `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs
-  `testApplicationPreferencesUpdateWorkspaceActions()`; `--details-only` runs
-  `testDetailSidebarRemainsVisibleAcrossGlobalSections()`; and `--failure-only`
-  runs `testOperationFailureOpensDetailedLogs()`. A bare
+  `testApplicationPreferencesUpdateWorkspaceActions()`; `--navigation-only`
+  runs `testUnifiedWindowUsesTopTabsAndWorkspaceSections()`; and
+  `--failure-only` runs `testOperationFailureOpensDetailedLogs()`. A bare
   `xcodebuild test` is a different, broader operation and is not a replacement
   for the documented checks.
 - UI automation requires an interactive GUI session and may require narrowly

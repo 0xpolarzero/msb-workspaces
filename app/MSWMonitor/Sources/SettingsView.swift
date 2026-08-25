@@ -6,32 +6,101 @@ import UserNotifications
 
 @MainActor
 @Observable
-final class SettingsNavigationState {
-    var section: SettingsSection
-
-    init(section: SettingsSection = .general) {
-        self.section = section
-    }
+final class ApplicationState {
+    var model: AppModel?
 }
 
-enum SettingsSection: String, CaseIterable, Identifiable {
-    case general = "General"
+enum AppTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case workspaces = "Workspaces"
     case github = "GitHub"
     case notifications = "Notifications"
     case backup = "Backup"
-    case about = "About"
+    case general = "General"
 
     var id: String { rawValue }
+}
 
-    init(deepLinkValue: String) {
-        switch deepLinkValue.lowercased() {
-        case "workspaces", "workspace": self = .workspaces
-        case "github", "github-access": self = .github
-        case "notifications", "notification": self = .notifications
-        case "backup", "backups": self = .backup
-        case "about": self = .about
-        default: self = .general
+struct AppRoute: Equatable {
+    let tab: AppTab
+    let workspace: Workspace.ID?
+    let workspaceSection: WorkspaceSection?
+
+    init(
+        tab: AppTab,
+        workspace: Workspace.ID? = nil,
+        workspaceSection: WorkspaceSection? = nil
+    ) {
+        self.tab = tab
+        self.workspace = workspace
+        self.workspaceSection = workspaceSection
+    }
+
+    init?(deepLink: URL) {
+        guard deepLink.scheme == "msw-monitor" else { return nil }
+        let components = URLComponents(url: deepLink, resolvingAgainstBaseURL: false)
+        let workspace = deepLink.host == "workspace"
+            ? deepLink.pathComponents
+                .filter { $0 != "/" }
+                .first
+                .flatMap(Workspace.ID.init(rawValue:))
+            : nil
+        let requested = components?.queryItems?
+            .first(where: { $0.name == "section" })?
+            .value ?? (deepLink.host == "workspace" ? "summary" : deepLink.host ?? "overview")
+        switch requested.lowercased() {
+        case "github", "github-access":
+            self.init(tab: .github, workspace: workspace)
+        case "backup", "backups", "restore":
+            self.init(tab: .backup, workspace: workspace)
+        case "activity":
+            self.init(tab: .overview, workspace: workspace)
+        case "overview":
+            if let workspace {
+                self.init(tab: .workspaces, workspace: workspace, workspaceSection: .summary)
+            } else {
+                self.init(tab: .overview)
+            }
+        case "notifications", "notification":
+            self.init(tab: .notifications)
+        case "general", "settings":
+            self.init(tab: .general)
+        default:
+            self.init(
+                tab: .workspaces,
+                workspace: workspace,
+                workspaceSection: WorkspaceSection(deepLinkValue: requested)
+            )
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class AppNavigationState {
+    var tab: AppTab
+    var workspace: Workspace.ID?
+    var workspaceSection: WorkspaceSection
+    var pendingPresentation = false
+
+    init(
+        tab: AppTab = .overview,
+        workspace: Workspace.ID? = nil,
+        workspaceSection: WorkspaceSection = .summary
+    ) {
+        self.tab = tab
+        self.workspace = workspace
+        self.workspaceSection = workspaceSection
+    }
+
+    func apply(_ route: AppRoute) {
+        pendingPresentation = true
+        tab = route.tab
+        if let workspace = route.workspace {
+            self.workspace = workspace
+        }
+        if let workspaceSection = route.workspaceSection {
+            self.workspaceSection = workspaceSection
         }
     }
 }
@@ -104,7 +173,8 @@ struct ApplicationPreferenceFields: View {
 }
 
 struct SettingsView: View {
-    @Bindable private var navigation: SettingsNavigationState
+    @Bindable private var navigation: AppNavigationState
+    @Bindable private var applicationState: ApplicationState
     @Bindable private var applicationPreferences: ApplicationPreferenceStore
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let provider: (any GitHubProviding)?
@@ -115,7 +185,6 @@ struct SettingsView: View {
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @AppStorage("pollingCadence") private var pollingCadence = 30.0
     @AppStorage("reducedMotion") private var reducedMotion = false
-    @AppStorage("backupDestination") private var backupDestination = ""
 
     @State private var loginItemStatus: SMAppService.Status = .notRegistered
     @State private var loginItemError: String?
@@ -135,7 +204,8 @@ struct SettingsView: View {
     @State private var updatingNotificationCategories: Set<MSWNotificationCategory> = []
 
     init(
-        navigation: SettingsNavigationState,
+        navigation: AppNavigationState,
+        applicationState: ApplicationState,
         applicationPreferences: ApplicationPreferenceStore,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         provider: (any GitHubProviding)? = nil,
@@ -146,6 +216,7 @@ struct SettingsView: View {
         }
     ) {
         self.navigation = navigation
+        self.applicationState = applicationState
         self.applicationPreferences = applicationPreferences
         self.authorizationCoordinator = authorizationCoordinator
         self.provider = provider
@@ -155,33 +226,64 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        TabView(selection: $navigation.section) {
-            generalSettings
-                .tabItem { Label("General", systemImage: "gear") }
-                .tag(SettingsSection.general)
+        Group {
+            if let model = applicationState.model {
+                TabView(selection: $navigation.tab) {
+                    DetailView(model: model, navigation: navigation, mode: .overview)
+                        .tabItem {
+                            Label("Overview", systemImage: "rectangle.grid.1x2")
+                        }
+                        .tag(AppTab.overview)
 
-            workspaceSettings
-                .tabItem { Label("Workspaces", systemImage: "square.grid.3x3") }
-                .tag(SettingsSection.workspaces)
+                    DetailView(model: model, navigation: navigation, mode: .workspaces)
+                        .tabItem {
+                            Label("Workspaces", systemImage: "square.grid.3x3")
+                        }
+                        .tag(AppTab.workspaces)
 
-            githubSettings
-                .tabItem { Label("GitHub", systemImage: "person.crop.circle.badge.checkmark") }
-                .tag(SettingsSection.github)
+                    githubSettings
+                        .tabItem {
+                            Label("GitHub", systemImage: "person.crop.circle.badge.checkmark")
+                        }
+                        .tag(AppTab.github)
 
-            notificationSettings
-                .tabItem { Label("Notifications", systemImage: "bell") }
-                .tag(SettingsSection.notifications)
+                    notificationSettings
+                        .tabItem {
+                            Label("Notifications", systemImage: "bell")
+                        }
+                        .tag(AppTab.notifications)
 
-            backupSettings
-                .tabItem { Label("Backup", systemImage: "externaldrive") }
-                .tag(SettingsSection.backup)
+                    DetailView(model: model, navigation: navigation, mode: .backup)
+                        .tabItem {
+                            Label("Backup", systemImage: "externaldrive")
+                        }
+                        .tag(AppTab.backup)
 
-            aboutSettings
-                .tabItem { Label("About", systemImage: "info.circle") }
-                .tag(SettingsSection.about)
+                    generalSettings
+                        .tabItem {
+                            Label("General", systemImage: "gear")
+                        }
+                        .tag(AppTab.general)
+                }
+                .accessibilityIdentifier("settings.tabs")
+            } else {
+                ProgressView("Loading MSW Monitor…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
-        .accessibilityIdentifier("settings.tabs")
-        .frame(minWidth: 680, idealWidth: 700, minHeight: 560, idealHeight: 620)
+        .onAppear {
+            NSApp.sendAction(#selector(AppDelegate.closeStatusPopover), to: nil, from: nil)
+            applicationState.model?.setPollingVisible(true)
+            if navigation.pendingPresentation {
+                navigation.pendingPresentation = false
+            } else {
+                navigation.tab = .general
+            }
+        }
+        .onDisappear {
+            applicationState.model?.setPollingVisible(false)
+        }
+        .frame(minWidth: 820, idealWidth: 900, minHeight: 600, idealHeight: 680)
         .transaction { transaction in
             if effectiveReducedMotion {
                 transaction.disablesAnimations = true
@@ -226,7 +328,6 @@ struct SettingsView: View {
                         set: { setLaunchAtLogin($0) }
                     )
                 )
-                LabeledContent("Current value", value: loginItemStatusText)
                 if let loginItemError {
                     recoveryMessage(loginItemError)
                     Button("Retry login item update") {
@@ -249,7 +350,6 @@ struct SettingsView: View {
                     Text("30 seconds").tag(30.0)
                     Text("60 seconds").tag(60.0)
                 }
-                LabeledContent("Current value", value: "Every \(Int(pollingCadence)) seconds")
             }
 
             Section("Applications") {
@@ -261,7 +361,6 @@ struct SettingsView: View {
 
             Section("Accessibility") {
                 Toggle("Reduce motion in Settings", isOn: $reducedMotion)
-                LabeledContent("Current value", value: reducedMotionStatus)
                 Text("The macOS Reduce Motion setting always takes precedence.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -271,18 +370,6 @@ struct SettingsView: View {
         .task { refreshLoginItemStatus() }
     }
 
-    private var workspaceSettings: some View {
-        Form {
-            Section("Configuration") {
-                LabeledContent("Source", value: "MSW typed configuration")
-                LabeledContent("Managed values", value: "Resources, links, and Git identity")
-                Text("Workspace changes are reviewed and applied through MSW. Settings never displays credential values.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
 
     private var githubSettings: some View {
         Form {
@@ -401,7 +488,7 @@ struct SettingsView: View {
             .disabled(isUpdatingGitHub)
             .accessibilityIdentifier("settings.github.retry.button")
         case .ready:
-            Button("Set up repository access", action: onConnect)
+            Button("Choose repository access…", action: onConnect)
                 .buttonStyle(.borderedProminent)
                 .disabled(isUpdatingGitHub)
                 .accessibilityIdentifier("settings.github.setup.button")
@@ -418,7 +505,7 @@ struct SettingsView: View {
                 ContentUnavailableView(
                     "No repository access",
                     systemImage: "lock.shield",
-                    description: Text("Assign repositories from setup.")
+                    description: Text("Choose repository access for each workspace here.")
                 )
             } else {
                 ForEach(workspaces, id: \.rawValue) { workspace in
@@ -517,32 +604,6 @@ struct SettingsView: View {
         .task { await loadNotificationState() }
     }
 
-    private var backupSettings: some View {
-        Form {
-            Section("Archive destination") {
-                TextField("Backup destination", text: $backupDestination)
-                    .textContentType(.URL)
-                LabeledContent(
-                    "Current value",
-                    value: backupDestination.isEmpty ? "Choose for each backup" : backupDestination
-                )
-                Text("Backup archives exclude Keychain records and contain sensitive workspace data.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private var aboutSettings: some View {
-        Form {
-            Section("MSW Monitor") {
-                LabeledContent("App", value: "Native macOS workspace monitor")
-                LabeledContent("Integration", value: "Typed MSW protocol")
-            }
-        }
-        .formStyle(.grouped)
-    }
 
 
     @ViewBuilder
@@ -650,20 +711,6 @@ struct SettingsView: View {
         reducedMotion || systemReduceMotion
     }
 
-    private var reducedMotionStatus: String {
-        if systemReduceMotion { return "On (macOS setting)" }
-        return reducedMotion ? "On" : "Off"
-    }
-
-    private var loginItemStatusText: String {
-        switch loginItemStatus {
-        case .enabled: return "Enabled"
-        case .requiresApproval: return "Denied until approved in System Settings"
-        case .notRegistered: return "Disabled"
-        case .notFound: return "Not available — retry the status check"
-        @unknown default: return "Not available — retry the status check"
-        }
-    }
 
     private var githubStatusText: String {
         switch githubConnectionState {

@@ -10,7 +10,8 @@ struct MSWMonitorApp: App {
     var body: some Scene {
         Settings {
             SettingsView(
-                navigation: appDelegate.settingsNavigation,
+                navigation: appDelegate.appNavigation,
+                applicationState: appDelegate.applicationState,
                 applicationPreferences: appDelegate.applicationPreferences,
                 authorizationCoordinator: appDelegate.authorizationCoordinator,
                 provider: appDelegate.provider,
@@ -28,7 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let connect: MSWConnectClient?
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: MSWClient
-    let settingsNavigation = SettingsNavigationState()
+    let appNavigation = AppNavigationState()
+    let applicationState = ApplicationState()
     let applicationPreferences: ApplicationPreferenceStore
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let githubInstallationURL: URL?
@@ -340,6 +342,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if folderBrowserFixture {
             model.installDirectoryUITestFixture()
         }
+        applicationState.model = model
+        if appNavigation.workspace == nil {
+            appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
+        }
         let bootstrap: (any MSWBootstrapCoordinating)?
         if ProcessInfo.processInfo.arguments.contains("--ui-test-setup-reconnect") {
             bootstrap = MSWBootstrapUITestStub(failureWorkspace: "dev")
@@ -361,7 +367,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             provider: fixtureProvider ?? provider,
             accessMode: accessMode,
             commandRunner: runner,
-            settingsNavigation: settingsNavigation,
+            appNavigation: appNavigation,
             applicationPreferences: applicationPreferences,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,
             retryStartupRecovery: retryStartupRecovery
@@ -396,6 +402,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController?.showSetupForGitHubAuthorization()
     }
 
+    @objc func openGeneralSettings() {
+        statusBarController?.showMain(route: AppRoute(tab: .general))
+    }
+
+    @objc func openSetupRepair() {
+        statusBarController?.showSetupForFirstLaunch()
+    }
+
+    @objc func closeStatusPopover() {
+        statusBarController?.closePopover()
+    }
+
     private func observeNotificationEvents(from model: AppModel) {
         withObservationTracking {
             _ = model.notificationEvents.count
@@ -419,7 +437,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     ) async {
         guard let deepLink = NotificationCoordinator.deepLink(from: response) else { return }
         await MainActor.run {
-            statusBarController?.showDetails(for: deepLink)
+            statusBarController?.showMain(for: deepLink)
         }
     }
 

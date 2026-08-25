@@ -118,6 +118,39 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.workspaces.map(\.state), [.stopped, .stopped, .stopped])
     }
 
+    func testAppRouteMapsDeepLinksIntoUnifiedTabs() throws {
+        let logs = try XCTUnwrap(AppRoute(
+            deepLink: URL(string: "msw-monitor://workspace/dev?section=logs")!
+        ))
+        XCTAssertEqual(logs.tab, .workspaces)
+        XCTAssertEqual(logs.workspace, .dev)
+        XCTAssertEqual(logs.workspaceSection, .logs)
+
+        let diagnostics = try XCTUnwrap(AppRoute(
+            deepLink: URL(string: "msw-monitor://diagnostics")!
+        ))
+        XCTAssertEqual(diagnostics.tab, .workspaces)
+        XCTAssertEqual(diagnostics.workspaceSection, .diagnostics)
+
+        let activity = try XCTUnwrap(AppRoute(
+            deepLink: URL(string: "msw-monitor://workspace/dev?section=activity")!
+        ))
+        XCTAssertEqual(activity.tab, .overview)
+        XCTAssertEqual(activity.workspace, .dev)
+    }
+
+    func testAppNavigationAppliesRouteWithoutDroppingWorkspaceContext() {
+        let navigation = AppNavigationState(
+            tab: .workspaces,
+            workspace: .dev,
+            workspaceSection: .files
+        )
+        navigation.apply(AppRoute(tab: .general))
+        XCTAssertEqual(navigation.tab, .general)
+        XCTAssertEqual(navigation.workspace, .dev)
+        XCTAssertEqual(navigation.workspaceSection, .files)
+    }
+
     func testTerminalLauncherBuildsSelfDeletingCommandScript() {
         let script = TerminalLauncher.commandScript(
             executableURL: URL(fileURLWithPath: "/tmp/MSW Monitor's/msw"),

@@ -21,14 +21,14 @@ case "${1:-}" in
   --preferences-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testApplicationPreferencesUpdateWorkspaceActions"
     ;;
-  --details-only)
-    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDetailSidebarRemainsVisibleAcrossGlobalSections"
+  --navigation-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testUnifiedWindowUsesTopTabsAndWorkspaceSections"
     ;;
   --failure-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--details-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--failure-only]"
     exit 64
     ;;
 esac
