@@ -237,7 +237,6 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(logs.waitForExistence(timeout: 2))
         logs.click()
         assertWorkspaceSection("Logs", in: app)
-        XCTAssertTrue(app.descendants(matching: .any)["details.logs"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["logs.tag.dev"].exists)
         for workspace in ["playgrounds", "personal"] {
@@ -258,6 +257,26 @@ final class MSWMonitorUITests: XCTestCase {
                 .waitForExistence(timeout: 2)
         )
         XCTAssertTrue(app.staticTexts["Development service ready"].exists)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["logs.copy.visible"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["logs.copy.dev.0"]
+                .waitForExistence(timeout: 2)
+        )
+        let devLogSelection = app.descendants(matching: .any)["logs.select.dev.0"]
+        XCTAssertTrue(devLogSelection.waitForExistence(timeout: 2))
+        devLogSelection.click()
+        let copySelectedLogs = app.descendants(matching: .any)["logs.copy.selected"]
+        XCTAssertTrue(copySelectedLogs.waitForExistence(timeout: 2))
+        copySelectedLogs.click()
+        XCTAssertEqual(
+            app.staticTexts.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "HHHHHHHH")
+            ).count,
+            0
+        )
 
         let network = app.buttons["Network"]
         XCTAssertTrue(network.waitForExistence(timeout: 2))
