@@ -194,7 +194,8 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Maintenance"].exists)
         assertText("Files", identifier: "details.section-title", in: app)
         XCTAssertTrue(app.popUpButtons["details.workspace-picker"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Repositories"].waitForExistence(timeout: 2))
+        assertText("Repositories", identifier: "files.repositories.title", in: app)
+        assertText("File tree", identifier: "folders.popover.title", in: app)
         XCTAssertTrue(app.descendants(matching: .any)["folders.path-bar"].waitForExistence(timeout: 2))
 
         let logs = app.buttons["Logs"]
@@ -326,6 +327,8 @@ final class MSWMonitorUITests: XCTestCase {
         let folderTree = app.descendants(matching: .any)["folders.tree"]
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["folders.entry.Projects"].waitForExistence(timeout: 2))
+        assertText("Repositories", identifier: "files.repositories.title", in: app)
+        assertText("File tree", identifier: "folders.popover.title", in: app)
         let repository = app.descendants(matching: .any)["repository.ui-playground-repo"]
         XCTAssertTrue(repository.waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["main • 0 ahead, 0 behind"].waitForExistence(timeout: 2))

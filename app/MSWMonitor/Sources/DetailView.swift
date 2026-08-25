@@ -353,18 +353,22 @@ struct DetailView: View {
         if let workspace = selectedWorkspaceID {
             HSplitView {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("Repositories", systemImage: "shippingbox")
+                    Text("Repositories")
                         .font(.headline)
+                        .accessibilityIdentifier("files.repositories.title")
                     repositories
                 }
+                .padding(.leading, 16)
+                .padding(.trailing, 12)
                 .frame(minWidth: 300, idealWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
 
                 FolderBrowserView(
                     model: model,
                     workspace: workspace,
-                    title: "Folders"
+                    title: "File tree"
                 )
                 .id(workspace)
+                .padding(.horizontal, 16)
                 .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
             }
             .accessibilityIdentifier("details.files")
@@ -505,12 +509,16 @@ struct DetailView: View {
                 if value.repositories.isEmpty {
                     ContentUnavailableView(value.needsStart ? "Workspace is stopped" : "No repositories reported", systemImage: "shippingbox", description: Text(value.needsStart ? "Start the selected workspace, then retry repository inspection." : "The runtime returned no repository records."))
                 } else {
-                    List(value.repositories) { repository in
-                        RepositoryRow(repository: repository) {
-                            model.reviewPush(for: repository, workspace: id)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(value.repositories) { repository in
+                                RepositoryRow(repository: repository) {
+                                    model.reviewPush(for: repository, workspace: id)
+                                }
+                            }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .listStyle(.inset)
                 }
             } else {
                 ContentUnavailableView("No repository snapshot", systemImage: "shippingbox", description: Text("Repository state appears here when available."))
@@ -701,12 +709,6 @@ struct FolderBrowserView: View {
             maxHeight: compact ? 210 : .infinity,
             alignment: .topLeading
         )
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(folderSearch.isEmpty ? "Loading folders" : "Searching folders")
         .accessibilityIdentifier("folders.loading-skeleton")
@@ -730,12 +732,6 @@ struct FolderBrowserView: View {
                 }
             }
             .padding(6)
-        }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
         }
         .frame(
             minHeight: compact ? 170 : 240,
@@ -779,7 +775,6 @@ struct FolderBrowserView: View {
 
     private var breadcrumbBar: some View {
         VStack(spacing: 5) {
-            Divider()
             ScrollView(.horizontal) {
                 HStack(spacing: 5) {
                     Button {
