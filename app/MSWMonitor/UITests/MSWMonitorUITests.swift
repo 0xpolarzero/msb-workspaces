@@ -371,7 +371,7 @@ final class MSWMonitorUITests: XCTestCase {
         copyVisibleLogs.click()
 
         let workspacesWindow = app.windows["Workspaces"]
-        XCTAssertLessThan(logTable.frame.minX - workspacesWindow.frame.minX, 80)
+        XCTAssertLessThan(logTable.frame.minX - workspacesWindow.frame.minX, 120)
         XCTAssertLessThan(logTable.frame.minY - logSearch.frame.maxY, 36)
         let logViewerScreenshot = XCTAttachment(screenshot: app.screenshot())
         logViewerScreenshot.name = "Native workspace log viewer"

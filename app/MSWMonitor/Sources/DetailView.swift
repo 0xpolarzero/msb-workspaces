@@ -145,15 +145,22 @@ struct DetailView: View {
     }
 
     private var workspacePane: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            workspaceFilterBar
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-            Divider()
-            sectionContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .padding(20)
+        Form {
+            Section("Workspaces") {
+                workspaceFilterBar
+            }
+
+            Section(navigation.workspaceSection.rawValue) {
+                sectionContent
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: 400,
+                        maxHeight: .infinity,
+                        alignment: .topLeading
+                    )
+            }
         }
+        .formStyle(.grouped)
         .onChange(of: navigation.workspaceSection) { _, section in
             visitedWorkspaceSections.insert(section)
         }
@@ -233,14 +240,16 @@ struct DetailView: View {
 
 
     private var overviewDashboard: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+        Form {
+            Section("Workspaces") {
                 workspaceSummary
-                Divider()
+            }
+
+            Section("System health") {
                 systemHealth
             }
-            .padding(20)
         }
+        .formStyle(.grouped)
         .accessibilityIdentifier("details.overview")
     }
 
@@ -687,9 +696,6 @@ struct DetailView: View {
 
     private var workspaceFilterBar: some View {
         HStack(spacing: 8) {
-            Text("Workspaces")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
             Button(hiddenWorkspaces.isEmpty ? "Clear" : "All") {
                 if hiddenWorkspaces.isEmpty {
                     hiddenWorkspaces = Set(model.workspaces.map(\.id))
@@ -1758,19 +1764,19 @@ private extension DetailView {
     }
 
     private var backup: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                GroupBox("Archive scope") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("Includes managed workspace code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics.", systemImage: "archivebox")
-                        Label("Excludes Mac Keychain records and host credentials.", systemImage: "key.slash")
-                        Text("Treat the archive as sensitive. Store it only in a trusted destination with appropriate disk encryption and access controls.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        Form {
+            Section("Archive scope") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Includes managed workspace code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics.", systemImage: "archivebox")
+                    Label("Excludes Mac Keychain records and host credentials.", systemImage: "key.slash")
+                    Text("Treat the archive as sensitive. Store it only in a trusted destination with appropriate disk encryption and access controls.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
+            Section("Backup and restore") {
                 HStack {
                     Button("Review New Backup…") { chooseBackupDirectory() }
                         .buttonStyle(.borderedProminent)
@@ -1785,29 +1791,33 @@ private extension DetailView {
                         .font(.caption)
                         .textSelection(.enabled)
                 }
+            }
 
-                if let restoreArchive {
-                    GroupBox("Restore preview") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            LabeledContent("Archive", value: restoreArchive.lastPathComponent)
-                            LabeledContent("Size", value: archiveSize(restoreArchive))
-                            Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
-                                .font(.caption)
-                            Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                            Button("Review Destructive Restore…", role: .destructive) { confirmRestore = true }
-                                .disabled(model.isMaintenanceOperationInFlight)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            if let restoreArchive {
+                Section("Restore preview") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Archive", value: restoreArchive.lastPathComponent)
+                        LabeledContent("Size", value: archiveSize(restoreArchive))
+                        Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
+                            .font(.caption)
+                        Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Review Destructive Restore…", role: .destructive) { confirmRestore = true }
+                            .disabled(model.isMaintenanceOperationInFlight)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            }
 
-                if let operation = latestModelMaintenanceOperation {
+            if let operation = latestModelMaintenanceOperation {
+                Section("Operation") {
                     ModelOperationView(operation: operation) {
                         retryMaintenance(kind: operation.kind)
                     }
-                } else if let operation = maintenanceOperation {
+                }
+            } else if let operation = maintenanceOperation {
+                Section("Operation") {
                     MaintenanceOperationView(operation: operation) {
                         if operation.kind == .backup, let destination = backupDestination {
                             beginBackup(to: destination)
@@ -1816,47 +1826,46 @@ private extension DetailView {
                         }
                     }
                 }
-
-                if let result = model.backupResult {
-                    GroupBox("Latest backup result") {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Label("Archive created", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                            LabeledContent("Archive", value: result.archive.lastPathComponent)
-                            LabeledContent("Completed", value: maintenanceOperation?.finishedAt?.formatted(date: .abbreviated, time: .standard) ?? "Time not retained")
-                            LabeledContent("Stopped for backup", value: result.stoppedWorkspaces.isEmpty ? "None reported" : result.stoppedWorkspaces.joined(separator: ", "))
-                            LabeledContent("Restarted afterward", value: result.restartedWorkspaces.isEmpty ? "None reported" : result.restartedWorkspaces.joined(separator: ", "))
-                            if let checksum = result.checksum {
-                                LabeledContent("Checksum sidecar", value: checksum.lastPathComponent)
-                                Text("The runtime reported a checksum file. This UI does not claim verification of its contents.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Label("No checksum was reported by the runtime.", systemImage: "exclamationmark.triangle")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                            }
-                            let notRestarted = Set(result.stoppedWorkspaces).subtracting(result.restartedWorkspaces)
-                            if !notRestarted.isEmpty {
-                                Text("Needs attention: \(notRestarted.sorted().joined(separator: ", ")) stopped for backup but was not reported restarted. Refresh state before acting.")
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                            }
-                        }
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-
-                detailError
             }
+
+            if let result = model.backupResult {
+                Section("Latest backup result") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Label("Archive created", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        LabeledContent("Archive", value: result.archive.lastPathComponent)
+                        LabeledContent("Completed", value: maintenanceOperation?.finishedAt?.formatted(date: .abbreviated, time: .standard) ?? "Time not retained")
+                        LabeledContent("Stopped for backup", value: result.stoppedWorkspaces.isEmpty ? "None reported" : result.stoppedWorkspaces.joined(separator: ", "))
+                        LabeledContent("Restarted afterward", value: result.restartedWorkspaces.isEmpty ? "None reported" : result.restartedWorkspaces.joined(separator: ", "))
+                        if let checksum = result.checksum {
+                            LabeledContent("Checksum sidecar", value: checksum.lastPathComponent)
+                            Text("The runtime reported a checksum file. This UI does not claim verification of its contents.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Label("No checksum was reported by the runtime.", systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        let notRestarted = Set(result.stoppedWorkspaces).subtracting(result.restartedWorkspaces)
+                        if !notRestarted.isEmpty {
+                            Text("Needs attention: \(notRestarted.sorted().joined(separator: ", ")) stopped for backup but was not reported restarted. Refresh state before acting.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            detailError
         }
+        .formStyle(.grouped)
     }
 
     private var systemHealth: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("System health", systemImage: "stethoscope")
-                    .font(.headline)
                 Spacer()
                 if needsInstallationRepair {
                     Button("Repair MSW installation…") {
