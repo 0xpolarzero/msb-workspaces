@@ -6948,12 +6948,16 @@ app_cmd_logs() {
   fi
   if [[ "$status" == Running ]]; then
     if ! raw="$(workspace_msb "$box" logs "$box" --format jsonl --tail 200 2>/dev/null)"; then
-      app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide bounded JSONL logs." "Retry after repairing the workspace runtime." "$box" true 69
+      if ! raw="$(workspace_msb "$box" logs "$box" --tail 200 2>/dev/null)"; then
+        app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide bounded logs." "Retry after repairing the workspace runtime." "$box" true 69
+      fi
     fi
   else
     reason_json="$(app_json_string "Showing system logs for a workspace that is $status.")"
     if ! raw="$(workspace_msb "$box" logs "$box" --source system --format jsonl --tail 200 2>/dev/null)"; then
-      app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide stopped-workspace system logs." "Inspect the named volume and sandbox runtime." "$box" true 69
+      if ! raw="$(workspace_msb "$box" logs "$box" --source system --tail 200 2>/dev/null)"; then
+        app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide stopped-workspace system logs." "Inspect the named volume and sandbox runtime." "$box" true 69
+      fi
     fi
   fi
   MSW_APP_RESPONSE_EMITTED=1

@@ -672,6 +672,8 @@ def main() -> int:
             print(payload)
         return 0
     if cmd == "logs":
+        if os.environ.get("MSW_FAKE_LOGS_JSONL_FAIL") == "1" and "--format" in rest:
+            return 64
         payload = os.environ.get("MSW_FAKE_LOGS", "")
         if payload:
             print(payload)

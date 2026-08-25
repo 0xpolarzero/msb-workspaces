@@ -3222,6 +3222,20 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertIn("stopped", stopped_lines[0]["reason"].lower())
         self.assertIn("disk mount failed", stopped_lines[1]["message"])
 
+    def test_app_logs_falls_back_to_bounded_plain_output(self) -> None:
+        self.env.msw("start", "dev")
+        document = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={
+                "MSW_FAKE_LOGS_JSONL_FAIL": "1",
+                "MSW_FAKE_LOGS": "demo service listening on port 3000",
+            },
+        )
+        lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
+        self.assertEqual([line["type"] for line in lines], ["stream-start", "log", "stream-end"])
+        self.assertEqual(lines[1]["message"], "demo service listening on port 3000")
+        self.assertTrue(lines[1]["safeForDisplay"])
+
 
     def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
         plan_document = json.loads(self.env.msw(
