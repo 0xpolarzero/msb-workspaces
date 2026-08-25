@@ -721,6 +721,8 @@ final class AppModel {
     private(set) var setupState: MSWBootstrapState = .initial
     private(set) var startupRecoveryBlockedReason: String?
     private(set) var repositoriesByWorkspace: [String: MSWRepositoriesResponse] = [:]
+    private(set) var repositoryLoadingWorkspaces: Set<String> = []
+    private(set) var repositoryUnavailableWorkspaces: Set<String> = []
     private(set) var portsSnapshot: MSWPortsResponse?
     private(set) var githubSnapshot: MSWGitHubStateResponse?
     private(set) var detailError: String?
@@ -1470,19 +1472,38 @@ final class AppModel {
 
 
     func loadRepositories(for id: Workspace.ID, clearsError: Bool = true) {
-        guard let operationService else { return }
+        loadRepositories(for: [id], clearsError: clearsError)
+    }
+
+    func loadRepositories(for ids: [Workspace.ID], clearsError: Bool = true) {
+        guard !ids.isEmpty, let operationService else { return }
+        let workspaceNames = Set(ids.map(\.rawValue))
+        repositoryLoadingWorkspaces.formUnion(workspaceNames)
+        repositoryUnavailableWorkspaces.subtract(workspaceNames)
         let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
-            do {
-                let result = try await operationService.repositories(workspace: id.rawValue)
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.detailError = nil
-                self.repositoriesByWorkspace[id.rawValue] = result
-            } catch {
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.detailError = error.localizedDescription
+            var loaded: [String: MSWRepositoriesResponse] = [:]
+            var failed: Set<String> = []
+            var failureMessage: String?
+            for id in ids {
+                do {
+                    loaded[id.rawValue] = try await operationService.repositories(
+                        workspace: id.rawValue
+                    )
+                } catch {
+                    failed.insert(id.rawValue)
+                    failureMessage = failureMessage ?? error.localizedDescription
+                }
             }
-            self?.finishDetailRequest(request)
+            guard let self, request == self.detailRequestGeneration else { return }
+            self.repositoryLoadingWorkspaces.subtract(workspaceNames)
+            self.repositoryUnavailableWorkspaces.formUnion(failed)
+            self.repositoryUnavailableWorkspaces.subtract(loaded.keys)
+            for (workspace, result) in loaded {
+                self.repositoriesByWorkspace[workspace] = result
+            }
+            self.detailError = failureMessage
+            self.finishDetailRequest(request)
         }
     }
 

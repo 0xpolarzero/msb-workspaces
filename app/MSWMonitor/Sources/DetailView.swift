@@ -244,9 +244,10 @@ struct DetailView: View {
     private func loadSelectedSection() {
         switch navigation.workspaceSection {
         case .files:
-            for workspace in visibleWorkspaces {
-                model.loadRepositories(for: workspace.id, clearsError: false)
-            }
+            model.loadRepositories(
+                for: visibleWorkspaces.map(\.id),
+                clearsError: false
+            )
         case .logs:
             model.loadLogs(for: visibleWorkspaces.map(\.id), clearsError: false)
         case .ports:
@@ -343,39 +344,10 @@ struct DetailView: View {
             Text("File tree")
                 .font(.headline)
                 .accessibilityIdentifier("files.tree.title")
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(visibleWorkspaces) { workspace in
-                        workspaceFileTree(for: workspace)
-                    }
-                }
-            }
+            CombinedWorkspaceFileTree(model: model, workspaces: visibleWorkspaces)
         }
     }
 
-    @ViewBuilder
-    private func workspaceFileTree(for workspace: Workspace) -> some View {
-        if workspace.state == .running && workspace.canOpenTerminal {
-            FolderBrowserView(
-                model: model,
-                workspace: workspace.id,
-                compact: true,
-                title: workspace.id.rawValue
-            )
-            .id(workspace.id)
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(workspace.id.rawValue)
-                    .font(.headline)
-                Text(workspace.state == .stopped ? "Workspace is stopped" : "File browsing is unavailable")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("files.tree.workspace.\(workspace.id.rawValue)")
-        }
-    }
 
     private var logs: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -550,10 +522,20 @@ struct DetailView: View {
                         }
                     }
                 }
-            } else {
-                Text(workspace.state == .stopped ? "Workspace is stopped" : "Loading repositories…")
+            } else if model.repositoryLoadingWorkspaces.contains(workspace.id.rawValue) {
+                RepositoryLoadingSkeleton()
+            } else if workspace.state == .stopped || workspace.state == .exited {
+                Text("Workspace is stopped")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else {
+                Text(
+                    model.repositoryUnavailableWorkspaces.contains(workspace.id.rawValue)
+                        ? "Repository information is unavailable"
+                        : "No repository information"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .contain)
@@ -561,11 +543,104 @@ struct DetailView: View {
     }
 
 }
+private struct RepositoryLoadingSkeleton: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.secondary.opacity(0.14))
+                .frame(width: 150, height: 13)
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.secondary.opacity(0.1))
+                .frame(width: 110, height: 10)
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Loading repositories")
+        .accessibilityIdentifier("repositories.loading-skeleton")
+    }
+}
+
+
+private struct CombinedWorkspaceFileTree: View {
+    @Bindable var model: AppModel
+    let workspaces: [Workspace]
+    @State private var expandedWorkspaces: Set<Workspace.ID>
+
+    init(model: AppModel, workspaces: [Workspace]) {
+        self.model = model
+        self.workspaces = workspaces
+        _expandedWorkspaces = State(initialValue: Set(workspaces.map(\.id)))
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 4) {
+                ForEach(workspaces) { workspace in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            if expandedWorkspaces.contains(workspace.id) {
+                                expandedWorkspaces.remove(workspace.id)
+                            } else {
+                                expandedWorkspaces.insert(workspace.id)
+                            }
+                        } label: {
+                            HStack(spacing: 7) {
+                                Image(
+                                    systemName: expandedWorkspaces.contains(workspace.id)
+                                        ? "chevron.down"
+                                        : "chevron.right"
+                                )
+                                .font(.caption2.weight(.semibold))
+                                .frame(width: 14)
+                                Image(systemName: "folder.fill")
+                                    .foregroundStyle(.secondary)
+                                Text(workspace.id.rawValue)
+                                    .font(.body.weight(.medium))
+                                Spacer()
+                                Text(workspace.state.rawValue)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("files.tree.workspace.\(workspace.id.rawValue)")
+
+                        if expandedWorkspaces.contains(workspace.id) {
+                            if workspace.state == .running && workspace.canOpenTerminal {
+                                FolderBrowserView(
+                                    model: model,
+                                    workspace: workspace.id,
+                                    compact: true,
+                                    treeOnly: true
+                                )
+                                .id(workspace.id)
+                                .padding(.leading, 21)
+                            } else {
+                                Text(
+                                    workspace.state == .stopped
+                                        ? "Workspace is stopped"
+                                        : "File browsing is unavailable"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .padding(.leading, 35)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .accessibilityIdentifier("files.workspace-tree")
+    }
+}
 
 struct FolderBrowserView: View {
     @Bindable var model: AppModel
     let workspace: Workspace.ID
     var compact = false
+    var treeOnly = false
     var title: String?
     var onClose: (() -> Void)?
     @State private var folderPath = "."
@@ -584,25 +659,30 @@ struct FolderBrowserView: View {
     @State private var truncatedChildPaths: Set<String> = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
+        Group {
+            if treeOnly {
+                browserContent
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    header
 
-            TextField("Search folders", text: $folderSearch)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("folders.search.field")
+                    TextField("Search folders", text: $folderSearch)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("folders.search.field")
 
-            browserContent
+                    browserContent
 
+                    if let editorError {
+                        Label(editorError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("folders.error")
+                    }
 
-            if let editorError {
-                Label(editorError, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("folders.error")
+                    breadcrumbBar
+                }
             }
-
-            breadcrumbBar
         }
         .frame(maxWidth: .infinity, maxHeight: compact ? nil : .infinity, alignment: .topLeading)
         .task(id: requestIdentity) {
@@ -717,7 +797,7 @@ struct FolderBrowserView: View {
 
     private var folderLoadingSkeleton: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(0..<6, id: \.self) { index in
+            ForEach(0..<(treeOnly ? 3 : 6), id: \.self) { index in
                 HStack(spacing: 8) {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color.secondary.opacity(0.14))
@@ -731,9 +811,9 @@ struct FolderBrowserView: View {
         .padding(10)
         .frame(
             maxWidth: .infinity,
-            minHeight: compact ? 170 : 240,
-            idealHeight: compact ? 190 : 320,
-            maxHeight: compact ? 210 : .infinity,
+            minHeight: treeOnly ? 60 : (compact ? 170 : 240),
+            idealHeight: treeOnly ? 80 : (compact ? 190 : 320),
+            maxHeight: treeOnly ? nil : (compact ? 210 : .infinity),
             alignment: .topLeading
         )
         .accessibilityElement(children: .ignore)
@@ -741,31 +821,44 @@ struct FolderBrowserView: View {
         .accessibilityIdentifier("folders.loading-skeleton")
     }
 
+    @ViewBuilder
     private func folderTree(entries: [MSWDirectoryResponse.Entry]) -> some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 2) {
-                ForEach(entries) { entry in
-                    FolderTreeBranch(
-                        entry: entry,
-                        childrenByPath: $childrenByPath,
-                        expandedPaths: $expandedPaths,
-                        loadingPaths: $loadingChildPaths,
-                        errorsByPath: $childErrors,
-                        truncatedPaths: $truncatedChildPaths,
-                        selection: $selectedFolderPath,
-                        onExpand: loadChildren,
-                        onNavigate: navigateToFolder
-                    )
-                }
+        if treeOnly {
+            folderTreeRows(entries)
+                .padding(.vertical, 2)
+                .accessibilityIdentifier("folders.tree")
+        } else {
+            ScrollView {
+                folderTreeRows(entries)
+                    .padding(6)
             }
-            .padding(6)
+            .frame(
+                minHeight: compact ? 170 : 240,
+                idealHeight: compact ? 190 : 320,
+                maxHeight: compact ? 210 : .infinity
+            )
+            .accessibilityIdentifier("folders.tree")
         }
-        .frame(
-            minHeight: compact ? 170 : 240,
-            idealHeight: compact ? 190 : 320,
-            maxHeight: compact ? 210 : .infinity
-        )
-        .accessibilityIdentifier("folders.tree")
+    }
+
+    private func folderTreeRows(
+        _ entries: [MSWDirectoryResponse.Entry]
+    ) -> some View {
+        LazyVStack(alignment: .leading, spacing: 2) {
+            ForEach(entries) { entry in
+                FolderTreeBranch(
+                    entry: entry,
+                    childrenByPath: $childrenByPath,
+                    expandedPaths: $expandedPaths,
+                    loadingPaths: $loadingChildPaths,
+                    errorsByPath: $childErrors,
+                    truncatedPaths: $truncatedChildPaths,
+                    selection: $selectedFolderPath,
+                    onExpand: loadChildren,
+                    onNavigate: handleTreeNavigation
+                )
+            }
+        }
     }
 
     private func searchResults(entries: [MSWDirectoryResponse.Entry]) -> some View {
@@ -854,6 +947,16 @@ struct FolderBrowserView: View {
         let path = selectedFolderPath ?? folderPath
         return path == "." ? "/workspace" : "/workspace/\(path)"
     }
+    private func handleTreeNavigation(_ path: String) {
+        if treeOnly {
+            selectedFolderPath = path
+            expandedPaths.insert(path)
+            loadChildren(path)
+        } else {
+            navigateToFolder(path)
+        }
+    }
+
     private func navigateToFolder(_ path: String) {
         folderSearch = ""
         selectedFolderPath = nil

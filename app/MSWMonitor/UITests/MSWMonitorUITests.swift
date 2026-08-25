@@ -196,7 +196,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         assertText("Repositories", identifier: "files.repositories.title", in: app)
         assertText("File tree", identifier: "files.tree.title", in: app)
-        XCTAssertTrue(app.descendants(matching: .any)["folders.path-bar"].waitForExistence(timeout: 2))
+        let combinedFileTree = app.descendants(matching: .any)["files.workspace-tree"]
+        XCTAssertTrue(combinedFileTree.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.descendants(matching: .any)["folders.path-bar"].exists)
+        XCTAssertFalse(app.textFields["folders.search.field"].exists)
         for workspace in ["dev", "playgrounds", "personal"] {
             XCTAssertTrue(
                 app.descendants(matching: .any)["workspace.filter.\(workspace)"]
@@ -206,15 +209,12 @@ final class MSWMonitorUITests: XCTestCase {
                 app.descendants(matching: .any)["repositories.workspace.\(workspace)"]
                     .waitForExistence(timeout: 2)
             )
+            XCTAssertTrue(
+                app.descendants(matching: .any)["files.tree.workspace.\(workspace)"]
+                    .waitForExistence(timeout: 2)
+            )
         }
-        XCTAssertTrue(
-            app.descendants(matching: .any)["files.tree.workspace.playgrounds"]
-                .waitForExistence(timeout: 2)
-        )
-        XCTAssertTrue(
-            app.descendants(matching: .any)["files.tree.workspace.personal"]
-                .waitForExistence(timeout: 2)
-        )
+        XCTAssertFalse(app.staticTexts["Loading repositories…"].exists)
 
         let clearWorkspaceFilter = app.descendants(matching: .any)["workspace.filter.clear"]
         XCTAssertTrue(clearWorkspaceFilter.waitForExistence(timeout: 2))
@@ -345,6 +345,16 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.toolbars.buttons["Workspaces"].waitForExistence(timeout: 2))
         app.toolbars.buttons["Workspaces"].click()
 
+        let combinedFileTree = app.descendants(matching: .any)["files.workspace-tree"]
+        XCTAssertTrue(combinedFileTree.waitForExistence(timeout: 2))
+        for workspace in ["dev", "playgrounds", "personal"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any)["files.tree.workspace.\(workspace)"]
+                    .waitForExistence(timeout: 2)
+            )
+        }
+        XCTAssertFalse(app.textFields["folders.search.field"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["folders.path-bar"].exists)
         let folderTree = app.descendants(matching: .any)["folders.tree"]
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["folders.entry.Projects"].waitForExistence(timeout: 2))
@@ -366,11 +376,13 @@ final class MSWMonitorUITests: XCTestCase {
         app.buttons["Logs"].click()
         assertText("Logs", identifier: "details.section-title", in: app)
         XCTAssertFalse(folderTree.exists)
+        XCTAssertFalse(combinedFileTree.exists)
 
         XCTAssertTrue(app.buttons["Files"].waitForExistence(timeout: 2))
         app.buttons["Files"].click()
         assertText("Files", identifier: "details.section-title", in: app)
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
+        XCTAssertTrue(combinedFileTree.waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["folders.entry.Projects"].exists)
         XCTAssertTrue(repository.exists)
         XCTAssertFalse(app.descendants(matching: .any)["folders.loading-skeleton"].exists)
