@@ -131,9 +131,6 @@ final class StatusBarController {
         showSetup()
     }
 
-    func showSetupForGitHubAuthorization() {
-        showSetup()
-    }
 
     func showMain(for deepLink: URL) {
         guard let route = AppRoute(deepLink: deepLink) else { return }

@@ -13,9 +13,7 @@ struct MSWMonitorApp: App {
                 navigation: appDelegate.appNavigation,
                 applicationState: appDelegate.applicationState,
                 applicationPreferences: appDelegate.applicationPreferences,
-                authorizationCoordinator: appDelegate.authorizationCoordinator,
-                provider: appDelegate.provider,
-                accessMode: appDelegate.accessMode,
+                githubState: appDelegate.githubSettingsState
             )
         }
     }
@@ -37,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let accessMode: GitHubAccessMode
     let policyStore: GitHubPolicyStore?
     let provider: (any GitHubProviding)?
+    let githubSettingsState: GitHubSettingsState
 
     /// Test seam: local-mode init must never build or pass any Connect
     /// dependency (broker, client, refresher, coordinator).
@@ -114,6 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             store.startWatching()
         }
+        self.githubSettingsState = GitHubSettingsState(
+            authorizationCoordinator: self.authorizationCoordinator,
+            provider: self.provider,
+            accessMode: accessMode
+        )
         super.init()
     }
 
@@ -343,6 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.installDirectoryUITestFixture()
         }
         applicationState.model = model
+        githubSettingsState.configure(provider: fixtureProvider ?? provider)
+        githubSettingsState.setPollingVisible(false)
         if appNavigation.workspace == nil {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
         }
@@ -399,9 +405,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func openGitHubSetup() {
-        statusBarController?.showSetupForGitHubAuthorization()
-    }
 
     @objc func openGeneralSettings() {
         statusBarController?.showMain(route: AppRoute(tab: .general))

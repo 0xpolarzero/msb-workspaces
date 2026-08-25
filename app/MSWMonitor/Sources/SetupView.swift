@@ -3779,7 +3779,7 @@ private struct InformationTooltip: View {
 
 /// Compact, searchable multi-selection picker. The persisted modes remain the
 /// policy source of truth; the push toggle maps directly to read-only/read-write.
-private struct RepositoryWorkspacePolicyEditor: View {
+struct RepositoryWorkspacePolicyEditor: View {
     let workspaces: [String]
     let installations: [GitHubInstallation]
     let repositoriesByInstallation: [Int: [GitHubRepository]]

@@ -96,6 +96,59 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
 
+    func testGitHubSettingsPreloadsAndEditsInline() {
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-github-success"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        let openMonitor = app.buttons["open-monitor.button"]
+        XCTAssertTrue(openMonitor.waitForExistence(timeout: 2))
+        openMonitor.click()
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+
+        let githubTab = app.toolbars.buttons["GitHub"]
+        XCTAssertTrue(githubTab.waitForExistence(timeout: 2))
+        githubTab.click()
+
+        XCTAssertTrue(
+            app.staticTexts["Connected as @octocat"].waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.staticTexts["Loading GitHub status…"].exists)
+
+        let editAccess = app.buttons["settings.github.setup.button"]
+        XCTAssertTrue(editAccess.waitForExistence(timeout: 2))
+        editAccess.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.github.editor"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.windows["setup.window"].exists)
+        let editorScreenshot = XCTAttachment(screenshot: app.screenshot())
+        editorScreenshot.name = "GitHub settings repository editor"
+        editorScreenshot.lifetime = .keepAlways
+        add(editorScreenshot)
+
+        let repositoryPicker = app.buttons["github.workspace.dev.repository-picker.button"]
+        XCTAssertTrue(repositoryPicker.waitForExistence(timeout: 2))
+        repositoryPicker.click()
+        let repository = app.checkBoxes["github.workspace.dev.repository.1001"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 2))
+        repository.click()
+
+        let save = app.buttons["settings.github.editor.save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 2))
+        XCTAssertTrue(save.isEnabled)
+        app.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: 600)
+        save.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.github.editor"]
+                .waitForNonExistence(timeout: 3)
+        )
+        XCTAssertFalse(app.windows["setup.window"].exists)
+    }
+
     private func launchFixture(_ arguments: [String]) -> XCUIApplication {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

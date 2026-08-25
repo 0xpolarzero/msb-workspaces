@@ -154,6 +154,33 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppNavigationState().workspaceSection, .files)
     }
 
+    func testGitHubSettingsRefreshPreservesCachedState() async throws {
+        let provider = GitHubFixtureProvider(scenario: "interaction-states")
+        let state = GitHubSettingsState(
+            authorizationCoordinator: nil,
+            provider: provider,
+            accessMode: .local
+        )
+
+        await state.refresh()
+        guard case .ready(let account, _, _) = state.connectionState else {
+            return XCTFail("Expected the initial GitHub catalog to be cached.")
+        }
+        XCTAssertEqual(account?.login, "octocat")
+        XCTAssertEqual(state.installations.map(\.id), [42])
+
+        let refresh = Task { await state.refresh() }
+        try await Task.sleep(for: .milliseconds(50))
+        if case .loading = state.connectionState {
+            XCTFail("A background refresh must preserve the cached GitHub settings.")
+        }
+        await refresh.value
+        guard case .ready(let refreshedAccount, _, _) = state.connectionState else {
+            return XCTFail("Expected the refreshed GitHub catalog to remain ready.")
+        }
+        XCTAssertEqual(refreshedAccount?.login, "octocat")
+    }
+
     func testSystemHealthUsesSetupPreflightChecks() async throws {
         let model = AppModel()
         let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")
