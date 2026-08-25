@@ -563,7 +563,6 @@ struct FolderBrowserView: View {
                 return
             }
 
-            snapshot = nil
             isDirectoryLoading = true
             if !folderSearch.isEmpty {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -623,11 +622,14 @@ struct FolderBrowserView: View {
     @ViewBuilder
     private var browserContent: some View {
         if isDirectoryLoading {
-            OperationRow(
-                phase: folderSearch.isEmpty ? "Listing folders" : "Searching folders",
-                scope: workspace.rawValue,
-                detail: "Reading a bounded folder snapshot from the running VM."
-            )
+            if let snapshot, folderSearch.isEmpty, !snapshot.entries.isEmpty {
+                folderTree(entries: snapshot.entries)
+                    .redacted(reason: .placeholder)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            } else {
+                folderLoadingSkeleton
+            }
         } else if let snapshot {
             if snapshot.entries.isEmpty {
                 folderUnavailableView(
@@ -656,6 +658,38 @@ struct FolderBrowserView: View {
                 accessibilityIdentifier: "folders.unavailable"
             )
         }
+    }
+
+    private var folderLoadingSkeleton: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(0..<6, id: \.self) { index in
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.secondary.opacity(0.14))
+                        .frame(width: 16, height: 16)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.secondary.opacity(0.14))
+                        .frame(width: CGFloat(110 + (index % 3) * 35), height: 12)
+                }
+            }
+        }
+        .padding(10)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: compact ? 170 : 240,
+            idealHeight: compact ? 190 : 320,
+            maxHeight: compact ? 210 : .infinity,
+            alignment: .topLeading
+        )
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(folderSearch.isEmpty ? "Loading folders" : "Searching folders")
+        .accessibilityIdentifier("folders.loading-skeleton")
     }
 
     private func folderTree(entries: [MSWDirectoryResponse.Entry]) -> some View {
@@ -937,8 +971,22 @@ private struct FolderTreeBranch: View {
     @ViewBuilder
     private var childContent: some View {
         if loadingPaths.contains(entry.path) {
-            ProgressView("Loading folders…")
-                .controlSize(.small)
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(0..<2, id: \.self) { index in
+                    HStack(spacing: 7) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.secondary.opacity(0.14))
+                            .frame(width: 14, height: 14)
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.14))
+                            .frame(width: CGFloat(90 + index * 30), height: 10)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Loading folders")
+            .accessibilityIdentifier("folders.entry.\(entry.path).loading-skeleton")
         } else if let error = errorsByPath[entry.path] {
             Label(error, systemImage: "exclamationmark.triangle")
                 .font(.caption)

@@ -1128,6 +1128,9 @@ final class AppModel {
             guard let fixture else {
                 throw MSWClientError.unavailable("The requested fixture folder is unavailable.")
             }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-folder-loading-skeleton") {
+                try await Task.sleep(for: .seconds(3))
+            }
             return fixture
         }
         guard let client else {

@@ -45,7 +45,11 @@ final class MSWMonitorUITests: XCTestCase {
     }
 
     func testDirectFolderPickerFromStatusPopover() {
-        let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-folder-browser",
+            "--ui-test-folder-loading-skeleton"
+        ])
         defer { terminateIfNeeded(app) }
 
         assertDirectFolderPicker(in: app)
@@ -323,6 +327,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(editorShortcut.label, "Open in Unsupported Editor…")
         editorShortcut.click()
 
+        let loadingSkeleton = app.descendants(matching: .any)["folders.loading-skeleton"]
+        XCTAssertTrue(loadingSkeleton.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.progressIndicators["Loading folders…"].exists)
+
         assertText("dev folders", identifier: "folders.popover.title", in: app)
         let pathBar = app.descendants(matching: .any)["folders.path-bar"]
         XCTAssertTrue(pathBar.waitForExistence(timeout: 2))
@@ -334,6 +342,7 @@ final class MSWMonitorUITests: XCTestCase {
         let folderTree = app.descendants(matching: .any)["folders.tree"]
         XCTAssertTrue(pickerContent.waitForExistence(timeout: 2))
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
+        XCTAssertFalse(loadingSkeleton.exists)
         let closePicker = app.buttons["folders.popover.close"]
         let headerOpen = app.buttons["folders.open.button"]
         XCTAssertTrue(closePicker.waitForExistence(timeout: 2))
@@ -389,7 +398,7 @@ final class MSWMonitorUITests: XCTestCase {
         search.click()
         search.typeText("Demo")
         let demo = app.buttons["folders.entry.Projects/Demo"]
-        XCTAssertTrue(demo.waitForExistence(timeout: 3))
+        XCTAssertTrue(demo.waitForExistence(timeout: 5))
         demo.click()
         let openFolder = app.buttons["folders.open.button"]
         XCTAssertEqual(openFolder.label, "Open in Unsupported Editor")
