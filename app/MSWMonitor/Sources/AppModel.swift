@@ -1146,6 +1146,7 @@ final class AppModel {
         workspaces[index].state = .running
         workspaces[index].freshness = .fresh
         workspaces[index].canOpenTerminal = true
+        workspaces[index].networkHost = "dev.msw.test"
         workspaces[index].serverCapabilities = MSWActionCapabilities(
             canStart: false,
             canStop: true,
@@ -1154,6 +1155,16 @@ final class AppModel {
             canPush: false
         )
         workspaces[index].nextAction = "Open Terminal"
+        portsSnapshot = MSWPortsResponse(
+            workspace: "all",
+            published: [
+                .init(port: "3000", configured: true),
+                .init(port: "5173", configured: true),
+                .init(port: "8080", configured: true)
+            ],
+            activeListening: "fixture",
+            freshness: .fresh
+        )
         directoryFixture = [
             MSWDirectoryResponse(
                 workspace: "dev",
@@ -1362,7 +1373,7 @@ final class AppModel {
 
 
     func loadRepositories(for id: Workspace.ID, clearsError: Bool = true) {
-        guard let operationService else { detailError = "Repository inspection is unavailable in fixture mode."; return }
+        guard let operationService else { return }
         let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
             do {
@@ -1454,7 +1465,7 @@ final class AppModel {
     }
 
     func loadPorts(for id: Workspace.ID? = nil, clearsError: Bool = true) {
-        guard let operationService else { detailError = "Port inspection is unavailable in fixture mode."; return }
+        guard let operationService else { return }
         let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
             do {

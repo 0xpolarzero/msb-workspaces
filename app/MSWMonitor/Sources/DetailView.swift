@@ -4,40 +4,37 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum WorkspaceSection: String, CaseIterable, Identifiable {
-    case summary = "Summary"
     case files = "Files"
     case logs = "Logs"
     case activity = "Activity"
     case ports = "Network"
-    case repositories = "Repositories"
-    case diagnostics = "Maintenance"
 
     var id: String { rawValue }
 
-    var requiresWorkspace: Bool {
+    var requiresWorkspace: Bool { self == .files }
+
+    var symbol: String {
         switch self {
-        case .repositories, .files:
-            return true
-        case .summary, .logs, .activity, .ports, .diagnostics:
-            return false
+        case .files: return "folder"
+        case .logs: return "text.alignleft"
+        case .activity: return "clock"
+        case .ports: return "network"
         }
     }
 
     init(deepLinkValue: String) {
         switch deepLinkValue.lowercased() {
-        case "metrics", "summary", "overview": self = .summary
         case "logs": self = .logs
         case "activity": self = .activity
-        case "repositories": self = .repositories
-        case "files", "folders": self = .files
         case "ports", "network": self = .ports
-        case "diagnostics", "maintenance": self = .diagnostics
-        default: self = .summary
+        case "files", "folders", "repositories": self = .files
+        default: self = .files
         }
     }
 }
 
 enum DetailMode {
+    case overview
     case workspaces
     case backup
 }
@@ -75,6 +72,7 @@ struct DetailView: View {
     var body: some View {
         Group {
             switch mode {
+            case .overview: overviewDashboard
             case .workspaces: workspacePane
             case .backup: backup
             }
@@ -185,8 +183,8 @@ struct DetailView: View {
 
     private var automaticallyRefreshesSelectedSection: Bool {
         switch navigation.workspaceSection {
-        case .logs, .repositories, .ports: return true
-        case .summary, .activity, .files, .diagnostics: return false
+        case .files, .logs, .ports: return true
+        case .activity: return false
         }
     }
 
@@ -208,15 +206,28 @@ struct DetailView: View {
                     .accessibilityIdentifier("details.workspace-picker")
                 }
             }
-            Picker("Section", selection: $navigation.workspaceSection) {
+            HStack(spacing: 4) {
                 ForEach(WorkspaceSection.allCases) { section in
-                    Text(section.rawValue)
-                        .tag(section)
-                        .accessibilityIdentifier("workspace.section.\(section.rawValue)")
+                    Button {
+                        navigation.workspaceSection = section
+                    } label: {
+                        Label(section.rawValue, systemImage: section.symbol)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle)
+                    .tint(
+                        navigation.workspaceSection == section
+                            ? Color.accentColor
+                            : Color.secondary
+                    )
+                    .accessibilityIdentifier("workspace.section.\(section.rawValue)")
+                    .accessibilityAddTraits(
+                        navigation.workspaceSection == section ? .isSelected : []
+                    )
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .accessibilityIdentifier("workspace.section-picker")
         }
     }
@@ -234,34 +245,25 @@ struct DetailView: View {
     @ViewBuilder
     private var sectionContent: some View {
         switch navigation.workspaceSection {
-        case .summary: workspaceSummary
+        case .files: filesAndRepositories
         case .logs: logs
         case .activity: activity
-        case .repositories: repositories
-        case .files:
-            if let workspace = selectedWorkspaceID {
-                FolderBrowserView(model: model, workspace: workspace)
-                    .id(workspace)
-            }
         case .ports: ports
-        case .diagnostics: diagnostics
         }
     }
 
     private func loadSelectedSection() {
         switch navigation.workspaceSection {
-        case .summary, .activity, .files:
-            break
-        case .logs:
-            model.loadLogs(for: model.workspaces.map(\.id), clearsError: false)
-        case .repositories:
+        case .files:
             if let workspace = navigation.workspace {
                 model.loadRepositories(for: workspace, clearsError: false)
             }
+        case .logs:
+            model.loadLogs(for: model.workspaces.map(\.id), clearsError: false)
         case .ports:
             model.loadPorts(clearsError: false)
-        case .diagnostics:
-            model.runDiagnostics()
+        case .activity:
+            break
         }
     }
 
@@ -273,21 +275,32 @@ struct DetailView: View {
     private var selectedWorkspaceID: Workspace.ID? { navigation.workspace }
 
 
-    private var workspaceSummary: some View {
+    private var overviewDashboard: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(model.workspaces) { workspace in
-                    WorkspaceSummaryRow(
-                        workspace: workspace,
-                        model: model,
-                        latestError: latestError(for: workspace),
-                        openLogs: {
-                            hiddenLogWorkspaces = Set(model.workspaces.map(\.id).filter { $0 != workspace.id })
-                            navigation.workspaceSection = .logs
-                        },
-                        openAttention: openAttention
-                    )
-                }
+            VStack(alignment: .leading, spacing: 20) {
+                workspaceSummary
+                Divider()
+                systemHealth
+            }
+            .padding(20)
+        }
+        .accessibilityIdentifier("details.overview")
+    }
+
+    private var workspaceSummary: some View {
+        LazyVStack(alignment: .leading, spacing: 10) {
+            ForEach(model.workspaces) { workspace in
+                WorkspaceSummaryRow(
+                    workspace: workspace,
+                    model: model,
+                    latestError: latestError(for: workspace),
+                    openLogs: {
+                        hiddenLogWorkspaces = Set(model.workspaces.map(\.id).filter { $0 != workspace.id })
+                        navigation.tab = .workspaces
+                        navigation.workspaceSection = .logs
+                    },
+                    openAttention: openAttention
+                )
             }
         }
         .accessibilityIdentifier("workspace.summary")
@@ -305,11 +318,35 @@ struct DetailView: View {
     private func openAttention(_ destination: WorkspaceAttentionDestination) {
         switch destination {
         case .network:
+            navigation.tab = .workspaces
             navigation.workspaceSection = .ports
         case .github:
             navigation.tab = .github
         case .maintenance:
-            navigation.workspaceSection = .diagnostics
+            navigation.tab = .overview
+        }
+    }
+
+    @ViewBuilder
+    private var filesAndRepositories: some View {
+        if let workspace = selectedWorkspaceID {
+            HSplitView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Repositories", systemImage: "shippingbox")
+                        .font(.headline)
+                    repositories
+                }
+                .frame(minWidth: 300, idealWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+
+                FolderBrowserView(
+                    model: model,
+                    workspace: workspace,
+                    title: "Folders"
+                )
+                .id(workspace)
+                .frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .accessibilityIdentifier("details.files")
         }
     }
 
@@ -346,22 +383,20 @@ struct DetailView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 if let failure = model.latestOperationFailure, failure.workspace == workspace.id {
-                    Label {
-                        Text(failure.reason)
-                            .accessibilityIdentifier("details.latest-operation-error.message")
-                    } icon: {
-                        Image(systemName: "xmark.circle.fill")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(failure.reason, systemImage: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Text(failure.recovery)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("View system health") {
+                            navigation.tab = .overview
+                        }
+                        .accessibilityIdentifier("details.latest-operation-error.action")
                     }
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    Text(failure.recovery)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("details.latest-operation-error.recovery")
-                    Button("Run Diagnostics") {
-                        navigation.workspaceSection = .diagnostics
-                    }
-                    .accessibilityIdentifier("details.latest-operation-error.action")
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("details.latest-operation-error")
                 }
                 if model.logsUnavailableWorkspaces.contains(workspace.id.rawValue) {
                     Text(workspace.state == .running
@@ -395,11 +430,6 @@ struct DetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityIdentifier(
-                model.latestOperationFailure?.workspace == workspace.id
-                    ? "details.latest-operation-error"
-                    : "logs.workspace-content.\(workspace.id.rawValue)"
-            )
         } label: {
             HStack {
                 Text(workspace.id.rawValue)
@@ -410,6 +440,7 @@ struct DetailView: View {
         }
         .accessibilityIdentifier("logs.workspace.\(workspace.id.rawValue)")
     }
+
 
     private func workspaceFilterBar(
         hidden: Binding<Set<Workspace.ID>>,
@@ -985,57 +1016,124 @@ private extension DetailView {
     }
 
     private var ports: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let warning = scopedPortWarning {
-                Label(warning, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("details.ports.warning")
-            }
-            if let value = model.portsSnapshot {
-                FreshnessNotice(freshness: value.freshness, observedAt: nil, reason: nil)
-                LabeledContent("Reported scope", value: value.workspace)
-                LabeledContent("Active listeners", value: value.activeListening)
-                if value.published.isEmpty {
-                    ContentUnavailableView("No published ports", systemImage: "network.slash", description: Text("The runtime reported no configured ports."))
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Each workspace has its own .msw.test address, so the same port can be used in multiple workspaces.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let snapshot = model.portsSnapshot {
+                FreshnessNotice(freshness: snapshot.freshness, observedAt: nil, reason: nil)
+                if snapshot.published.isEmpty {
+                    ContentUnavailableView(
+                        "No published ports",
+                        systemImage: "network.slash",
+                        description: Text("No ports are configured for workspace forwarding.")
+                    )
                 } else {
-                    List(value.published) { port in
-                        HStack {
-                            Text(port.port).monospacedDigit()
-                            Spacer()
-                            Text(port.configured ? "Configured" : "Not configured").foregroundStyle(.secondary)
-                            if let id = navigation.workspace,
-                               value.workspace == id.rawValue,
-                               let workspace = model.workspaces.first(where: { $0.id == id }),
-                               workspace.state == .running,
-                               workspace.freshness == .fresh,
-                               workspace.networkHost != nil,
-                               workspace.credential != .quarantined {
-                                Button("Open") { model.openSite(for: id, port: port.port) }
-                                    .buttonStyle(.borderless)
-                                    .accessibilityLabel("Open port \(port.port)")
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(model.workspaces) { workspace in
+                                networkRow(workspace: workspace, ports: snapshot.published)
                             }
                         }
                     }
-                    .listStyle(.inset)
                 }
             } else {
-                ContentUnavailableView("No port snapshot", systemImage: "network", description: Text("Configured ports and active listeners appear here when available."))
+                Text("Port information is not available yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             detailError
         }
+        .accessibilityIdentifier("details.ports")
     }
 
-    private var scopedPortWarning: String? {
-        guard let workspace = navigation.workspace,
-              let snapshot = model.workspaces.first(where: { $0.id == workspace }),
-              let warning = snapshot.portWarning,
-              !warning.isEmpty else {
-            return nil
+    private func networkRow(
+        workspace: Workspace,
+        ports: [MSWPortsResponse.Port]
+    ) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                if let warning = workspace.portWarning, !warning.isEmpty {
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(ports) { port in
+                            HStack(spacing: 6) {
+                                Text(port.port)
+                                    .font(.callout.monospacedDigit().weight(.medium))
+                                if canOpen(port: port, in: workspace) {
+                                    Button("Open") {
+                                        model.openSite(for: workspace.id, port: port.port)
+                                    }
+                                    .controlSize(.small)
+                                    .accessibilityIdentifier(
+                                        "network.\(workspace.id.rawValue).port.\(port.port).open"
+                                    )
+                                }
+                                if let url = networkURL(workspace: workspace, port: port.port) {
+                                    Button {
+                                        copyToPasteboard(url)
+                                    } label: {
+                                        Label("Copy URL", systemImage: "doc.on.doc")
+                                            .labelStyle(.iconOnly)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .help("Copy \(url)")
+                                    .accessibilityIdentifier(
+                                        "network.\(workspace.id.rawValue).port.\(port.port).copy"
+                                    )
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 7))
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            HStack {
+                Text(workspace.id.rawValue)
+                if let host = workspace.networkHost {
+                    Text(host)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Address unavailable")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(workspace.state.rawValue)
+                    .foregroundStyle(.secondary)
+            }
         }
-        return warning
+        .accessibilityIdentifier("network.workspace.\(workspace.id.rawValue)")
+    }
+
+    private func canOpen(port: MSWPortsResponse.Port, in workspace: Workspace) -> Bool {
+        port.configured &&
+            workspace.state == .running &&
+            workspace.freshness == .fresh &&
+            workspace.networkHost != nil &&
+            workspace.credential != .quarantined &&
+            !(workspace.skippedPorts ?? []).contains(Int(port.port) ?? -1)
+    }
+
+    private func networkURL(workspace: Workspace, port: String) -> String? {
+        guard let host = workspace.networkHost else { return nil }
+        return "http://\(host):\(port)"
+    }
+
+    private func copyToPasteboard(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
 
@@ -1193,20 +1291,34 @@ private extension DetailView {
         }
     }
 
-    private var diagnostics: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionToolbar(actionTitle: "Run Checks") { model.runDiagnostics() }
-            Button("Repair MSW installation…") {
-                NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+    private var systemHealth: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("System health", systemImage: "stethoscope")
+                    .font(.headline)
+                Spacer()
+                if needsInstallationRepair {
+                    Button("Repair MSW installation…") {
+                        NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+                    }
+                    .accessibilityIdentifier("maintenance.repair.button")
+                }
+                Button("Run checks") {
+                    model.runDiagnostics()
+                }
+                .disabled(model.isDetailLoading)
+                .accessibilityIdentifier("overview.run-checks.button")
             }
-            .accessibilityIdentifier("maintenance.repair.button")
-            Text("Checks verify MSW without showing credentials.")
+            Text("Checks the local MSW protocol, runtime, and credential broker without exposing credentials.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+
             if model.diagnosticChecks.isEmpty && !model.isDetailLoading {
-                ContentUnavailableView("No diagnostic run", systemImage: "wrench.and.screwdriver", description: Text("Run checks to inspect the local MSW installation."))
+                Text("Run checks when setup, runtime access, or workspace actions are not working.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
-                List(model.diagnosticChecks) { check in
+                ForEach(model.diagnosticChecks) { check in
                     VStack(alignment: .leading, spacing: 5) {
                         HStack {
                             Label(check.title, systemImage: diagnosticSymbol(check.status))
@@ -1215,35 +1327,36 @@ private extension DetailView {
                             Text(check.status.rawValue.capitalized)
                                 .foregroundStyle(diagnosticColor(check.status))
                         }
-                        Text(check.detail).font(.caption).foregroundStyle(.secondary)
+                        Text(check.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         if let recovery = check.recovery {
-                            Text("Recovery: \(recovery)").font(.caption).foregroundStyle(.orange)
+                            Text(recovery)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
                         }
                     }
+                    .padding(10)
+                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("diagnostics.\(check.id)")
                 }
-                .listStyle(.inset)
             }
+
             if model.isDetailLoading {
-                OperationRow(phase: "Running checks", scope: navigation.workspace?.rawValue, detail: "Checking protocol, runtime, and credential-broker availability.")
+                OperationRow(
+                    phase: "Running checks",
+                    scope: nil,
+                    detail: "Checking protocol, runtime, and credential-broker availability."
+                )
             }
-            detailError
         }
+        .accessibilityIdentifier("overview.system-health")
     }
 
-    @ViewBuilder
-    private func sectionToolbar(actionTitle: String, action: @escaping () -> Void) -> some View {
-        HStack {
-            if let observedAt = selectedWorkspace?.observedAt {
-                Text("Last workspace observation: \(observedAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button(actionTitle, action: action)
-                .keyboardShortcut("r", modifiers: [.command])
-                .disabled(model.isDetailLoading)
+    private var needsInstallationRepair: Bool {
+        model.startupRecoveryBlockedReason != nil || model.diagnosticChecks.contains { check in
+            (check.id == "handshake" || check.id == "quick-check") && check.status != .pass
         }
     }
 

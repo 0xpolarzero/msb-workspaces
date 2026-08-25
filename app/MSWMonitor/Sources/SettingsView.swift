@@ -11,6 +11,7 @@ final class ApplicationState {
 }
 
 enum AppTab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
     case workspaces = "Workspaces"
     case github = "GitHub"
     case notifications = "Notifications"
@@ -54,8 +55,8 @@ struct AppRoute: Equatable {
             self.init(tab: .backup, workspace: workspace)
         case "activity":
             self.init(tab: .workspaces, workspace: workspace, workspaceSection: .activity)
-        case "overview":
-            self.init(tab: .workspaces, workspace: workspace, workspaceSection: .summary)
+        case "overview", "summary", "metrics", "diagnostics", "maintenance":
+            self.init(tab: .overview, workspace: workspace)
         case "notifications", "notification":
             self.init(tab: .notifications)
         case "general", "settings":
@@ -79,9 +80,9 @@ final class AppNavigationState {
     var pendingPresentation = false
 
     init(
-        tab: AppTab = .workspaces,
+        tab: AppTab = .overview,
         workspace: Workspace.ID? = nil,
-        workspaceSection: WorkspaceSection = .summary
+        workspaceSection: WorkspaceSection = .files
     ) {
         self.tab = tab
         self.workspace = workspace
@@ -224,6 +225,12 @@ struct SettingsView: View {
         Group {
             if let model = applicationState.model {
                 TabView(selection: $navigation.tab) {
+                    DetailView(model: model, navigation: navigation, mode: .overview)
+                        .tabItem {
+                            Label("Overview", systemImage: "rectangle.grid.1x2")
+                        }
+                        .tag(AppTab.overview)
+
                     DetailView(model: model, navigation: navigation, mode: .workspaces)
                         .tabItem {
                             Label("Workspaces", systemImage: "square.grid.3x3")

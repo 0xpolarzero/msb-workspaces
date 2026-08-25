@@ -112,7 +112,7 @@ struct MonitorView: View {
                             workspaceSection: .logs
                         ))
                     } else {
-                        openRoute(AppRoute(tab: .workspaces, workspaceSection: .diagnostics))
+                        openRoute(AppRoute(tab: .overview))
                     }
                 } label: {
                     Label("View Error Details", systemImage: "doc.text.magnifyingglass")
@@ -138,7 +138,7 @@ struct MonitorView: View {
     private var shortcuts: some View {
         HStack(spacing: 8) {
             Button {
-                openRoute(AppRoute(tab: .workspaces, workspace: model.selectedWorkspace, workspaceSection: .summary))
+                openRoute(AppRoute(tab: .overview, workspace: model.selectedWorkspace))
             } label: {
                 Label("Open MSW Monitor…", systemImage: "macwindow")
             }
@@ -233,7 +233,7 @@ private struct WorkspaceRow: View {
     private var primaryAction: some View {
         if workspace.state == .quarantined {
             compactButton("Review", systemImage: "exclamationmark.triangle") {
-                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .diagnostics))
+                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
             }
         } else if workspace.freshness != .fresh || workspace.state == .unknown || workspace.state == .unavailable {
             compactButton("Retry", systemImage: "arrow.clockwise") {
@@ -259,7 +259,7 @@ private struct WorkspaceRow: View {
             .accessibilityIdentifier("workspace.\(workspace.id.rawValue).start")
         } else {
             compactButton("Open MSW Monitor", systemImage: "arrow.up.right") {
-                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .summary))
+                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
             }
         }
     }
@@ -326,13 +326,13 @@ private struct WorkspaceRow: View {
             .disabled(!canOpenSite)
 
             Divider()
-            Button("Repositories") {
+            Button("Files") {
                 model.selectedWorkspace = workspace.id
-                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .repositories))
+                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .files))
             }
             Button("Open MSW Monitor…") {
                 model.selectedWorkspace = workspace.id
-                openRoute(AppRoute(tab: .workspaces, workspace: workspace.id, workspaceSection: .summary))
+                openRoute(AppRoute(tab: .overview, workspace: workspace.id))
             }
         } label: {
             Label("Actions for \(workspace.id.rawValue)", systemImage: "ellipsis")

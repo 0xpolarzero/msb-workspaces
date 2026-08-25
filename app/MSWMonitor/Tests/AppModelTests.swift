@@ -129,8 +129,8 @@ final class AppModelTests: XCTestCase {
         let diagnostics = try XCTUnwrap(AppRoute(
             deepLink: URL(string: "msw-monitor://diagnostics")!
         ))
-        XCTAssertEqual(diagnostics.tab, .workspaces)
-        XCTAssertEqual(diagnostics.workspaceSection, .diagnostics)
+        XCTAssertEqual(diagnostics.tab, .overview)
+        XCTAssertNil(diagnostics.workspaceSection)
 
         let activity = try XCTUnwrap(AppRoute(
             deepLink: URL(string: "msw-monitor://workspace/dev?section=activity")!
@@ -142,9 +142,16 @@ final class AppModelTests: XCTestCase {
         let overview = try XCTUnwrap(AppRoute(
             deepLink: URL(string: "msw-monitor://overview")!
         ))
-        XCTAssertEqual(overview.tab, .workspaces)
-        XCTAssertEqual(overview.workspaceSection, .summary)
-        XCTAssertEqual(AppNavigationState().tab, .workspaces)
+        XCTAssertEqual(overview.tab, .overview)
+        XCTAssertNil(overview.workspaceSection)
+
+        let repositories = try XCTUnwrap(AppRoute(
+            deepLink: URL(string: "msw-monitor://workspace/dev?section=repositories")!
+        ))
+        XCTAssertEqual(repositories.tab, .workspaces)
+        XCTAssertEqual(repositories.workspaceSection, .files)
+        XCTAssertEqual(AppNavigationState().tab, .overview)
+        XCTAssertEqual(AppNavigationState().workspaceSection, .files)
     }
 
     func testUnavailableLogsBecomeQuietPerWorkspaceCapabilityState() async throws {
