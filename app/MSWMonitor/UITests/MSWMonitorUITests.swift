@@ -216,13 +216,13 @@ final class MSWMonitorUITests: XCTestCase {
         }
         XCTAssertFalse(app.staticTexts["Loading repositories…"].exists)
 
-        let clearWorkspaceFilter = app.descendants(matching: .any)["workspace.filter.clear"]
-        XCTAssertTrue(clearWorkspaceFilter.waitForExistence(timeout: 2))
-        clearWorkspaceFilter.click()
+        let bulkWorkspaceFilter = app.descendants(matching: .any)["workspace.filter.toggle-all"]
+        XCTAssertTrue(bulkWorkspaceFilter.waitForExistence(timeout: 2))
+        XCTAssertEqual(bulkWorkspaceFilter.label, "Clear all workspaces")
+        bulkWorkspaceFilter.click()
         XCTAssertTrue(app.staticTexts["No workspaces selected"].waitForExistence(timeout: 2))
-        let allWorkspaceFilter = app.descendants(matching: .any)["workspace.filter.all"]
-        XCTAssertTrue(allWorkspaceFilter.waitForExistence(timeout: 2))
-        allWorkspaceFilter.click()
+        XCTAssertEqual(bulkWorkspaceFilter.label, "Select all workspaces")
+        bulkWorkspaceFilter.click()
         XCTAssertTrue(
             app.descendants(matching: .any)["repositories.workspace.dev"]
                 .waitForExistence(timeout: 2)

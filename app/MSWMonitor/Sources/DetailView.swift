@@ -445,39 +445,50 @@ struct DetailView: View {
             Text("Workspaces")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Button("All") {
-                hiddenWorkspaces.removeAll()
+            Button(hiddenWorkspaces.isEmpty ? "Clear" : "All") {
+                if hiddenWorkspaces.isEmpty {
+                    hiddenWorkspaces = Set(model.workspaces.map(\.id))
+                } else {
+                    hiddenWorkspaces.removeAll()
+                }
             }
-            .disabled(hiddenWorkspaces.isEmpty)
-            .accessibilityIdentifier("workspace.filter.all")
-            Button("Clear") {
-                hiddenWorkspaces = Set(model.workspaces.map(\.id))
-            }
-            .disabled(visibleWorkspaces.isEmpty)
-            .accessibilityIdentifier("workspace.filter.clear")
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("workspace.filter.toggle-all")
+            .accessibilityLabel(
+                hiddenWorkspaces.isEmpty ? "Clear all workspaces" : "Select all workspaces"
+            )
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     ForEach(model.workspaces) { workspace in
-                        Toggle(
-                            workspace.id.rawValue,
-                            isOn: Binding(
-                                get: { !hiddenWorkspaces.contains(workspace.id) },
-                                set: { isIncluded in
-                                    if isIncluded {
-                                        hiddenWorkspaces.remove(workspace.id)
-                                    } else {
-                                        hiddenWorkspaces.insert(workspace.id)
-                                    }
-                                }
-                            )
-                        )
-                        .toggleStyle(.checkbox)
-                        .accessibilityIdentifier("workspace.filter.\(workspace.id.rawValue)")
+                        workspaceFilterChip(for: workspace)
                     }
                 }
             }
         }
         .controlSize(.small)
+    }
+
+    private func workspaceFilterChip(for workspace: Workspace) -> some View {
+        let isSelected = !hiddenWorkspaces.contains(workspace.id)
+        return Button {
+            if isSelected {
+                hiddenWorkspaces.insert(workspace.id)
+            } else {
+                hiddenWorkspaces.remove(workspace.id)
+            }
+        } label: {
+            Label(
+                workspace.id.rawValue,
+                systemImage: isSelected ? "checkmark.circle.fill" : "circle"
+            )
+            .font(.caption.weight(.medium))
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
+        .tint(isSelected ? Color.accentColor : Color.secondary)
+        .accessibilityIdentifier("workspace.filter.\(workspace.id.rawValue)")
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var repositories: some View {
