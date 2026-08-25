@@ -326,6 +326,17 @@ final class MSWMonitorUITests: XCTestCase {
         let folderTree = app.descendants(matching: .any)["folders.tree"]
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["folders.entry.Projects"].waitForExistence(timeout: 2))
+        let repository = app.descendants(matching: .any)["repository.ui-playground-repo"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["main • 0 ahead, 0 behind"].waitForExistence(timeout: 2))
+        for confusingCopy in ["blocked", "localChanges", "checked", "Uncommitted changes"] {
+            XCTAssertEqual(
+                app.staticTexts.matching(
+                    NSPredicate(format: "label CONTAINS[c] %@", confusingCopy)
+                ).count,
+                0
+            )
+        }
 
         XCTAssertTrue(app.buttons["Logs"].waitForExistence(timeout: 2))
         app.buttons["Logs"].click()
@@ -337,6 +348,7 @@ final class MSWMonitorUITests: XCTestCase {
         assertText("Files", identifier: "details.section-title", in: app)
         XCTAssertTrue(folderTree.waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["folders.entry.Projects"].exists)
+        XCTAssertTrue(repository.exists)
         XCTAssertFalse(app.descendants(matching: .any)["folders.loading-skeleton"].exists)
         XCTAssertFalse(app.progressIndicators["Loading folders…"].exists)
     }

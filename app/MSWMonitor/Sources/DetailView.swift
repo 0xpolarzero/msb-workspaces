@@ -1837,14 +1837,9 @@ private struct RepositoryRow: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(repository.path).font(.body.weight(.medium)).textSelection(.enabled)
-                Text("\(repository.branch ?? "detached") • \(repository.pushability.rawValue) • \(repository.aheadCount) ahead, \(repository.behindCount) behind")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("Worktree: \(repository.worktreeState.rawValue) • checked \(repository.checkedAt?.formatted(date: .abbreviated, time: .shortened) ?? "at an unknown time")")
-                    .font(.caption2).foregroundStyle(.secondary)
-                if repository.worktreeState == .localChanges {
-                    Text("Uncommitted changes are not included in a push.")
-                        .font(.caption2).foregroundStyle(.orange)
-                }
+                Text("\(repository.branch ?? "detached") • \(repository.aheadCount) ahead, \(repository.behindCount) behind")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
             if repository.pushability == .pushable || repository.pushability == .publish {
@@ -1853,6 +1848,7 @@ private struct RepositoryRow: View {
             }
         }
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("repository.\(repository.path)")
     }
 }
 

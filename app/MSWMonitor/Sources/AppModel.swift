@@ -1233,6 +1233,35 @@ final class AppModel {
             ],
             freshness: .fresh
         )
+        repositoriesByWorkspace["dev"] = MSWRepositoriesResponse(
+            workspace: "dev",
+            repositories: [
+                MSWRepositorySnapshot(
+                    path: "ui-playground-repo",
+                    canonicalRemote: nil,
+                    branch: "main",
+                    upstreamRef: nil,
+                    worktreeState: .localChanges,
+                    destinationState: .unavailable,
+                    stagedCount: 0,
+                    modifiedCount: 0,
+                    deletedCount: 0,
+                    untrackedCount: 1,
+                    aheadCount: 0,
+                    behindCount: 0,
+                    localCommit: "5dce308cb96398eb220378edd913ce1c1167c7ac",
+                    remoteCommit: nil,
+                    pushability: .blocked,
+                    needsStart: false,
+                    freshness: .fresh,
+                    checkedAt: Date()
+                )
+            ],
+            needsStart: false,
+            freshness: .fresh,
+            worktreeStatusIncluded: true,
+            notice: nil
+        )
         directoryFixture = [
             MSWDirectoryResponse(
                 workspace: "dev",
