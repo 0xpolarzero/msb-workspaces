@@ -122,14 +122,20 @@ struct MSWDiagnosticCheck: Codable, Sendable, Equatable, Identifiable {
 
 struct MSWBackupResult: Codable, Sendable, Equatable {
     let archive: URL
+    let archiveBytes: Int64
+    let completedAt: Date
     let checksum: URL?
     let stoppedWorkspaces: [String]
     let restartedWorkspaces: [String]
+
+    var workspacesNeedingRestart: [String] {
+        Array(Set(stoppedWorkspaces).subtracting(restartedWorkspaces)).sorted()
+    }
 }
 
 struct MSWBackupPreview: Codable, Sendable, Equatable {
     let destination: URL
-    let requiredBytes: Int64
+    let estimatedSourceBytes: Int64
     let runningWorkspaces: [String]
 }
 
@@ -152,14 +158,14 @@ actor MSWDiagnostics {
         guard result.destination.hasPrefix("/"),
               !result.destination.contains("\0"),
               previewDestination.path == selectedDestination.path,
-              result.requiredBytes > 0,
+              result.estimatedSourceBytes > 0,
               Set(result.runningWorkspaces).count == result.runningWorkspaces.count,
               result.runningWorkspaces.allSatisfy(WorkspaceID.isValid) else {
             throw MSWClientError.malformedJSON(command: "backup-preview")
         }
         return MSWBackupPreview(
             destination: previewDestination,
-            requiredBytes: result.requiredBytes,
+            estimatedSourceBytes: result.estimatedSourceBytes,
             runningWorkspaces: result.runningWorkspaces
         )
     }
@@ -167,13 +173,24 @@ actor MSWDiagnostics {
     func backup(to directory: URL) async throws -> MSWBackupResult {
         try validateDirectory(directory)
         let envelope = try await client.backup(directory: directory)
-        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup") }
+        guard let result = envelope.result,
+              let completedAt = envelope.observedAt else {
+            throw MSWClientError.missingResult(command: "backup")
+        }
         guard result.archive.hasPrefix("/"), !result.archive.contains("\0"),
-              result.checksum.map({ $0.hasPrefix("/") && !$0.contains("\0") }) ?? true else {
+              result.archiveBytes > 0,
+              result.checksum.map({ $0.hasPrefix("/") && !$0.contains("\0") }) ?? true,
+              Set(result.stoppedWorkspaces).count == result.stoppedWorkspaces.count,
+              Set(result.restartedWorkspaces).count == result.restartedWorkspaces.count,
+              result.stoppedWorkspaces.allSatisfy(WorkspaceID.isValid),
+              result.restartedWorkspaces.allSatisfy(WorkspaceID.isValid),
+              Set(result.restartedWorkspaces).isSubset(of: Set(result.stoppedWorkspaces)) else {
             throw MSWClientError.malformedJSON(command: "backup")
         }
         return MSWBackupResult(
             archive: URL(fileURLWithPath: result.archive),
+            archiveBytes: result.archiveBytes,
+            completedAt: completedAt,
             checksum: result.checksum.map { URL(fileURLWithPath: $0) },
             stoppedWorkspaces: result.stoppedWorkspaces,
             restartedWorkspaces: result.restartedWorkspaces

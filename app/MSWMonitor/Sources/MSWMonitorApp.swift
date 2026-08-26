@@ -358,7 +358,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard path.hasPrefix("/") else { return nil }
                 return URL(fileURLWithPath: path, isDirectory: true)
             }.first
-            model.installBackupUITestFixture(destination: backupDestination)
+            let backupResultScenario = arguments.compactMap { argument -> AppModel.BackupUITestResultScenario? in
+                guard argument.hasPrefix("--ui-test-backup-result=") else { return nil }
+                switch argument.dropFirst("--ui-test-backup-result=".count) {
+                case "success": return .success
+                case "partial": return .partial
+                case "failure": return .failure
+                default: return nil
+                }
+            }.first
+            model.installBackupUITestFixture(
+                destination: backupDestination,
+                resultScenario: backupResultScenario
+            )
         }
         applicationState.model = model
         githubSettingsState.configure(provider: fixtureProvider ?? provider)

@@ -882,6 +882,7 @@ struct MSWCheckResult: Codable, Sendable {
 
 struct MSWBackupResponse: Codable, Sendable {
     let archive: String
+    let archiveBytes: Int64
     let checksum: String?
     let stoppedWorkspaces: [String]
     let restartedWorkspaces: [String]
@@ -889,7 +890,7 @@ struct MSWBackupResponse: Codable, Sendable {
 
 struct MSWBackupPreviewResponse: Codable, Sendable {
     let destination: String
-    let requiredBytes: Int64
+    let estimatedSourceBytes: Int64
     let runningWorkspaces: [String]
 }
 

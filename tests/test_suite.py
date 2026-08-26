@@ -3133,9 +3133,9 @@ class PackagedBehaviorTests(MSWTestCase):
         preview = json.loads(self.env.msw(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
-        self.assertEqual(set(preview), {"destination", "requiredBytes", "runningWorkspaces"})
+        self.assertEqual(set(preview), {"destination", "estimatedSourceBytes", "runningWorkspaces"})
         self.assertEqual(preview["destination"], str(destination.resolve()))
-        self.assertGreater(preview["requiredBytes"], 0)
+        self.assertGreater(preview["estimatedSourceBytes"], 0)
         self.assertEqual(preview["runningWorkspaces"], ["dev"])
 
         preview_with_status_unavailable = json.loads(self.env.msw(
@@ -3161,6 +3161,10 @@ class PackagedBehaviorTests(MSWTestCase):
         result = document["result"]
         self.assertTrue(result["archive"].endswith(".tar.zst"), result)
         self.assertTrue(Path(result["archive"]).is_file())
+        self.assertEqual(result["archiveBytes"], Path(result["archive"]).stat().st_size)
+        self.assertGreater(result["archiveBytes"], 0)
+        self.assertNotIn("archiveBytes", preview)
+        self.assertNotIn("estimatedSourceBytes", result)
         self.assertEqual(result["checksum"], result["archive"] + ".sha256")
         self.assertEqual(result["stoppedWorkspaces"], ["dev"])
         self.assertEqual(result["restartedWorkspaces"], ["dev"])

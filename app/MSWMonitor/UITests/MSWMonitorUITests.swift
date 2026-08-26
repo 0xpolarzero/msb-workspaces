@@ -221,11 +221,15 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(confirmationTitle.value as? String, "Create new backup")
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.required-space.label"].value as? String,
-            "Required disk space"
+            "Estimated source data"
         )
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.required-space.value"].value as? String,
             "16 GB"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["backup.estimate.explanation"].value as? String,
+            "This is the managed data size before tar/zstd streaming and compression. The final compressed archive size is reported after creation."
         )
         XCTAssertEqual(app.buttons["backup.confirmation.create"].label, "Create Backup")
         app.buttons["backup.confirmation.cancel"].click()
@@ -236,6 +240,90 @@ final class MSWMonitorUITests: XCTestCase {
         app.statusItems["statusItem.button"].click()
         app.buttons["quit.button"].click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
+    func testBackupResultCardSuccessPartialAndFailure() throws {
+        let scenarios = ["success", "partial", "failure"]
+        var launchedApps: [XCUIApplication] = []
+        var destinations: [URL] = []
+        defer {
+            launchedApps.forEach { terminateIfNeeded($0) }
+            destinations.forEach { try? FileManager.default.removeItem(at: $0) }
+        }
+
+        for scenario in scenarios {
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MSWMonitor Backup Result \(scenario)-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            destinations.append(destination)
+            let app = launchFixture([
+                "--ui-test-open-popover",
+                "--ui-test-backup-destination=\(destination.path)",
+                "--ui-test-backup-result=\(scenario)"
+            ])
+            launchedApps.append(app)
+
+            XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+            app.buttons["open-monitor.button"].click()
+            XCTAssertTrue(app.toolbars.buttons["Backup"].waitForExistence(timeout: 3))
+            app.toolbars.buttons["Backup"].click()
+            app.buttons["backup.create-new.button"].click()
+            let destinationPanel = app.dialogs["Choose Backup Destination"]
+            XCTAssertTrue(destinationPanel.waitForExistence(timeout: 3))
+            destinationPanel.buttons["Choose Destination…"].click()
+            XCTAssertTrue(app.buttons["backup.confirmation.create"].waitForExistence(timeout: 3))
+            app.buttons["backup.confirmation.create"].click()
+
+            XCTAssertTrue(
+                app.descendants(matching: .any)["backup.operation.card"]
+                    .waitForExistence(timeout: 3)
+            )
+            XCTAssertFalse(app.staticTexts["Latest backup result"].exists)
+            XCTAssertFalse(app.staticTexts["Outcome unknown"].exists)
+            XCTAssertFalse(app.buttons["Retry Backup"].exists)
+
+            switch scenario {
+            case "success":
+                assertText("Archive created", identifier: "backup.result.status", in: app)
+                assertText(
+                    "microsandbox-all-20260826-120000.tar.zst",
+                    identifier: "backup.result.archive",
+                    in: app
+                )
+                assertBackupArchiveSize(in: app)
+                assertIdentifier("backup.result.completed", in: app)
+                XCTAssertFalse(app.descendants(matching: .any)["backup.result.restart-warning"].exists)
+                XCTAssertFalse(app.staticTexts["Request failed"].exists)
+            case "partial":
+                assertText("Archive created", identifier: "backup.result.status", in: app)
+                assertText(
+                    "Archive created. Restart required for: personal.",
+                    identifier: "backup.result.restart-warning",
+                    in: app
+                )
+                assertBackupArchiveSize(in: app)
+                XCTAssertFalse(app.staticTexts["Request failed"].exists)
+                XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
+                let refresh = app.buttons["backup.result.refresh-workspaces"]
+                XCTAssertTrue(refresh.waitForExistence(timeout: 2))
+                XCTAssertTrue(refresh.isEnabled)
+                refresh.click()
+            case "failure":
+                assertText("Request failed", identifier: "backup.result.failure", in: app)
+                XCTAssertEqual(
+                    app.descendants(matching: .any)
+                        .matching(NSPredicate(format: "value == %@", "Request failed")).count,
+                    1
+                )
+                XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
+                XCTAssertFalse(app.descendants(matching: .any)["backup.result.archive"].exists)
+            default:
+                XCTFail("Unexpected backup result scenario")
+            }
+
+            app.typeKey("q", modifierFlags: .command)
+            XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+        }
     }
 
     func testOperationFailureOpensDetailedLogs() {
@@ -1452,6 +1540,16 @@ final class MSWMonitorUITests: XCTestCase {
         let element = app.staticTexts[identifier]
         XCTAssertTrue(element.waitForExistence(timeout: 2), "Missing \(identifier)")
         XCTAssertEqual(element.value as? String, text)
+    }
+
+    private func assertBackupArchiveSize(in app: XCUIApplication) {
+        let element = app.staticTexts["backup.result.size"]
+        XCTAssertTrue(element.waitForExistence(timeout: 2), "Missing backup.result.size")
+        let value = element.value as? String ?? ""
+        XCTAssertNotNil(
+            value.range(of: #"^7[.,]3 M(B|o)$"#, options: .regularExpression),
+            "Unexpected compressed archive size: \(value)"
+        )
     }
 
     private func assertAction(

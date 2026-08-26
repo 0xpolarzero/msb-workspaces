@@ -710,6 +710,12 @@ struct SourceEditorLauncher {
 @Observable
 @MainActor
 final class AppModel {
+    enum BackupUITestResultScenario: Equatable {
+        case success
+        case partial
+        case failure
+    }
+
     private(set) var workspaces: [Workspace]
     private(set) var lastObservedAt: Date?
     private(set) var lastError: String?
@@ -779,8 +785,9 @@ final class AppModel {
     private var detailRequestGeneration = 0
     private var systemHealthGeneration = 0
     private var directoryFixture: [MSWDirectoryResponse] = []
-    private var backupPreviewFixtureRequiredBytes: Int64?
+    private var backupPreviewFixtureEstimatedSourceBytes: Int64?
     private var backupPreviewFixtureDestination: URL?
+    private var backupUITestResultScenario: BackupUITestResultScenario?
     private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
@@ -1803,15 +1810,17 @@ final class AppModel {
     }
 
     func installBackupUITestFixture(
-        requiredBytes: Int64 = 16_000_000_000,
-        destination: URL? = nil
+        estimatedSourceBytes: Int64 = 16_000_000_000,
+        destination: URL? = nil,
+        resultScenario: BackupUITestResultScenario? = nil
     ) {
-        backupPreviewFixtureRequiredBytes = requiredBytes
+        backupPreviewFixtureEstimatedSourceBytes = estimatedSourceBytes
         backupPreviewFixtureDestination = destination
+        backupUITestResultScenario = resultScenario
     }
 
     func backupUITestDestinationIfAvailable() -> URL? {
-        guard backupPreviewFixtureRequiredBytes != nil else { return nil }
+        guard backupPreviewFixtureEstimatedSourceBytes != nil else { return nil }
         return backupPreviewFixtureDestination
     }
 
@@ -1820,10 +1829,10 @@ final class AppModel {
         detailError = nil
         pendingBackupPreview = nil
         backupRequiresRuntimeRepair = false
-        if let requiredBytes = backupPreviewFixtureRequiredBytes {
+        if let estimatedSourceBytes = backupPreviewFixtureEstimatedSourceBytes {
             let preview = MSWBackupPreview(
                 destination: directory,
-                requiredBytes: requiredBytes,
+                estimatedSourceBytes: estimatedSourceBytes,
                 runningWorkspaces: workspaces.filter { $0.state == .running }.map(\.id.rawValue)
             )
             pendingBackupPreview = preview
@@ -1855,6 +1864,35 @@ final class AppModel {
 
     func createBackup(to directory: URL) {
         pendingBackupPreview = nil
+        backupResult = nil
+        maintenanceMessage = nil
+        detailError = nil
+        if let scenario = backupUITestResultScenario {
+            beginOperation(kind: .backup, workspace: nil, action: "backup", message: "Creating backup.")
+            switch scenario {
+            case .success, .partial:
+                let result = MSWBackupResult(
+                    archive: directory.appendingPathComponent("microsandbox-all-20260826-120000.tar.zst"),
+                    archiveBytes: 7_340_032,
+                    completedAt: Date(timeIntervalSince1970: 1_777_464_000),
+                    checksum: nil,
+                    stoppedWorkspaces: scenario == .partial ? ["dev", "personal"] : ["dev"],
+                    restartedWorkspaces: ["dev"]
+                )
+                completeBackup(result)
+            case .failure:
+                let error = MSWClientError.unavailable("The backup could not be created.")
+                detailError = error.localizedDescription
+                failOperation(
+                    kind: .backup,
+                    workspace: nil,
+                    action: "backup",
+                    error: error,
+                    notificationKind: .backupFailure
+                )
+            }
+            return
+        }
         guard let diagnostics else {
             detailError = "Backups are unavailable in fixture mode."
             return
@@ -1864,42 +1902,39 @@ final class AppModel {
             return
         }
         isDetailLoading = true
-        detailError = nil
         beginOperation(kind: .backup, workspace: nil, action: "backup", message: "Creating backup.")
         Task { [weak self] in
             do {
                 let result = try await diagnostics.backup(to: directory)
-                self?.backupResult = result
-                let stopped = Set(result.stoppedWorkspaces)
-                let restarted = Set(result.restartedWorkspaces)
-                let operationKey = self?.operationKey(kind: .backup, workspace: nil) ?? "backup:all"
-                if stopped == restarted {
-                    self?.maintenanceMessage = "Backup created at \(result.archive.lastPathComponent)."
-                    self?.finishOperation(
-                        key: operationKey,
-                        outcome: .succeeded,
-                        message: "Backup completed."
-                    )
-                } else {
-                    let message = "Backup archive created, but not every workspace that was stopped was restarted. Review workspace state before retrying."
-                    self?.maintenanceMessage = message
-                    self?.detailError = message
-                    self?.finishOperation(key: operationKey, outcome: .unknown, message: message)
-                    self?.emitNotification(
-                        kind: .backupFailure,
-                        workspace: nil,
-                        title: "Backup restart incomplete",
-                        message: message,
-                        recovery: "Review Activity and workspace state before retrying.",
-                        deepLink: "msw-monitor://activity"
-                    )
-                }
+                self?.completeBackup(result)
             } catch {
                 self?.detailError = error.localizedDescription
                 self?.failOperation(kind: .backup, workspace: nil, action: "backup", error: error, notificationKind: .backupFailure)
             }
             self?.isDetailLoading = false
         }
+    }
+
+    func refreshBackupWorkspaceState() {
+        guard !isMaintenanceOperationInFlight else { return }
+        refresh()
+    }
+
+    private func completeBackup(_ result: MSWBackupResult) {
+        backupResult = result
+        detailError = nil
+        let message: String
+        if result.workspacesNeedingRestart.isEmpty {
+            message = "Archive created."
+        } else {
+            message = "Archive created. Restart required for: \(result.workspacesNeedingRestart.joined(separator: ", "))."
+        }
+        maintenanceMessage = message
+        finishOperation(
+            key: operationKey(kind: .backup, workspace: nil),
+            outcome: .succeeded,
+            message: message
+        )
     }
 
     func restoreBackup(archive: URL, confirmation: String) {

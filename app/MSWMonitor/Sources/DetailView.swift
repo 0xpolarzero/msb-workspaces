@@ -1836,7 +1836,7 @@ private extension DetailView {
                     }
 
                     if model.isBackupPreviewLoading {
-                        ProgressView("Calculating required disk space…")
+                        ProgressView("Estimating managed source data…")
                             .accessibilityIdentifier("backup.preview.loading")
                     }
                     if let backupDestination {
@@ -1875,7 +1875,15 @@ private extension DetailView {
                     }
                 }
 
-                if let operation = latestModelMaintenanceOperation {
+                if latestBackupOperation != nil || model.backupResult != nil {
+                    BackupOperationCard(
+                        operation: latestBackupOperation,
+                        result: model.backupResult,
+                        refreshWorkspaceState: model.refreshBackupWorkspaceState
+                    )
+                }
+
+                if let operation = latestRestoreOperation {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Operation")
                             .font(.headline)
@@ -1884,7 +1892,7 @@ private extension DetailView {
                             retryMaintenance(kind: operation.kind)
                         }
                     }
-                } else if let operation = maintenanceOperation {
+                } else if let operation = maintenanceOperation, operation.kind == .restore {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Operation")
                             .font(.headline)
@@ -1899,38 +1907,9 @@ private extension DetailView {
                     }
                 }
 
-                if let result = model.backupResult {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Latest backup result")
-                            .font(.headline)
-                            .accessibilityAddTraits(.isHeader)
-                        Label("Archive created", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                        LabeledContent("Archive", value: result.archive.lastPathComponent)
-                        LabeledContent("Completed", value: maintenanceOperation?.finishedAt?.formatted(date: .abbreviated, time: .standard) ?? "Time not retained")
-                        LabeledContent("Stopped for backup", value: result.stoppedWorkspaces.isEmpty ? "None reported" : result.stoppedWorkspaces.joined(separator: ", "))
-                        LabeledContent("Restarted afterward", value: result.restartedWorkspaces.isEmpty ? "None reported" : result.restartedWorkspaces.joined(separator: ", "))
-                        if let checksum = result.checksum {
-                            LabeledContent("Checksum sidecar", value: checksum.lastPathComponent)
-                            Text("The runtime reported a checksum file. This UI does not claim verification of its contents.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Label("No checksum was reported by the runtime.", systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                        let notRestarted = Set(result.stoppedWorkspaces).subtracting(result.restartedWorkspaces)
-                        if !notRestarted.isEmpty {
-                            Text("Needs attention: \(notRestarted.sorted().joined(separator: ", ")) stopped for backup but was not reported restarted. Refresh state before acting.")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !showsBackupFailureCard {
+                    detailError
                 }
-
-                detailError
             }
             .padding(20)
         }
@@ -2075,10 +2054,23 @@ private extension DetailView {
         maintenanceOperation = operation
     }
 
-    private var latestModelMaintenanceOperation: MSWOperationState? {
+    private var latestBackupOperation: MSWOperationState? {
         model.operationStates.values
-            .filter { $0.kind == .backup || $0.kind == .restore }
+            .filter { $0.kind == .backup }
             .max { $0.updatedAt < $1.updatedAt }
+    }
+
+    private var latestRestoreOperation: MSWOperationState? {
+        model.operationStates.values
+            .filter { $0.kind == .restore }
+            .max { $0.updatedAt < $1.updatedAt }
+    }
+
+    private var showsBackupFailureCard: Bool {
+        guard let operation = latestBackupOperation,
+              operation.outcome == .failed,
+              let error = model.detailError else { return false }
+        return error == operation.message
     }
 
     private func retryMaintenance(kind: MSWOperationState.Kind) {
@@ -2381,12 +2373,16 @@ private struct BackupReviewView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Text("Required disk space")
+                Text("Estimated source data")
                     .accessibilityIdentifier("backup.required-space.label")
                 Spacer()
-                Text(ByteCountFormatter.string(fromByteCount: preview.requiredBytes, countStyle: .file))
+                Text(ByteCountFormatter.string(fromByteCount: preview.estimatedSourceBytes, countStyle: .file))
                     .accessibilityIdentifier("backup.required-space.value")
             }
+            Text("This is the managed data size before tar/zstd streaming and compression. The final compressed archive size is reported after creation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("backup.estimate.explanation")
             if isBusy {
                 Text("Another backup or restore is already in progress. Wait for it to finish before starting this operation.")
                     .font(.caption)
@@ -2469,12 +2465,83 @@ private struct MaintenanceOperation: Equatable {
     var outcome: Outcome
 }
 
+private struct BackupOperationCard: View {
+    let operation: MSWOperationState?
+    let result: MSWBackupResult?
+    let refreshWorkspaceState: () -> Void
+
+    var body: some View {
+        GroupBox("Backup status") {
+            VStack(alignment: .leading, spacing: 8) {
+                if operation?.outcome == .pending {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text("Creating backup")
+                            .font(.body.weight(.medium))
+                    }
+                    Text(operation?.message ?? "Creating the compressed archive.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let result {
+                    Label("Archive created", systemImage: "checkmark.circle.fill")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(result.workspacesNeedingRestart.isEmpty ? .green : .orange)
+                        .accessibilityIdentifier("backup.result.status")
+                    HStack {
+                        Text("Archive")
+                        Spacer()
+                        Text(result.archive.lastPathComponent)
+                            .accessibilityIdentifier("backup.result.archive")
+                    }
+                    HStack {
+                        Text("Compressed size")
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: result.archiveBytes, countStyle: .file))
+                            .accessibilityIdentifier("backup.result.size")
+                    }
+                    HStack {
+                        Text("Completed")
+                        Spacer()
+                        Text(result.completedAt.formatted(date: .abbreviated, time: .standard))
+                            .accessibilityIdentifier("backup.result.completed")
+                    }
+                    if !result.workspacesNeedingRestart.isEmpty {
+                        Text("Archive created. Restart required for: \(result.workspacesNeedingRestart.joined(separator: ", ")).")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("backup.result.restart-warning")
+                        Button("Refresh Workspace State", action: refreshWorkspaceState)
+                            .disabled(operation?.outcome == .pending)
+                            .accessibilityIdentifier("backup.result.refresh-workspaces")
+                    }
+                } else if let operation, operation.outcome == .failed {
+                    Label("Request failed", systemImage: "exclamationmark.triangle.fill")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("backup.result.failure")
+                    Text(operation.message)
+                        .font(.caption)
+                        .textSelection(.enabled)
+                    if let recovery = operation.recovery {
+                        Text(recovery.recovery ?? recovery.reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("backup.operation.card")
+    }
+}
+
 private struct MaintenanceOperationView: View {
     let operation: MaintenanceOperation
     let retry: () -> Void
 
     var body: some View {
-        GroupBox(operation.kind == .backup ? "Backup operation" : "Restore operation") {
+        GroupBox("Restore operation") {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     if operation.outcome == .running { ProgressView().controlSize(.small) }
@@ -2495,9 +2562,9 @@ private struct MaintenanceOperationView: View {
                     }
                 case .failed(let message):
                     Label(message, systemImage: "xmark.circle.fill").font(.caption).foregroundStyle(.red)
-                    Text(operation.kind == .restore ? "Rollback status was not reported. Outcome is unknown; run diagnostics and refresh before retrying." : "No archive result was reported. Review the destination and available space before retrying.")
+                    Text("Rollback status was not reported. Outcome is unknown; run diagnostics and refresh before retrying.")
                         .font(.caption).foregroundStyle(.orange)
-                    Button(operation.kind == .restore ? "Review Retry" : "Retry Backup", action: retry)
+                    Button("Review Retry", action: retry)
                 }
                 if let finishedAt = operation.finishedAt {
                     LabeledContent("Finished", value: finishedAt.formatted(date: .abbreviated, time: .standard))
