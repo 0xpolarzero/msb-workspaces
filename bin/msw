@@ -4325,7 +4325,8 @@ readonly MSW_BACKUP_PROTOCOL_VERSION=2
 readonly BACKUP_OPERATION_ROOT="${MSW_BACKUP_OPERATION_ROOT:-$HOME/.local/state/msw/backup-operations}"
 readonly BACKUP_HISTORY_FILE="${MSW_BACKUP_HISTORY_FILE:-$HOME/.local/state/msw/backup-history.json}"
 readonly BACKUP_SNAPSHOT_SESSION="$BACKUP_OPERATION_ROOT/.snapshot-session.json"
-readonly BACKUP_SNAPSHOT_LOCK="$BACKUP_OPERATION_ROOT/.snapshot-coordinator-lock"
+readonly BACKUP_SNAPSHOT_LOCK="$BACKUP_OPERATION_ROOT/.snapshot-coordinator.lock"
+readonly BACKUP_SNAPSHOT_OWNER="$BACKUP_OPERATION_ROOT/.snapshot-coordinator-owner.json"
 
 backup_state_prepare() {
   umask 077
@@ -4377,40 +4378,32 @@ backup_record_progress() {
 }
 
 backup_snapshot_lock_acquire() {
-  local owner expected current attempts=0 self_started
+  local self_started owner_tmp
   self_started="$(backup_process_signature "$$")"
   [[ -n "$self_started" ]] || return 1
-  while ! mkdir "$BACKUP_SNAPSHOT_LOCK" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    owner="$(/bin/cat "$BACKUP_SNAPSHOT_LOCK/owner" 2>/dev/null || printf 0)"
-    expected="$(/bin/cat "$BACKUP_SNAPSHOT_LOCK/owner-started" 2>/dev/null || true)"
-    if (( attempts < 5 )) && { [[ ! "$owner" =~ ^[0-9]+$ || "$owner" -le 1 ]] || [[ -z "$expected" ]]; }; then
-      sleep 0.05
-      continue
-    fi
-    current="$(backup_process_signature "$owner")"
-    if [[ "$owner" =~ ^[0-9]+$ && "$owner" -gt 1 && -n "$expected" && "$current" == "$expected" ]]; then
-      (( attempts < 400 )) || return 1
-      sleep 0.05
-      continue
-    fi
-    rm -f "$BACKUP_SNAPSHOT_LOCK/owner" "$BACKUP_SNAPSHOT_LOCK/owner-started"
-    rmdir "$BACKUP_SNAPSHOT_LOCK" 2>/dev/null || { sleep 0.05; continue; }
-  done
-  printf '%s\n' "$$" >"$BACKUP_SNAPSHOT_LOCK/owner"
-  printf '%s\n' "$self_started" >"$BACKUP_SNAPSHOT_LOCK/owner-started"
-  chmod 600 "$BACKUP_SNAPSHOT_LOCK/owner" "$BACKUP_SNAPSHOT_LOCK/owner-started"
+  [[ -n "$LOCKF_BIN" && -x "$LOCKF_BIN" ]] || return 1
+  if ! exec 7>>"$BACKUP_SNAPSHOT_LOCK"; then return 1; fi
+  chmod 600 "$BACKUP_SNAPSHOT_LOCK" || { exec 7>&-; return 1; }
+  if ! "$LOCKF_BIN" -s -t 500 7; then exec 7>&-; return 1; fi
+  owner_tmp="$(mktemp "$BACKUP_OPERATION_ROOT/.snapshot-owner.XXXXXX")"
+  if ! "$JQ_BIN" -cn --argjson pid "$$" --arg processStarted "$self_started" --arg acquiredAt "$(app_now)" \
+    '{schemaVersion:1,pid:$pid,processStarted:$processStarted,acquiredAt:$acquiredAt}' >"$owner_tmp"; then
+    rm -f "$owner_tmp"; exec 7>&-; return 1
+  fi
+  if ! chmod 600 "$owner_tmp" || ! mv "$owner_tmp" "$BACKUP_SNAPSHOT_OWNER"; then
+    rm -f "$owner_tmp"; exec 7>&-; return 1
+  fi
 }
 
 backup_snapshot_lock_release() {
   local owner expected current
-  owner="$(/bin/cat "$BACKUP_SNAPSHOT_LOCK/owner" 2>/dev/null || printf 0)"
-  expected="$(/bin/cat "$BACKUP_SNAPSHOT_LOCK/owner-started" 2>/dev/null || true)"
+  owner="$($JQ_BIN -r '.pid // 0' "$BACKUP_SNAPSHOT_OWNER" 2>/dev/null || printf 0)"
+  expected="$($JQ_BIN -r '.processStarted // empty' "$BACKUP_SNAPSHOT_OWNER" 2>/dev/null || true)"
   current="$(backup_process_signature "$$")"
   if [[ "$owner" == "$$" && -n "$expected" && "$expected" == "$current" ]]; then
-    rm -f "$BACKUP_SNAPSHOT_LOCK/owner" "$BACKUP_SNAPSHOT_LOCK/owner-started"
-    rmdir "$BACKUP_SNAPSHOT_LOCK" 2>/dev/null || true
+    rm -f "$BACKUP_SNAPSHOT_OWNER"
   fi
+  exec 7>&-
 }
 
 backup_snapshot_store() {
@@ -4459,17 +4452,25 @@ backup_snapshot_reconcile_locked() {
   [[ -e "$BACKUP_SNAPSHOT_SESSION" ]] || return 0
   [[ -f "$BACKUP_SNAPSHOT_SESSION" && ! -L "$BACKUP_SNAPSHOT_SESSION" ]] || return 1
   "$JQ_BIN" -e '
-    select(.schemaVersion == 1 and (.sessionId | type == "string") and
+    select(.schemaVersion == 1 and (.sessionId | type == "string" and test("^[a-z0-9-]{8,64}$")) and
       (.state == "quiescing" or .state == "ready" or .state == "restoring" or .state == "restored") and
       (.originallyRunning | type == "array") and all(.originallyRunning[]; type == "string") and
+      ((.originallyRunning | unique | length) == (.originallyRunning | length)) and
       (.restartedWorkspaces | type == "array") and (.restartPending | type == "array") and
       (.members | type == "array") and all(.members[];
-        (.operationId | type == "string") and (.pid | type == "number") and
-        (.processStarted | type == "string") and
+        (.operationId | type == "string" and test("^(direct-)?[a-z0-9-]{8,64}$")) and
+        (.pid | type == "number" and . > 1 and floor == .) and
+        (.processStarted | type == "string" and length > 0) and
         (.phase == "archiving" or .phase == "complete") and
-        ((.archivePid == null) or (.archivePid | type == "number")) and
-        ((.archiveProcessStarted == null) or (.archiveProcessStarted | type == "string"))))
+        (((.archivePid == null) and (.archiveProcessStarted == null)) or
+          ((.archivePid | type == "number" and . > 1 and floor == .) and
+           (.archiveProcessStarted | type == "string" and length > 0)))) and
+      ((.members | map(.operationId) | unique | length) == (.members | length)))
   ' "$BACKUP_SNAPSHOT_SESSION" >/dev/null || return 1
+  while IFS= read -r box; do
+    [[ -n "$box" ]] || continue
+    is_workspace "$box" || return 1
+  done < <("$JQ_BIN" -r '.originallyRunning[],.restartedWorkspaces[],.restartPending[]' "$BACKUP_SNAPSHOT_SESSION")
   while IFS= read -r member; do
     [[ -n "$member" ]] || continue
     pid="$($JQ_BIN -r '.pid' <<<"$member")"
@@ -4505,7 +4506,7 @@ backup_snapshot_reconcile_locked() {
 }
 
 backup_snapshot_join() {
-  local operation_id="$1" member signature original='[]' box session_id
+  local operation_id="$1" member signature original='[]' box session_id session_tmp
   signature="$(backup_process_signature "$$")"
   [[ -n "$signature" ]] || return 1
   member="$($JQ_BIN -cn --arg operationId "$operation_id" --argjson pid "$$" --arg processStarted "$signature" --arg joinedAt "$(app_now)" '{operationId:$operationId,pid:$pid,processStarted:$processStarted,phase:"archiving",joinedAt:$joinedAt}')"
@@ -4522,10 +4523,20 @@ backup_snapshot_join() {
         [[ -n "$box" ]] && original="$($JQ_BIN -cn --argjson a "$original" --arg v "$box" '$a + [$v]')"
       done < <(running_workspaces)
       session_id="$(app_request_id | /usr/bin/tr '[:upper:]' '[:lower:]')"
-      "$JQ_BIN" -cn --arg sessionId "$session_id" --arg now "$(app_now)" --argjson original "$original" --argjson member "$member" \
-        '{schemaVersion:1,sessionId:$sessionId,state:"quiescing",createdAt:$now,updatedAt:$now,quiescedAt:null,restoredAt:null,originallyRunning:$original,restartedWorkspaces:[],restartPending:[],members:[$member]}' >"$BACKUP_SNAPSHOT_SESSION.tmp"
-      chmod 600 "$BACKUP_SNAPSHOT_SESSION.tmp"; mv "$BACKUP_SNAPSHOT_SESSION.tmp" "$BACKUP_SNAPSHOT_SESSION"
-      if ! backup_snapshot_reconcile_locked; then backup_snapshot_lock_release; return 1; fi
+      session_tmp="$(mktemp "$BACKUP_OPERATION_ROOT/.snapshot-session.XXXXXX")"
+      if ! "$JQ_BIN" -cn --arg sessionId "$session_id" --arg now "$(app_now)" --argjson original "$original" --argjson member "$member" \
+        '{schemaVersion:1,sessionId:$sessionId,state:"quiescing",createdAt:$now,updatedAt:$now,quiescedAt:null,restoredAt:null,originallyRunning:$original,restartedWorkspaces:[],restartPending:[],members:[$member]}' >"$session_tmp" ||
+        ! chmod 600 "$session_tmp" || ! mv "$session_tmp" "$BACKUP_SNAPSHOT_SESSION"; then
+        rm -f "$session_tmp"
+        backup_snapshot_lock_release
+        return 1
+      fi
+      if ! backup_snapshot_reconcile_locked; then
+        backup_snapshot_store '.members |= map(select(.operationId != $operationId))' --arg operationId "$operation_id" || true
+        backup_snapshot_reconcile_locked || true
+        backup_snapshot_lock_release
+        return 1
+      fi
     else
       backup_snapshot_store '.members += [$member] | .updatedAt=$now' --argjson member "$member" --arg now "$(app_now)" || { backup_snapshot_lock_release; return 1; }
     fi
@@ -4535,6 +4546,20 @@ backup_snapshot_join() {
     backup_snapshot_lock_release
     return 0
   done
+}
+
+backup_snapshot_running_workspaces() {
+  local operation_id="$1" rc=0
+  backup_snapshot_lock_acquire || return 1
+  backup_snapshot_reconcile_locked || rc=$?
+  if (( rc == 0 )); then
+    "$JQ_BIN" -e --arg operationId "$operation_id" '.members[] | select(.operationId == $operationId)' "$BACKUP_SNAPSHOT_SESSION" >/dev/null 2>&1 || rc=1
+  fi
+  if (( rc == 0 )); then
+    "$JQ_BIN" -r '.originallyRunning[]' "$BACKUP_SNAPSHOT_SESSION" || rc=$?
+  fi
+  backup_snapshot_lock_release
+  return "$rc"
 }
 
 backup_snapshot_rebind() {
@@ -4631,7 +4656,7 @@ running_workspaces() {
 }
 
 cmd_backup() {
-  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info result_sidecar temp running_file box rel home_real managed_snapshot=0
+  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info result_sidecar temp running_file box rel home_real managed_snapshot=0 direct_snapshot=0 snapshot_member_id="" snapshot_outcome backup_rc=0
   require_command_path gtar "$GTAR_BIN"
   require_command_path zstd "$ZSTD_BIN"
   require_command_path shasum "$SHASUM_BIN"
@@ -4657,10 +4682,22 @@ cmd_backup() {
     managed_snapshot=1
     "$JQ_BIN" -r '.runningWorkspaces[]' "$(backup_record_path "$MSW_BACKUP_OPERATION_ID")" >"$running_file"
   else
-    running_workspaces >"$running_file"
+    backup_state_prepare
+    snapshot_member_id="direct-$(app_request_id | /usr/bin/tr '[:upper:]' '[:lower:]')"
+    if ! backup_snapshot_join "$snapshot_member_id"; then
+      rm -rf "$temp"
+      fatal "could not join the shared backup snapshot"
+    fi
+    direct_snapshot=1
+    managed_snapshot=1
+    if ! backup_snapshot_running_workspaces "$snapshot_member_id" >"$running_file"; then
+      backup_snapshot_finish "$snapshot_member_id" >/dev/null 2>&1 || true
+      rm -rf "$temp"
+      fatal "could not read the shared backup snapshot"
+    fi
   fi
 
-  if ! (
+  if (
     export MSW_BACKUP_CLEANUP_PARTIAL="$partial"
     export MSW_BACKUP_CLEANUP_ARCHIVE="$archive"
     export MSW_BACKUP_CLEANUP_CHECKSUM="$checksum"
@@ -4695,14 +4732,24 @@ cmd_backup() {
     trap 'exit 143' TERM HUP
 
     if (( managed_snapshot == 1 )); then
-      while [[ ! -e "$MSW_BACKUP_ARCHIVE_LEASE_GATE" ]]; do
-        kill -0 "$$" 2>/dev/null || exit 143
-        sleep 0.05
-      done
-      /bin/sh -c 'parent=$PPID; while kill -0 "$parent" 2>/dev/null; do sleep 0.1; done' &
+      if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
+        while [[ ! -e "$MSW_BACKUP_ARCHIVE_LEASE_GATE" ]]; do
+          [[ "$(backup_process_signature "${MSW_BACKUP_GATE_OWNER_PID:-0}")" == "${MSW_BACKUP_GATE_OWNER_STARTED:-missing}" ]] || exit 143
+          sleep 0.05
+        done
+      fi
+      /bin/sh -c '
+        parent=$PPID
+        expected=$(/bin/ps -p "$parent" -o lstart= 2>/dev/null | /usr/bin/xargs 2>/dev/null)
+        [ -n "$expected" ] || exit 1
+        while current=$(/bin/ps -p "$parent" -o lstart= 2>/dev/null | /usr/bin/xargs 2>/dev/null) &&
+          [ -n "$current" ] && [ "$current" = "$expected" ]; do
+          sleep 0.1
+        done
+      ' &
       MSW_BACKUP_CLEANUP_LEASE_PID=$!
       export MSW_BACKUP_CLEANUP_LEASE_PID
-      backup_snapshot_rebind "$MSW_BACKUP_OPERATION_ID" "$MSW_BACKUP_CLEANUP_LEASE_PID" || fatal "could not persist the active archive lease"
+      backup_snapshot_rebind "${MSW_BACKUP_OPERATION_ID:-$snapshot_member_id}" "$MSW_BACKUP_CLEANUP_LEASE_PID" || fatal "could not persist the active archive lease"
     fi
 
     if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
@@ -4791,8 +4838,19 @@ sys.stdout.buffer.flush()' "$count_file" |
       backup_record_progress "$MSW_BACKUP_OPERATION_ID" finalizing "$processed" "$written" "Finalizing durable result metadata and workspace reconciliation."
     fi
   ); then
-    return 1
+    backup_rc=0
+  else
+    backup_rc=$?
   fi
+
+  if (( direct_snapshot == 1 )); then
+    snapshot_outcome="$(backup_snapshot_finish "$snapshot_member_id")" || return 1
+    while IFS= read -r box; do
+      [[ -n "$box" ]] || continue
+      warn "could not restart $box after backup"
+    done < <("$JQ_BIN" -r '.restartPending[]' <<<"$snapshot_outcome")
+  fi
+  (( backup_rc == 0 )) || return "$backup_rc"
 
   ok "backup complete"
   printf '%s\n' "$archive"
@@ -4968,6 +5026,8 @@ backup_operation_worker() {
   trap cleanup_backup_worker EXIT
   export MSW_BACKUP_OPERATION_ID="$operation_id"
   export MSW_BACKUP_ARCHIVE_PATH="$($JQ_BIN -r '.expectedArchive' "$record")"
+  export MSW_BACKUP_GATE_OWNER_PID="$$"
+  export MSW_BACKUP_GATE_OWNER_STARTED="$owner_started"
   local backup_rc
   output_file="$BACKUP_OPERATION_ROOT/$operation_id.command-output"
   lease_gate="$BACKUP_OPERATION_ROOT/$operation_id.archive-lease-ready"

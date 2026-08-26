@@ -3338,6 +3338,12 @@ class PackagedBehaviorTests(MSWTestCase):
         barrier = self.env.root / "backup-archive-barrier"
         barrier.mkdir()
         extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+        sparse_source = self.env.home / ".microsandbox" / "overlap-sparse.img"
+        sparse_size = 32 * 1024 * 1024
+        with sparse_source.open("wb") as handle:
+            handle.write(b"OVERLAP-SPARSE-START")
+            handle.seek(sparse_size - len(b"OVERLAP-SPARSE-END"))
+            handle.write(b"OVERLAP-SPARSE-END")
 
         def start(key: str) -> dict:
             return json.loads(self.env.msw(
@@ -3416,6 +3422,21 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(sum(event == {"event": "stop", "box": "dev"} for event in after_events), 1)
         self.assertEqual(sum(event == {"event": "start", "box": "dev"} for event in after_events), 1)
         self.assertFalse(session_path.exists())
+        restored_root = self.env.root / "overlap-sparse-restored"
+        restored_root.mkdir()
+        archive = Path(completed[first["operationId"]]["result"]["archive"])
+        run_cmd([
+            "bash", "-lc",
+            f"{SYSTEM_ZSTD} -dc -q {archive!s} | {SYSTEM_TAR} --extract -C {restored_root!s} -f - .microsandbox/overlap-sparse.img",
+        ], env=self.env.env)
+        restored_sparse = restored_root / ".microsandbox" / sparse_source.name
+        self.assertEqual(restored_sparse.stat().st_size, sparse_size)
+        self.assertLess(restored_sparse.stat().st_blocks * 512, sparse_size // 8)
+        with restored_sparse.open("rb") as handle:
+            self.assertEqual(handle.read(len(b"OVERLAP-SPARSE-START")),
+                             b"OVERLAP-SPARSE-START")
+            handle.seek(sparse_size - len(b"OVERLAP-SPARSE-END"))
+            self.assertEqual(handle.read(), b"OVERLAP-SPARSE-END")
 
     def test_dead_shared_snapshot_participant_reconciles_without_restarting_under_live_archive(self) -> None:
         self.env.msw("start", "dev")
@@ -3468,17 +3489,28 @@ class PackagedBehaviorTests(MSWTestCase):
         ]).stdout.strip())
         os.kill(dead_member["pid"], signal.SIGKILL)
         os.kill(archive_shell_pid, signal.SIGKILL)
+        reused_session = json.loads(session_path.read_text())
+        for member in reused_session["members"]:
+            if member["operationId"] == dead["operationId"]:
+                member["pid"] = os.getpid()
+                member["processStarted"] = "reused-primary-pid-signature"
+                member["archivePid"] = os.getpid()
+                member["archiveProcessStarted"] = "reused-archive-pid-signature"
+        session_path.write_text(json.dumps(reused_session))
+        session_path.chmod(0o600)
         dead_record = operation_root / f"{dead['operationId']}.json"
         record = json.loads(dead_record.read_text())
         record["updatedEpoch"] = 0
         dead_record.write_text(json.dumps(record))
         dead_record.chmod(0o600)
-        stale_lock = operation_root / ".snapshot-coordinator-lock"
-        stale_lock.mkdir(mode=0o700, exist_ok=True)
-        (stale_lock / "owner").write_text("99999999\n")
-        (stale_lock / "owner-started").write_text("stale-process-signature\n")
-        (stale_lock / "owner").chmod(0o600)
-        (stale_lock / "owner-started").chmod(0o600)
+        coordinator_owner = operation_root / ".snapshot-coordinator-owner.json"
+        coordinator_owner.write_text(json.dumps({
+            "schemaVersion": 1,
+            "pid": 99999999,
+            "processStarted": "stale-process-signature",
+            "acquiredAt": "2026-01-01T00:00:00Z",
+        }))
+        coordinator_owner.chmod(0o600)
 
         wait_until(lambda: status(dead["operationId"])["state"] == "failed",
                    "dead participant was not reconciled")
@@ -3489,7 +3521,10 @@ class PackagedBehaviorTests(MSWTestCase):
         remaining = json.loads(session_path.read_text())
         self.assertEqual([member["operationId"] for member in remaining["members"]],
                          [live["operationId"]])
-        self.assertFalse(stale_lock.exists())
+        self.assertFalse(coordinator_owner.exists())
+        coordinator_lock = operation_root / ".snapshot-coordinator.lock"
+        self.assertTrue(coordinator_lock.is_file())
+        self.assertEqual(stat.S_IMODE(coordinator_lock.stat().st_mode), 0o600)
 
         (barrier / f"{live['operationId']}.release").touch()
         wait_until(lambda: status(live["operationId"])["state"] == "completed",
@@ -3499,6 +3534,78 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(completed["result"]["restartedWorkspaces"], ["dev"])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
         self.assertFalse(session_path.exists())
+
+    def test_direct_backup_participates_in_live_durable_snapshot(self) -> None:
+        self.env.msw("start", "dev")
+        destination = self.env.root / "direct-and-durable-backups"
+        destination.mkdir()
+        barrier = self.env.root / "direct-and-durable-barrier"
+        barrier.mkdir()
+        extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+
+        durable = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination),
+            "--request-key", "durable-with-direct", "--format", "json",
+            extra_env=extra,
+        ).stdout)["result"]
+        durable_ready = barrier / f"{durable['operationId']}.ready"
+        for _ in range(600):
+            if durable_ready.exists():
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("durable archive did not reach the overlap barrier")
+
+        direct = subprocess.Popen(
+            [str(self.env.msw_bin), "backup", str(destination)],
+            env=self.env.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        session_path = operation_root / ".snapshot-session.json"
+        try:
+            direct_member = None
+            for _ in range(600):
+                session = json.loads(session_path.read_text())
+                direct_member = next(
+                    (member for member in session["members"]
+                     if member["operationId"].startswith("direct-")),
+                    None,
+                )
+                if direct_member is not None and direct_member["phase"] == "complete":
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("direct backup did not archive through the shared snapshot")
+
+            self.assertIsNone(direct.poll())
+            self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+            self.assertEqual(
+                {member["operationId"] for member in session["members"]},
+                {durable["operationId"], direct_member["operationId"]},
+            )
+
+            (barrier / f"{durable['operationId']}.release").touch()
+            completed = durable
+            for _ in range(600):
+                completed = json.loads(self.env.msw(
+                    "app", "backup-status", "--operation-id", durable["operationId"],
+                    "--format", "json",
+                ).stdout)["result"]
+                if completed["state"] == "completed":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(completed["state"], "completed")
+            stdout, stderr = direct.communicate(timeout=30)
+            self.assertEqual(direct.returncode, 0, stdout + stderr)
+            self.assertEqual(len([line for line in stdout.splitlines()
+                                  if line.endswith(".tar.zst")]), 1)
+            self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+            self.assertFalse(session_path.exists())
+        finally:
+            (barrier / "release").touch()
+            if direct.poll() is None:
+                direct.terminate()
+                direct.communicate(timeout=10)
 
     def test_app_backup_pipeline_failure_returns_only_structured_failure(self) -> None:
         self.env.msw("start", "dev")
