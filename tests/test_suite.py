@@ -3170,6 +3170,51 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(result["restartedWorkspaces"], ["dev"])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 
+    def test_app_backup_reports_archive_when_workspace_restart_is_incomplete(self) -> None:
+        self.env.msw("start", "dev")
+        destination = self.env.root / "app-backups-partial"
+        destination.mkdir()
+
+        document = json.loads(self.env.msw(
+            "app", "backup", "--directory", str(destination), "--format", "json",
+            timeout=90, extra_env={"MSW_FAKE_START_FAIL": "1"},
+        ).stdout)
+
+        result = document["result"]
+        self.assertTrue(document["ok"])
+        self.assertTrue(Path(result["archive"]).is_file())
+        self.assertEqual(result["archiveBytes"], Path(result["archive"]).stat().st_size)
+        self.assertEqual(result["stoppedWorkspaces"], ["dev"])
+        self.assertEqual(result["restartedWorkspaces"], [])
+        self.assertEqual(
+            document["warnings"],
+            ["MSW could not confirm that dev returned to its pre-backup running state"],
+        )
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
+    def test_app_backup_pipeline_failure_returns_only_structured_failure(self) -> None:
+        self.env.msw("start", "dev")
+        destination = self.env.root / "app-backups-failed"
+        fake_zstd = self.env.root / "tools/failing-app-zstd"
+        fake_zstd.write_text("#!/bin/sh\nexit 42\n")
+        fake_zstd.chmod(0o755)
+
+        failed = self.env.msw(
+            "app", "backup", "--directory", str(destination), "--format", "json",
+            timeout=90, check=False, extra_env={"MSW_ZSTD_BIN": str(fake_zstd)},
+        )
+
+        self.assertEqual(failed.returncode, 1, (failed.stdout, failed.stderr))
+        self.assertEqual(len(failed.stdout.splitlines()), 1)
+        document = json.loads(failed.stdout)
+        self.assertFalse(document["ok"])
+        self.assertEqual(document["command"], "backup")
+        self.assertEqual(document["error"]["code"], "MSW_BACKUP_FAILED")
+        self.assertEqual(document["warnings"], [])
+        self.assertNotIn("result", document)
+        self.assertEqual(list(destination.glob("*")), [])
+        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+
     def test_app_oauth_host_profile_enables_aggregate_host_write_capability(self) -> None:
         credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
         credentials.parent.mkdir(parents=True, exist_ok=True)

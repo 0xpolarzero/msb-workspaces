@@ -4368,6 +4368,7 @@ cmd_backup() {
   (
     cleanup_backup() {
       local rc=$? running_box
+      trap - EXIT
       rm -f "$partial"
       if (( rc != 0 )); then rm -f "$archive" "$checksum" "$info"; fi
       while IFS= read -r running_box; do
@@ -5599,17 +5600,22 @@ app_cmd_backup() {
     [[ -n "$running_json" ]] && running_json+=","
     running_json+="$(app_json_string "$box")"
   done < <(running_workspaces)
-  if ! output="$(cmd_backup "$directory" 2>/dev/null)"; then
+  if ! output="$("$MSW_SCRIPT_ROOT/msw" backup "$directory" 2>/dev/null)"; then
     app_emit_error backup "MSW_BACKUP_FAILED" "The backup could not be created." "Review the destination and workspace health, then retry." "" true 1
+    return 1
   fi
   directory="$(cd "$directory" && pwd -P)"
   archive="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst$/p' | tail -n 1)"
   checksum="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst\.sha256$/p' | tail -n 1)"
-  [[ -n "$archive" && "$archive" == "$directory"/* && "$archive" == *.tar.zst && -f "$archive" && ! -L "$archive" ]] ||
+  if [[ -z "$archive" || "$archive" != "$directory"/* || "$archive" != *.tar.zst || ! -f "$archive" || -L "$archive" ]]; then
     app_emit_error backup "MSW_BACKUP_FAILED" "MSW returned an invalid backup archive path." "Retry the backup after checking diagnostics." "" false 78
+    return 78
+  fi
   archive_bytes="$(/usr/bin/wc -c <"$archive" | /usr/bin/awk '{ print $1 }')"
-  [[ "$archive_bytes" =~ ^[0-9]+$ && "$archive_bytes" -gt 0 ]] ||
+  if [[ ! "$archive_bytes" =~ ^[0-9]+$ || "$archive_bytes" -le 0 ]]; then
     app_emit_error backup "MSW_BACKUP_FAILED" "MSW could not validate the completed backup archive size." "Retry the backup after checking diagnostics." "" false 78
+    return 78
+  fi
   [[ -n "$checksum" && "$checksum" == "$archive.sha256" && -f "$checksum" && ! -L "$checksum" ]] || checksum=""
   for box in "${WORKSPACES[@]}"; do
     [[ ",$running_json," == *",\"$box\","* ]] || continue
@@ -5648,6 +5654,7 @@ app_cmd_backup_preview() {
   if ! estimated_source_bytes="$(backup_estimated_source_bytes)" ||
     [[ ! "$estimated_source_bytes" =~ ^[0-9]+$ || "$estimated_source_bytes" -le 0 ]]; then
     app_emit_error backup-preview "MSW_BACKUP_PREVIEW_FAILED" "The managed source data estimate could not be measured." "Run diagnostics and retry." "" true 69
+    return 69
   fi
   while IFS= read -r box; do
     [[ -n "$box" ]] || continue
