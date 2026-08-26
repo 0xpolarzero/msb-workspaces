@@ -3124,6 +3124,8 @@ class PackagedBehaviorTests(MSWTestCase):
         self.env.msw("start", "dev")
         destination = self.env.root / "app-backups"
         destination.mkdir()
+        compressible_source = self.env.home / ".microsandbox" / "backup-size-semantics.bin"
+        compressible_source.write_bytes(b"A" * (2 * 1024 * 1024))
 
         handshake = json.loads(self.env.msw(
             "app", "handshake", "--format", "json",
@@ -3136,6 +3138,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(set(preview), {"destination", "estimatedSourceBytes", "runningWorkspaces"})
         self.assertEqual(preview["destination"], str(destination.resolve()))
         self.assertGreater(preview["estimatedSourceBytes"], 0)
+        self.assertGreaterEqual(preview["estimatedSourceBytes"], compressible_source.stat().st_size)
         self.assertEqual(preview["runningWorkspaces"], ["dev"])
 
         preview_with_status_unavailable = json.loads(self.env.msw(
@@ -3163,6 +3166,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(Path(result["archive"]).is_file())
         self.assertEqual(result["archiveBytes"], Path(result["archive"]).stat().st_size)
         self.assertGreater(result["archiveBytes"], 0)
+        self.assertLess(result["archiveBytes"], preview["estimatedSourceBytes"])
         self.assertNotIn("archiveBytes", preview)
         self.assertNotIn("estimatedSourceBytes", result)
         self.assertEqual(result["checksum"], result["archive"] + ".sha256")

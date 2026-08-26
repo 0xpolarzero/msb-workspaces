@@ -79,8 +79,7 @@ private actor CommandRecorder {
 
 private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"backupPreview":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
-@MainActor
-private func makeBackupModel(temporary: URL, response: String) throws -> AppModel {
+private func writeBackupExecutable(temporary: URL, response: String) throws -> URL {
     let executable = temporary.appendingPathComponent("msw")
     let script = """
     #!/bin/sh
@@ -94,6 +93,12 @@ private func makeBackupModel(temporary: URL, response: String) throws -> AppMode
     """
     try Data(script.utf8).write(to: executable)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+    return executable
+}
+
+@MainActor
+private func makeBackupModel(temporary: URL, response: String) throws -> AppModel {
+    let executable = try writeBackupExecutable(temporary: temporary, response: response)
     let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
         homeDirectory: temporary,
         configuredExecutable: executable
@@ -334,15 +339,56 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.operationStates.values.first(where: { $0.kind == .backup })?.outcome, .succeeded)
     }
 
+    func testBackupRunningStateAddsPercentageOnlyAfterRuntimeProgressSuppliesIt() throws {
+        let destination = URL(fileURLWithPath: "/tmp/msw-backup-progress", isDirectory: true)
+        let model = AppModel()
+        model.installBackupUITestFixture(destination: destination, resultScenario: .running)
+
+        model.createBackup(to: destination)
+
+        let initial = try XCTUnwrap(model.operationStates.values.first(where: { $0.kind == .backup }))
+        XCTAssertEqual(initial.phase, .running)
+        XCTAssertEqual(initial.message, "Creating backup.")
+        XCTAssertNil(initial.fraction)
+
+        model.recordProgress(MSWProgressEvent(
+            schemaVersion: 1,
+            type: "progress",
+            requestId: "backup-progress",
+            phase: "compressing",
+            workspace: nil,
+            fraction: 0.42,
+            message: "Compressing managed data.",
+            safeForDisplay: true
+        ))
+
+        let updated = try XCTUnwrap(model.operationStates.values.first(where: { $0.kind == .backup }))
+        XCTAssertEqual(updated.startedAt, initial.startedAt)
+        XCTAssertGreaterThanOrEqual(updated.updatedAt, initial.updatedAt)
+        XCTAssertEqual(updated.phase, .running)
+        XCTAssertEqual(updated.message, "Compressing managed data.")
+        XCTAssertEqual(updated.fraction, 0.42)
+    }
+
     func testBackupPartialSuccessNamesRestartWorkspacesAndSuppressesStaleError() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-backup-partial-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let archive = temporary.appendingPathComponent("microsandbox-all.tar.zst")
+        let failedResponse = #"{"schemaVersion":1,"requestId":"backup-failed","ok":false,"command":"backup","observedAt":"2026-08-26T11:59:00Z","result":null,"warnings":[],"error":{"code":"MSW_BACKUP_FAILED","message":"A stale failure.","recovery":"Retry later.","workspace":null,"retryable":true}}"#
         let response = #"{"schemaVersion":1,"requestId":"backup","ok":true,"command":"backup","observedAt":"2026-08-26T12:00:00Z","result":{"archive":"ARCHIVE","archiveBytes":7340032,"checksum":null,"stoppedWorkspaces":["personal","dev"],"restartedWorkspaces":["dev"]},"warnings":["personal needs restart"],"error":null}"#
             .replacingOccurrences(of: "ARCHIVE", with: archive.path)
-        let model = try makeBackupModel(temporary: temporary, response: response)
+        let model = try makeBackupModel(temporary: temporary, response: failedResponse)
+
+        model.createBackup(to: temporary)
+        for _ in 0..<100 {
+            if !model.isDetailLoading { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(model.detailError)
+
+        _ = try writeBackupExecutable(temporary: temporary, response: response)
 
         model.createBackup(to: temporary)
         for _ in 0..<100 {

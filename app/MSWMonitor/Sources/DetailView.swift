@@ -2030,9 +2030,7 @@ private extension DetailView {
     }
 
     private func beginBackup(to destination: URL) {
-        maintenanceOperation = MaintenanceOperation(kind: .backup, phase: "Preparing archive", startedAt: Date(), finishedAt: nil, outcome: .running)
         model.createBackup(to: destination)
-        if !model.isDetailLoading { finishMaintenanceOperation() }
     }
 
     private func beginRestore(archive: URL, confirmation: String) {
@@ -2373,13 +2371,13 @@ private struct BackupReviewView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Text("Estimated source data")
+                Text("Estimated source data size")
                     .accessibilityIdentifier("backup.required-space.label")
                 Spacer()
                 Text(ByteCountFormatter.string(fromByteCount: preview.estimatedSourceBytes, countStyle: .file))
                     .accessibilityIdentifier("backup.required-space.value")
             }
-            Text("This is the managed data size before tar/zstd streaming and compression. The final compressed archive size is reported after creation.")
+            Text("This estimates managed on-disk data before sparse tar/zstd compression. The final compressed archive is usually smaller and its actual size is reported after creation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("backup.estimate.explanation")
@@ -2471,21 +2469,39 @@ private struct BackupOperationCard: View {
     let refreshWorkspaceState: () -> Void
 
     var body: some View {
-        GroupBox("Backup status") {
+        GroupBox(operation?.outcome == .pending ? "Backup status" : "Backup result") {
             VStack(alignment: .leading, spacing: 8) {
-                if operation?.outcome == .pending {
+                if let operation, operation.outcome == .pending {
                     HStack {
-                        ProgressView().controlSize(.small)
-                        Text("Creating backup")
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityIdentifier("backup.running.spinner")
+                        Text(runningPhaseTitle(operation.phase))
                             .font(.body.weight(.medium))
+                            .accessibilityIdentifier("backup.running.status")
+                        Spacer()
+                        if let fraction = operation.fraction {
+                            Text("\(Int((fraction * 100).rounded()))%")
+                                .font(.caption.monospacedDigit())
+                                .accessibilityIdentifier("backup.running.percentage")
+                        }
                     }
-                    Text(operation?.message ?? "Creating the compressed archive.")
+                    Text(operation.message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("backup.running.message")
+                    HStack(spacing: 12) {
+                        Text("Started \(operation.startedAt.formatted(date: .abbreviated, time: .standard))")
+                            .accessibilityIdentifier("backup.running.started")
+                        Text("Updated \(operation.updatedAt.formatted(date: .abbreviated, time: .standard))")
+                            .accessibilityIdentifier("backup.running.updated")
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 } else if let result {
                     Label("Archive created", systemImage: "checkmark.circle.fill")
                         .font(.body.weight(.medium))
-                        .foregroundStyle(result.workspacesNeedingRestart.isEmpty ? .green : .orange)
+                        .foregroundStyle(.green)
                         .accessibilityIdentifier("backup.result.status")
                     HStack {
                         Text("Archive")
@@ -2506,7 +2522,7 @@ private struct BackupOperationCard: View {
                             .accessibilityIdentifier("backup.result.completed")
                     }
                     if !result.workspacesNeedingRestart.isEmpty {
-                        Text("Archive created. Restart required for: \(result.workspacesNeedingRestart.joined(separator: ", ")).")
+                        Text("Restart required for: \(result.workspacesNeedingRestart.joined(separator: ", ")).")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(.orange)
                             .accessibilityIdentifier("backup.result.restart-warning")
@@ -2533,6 +2549,16 @@ private struct BackupOperationCard: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("backup.operation.card")
+    }
+
+    private func runningPhaseTitle(_ phase: MSWOperationState.Phase) -> String {
+        switch phase {
+        case .preparing: return "Preparing backup"
+        case .awaitingConfirmation: return "Awaiting confirmation"
+        case .running: return "Creating backup"
+        case .verifying: return "Verifying backup"
+        case .finished: return "Finishing backup"
+        }
     }
 }
 

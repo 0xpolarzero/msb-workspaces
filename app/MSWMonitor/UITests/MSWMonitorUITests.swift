@@ -171,7 +171,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.windows["setup.window"].exists)
     }
 
-    private func launchFixture(_ arguments: [String]) -> XCUIApplication {
+    private func launchFixture(
+        _ arguments: [String],
+        environment: [String: String] = [:]
+    ) -> XCUIApplication {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -179,6 +182,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
         let app = XCUIApplication(url: appURL)
         app.launchArguments = arguments
+        app.launchEnvironment.merge(environment) { _, requested in requested }
         app.launch()
         return app
     }
@@ -221,7 +225,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(confirmationTitle.value as? String, "Create new backup")
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.required-space.label"].value as? String,
-            "Estimated source data"
+            "Estimated source data size"
         )
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.required-space.value"].value as? String,
@@ -229,7 +233,7 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.estimate.explanation"].value as? String,
-            "This is the managed data size before tar/zstd streaming and compression. The final compressed archive size is reported after creation."
+            "This estimates managed on-disk data before sparse tar/zstd compression. The final compressed archive is usually smaller and its actual size is reported after creation."
         )
         XCTAssertEqual(app.buttons["backup.confirmation.create"].label, "Create Backup")
         app.buttons["backup.confirmation.cancel"].click()
@@ -243,7 +247,7 @@ final class MSWMonitorUITests: XCTestCase {
     }
 
     func testBackupResultCardSuccessPartialAndFailure() throws {
-        let scenarios = ["success", "partial", "failure"]
+        let scenarios = ["running", "success", "partial", "failure"]
         var launchedApps: [XCUIApplication] = []
         var destinations: [URL] = []
         defer {
@@ -259,8 +263,10 @@ final class MSWMonitorUITests: XCTestCase {
             let app = launchFixture([
                 "--ui-test-open-popover",
                 "--ui-test-backup-destination=\(destination.path)",
-                "--ui-test-backup-result=\(scenario)"
-            ])
+                "--ui-test-backup-result=\(scenario)",
+                "-AppleLanguages", "(en)",
+                "-AppleLocale", "en_FR"
+            ], environment: ["TZ": "Europe/Paris"])
             launchedApps.append(app)
 
             XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
@@ -283,6 +289,15 @@ final class MSWMonitorUITests: XCTestCase {
             XCTAssertFalse(app.buttons["Retry Backup"].exists)
 
             switch scenario {
+            case "running":
+                assertText("Creating backup", identifier: "backup.running.status", in: app)
+                assertText("Creating backup.", identifier: "backup.running.message", in: app)
+                assertIdentifier("backup.running.spinner", in: app)
+                assertIdentifier("backup.running.started", in: app)
+                assertIdentifier("backup.running.updated", in: app)
+                XCTAssertFalse(app.descendants(matching: .any)["backup.running.percentage"].exists)
+                XCTAssertFalse(app.descendants(matching: .any)["backup.result.archive"].exists)
+                XCTAssertFalse(app.staticTexts["Request failed"].exists)
             case "success":
                 assertText("Archive created", identifier: "backup.result.status", in: app)
                 assertText(
@@ -291,17 +306,23 @@ final class MSWMonitorUITests: XCTestCase {
                     in: app
                 )
                 assertBackupArchiveSize(in: app)
-                assertIdentifier("backup.result.completed", in: app)
+                assertBackupCompletionTime(in: app)
                 XCTAssertFalse(app.descendants(matching: .any)["backup.result.restart-warning"].exists)
                 XCTAssertFalse(app.staticTexts["Request failed"].exists)
             case "partial":
                 assertText("Archive created", identifier: "backup.result.status", in: app)
                 assertText(
-                    "Archive created. Restart required for: personal.",
+                    "microsandbox-all-20260826-120000.tar.zst",
+                    identifier: "backup.result.archive",
+                    in: app
+                )
+                assertText(
+                    "Restart required for: personal.",
                     identifier: "backup.result.restart-warning",
                     in: app
                 )
                 assertBackupArchiveSize(in: app)
+                assertBackupCompletionTime(in: app)
                 XCTAssertFalse(app.staticTexts["Request failed"].exists)
                 XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
                 let refresh = app.buttons["backup.result.refresh-workspaces"]
@@ -1549,6 +1570,14 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertNotNil(
             value.range(of: #"^7[.,]3 M(B|o)$"#, options: .regularExpression),
             "Unexpected compressed archive size: \(value)"
+        )
+    }
+
+    private func assertBackupCompletionTime(in app: XCUIApplication) {
+        assertText(
+            "26 Aug 2026 at 14:00:00",
+            identifier: "backup.result.completed",
+            in: app
         )
     }
 

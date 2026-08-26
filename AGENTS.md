@@ -102,6 +102,19 @@ For unified top-tab and workspace navigation changes, use:
 app/MSWMonitor/Scripts/smoke-test.sh --navigation-only
 ```
 
+For backup destination preview semantics, use:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --backup-only
+```
+
+For consolidated running, success, partial-restart, and failure backup results,
+use:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --backup-result-only
+```
+
 For operation-failure presentation and error-detail routing, use:
 
 ```bash
@@ -374,7 +387,10 @@ unredacted system logs.
   `testStatusItemMinimalPopoverAndQuit()`; `--picker-only` runs
   `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs
   `testApplicationPreferencesUpdateWorkspaceActions()`; `--navigation-only`
-  runs `testUnifiedWindowUsesTopTabsAndWorkspaceSections()`; and
+  runs `testUnifiedWindowUsesTopTabsAndWorkspaceSections()`; `--backup-only`
+  runs `testBackupDestinationSelectionShowsRequiredSpaceConfirmation()`;
+  `--backup-result-only` runs
+  `testBackupResultCardSuccessPartialAndFailure()`; and
   `--failure-only` runs `testOperationFailureOpensDetailedLogs()`. A bare
   `xcodebuild test` is a different, broader operation and is not a replacement
   for the documented checks.

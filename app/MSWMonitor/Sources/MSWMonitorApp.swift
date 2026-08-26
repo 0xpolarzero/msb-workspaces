@@ -361,6 +361,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let backupResultScenario = arguments.compactMap { argument -> AppModel.BackupUITestResultScenario? in
                 guard argument.hasPrefix("--ui-test-backup-result=") else { return nil }
                 switch argument.dropFirst("--ui-test-backup-result=".count) {
+                case "running": return .running
                 case "success": return .success
                 case "partial": return .partial
                 case "failure": return .failure

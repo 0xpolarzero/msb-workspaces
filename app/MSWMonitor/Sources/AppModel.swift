@@ -711,6 +711,7 @@ struct SourceEditorLauncher {
 @MainActor
 final class AppModel {
     enum BackupUITestResultScenario: Equatable {
+        case running
         case success
         case partial
         case failure
@@ -1867,14 +1868,17 @@ final class AppModel {
         backupResult = nil
         maintenanceMessage = nil
         detailError = nil
+        backupRequiresRuntimeRepair = false
         if let scenario = backupUITestResultScenario {
             beginOperation(kind: .backup, workspace: nil, action: "backup", message: "Creating backup.")
             switch scenario {
+            case .running:
+                break
             case .success, .partial:
                 let result = MSWBackupResult(
                     archive: directory.appendingPathComponent("microsandbox-all-20260826-120000.tar.zst"),
                     archiveBytes: 7_340_032,
-                    completedAt: Date(timeIntervalSince1970: 1_777_464_000),
+                    completedAt: Date(timeIntervalSince1970: 1_787_745_600),
                     checksum: nil,
                     stoppedWorkspaces: scenario == .partial ? ["dev", "personal"] : ["dev"],
                     restartedWorkspaces: ["dev"]
@@ -1923,6 +1927,7 @@ final class AppModel {
     private func completeBackup(_ result: MSWBackupResult) {
         backupResult = result
         detailError = nil
+        backupRequiresRuntimeRepair = false
         let message: String
         if result.workspacesNeedingRestart.isEmpty {
             message = "Archive created."
