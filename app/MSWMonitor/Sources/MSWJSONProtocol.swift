@@ -2,6 +2,7 @@ import Foundation
 
 enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
     case invalidExecutable
+    case incompatibleExecutable
     case invalidArguments
     case timedOut(command: String)
     case cancelled
@@ -19,6 +20,8 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidExecutable: return "MSW executable is unavailable."
+        case .incompatibleExecutable:
+            return "The installed MSW runtime is older than this version of MSW Monitor. Open Setup and repair the MSW installation, then retry."
         case .invalidArguments: return "The requested MSW operation has invalid arguments."
         case .timedOut(let command): return "MSW operation timed out: \(command)."
         case .cancelled: return "The MSW operation was cancelled."

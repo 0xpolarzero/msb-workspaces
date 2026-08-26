@@ -24,6 +24,9 @@ case "${1:-}" in
   --navigation-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testUnifiedWindowUsesTopTabsAndWorkspaceSections"
     ;;
+  --backup-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testBackupDestinationSelectionShowsRequiredSpaceConfirmation"
+    ;;
   --network-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testNetworkShowsActivePortsFirst"
     ;;
@@ -34,7 +37,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--network-only|--files-cache-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--backup-only|--network-only|--files-cache-only|--failure-only]"
     exit 64
     ;;
 esac

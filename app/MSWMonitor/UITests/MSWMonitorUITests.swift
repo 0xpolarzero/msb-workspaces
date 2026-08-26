@@ -188,6 +188,56 @@ final class MSWMonitorUITests: XCTestCase {
             app.terminate()
         }
     }
+
+    func testBackupDestinationSelectionShowsRequiredSpaceConfirmation() throws {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MSWMonitor Backups-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-backup-destination=\(destination.path)"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.toolbars.buttons["Backup"].waitForExistence(timeout: 2))
+        app.toolbars.buttons["Backup"].click()
+
+        let createNewBackup = app.buttons["backup.create-new.button"]
+        XCTAssertTrue(createNewBackup.waitForExistence(timeout: 2))
+        createNewBackup.click()
+
+        let destinationPanel = app.dialogs["Choose Backup Destination"]
+        XCTAssertTrue(destinationPanel.waitForExistence(timeout: 3))
+        let chooseDestination = destinationPanel.buttons["Choose Destination…"]
+        XCTAssertTrue(chooseDestination.waitForExistence(timeout: 2))
+        chooseDestination.click()
+
+        let confirmationTitle = app.descendants(matching: .any)["backup.confirmation.title"]
+        XCTAssertTrue(confirmationTitle.waitForExistence(timeout: 3))
+        XCTAssertEqual(confirmationTitle.value as? String, "Create new backup")
+        XCTAssertEqual(
+            app.descendants(matching: .any)["backup.required-space.label"].value as? String,
+            "Required disk space"
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any)["backup.required-space.value"].value as? String,
+            "16 GB"
+        )
+        XCTAssertEqual(app.buttons["backup.confirmation.create"].label, "Create Backup")
+        app.buttons["backup.confirmation.cancel"].click()
+        XCTAssertTrue(confirmationTitle.waitForNonExistence(timeout: 2))
+
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(app.statusItems["statusItem.button"].waitForExistence(timeout: 2))
+        app.statusItems["statusItem.button"].click()
+        app.buttons["quit.button"].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
     func testOperationFailureOpensDetailedLogs() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -228,7 +278,10 @@ final class MSWMonitorUITests: XCTestCase {
         )
     }
     func testUnifiedWindowUsesTopTabsAndWorkspaceSections() {
-        let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-folder-browser"
+        ])
         defer { terminateIfNeeded(app) }
 
         let openMonitor = app.buttons["open-monitor.button"]
@@ -240,6 +293,15 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["overview.system-health"]
                 .waitForExistence(timeout: 2)
+        )
+        XCTAssertEqual(
+            app.staticTexts.matching(
+                NSPredicate(
+                    format: "label CONTAINS[c] %@",
+                    "Runs the same dependency checks"
+                )
+            ).count,
+            0
         )
         XCTAssertTrue(app.buttons["Run checks"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Files"].exists)
@@ -421,8 +483,12 @@ final class MSWMonitorUITests: XCTestCase {
         backupTab.click()
         XCTAssertTrue(app.windows["Backup"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["Archive scope"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Backup and restore"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["Review New Backup…"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Backup"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Restore"].waitForExistence(timeout: 2))
+        let createNewBackup = app.buttons["backup.create-new.button"]
+        XCTAssertTrue(createNewBackup.waitForExistence(timeout: 2))
+        XCTAssertEqual(createNewBackup.label, "Create New Backup…")
+        XCTAssertFalse(app.buttons["Review New Backup…"].exists)
         XCTAssertTrue(app.buttons["Choose Restore Archive…"].waitForExistence(timeout: 2))
 
         let githubTab = app.toolbars.buttons["GitHub"]

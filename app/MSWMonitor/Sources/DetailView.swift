@@ -38,6 +38,20 @@ enum DetailMode {
     case backup
 }
 
+enum BackupDestinationPicker {
+    @MainActor
+    static func makePanel() -> NSOpenPanel {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Backup Destination"
+        panel.prompt = "Choose Destination…"
+        panel.message = "Selecting a directory does not start the backup. You will review scope and workspace impact next."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        return panel
+    }
+}
+
 private enum WorkspaceAttentionDestination {
     case network
     case github
@@ -108,16 +122,20 @@ struct DetailView: View {
                 )
             }
         }
-        .sheet(isPresented: $reviewBackup) {
-            if let backupDestination {
+        .sheet(isPresented: $reviewBackup, onDismiss: {
+            model.cancelPendingBackup()
+        }) {
+            if let preview = model.pendingBackupPreview {
                 BackupReviewView(
-                    destination: backupDestination,
-                    workspaces: model.workspaces,
+                    preview: preview,
                     isBusy: model.isMaintenanceOperationInFlight,
-                    cancel: { reviewBackup = false },
+                    cancel: {
+                        reviewBackup = false
+                        model.cancelPendingBackup()
+                    },
                     apply: {
                         reviewBackup = false
-                        beginBackup(to: backupDestination)
+                        beginBackup(to: preview.destination)
                     }
                 )
             }
@@ -145,22 +163,22 @@ struct DetailView: View {
     }
 
     private var workspacePane: some View {
-        Form {
-            Section("Workspaces") {
-                workspaceFilterBar
-            }
+        VStack(spacing: 0) {
+            workspaceFilterBar
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
 
-            Section(navigation.workspaceSection.rawValue) {
-                sectionContent
-                    .frame(
-                        maxWidth: .infinity,
-                        minHeight: 400,
-                        maxHeight: .infinity,
-                        alignment: .topLeading
-                    )
-            }
+            Divider()
+
+            sectionContent
+                .padding(20)
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: 400,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
         }
-        .formStyle(.grouped)
         .onChange(of: navigation.workspaceSection) { _, section in
             visitedWorkspaceSections.insert(section)
         }
@@ -240,17 +258,44 @@ struct DetailView: View {
 
 
     private var overviewDashboard: some View {
-        Form {
-            Section("Workspaces") {
-                workspaceSummary
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Workspaces")
+                        .font(.title3.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    workspaceSummary
+                }
 
-            Section("System health") {
-                systemHealth
+                VStack(alignment: .leading, spacing: 10) {
+                    systemHealthHeader
+                    systemHealth
+                }
+                .accessibilityIdentifier("overview.system-health")
             }
+            .padding(20)
         }
-        .formStyle(.grouped)
         .accessibilityIdentifier("details.overview")
+    }
+
+    private var systemHealthHeader: some View {
+        HStack {
+            Text("System health")
+                .font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+            Spacer()
+            if needsInstallationRepair {
+                Button("Repair MSW installation…") {
+                    NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+                }
+                .accessibilityIdentifier("maintenance.repair.button")
+            }
+            Button("Run checks") {
+                model.runSystemHealthChecks()
+            }
+            .disabled(model.isSystemHealthLoading)
+            .accessibilityIdentifier("overview.run-checks.button")
+        }
     }
 
     private var workspaceSummary: some View {
@@ -1764,9 +1809,12 @@ private extension DetailView {
     }
 
     private var backup: some View {
-        Form {
-            Section("Archive scope") {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
+                    Text("Archive scope")
+                        .font(.title3.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
                     Label("Includes managed workspace code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics.", systemImage: "archivebox")
                     Label("Excludes Mac Keychain records and host credentials.", systemImage: "key.slash")
                     Text("Treat the archive as sensitive. Store it only in a trusted destination with appropriate disk encryption and access controls.")
@@ -1774,63 +1822,88 @@ private extension DetailView {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
 
-            Section("Backup and restore") {
-                HStack {
-                    Button("Review New Backup…") { chooseBackupDirectory() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.isMaintenanceOperationInFlight)
-                    Button("Choose Restore Archive…") { chooseRestoreArchive() }
-                        .disabled(model.isMaintenanceOperationInFlight)
-                    Spacer()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Backup")
+                            .font(.title3.weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                        Spacer()
+                        Button("Create New Backup…") { chooseBackupDirectory() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(model.isMaintenanceOperationInFlight || model.isBackupPreviewLoading)
+                            .accessibilityIdentifier("backup.create-new.button")
+                    }
+
+                    if model.isBackupPreviewLoading {
+                        ProgressView("Calculating required disk space…")
+                            .accessibilityIdentifier("backup.preview.loading")
+                    }
+                    if let backupDestination {
+                        LabeledContent("Backup destination", value: backupDestination.path(percentEncoded: false))
+                            .font(.caption)
+                            .textSelection(.enabled)
+                    }
                 }
 
-                if let backupDestination {
-                    LabeledContent("Backup destination", value: backupDestination.path(percentEncoded: false))
-                        .font(.caption)
-                        .textSelection(.enabled)
-                }
-            }
-
-            if let restoreArchive {
-                Section("Restore preview") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Archive", value: restoreArchive.lastPathComponent)
-                        LabeledContent("Size", value: archiveSize(restoreArchive))
-                        Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
-                            .font(.caption)
-                        Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                        Button("Review Destructive Restore…", role: .destructive) { confirmRestore = true }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Restore")
+                            .font(.title3.weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                        Spacer()
+                        Button("Choose Restore Archive…") { chooseRestoreArchive() }
                             .disabled(model.isMaintenanceOperationInFlight)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
 
-            if let operation = latestModelMaintenanceOperation {
-                Section("Operation") {
-                    ModelOperationView(operation: operation) {
-                        retryMaintenance(kind: operation.kind)
+                    if let restoreArchive {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Restore preview")
+                                .font(.headline)
+                                .accessibilityAddTraits(.isHeader)
+                            LabeledContent("Archive", value: restoreArchive.lastPathComponent)
+                            LabeledContent("Size", value: archiveSize(restoreArchive))
+                            Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
+                                .font(.caption)
+                            Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            Button("Review Destructive Restore…", role: .destructive) { confirmRestore = true }
+                                .disabled(model.isMaintenanceOperationInFlight)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-            } else if let operation = maintenanceOperation {
-                Section("Operation") {
-                    MaintenanceOperationView(operation: operation) {
-                        if operation.kind == .backup, let destination = backupDestination {
-                            beginBackup(to: destination)
-                        } else if operation.kind == .restore, restoreArchive != nil {
-                            confirmRestore = true
+
+                if let operation = latestModelMaintenanceOperation {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Operation")
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
+                        ModelOperationView(operation: operation) {
+                            retryMaintenance(kind: operation.kind)
+                        }
+                    }
+                } else if let operation = maintenanceOperation {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Operation")
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
+                        MaintenanceOperationView(operation: operation) {
+                            if operation.kind == .backup, let destination = backupDestination {
+                                beginBackup(to: destination)
+                            } else if operation.kind == .restore, restoreArchive != nil {
+                                confirmRestore = true
+                            }
                         }
                     }
                 }
-            }
 
-            if let result = model.backupResult {
-                Section("Latest backup result") {
-                    VStack(alignment: .leading, spacing: 7) {
+                if let result = model.backupResult {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Latest backup result")
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
                         Label("Archive created", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                         LabeledContent("Archive", value: result.archive.lastPathComponent)
                         LabeledContent("Completed", value: maintenanceOperation?.finishedAt?.formatted(date: .abbreviated, time: .standard) ?? "Time not retained")
@@ -1856,33 +1929,15 @@ private extension DetailView {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            }
 
-            detailError
+                detailError
+            }
+            .padding(20)
         }
-        .formStyle(.grouped)
     }
 
     private var systemHealth: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Spacer()
-                if needsInstallationRepair {
-                    Button("Repair MSW installation…") {
-                        NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
-                    }
-                    .accessibilityIdentifier("maintenance.repair.button")
-                }
-                Button("Run checks") {
-                    model.runSystemHealthChecks()
-                }
-                .disabled(model.isSystemHealthLoading)
-                .accessibilityIdentifier("overview.run-checks.button")
-            }
-            Text("Runs the same dependency checks as setup: macOS, Apple Silicon, disk, memory, required tools, MSW runtime, and host integration.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             ForEach(model.systemHealthChecks) { check in
                 VStack(alignment: .leading, spacing: 5) {
                     HStack {
@@ -1915,7 +1970,6 @@ private extension DetailView {
                 )
             }
         }
-        .accessibilityIdentifier("overview.system-health")
     }
 
     private var needsInstallationRepair: Bool {
@@ -1939,8 +1993,15 @@ private extension DetailView {
                 Text("Cached content above is last known, not a fresh verification.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Button("Retry", action: loadSelectedSection)
-                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                if model.backupRequiresRuntimeRepair {
+                    Button("Repair MSW installation…") {
+                        NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+                    }
+                    .accessibilityIdentifier("backup.repair-runtime.button")
+                } else {
+                    Button("Retry", action: retryDetailFailure)
+                        .keyboardShortcut("r", modifiers: [.command, .shift])
+                }
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1951,15 +2012,26 @@ private extension DetailView {
     }
 
     private func chooseBackupDirectory() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Backup Destination"
-        panel.prompt = "Review Destination"
-        panel.message = "Selecting a directory does not start the backup. You will review scope and workspace impact next."
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
+        let panel = BackupDestinationPicker.makePanel()
+        panel.directoryURL = model.backupUITestDestinationIfAvailable()
         if panel.runModal() == .OK, let url = panel.url {
             backupDestination = url
+            prepareBackupReview(to: url)
+        }
+    }
+
+    private func retryDetailFailure() {
+        if let backupDestination {
+            prepareBackupReview(to: backupDestination)
+        } else {
+            loadSelectedSection()
+        }
+    }
+
+    private func prepareBackupReview(to destination: URL) {
+        Task { @MainActor in
+            guard let preview = await model.prepareBackup(to: destination) else { return }
+            backupDestination = preview.destination
             reviewBackup = true
         }
     }
@@ -2010,8 +2082,8 @@ private extension DetailView {
     }
 
     private func retryMaintenance(kind: MSWOperationState.Kind) {
-        if kind == .backup, backupDestination != nil {
-            reviewBackup = true
+        if kind == .backup, let backupDestination {
+            prepareBackupReview(to: backupDestination)
         } else if kind == .restore, restoreArchive != nil {
             confirmRestore = true
         }
@@ -2293,8 +2365,7 @@ private struct PushConfirmationView: View {
 }
 
 private struct BackupReviewView: View {
-    let destination: URL
-    let workspaces: [Workspace]
+    let preview: MSWBackupPreview
     let isBusy: Bool
     let cancel: () -> Void
     let apply: () -> Void
@@ -2302,17 +2373,23 @@ private struct BackupReviewView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Review backup").font(.title2.weight(.semibold))
-            LabeledContent("Destination", value: destination.path(percentEncoded: false))
+            Text("Create new backup")
+                .font(.title2.weight(.semibold))
+                .accessibilityIdentifier("backup.confirmation.title")
+            LabeledContent("Destination", value: preview.destination.path(percentEncoded: false))
             Text("Includes managed code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics. Mac Keychain records are excluded.")
-            let running = workspaces.filter { $0.state == .running }.map { $0.id.rawValue }
+            let running = preview.runningWorkspaces
             LabeledContent("Running workspaces", value: running.isEmpty ? "None" : running.joined(separator: ", "))
             Text(running.isEmpty ? "No running workspace stop is expected." : "Running workspaces may be stopped to create a consistent archive, then restarted when the runtime can do so safely. The result will list both sets.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Required free space is not exposed by the current contract. Confirm adequate capacity before continuing.")
-                .font(.caption)
-                .foregroundStyle(.orange)
+            HStack {
+                Text("Required disk space")
+                    .accessibilityIdentifier("backup.required-space.label")
+                Spacer()
+                Text(ByteCountFormatter.string(fromByteCount: preview.requiredBytes, countStyle: .file))
+                    .accessibilityIdentifier("backup.required-space.value")
+            }
             if isBusy {
                 Text("Another backup or restore is already in progress. Wait for it to finish before starting this operation.")
                     .font(.caption)
@@ -2320,11 +2397,15 @@ private struct BackupReviewView: View {
             }
             HStack {
                 Spacer()
-                Button("Cancel", action: cancel).keyboardShortcut(.cancelAction).focused($cancelFocused)
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .focused($cancelFocused)
+                    .accessibilityIdentifier("backup.confirmation.cancel")
                 Button("Create Backup", action: apply)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(isBusy)
+                    .accessibilityIdentifier("backup.confirmation.create")
             }
         }
         .padding(24)

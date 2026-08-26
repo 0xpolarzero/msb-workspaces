@@ -732,6 +732,9 @@ final class AppModel {
     private(set) var systemHealthChecks: [MSWPreflightCheck] = []
     private(set) var isSystemHealthLoading = false
     private(set) var backupResult: MSWBackupResult?
+    private(set) var pendingBackupPreview: MSWBackupPreview?
+    private(set) var isBackupPreviewLoading = false
+    private(set) var backupRequiresRuntimeRepair = false
     private(set) var maintenanceMessage: String?
     var selectedWorkspace: Workspace.ID?
     private(set) var pendingLifecyclePlan: MSWLifecyclePlan?
@@ -776,6 +779,8 @@ final class AppModel {
     private var detailRequestGeneration = 0
     private var systemHealthGeneration = 0
     private var directoryFixture: [MSWDirectoryResponse] = []
+    private var backupPreviewFixtureRequiredBytes: Int64?
+    private var backupPreviewFixtureDestination: URL?
     private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
@@ -1506,6 +1511,7 @@ final class AppModel {
         isDetailLoading = true
         if clearsError {
             detailError = nil
+            backupRequiresRuntimeRepair = false
         }
         return detailRequestGeneration
     }
@@ -1796,7 +1802,59 @@ final class AppModel {
         }
     }
 
+    func installBackupUITestFixture(
+        requiredBytes: Int64 = 16_000_000_000,
+        destination: URL? = nil
+    ) {
+        backupPreviewFixtureRequiredBytes = requiredBytes
+        backupPreviewFixtureDestination = destination
+    }
+
+    func backupUITestDestinationIfAvailable() -> URL? {
+        guard backupPreviewFixtureRequiredBytes != nil else { return nil }
+        return backupPreviewFixtureDestination
+    }
+
+    func prepareBackup(to directory: URL) async -> MSWBackupPreview? {
+        guard !isMaintenanceOperationInFlight, !isBackupPreviewLoading else { return nil }
+        detailError = nil
+        pendingBackupPreview = nil
+        backupRequiresRuntimeRepair = false
+        if let requiredBytes = backupPreviewFixtureRequiredBytes {
+            let preview = MSWBackupPreview(
+                destination: directory,
+                requiredBytes: requiredBytes,
+                runningWorkspaces: workspaces.filter { $0.state == .running }.map(\.id.rawValue)
+            )
+            pendingBackupPreview = preview
+            return preview
+        }
+        guard let diagnostics else {
+            detailError = "Backups are unavailable in fixture mode."
+            return nil
+        }
+        isBackupPreviewLoading = true
+        defer { isBackupPreviewLoading = false }
+        do {
+            let preview = try await diagnostics.previewBackup(to: directory)
+            pendingBackupPreview = preview
+            return preview
+        } catch {
+            if let clientError = error as? MSWClientError {
+                backupRequiresRuntimeRepair = clientError == .invalidExecutable ||
+                    clientError == .incompatibleExecutable
+            }
+            detailError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func cancelPendingBackup() {
+        pendingBackupPreview = nil
+    }
+
     func createBackup(to directory: URL) {
+        pendingBackupPreview = nil
         guard let diagnostics else {
             detailError = "Backups are unavailable in fixture mode."
             return
@@ -1845,6 +1903,7 @@ final class AppModel {
     }
 
     func restoreBackup(archive: URL, confirmation: String) {
+        backupRequiresRuntimeRepair = false
         guard let diagnostics else {
             detailError = "Restore is unavailable in fixture mode."
             return
@@ -1901,6 +1960,7 @@ final class AppModel {
     func clearDetailError() {
         detailRequestGeneration += 1
         detailError = nil
+        backupRequiresRuntimeRepair = false
         if !isMaintenanceOperationInFlight {
             isDetailLoading = false
         }

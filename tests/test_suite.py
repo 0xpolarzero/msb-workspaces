@@ -3123,6 +3123,35 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_app_backup_returns_archive_and_reconciled_running_set(self) -> None:
         self.env.msw("start", "dev")
         destination = self.env.root / "app-backups"
+        destination.mkdir()
+
+        handshake = json.loads(self.env.msw(
+            "app", "handshake", "--format", "json",
+        ).stdout)["result"]
+        self.assertTrue(handshake["capabilities"]["backupPreview"])
+
+        preview = json.loads(self.env.msw(
+            "app", "backup-preview", "--directory", str(destination), "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(set(preview), {"destination", "requiredBytes", "runningWorkspaces"})
+        self.assertEqual(preview["destination"], str(destination.resolve()))
+        self.assertGreater(preview["requiredBytes"], 0)
+        self.assertEqual(preview["runningWorkspaces"], ["dev"])
+
+        preview_with_status_unavailable = json.loads(self.env.msw(
+            "app", "backup-preview", "--directory", str(destination), "--format", "json",
+            extra_env={"MSW_FAKE_STATUS_FAIL": "1"},
+        ).stdout)["result"]
+        self.assertEqual(preview_with_status_unavailable["runningWorkspaces"], ["dev"])
+
+        rejected = self.env.msw(
+            "app", "backup-preview", "--directory", str(destination / "missing"),
+            "--format", "json", check=False,
+        )
+        self.assertEqual(rejected.returncode, 64)
+        failure = json.loads(rejected.stdout)
+        self.assertEqual(failure["error"]["code"], "MSW_INVALID_REQUEST")
+        self.assertIn("msw app help", failure["error"]["recovery"])
 
         document = json.loads(self.env.msw(
             "app", "backup", "--directory", str(destination), "--format", "json",
@@ -3345,7 +3374,8 @@ class PackagedBehaviorTests(MSWTestCase):
         help_text = self.env.msw("app", "help").stdout
         for command in (
             "url", "clone", "pull", "identity", "disk", "resize", "clean",
-            "upgrade", "update", "check", "backup", "restore", "push-plan",
+            "upgrade", "update", "check", "backup-preview", "backup", "restore",
+            "push-plan",
         ):
             self.assertIn(f"msw app {command}", help_text)
 

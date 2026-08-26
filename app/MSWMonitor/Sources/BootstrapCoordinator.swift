@@ -1166,6 +1166,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                   value.protocolVersion == 1,
                   value.configurationAvailable,
                   value.runtimeAvailable,
+                  value.capabilities.backupPreview,
                   value.capabilities.jq else {
                 return false
             }

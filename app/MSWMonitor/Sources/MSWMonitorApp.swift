@@ -350,9 +350,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if folderBrowserFixture {
             model.installDirectoryUITestFixture()
         }
+        if fixtureMode {
+            let backupDestination = arguments.compactMap { argument -> URL? in
+                let prefix = "--ui-test-backup-destination="
+                guard argument.hasPrefix(prefix) else { return nil }
+                let path = String(argument.dropFirst(prefix.count))
+                guard path.hasPrefix("/") else { return nil }
+                return URL(fileURLWithPath: path, isDirectory: true)
+            }.first
+            model.installBackupUITestFixture(destination: backupDestination)
+        }
         applicationState.model = model
         githubSettingsState.configure(provider: fixtureProvider ?? provider)
-        githubSettingsState.setPollingVisible(false)
+        let setupFixtureOwnsGitHubLoading = arguments.contains("--ui-test-setup") ||
+            arguments.contains("--ui-test-setup-review") ||
+            arguments.contains("--ui-test-setup-reconnect")
+        if !setupFixtureOwnsGitHubLoading {
+            githubSettingsState.setPollingVisible(false)
+        }
         if appNavigation.workspace == nil {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
         }

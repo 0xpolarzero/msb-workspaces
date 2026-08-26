@@ -847,6 +847,15 @@ actor MSWClient {
         )
     }
 
+    func previewBackup(directory: URL) async throws -> MSWEnvelope<MSWBackupPreviewResponse> {
+        try await execute(
+            arguments: ["app", "backup-preview", "--directory", directory.path, "--format", "json"],
+            as: MSWBackupPreviewResponse.self,
+            command: "backup-preview",
+            timeout: .seconds(300)
+        )
+    }
+
     func restore(archive: URL, confirmation: String) async throws -> MSWEnvelope<MSWWorkspaceOperationResult> {
         guard confirmation == "RESTORE", archive.isFileURL, archive.pathExtension == "zst" else {
             throw MSWClientError.invalidArguments

@@ -648,64 +648,74 @@ struct SettingsView: View {
 
 
     private var githubSettings: some View {
-        Form {
-            if accessMode == .local {
-                localGitHubAccountSection
-                localGitHubAccessSection
-            } else {
-                Section("Account") {
-                    if let connectedAccount {
-                        Label("Connected as @\(connectedAccount.login)", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .accessibilityLabel("Connected as @\(connectedAccount.login)")
-                            .accessibilityIdentifier("settings.github.status")
-                    } else {
-                        LabeledContent("Status", value: githubStatusText)
-                            .accessibilityIdentifier("settings.github.status")
-                    }
-                    githubPrimaryAction
-                    Button("Remove all GitHub access…", role: .destructive) {
-                        destructiveAction = .disconnect(groupedMetadata, connectedAccount)
-                    }
-                    .disabled(
-                        !githubFeatureAvailable ||
-                            (metadata.isEmpty && connectedAccount == nil) ||
-                            isUpdatingGitHub
-                    )
-                    if let githubError {
-                        recoveryMessage(githubError)
-                        Button("Retry GitHub status") {
-                            Task { await loadGitHubState() }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                if accessMode == .local {
+                    localGitHubAccountSection
+                    localGitHubAccessSection
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Account")
+                            .font(.title3.weight(.semibold))
+                            .accessibilityAddTraits(.isHeader)
+                        if let connectedAccount {
+                            Label("Connected as @\(connectedAccount.login)", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .accessibilityLabel("Connected as @\(connectedAccount.login)")
+                                .accessibilityIdentifier("settings.github.status")
+                        } else {
+                            LabeledContent("Status", value: githubStatusText)
+                                .accessibilityIdentifier("settings.github.status")
                         }
-                    }
-                }
-
-                if !isEditingGitHubAccess, !isPreparingGitHubEditor {
-                Section("Repository access") {
-                    if groupedMetadata.isEmpty {
-                        ContentUnavailableView(
-                            "No workspace access",
-                            systemImage: "lock.shield",
-                            description: Text(
-                                githubFeatureAvailable
-                                    ? "Connect GitHub to review repository access for each workspace."
-                                    : GitHubFeatureAvailability.unavailableNotice
-                            )
+                        githubPrimaryAction
+                        Button("Remove all GitHub access…", role: .destructive) {
+                            destructiveAction = .disconnect(groupedMetadata, connectedAccount)
+                        }
+                        .disabled(
+                            !githubFeatureAvailable ||
+                                (metadata.isEmpty && connectedAccount == nil) ||
+                                isUpdatingGitHub
                         )
-                    } else {
-                        ForEach(groupedMetadata) { group in
-                            workspaceGrantRow(group)
+                        if let githubError {
+                            recoveryMessage(githubError)
+                            Button("Retry GitHub status") {
+                                Task { await loadGitHubState() }
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if !isEditingGitHubAccess, !isPreparingGitHubEditor {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Repository access")
+                                .font(.title3.weight(.semibold))
+                                .accessibilityAddTraits(.isHeader)
+                            if groupedMetadata.isEmpty {
+                                ContentUnavailableView(
+                                    "No workspace access",
+                                    systemImage: "lock.shield",
+                                    description: Text(
+                                        githubFeatureAvailable
+                                            ? "Connect GitHub to review repository access for each workspace."
+                                            : GitHubFeatureAvailability.unavailableNotice
+                                    )
+                                )
+                            } else {
+                                ForEach(groupedMetadata) { group in
+                                    workspaceGrantRow(group)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+                if accessMode == .connect,
+                   isEditingGitHubAccess || isPreparingGitHubEditor {
+                    githubAccessEditorSection
                 }
             }
-            if accessMode == .connect,
-               isEditingGitHubAccess || isPreparingGitHubEditor {
-                githubAccessEditorSection
-            }
+            .padding(20)
         }
-        .formStyle(.grouped)
         .accessibilityIdentifier("settings.github")
         .onAppear {
             isGitHubAccessTemporarilyDisabled = UserDefaults.standard.bool(
@@ -722,7 +732,10 @@ struct SettingsView: View {
     }
 
     private var localGitHubAccountSection: some View {
-        Section("Account") {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Account")
+                .font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             switch githubConnectionState {
             case .loading:
                 LabeledContent("Status", value: githubStatusText)
@@ -752,6 +765,7 @@ struct SettingsView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func localGitHubConnectedAccountRow(_ account: GitHubAccount) -> some View {
@@ -811,7 +825,10 @@ struct SettingsView: View {
     @ViewBuilder
     private var localGitHubAccessSection: some View {
         if case .ready = githubConnectionState {
-            Section("Repository access") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Repository access")
+                    .font(.title3.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 RepositoryWorkspacePolicyEditor(
                     workspaces: githubWorkspaceNames,
                     installations: githubState.installations,
@@ -847,6 +864,7 @@ struct SettingsView: View {
                     .controlSize(.small)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {
                 synchronizeLocalGitHubEditorIfClean()
             }
@@ -858,7 +876,10 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var githubAccessEditorSection: some View {
-        Section("Edit repository access") {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Edit repository access")
+                .font(.title3.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             if isPreparingGitHubEditor {
                 ProgressView("Preparing repository editor…")
                     .accessibilityIdentifier("settings.github.editor.loading")
@@ -886,6 +907,7 @@ struct SettingsView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var githubWorkspaceNames: [String] {

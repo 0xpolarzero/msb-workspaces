@@ -325,7 +325,10 @@ actor MSWCommandRunner {
                 return nil
             }
             if envelope.ok {
-                return output.status == 0 && envelope.error == nil && envelope.result?.protocolVersion == 1
+                return output.status == 0 &&
+                    envelope.error == nil &&
+                    envelope.result?.protocolVersion == 1 &&
+                    envelope.result?.capabilities.backupPreview == true
                     ? envelope.result
                     : nil
             }
@@ -389,8 +392,11 @@ actor MSWCommandRunner {
         stdin: Data? = nil,
         terminationGrace: Duration = .milliseconds(250)
     ) async throws -> MSWCommand {
-        guard let executable = await mswResolution().selected else {
-            throw MSWClientError.invalidExecutable
+        let resolution = await mswResolution()
+        guard let executable = resolution.selected else {
+            throw resolution.hasInstalledExecutable
+                ? MSWClientError.incompatibleExecutable
+                : MSWClientError.invalidExecutable
         }
         return MSWCommand(
             executable: executable,

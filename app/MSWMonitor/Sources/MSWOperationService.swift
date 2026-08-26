@@ -127,6 +127,12 @@ struct MSWBackupResult: Codable, Sendable, Equatable {
     let restartedWorkspaces: [String]
 }
 
+struct MSWBackupPreview: Codable, Sendable, Equatable {
+    let destination: URL
+    let requiredBytes: Int64
+    let runningWorkspaces: [String]
+}
+
 actor MSWDiagnostics {
     private let client: MSWClient
 
@@ -134,6 +140,29 @@ actor MSWDiagnostics {
         self.client = client
     }
 
+
+    func previewBackup(to directory: URL) async throws -> MSWBackupPreview {
+        try validateDirectory(directory)
+        let envelope = try await client.previewBackup(directory: directory)
+        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-preview") }
+        let selectedDestination = directory.resolvingSymlinksInPath().standardizedFileURL
+        let previewDestination = URL(fileURLWithPath: result.destination)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard result.destination.hasPrefix("/"),
+              !result.destination.contains("\0"),
+              previewDestination.path == selectedDestination.path,
+              result.requiredBytes > 0,
+              Set(result.runningWorkspaces).count == result.runningWorkspaces.count,
+              result.runningWorkspaces.allSatisfy(WorkspaceID.isValid) else {
+            throw MSWClientError.malformedJSON(command: "backup-preview")
+        }
+        return MSWBackupPreview(
+            destination: previewDestination,
+            requiredBytes: result.requiredBytes,
+            runningWorkspaces: result.runningWorkspaces
+        )
+    }
 
     func backup(to directory: URL) async throws -> MSWBackupResult {
         try validateDirectory(directory)
@@ -160,7 +189,11 @@ actor MSWDiagnostics {
     }
 
     private func validateDirectory(_ directory: URL) throws {
-        guard directory.isFileURL, !directory.path.contains("..") else { throw MSWClientError.invalidArguments }
+        guard directory.isFileURL,
+              directory.path.hasPrefix("/"),
+              directory.path.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw MSWClientError.invalidArguments
+        }
     }
 
 }

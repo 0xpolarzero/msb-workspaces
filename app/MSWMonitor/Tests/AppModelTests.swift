@@ -77,7 +77,7 @@ private actor CommandRecorder {
     }
 }
 
-private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
+private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"backupPreview":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
 private final class FailingNotificationCenter: MSWNotificationCenterControlling {
     private(set) var addInvocationCount = 0
@@ -111,6 +111,182 @@ private func makeNotificationEvent() -> MSWNotificationEvent {
 
 @MainActor
 final class AppModelTests: XCTestCase {
+    func testBackupDestinationPickerUsesStandardMacWording() {
+        let panel = BackupDestinationPicker.makePanel()
+
+        XCTAssertEqual(panel.title, "Choose Backup Destination")
+        XCTAssertEqual(panel.prompt, "Choose Destination…")
+        XCTAssertEqual(
+            panel.message,
+            "Selecting a directory does not start the backup. You will review scope and workspace impact next."
+        )
+        XCTAssertNotEqual(panel.prompt, "Review Destination")
+    }
+
+    func testBackupPreviewFlowsThroughTypedModelBoundary() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-backup-preview-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let destination = temporary.appendingPathComponent("Backups..Archive", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let previewResponse = #"{"schemaVersion":1,"requestId":"backup-preview","ok":true,"command":"backup-preview","observedAt":"2026-08-08T00:00:00Z","result":{"destination":"DESTINATION","requiredBytes":16000000000,"runningWorkspaces":["dev"]},"warnings":[],"error":null}"#
+            .replacingOccurrences(of: "DESTINATION", with: destination.path)
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "backup-preview" ]; then
+            printf '%s\\n' '\(previewResponse)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(diagnostics: MSWDiagnostics(client: client))
+
+        let returnedPreview = await model.prepareBackup(to: destination)
+
+        let preview = try XCTUnwrap(model.pendingBackupPreview)
+        XCTAssertEqual(returnedPreview, preview)
+        XCTAssertEqual(preview.destination, destination)
+        XCTAssertEqual(preview.requiredBytes, 16_000_000_000)
+        XCTAssertEqual(preview.runningWorkspaces, ["dev"])
+        XCTAssertFalse(model.isBackupPreviewLoading)
+        XCTAssertFalse(model.backupRequiresRuntimeRepair)
+        model.cancelPendingBackup()
+        XCTAssertNil(model.pendingBackupPreview)
+
+        let mismatchedResponse = previewResponse.replacingOccurrences(
+            of: destination.path,
+            with: temporary.path
+        )
+        let mismatchedScript = script.replacingOccurrences(
+            of: previewResponse,
+            with: mismatchedResponse
+        )
+        try Data(mismatchedScript.utf8).write(to: executable)
+
+        let rejectedPreview = await model.prepareBackup(to: destination)
+        XCTAssertNil(rejectedPreview)
+        XCTAssertNil(model.pendingBackupPreview)
+        XCTAssertNotNil(model.detailError)
+        XCTAssertFalse(model.isBackupPreviewLoading)
+        XCTAssertFalse(model.backupRequiresRuntimeRepair)
+    }
+
+    func testBackupPreviewUsesResolvedShippedCLIAndReturnsRealRequiredBytes() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-backup-preview-integration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let sourceExecutable = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("bin/msw")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: sourceExecutable.path))
+
+        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
+        let toolDirectory = temporary.appendingPathComponent(".local/bin", isDirectory: true)
+        let managedDirectory = temporary.appendingPathComponent(".microsandbox", isDirectory: true)
+        let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
+        for directory in [configDirectory, toolDirectory, managedDirectory, destination] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        try Data(repeating: 0x41, count: 4_096).write(
+            to: managedDirectory.appendingPathComponent("managed-state.bin")
+        )
+
+        let jq = toolDirectory.appendingPathComponent("jq")
+        try Data("#!/bin/sh\ncase \"$1\" in\n  -e) exit 0 ;;\n  -r) printf 'dev\\n' ;;\n  *) exit 1 ;;\nesac\n".utf8).write(to: jq)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: jq.path)
+        let config = """
+        MSW_VERSION="3.1.0"
+        MSW_MSB_BIN="/usr/bin/false"
+        MSW_JQ_BIN="\(jq.path)"
+        MSW_GITHUB_MODE="local"
+        """
+        try Data(config.utf8).write(to: configDirectory.appendingPathComponent("config.sh"))
+        let workspaces = #"{"schemaVersion":1,"workspaces":[{"name":"dev","cpu":4,"cpuCeiling":4,"memoryGiB":16,"memoryCeilingGiB":16,"workspaceStorageGiB":60,"runtimeStorageGiB":60}]}"#
+        try Data(workspaces.utf8).write(to: configDirectory.appendingPathComponent("workspaces.json"))
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: sourceExecutable
+        ))
+        let client = MSWClient(runner: runner)
+        let model = AppModel(diagnostics: MSWDiagnostics(client: client))
+
+        let returnedPreview = await model.prepareBackup(to: destination)
+        let preview = try XCTUnwrap(returnedPreview)
+        let resolvedExecutable = await client.executableURL()
+
+        XCTAssertEqual(resolvedExecutable, sourceExecutable)
+        XCTAssertEqual(preview.destination, destination)
+        XCTAssertGreaterThan(preview.requiredBytes, 4_096)
+        XCTAssertEqual(preview.runningWorkspaces, [])
+        XCTAssertNil(model.detailError)
+    }
+
+    func testBackupPreviewRejectsOlderRuntimeBeforeItsBareExit64AndExplainsRepair() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-backup-preview-stale-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let previewInvocation = temporary.appendingPathComponent("backup-preview-invoked")
+        let executable = temporary.appendingPathComponent("msw")
+        let olderHandshake = protocolCompatibleHandshake.replacingOccurrences(
+            of: ",\"backupPreview\":true",
+            with: ""
+        )
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(olderHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "backup-preview" ]; then
+            : > "\(previewInvocation.path)"
+            exit 64
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        ))
+        let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: runner)))
+
+        let preview = await model.prepareBackup(to: destination)
+
+        XCTAssertNil(preview)
+        XCTAssertNil(model.pendingBackupPreview)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: previewInvocation.path))
+        XCTAssertTrue(model.backupRequiresRuntimeRepair)
+        XCTAssertEqual(
+            model.detailError,
+            "The installed MSW runtime is older than this version of MSW Monitor. Open Setup and repair the MSW installation, then retry."
+        )
+        model.clearDetailError()
+        XCTAssertNil(model.detailError)
+        XCTAssertFalse(model.backupRequiresRuntimeRepair)
+        let resolution = await runner.mswResolution()
+        XCTAssertNil(resolution.selected)
+        XCTAssertEqual(resolution.incompatibleCandidates, [executable])
+    }
+
     func testInitialWorkspacesAreFixedAndStopped() {
         let model = AppModel()
 
@@ -1676,7 +1852,7 @@ final class AppModelTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let passingHandshake = #"""
-        {"schemaVersion":1,"requestId":"handshake-pass","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}
+        {"schemaVersion":1,"requestId":"handshake-pass","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"backupPreview":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}
         """#
         let failingHandshake = #"""
         {"schemaVersion":1,"requestId":"handshake-fail","ok":false,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_RUNTIME_UNAVAILABLE","message":"runtime unavailable","recovery":"Repair MSW","workspace":null,"retryable":true}}
@@ -2313,7 +2489,7 @@ final class AppModelTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stale.path)
 
         let compatible = temporary.appendingPathComponent("compatible-msw")
-        let handshake = #"{"schemaVersion":1,"requestId":"compatible","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
+        let handshake = #"{"schemaVersion":1,"requestId":"compatible","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"backupPreview":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
         try Data("#!/bin/sh\nprintf '%s\\n' '\(handshake)'\n".utf8).write(to: compatible)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: compatible.path)
 

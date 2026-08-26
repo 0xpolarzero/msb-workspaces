@@ -244,8 +244,26 @@ struct MSWHandshake: Codable, Sendable {
         let jsonLogs: Bool
         let plans: Bool
         let bootstrapEvents: Bool
+        let backupPreview: Bool
         let jq: Bool
         let workspaceCount: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case jsonState, jsonMetrics, jsonLogs, plans, bootstrapEvents
+            case backupPreview, jq, workspaceCount
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            jsonState = try container.decode(Bool.self, forKey: .jsonState)
+            jsonMetrics = try container.decode(Bool.self, forKey: .jsonMetrics)
+            jsonLogs = try container.decode(Bool.self, forKey: .jsonLogs)
+            plans = try container.decode(Bool.self, forKey: .plans)
+            bootstrapEvents = try container.decode(Bool.self, forKey: .bootstrapEvents)
+            backupPreview = try container.decodeIfPresent(Bool.self, forKey: .backupPreview) ?? false
+            jq = try container.decode(Bool.self, forKey: .jq)
+            workspaceCount = try container.decode(Int.self, forKey: .workspaceCount)
+        }
     }
 }
 
@@ -867,6 +885,12 @@ struct MSWBackupResponse: Codable, Sendable {
     let checksum: String?
     let stoppedWorkspaces: [String]
     let restartedWorkspaces: [String]
+}
+
+struct MSWBackupPreviewResponse: Codable, Sendable {
+    let destination: String
+    let requiredBytes: Int64
+    let runningWorkspaces: [String]
 }
 
 // JSON values are used only for opaque, schema-validated snapshots such as
