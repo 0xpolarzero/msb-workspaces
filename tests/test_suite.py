@@ -3206,6 +3206,17 @@ class PackagedBehaviorTests(MSWTestCase):
         ).stdout)["result"]
         self.assertEqual(started["operationId"], duplicate["operationId"])
         self.assertNotEqual(started["operationId"], distinct["operationId"])
+        other_destination = self.env.root / "other-app-backups"
+        other_destination.mkdir()
+        conflicting_replay = self.env.msw(
+            "app", "backup-start", "--directory", str(other_destination),
+            "--request-key", "portable-contract-one", "--format", "json", check=False,
+        )
+        self.assertEqual(conflicting_replay.returncode, 73)
+        self.assertEqual(
+            json.loads(conflicting_replay.stdout)["error"]["code"],
+            "MSW_BACKUP_IDEMPOTENCY_CONFLICT",
+        )
 
         def terminal(operation_id: str) -> dict:
             last = None
@@ -3260,6 +3271,28 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(incompatible.returncode, 78)
         self.assertEqual(json.loads(incompatible.stdout)["error"]["code"], "MSW_BACKUP_RECORD_INCOMPATIBLE")
         legacy_record.unlink()
+
+        valid_record = json.loads(record_path.read_text())
+        missing_archive_bytes = json.loads(json.dumps(valid_record))
+        missing_archive_bytes["result"].pop("archiveBytes")
+        record_path.write_text(json.dumps(missing_archive_bytes))
+        record_path.chmod(0o600)
+        incompatible_current = self.env.msw(
+            "app", "backup-status", "--operation-id", started["operationId"],
+            "--format", "json", check=False,
+        )
+        self.assertEqual(incompatible_current.returncode, 78)
+        self.assertEqual(
+            json.loads(incompatible_current.stdout)["error"]["code"],
+            "MSW_BACKUP_RECORD_INCOMPATIBLE",
+        )
+        expired = time.time() - 31 * 24 * 60 * 60
+        os.utime(record_path, (expired, expired))
+        incompatible_list = self.env.msw("app", "backup-list", "--format", "json", check=False)
+        self.assertEqual(incompatible_list.returncode, 78)
+        self.assertTrue(record_path.exists(), "incompatible retained records must never be pruned")
+        record_path.write_text(json.dumps(valid_record))
+        record_path.chmod(0o600)
 
         # Simulate an app/worker crash after the verified result sidecar was
         # committed but before the operation record's final presentation

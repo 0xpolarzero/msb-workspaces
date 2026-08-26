@@ -1903,7 +1903,7 @@ final class AppModel {
             return preview
         } catch {
             backupRequiresRuntimeRepair = backupRepairRequired(for: error)
-            detailError = error.localizedDescription
+            detailError = backupErrorMessage(error)
             return nil
         }
     }
@@ -1983,8 +1983,8 @@ final class AppModel {
                 let operation = try await diagnostics.startBackup(to: directory, requestKey: requestKey)
                 self?.upsertBackupOperation(operation)
             } catch {
-                self?.detailError = error.localizedDescription
                 self?.backupRequiresRuntimeRepair = self?.backupRepairRequired(for: error) ?? false
+                self?.detailError = self?.backupErrorMessage(error)
             }
             self?.isDetailLoading = false
         }
@@ -2002,8 +2002,8 @@ final class AppModel {
             }
             if detailError?.contains("backup") == true { detailError = nil }
         } catch {
-            detailError = error.localizedDescription
             backupRequiresRuntimeRepair = backupRepairRequired(for: error)
+            detailError = backupErrorMessage(error)
         }
     }
 
@@ -2012,9 +2012,22 @@ final class AppModel {
         switch clientError {
         case .invalidExecutable, .incompatibleExecutable, .unsupportedBackupProtocol:
             return true
+        case .malformedJSON(let command):
+            return ["backup-preview", "backup-start", "backup-list", "backup-status"].contains(command)
+        case .protocolFailure(let error):
+            return error.code == "MSW_BACKUP_RECORD_INCOMPATIBLE"
         default:
             return false
         }
+    }
+
+    private func backupErrorMessage(_ error: Error) -> String {
+        if let clientError = error as? MSWClientError,
+           case .malformedJSON(let command) = clientError,
+           ["backup-preview", "backup-start", "backup-list", "backup-status"].contains(command) {
+            return "The installed MSW runtime returned an incompatible backup schema. Open Setup and repair the MSW installation, then retry."
+        }
+        return error.localizedDescription
     }
 
     private func upsertBackupOperation(_ operation: MSWBackupOperation) {

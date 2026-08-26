@@ -278,6 +278,7 @@ actor MSWDiagnostics {
               value.requestKey.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil,
               let state = MSWBackupOperation.State(rawValue: value.state),
               let phase = MSWBackupOperation.Phase(rawValue: value.phase),
+              !value.message.isEmpty,
               value.destination.hasPrefix("/"), !value.destination.contains("\0"),
               value.updatedAt >= value.startedAt, value.elapsedSeconds >= 0,
               value.ownerPid.map({ $0 > 1 }) ?? true,
@@ -286,9 +287,13 @@ actor MSWDiagnostics {
                   $0.lowerBytes > 0 && $0.upperBytes >= $0.lowerBytes &&
                     $0.basisRatio > 0 && $0.changedSourceRatio > 0 && !$0.provenance.isEmpty
               }) ?? true,
+              Set(value.runningWorkspaces).count == value.runningWorkspaces.count,
+              value.runningWorkspaces.allSatisfy(WorkspaceID.isValid),
               value.progress.processedBytes >= 0, value.progress.writtenBytes >= 0,
               value.progress.throughputBytesPerSecond >= 0,
               value.progress.totalBytes.map({ $0 > 0 }) ?? true,
+              value.progress.totalBytes.map({ value.progress.processedBytes <= $0 }) ?? true,
+              value.progress.etaSeconds == nil || value.progress.totalBytes != nil,
               value.progress.etaSeconds.map({ $0 >= 0 }) ?? true else {
             throw MSWClientError.malformedJSON(command: command)
         }
@@ -302,6 +307,7 @@ actor MSWDiagnostics {
                   final.info.hasPrefix("/"), !final.info.contains("\0"),
                   Set(final.stoppedWorkspaces).count == final.stoppedWorkspaces.count,
                   Set(final.restartedWorkspaces).isSubset(of: Set(final.stoppedWorkspaces)),
+                  final.stoppedWorkspaces == value.runningWorkspaces,
                   final.stoppedWorkspaces.allSatisfy(WorkspaceID.isValid),
                   final.restartedWorkspaces.allSatisfy(WorkspaceID.isValid) else {
                 throw MSWClientError.malformedJSON(command: command)
@@ -314,12 +320,20 @@ actor MSWDiagnostics {
         } else {
             result = nil
         }
-        guard (state == .completed) == (result != nil),
+        let phaseMatchesState = switch state {
+        case .queued: phase == .preparing
+        case .running: phase == .preparing || phase == .archiveWriting || phase == .checksumming || phase == .finalizing
+        case .completed: phase == .completed
+        case .failed: phase == .failed
+        }
+        guard phaseMatchesState,
+              (state == .completed) == (result != nil),
               (state == .completed) == (phase == .completed),
               (state == .failed) == (value.error != nil),
               (state == .failed) == (phase == .failed),
               (state == .completed || state == .failed) == (value.completedAt != nil),
-              (state == .queued || state == .running) == (result == nil && value.error == nil) else {
+              (state == .queued || state == .running) == (result == nil && value.error == nil),
+              result.map({ value.progress.writtenBytes == $0.archiveBytes }) ?? true else {
             throw MSWClientError.malformedJSON(command: command)
         }
         return MSWBackupOperation(

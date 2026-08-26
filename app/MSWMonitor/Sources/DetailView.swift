@@ -2492,7 +2492,7 @@ private struct BackupOperationCard: View {
                             .accessibilityIdentifier("backup.running.status")
                         Spacer()
                         if let total = operation.totalBytes, total > 0 {
-                            Text("\(Int((Double(operation.processedBytes) / Double(total) * 100).rounded()))%")
+                            Text("\(min(100, Int(Double(operation.processedBytes) / Double(total) * 100)))%")
                                 .font(.caption.monospacedDigit())
                                 .accessibilityIdentifier("backup.running.percentage")
                         }

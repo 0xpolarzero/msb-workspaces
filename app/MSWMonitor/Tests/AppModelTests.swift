@@ -315,40 +315,53 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(resolution.incompatibleCandidates, [executable])
     }
 
-    func testBackupNegotiationRejectsPriorOperationSchemaLackingArchiveBytesBeforeStart() async throws {
+    func testBackupNegotiationRejectsOlderMissingArchiveBytesAndFutureSchemasBeforeStart() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-backup-schema1-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-        let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let invocation = temporary.appendingPathComponent("backup-start-invoked")
-        let executable = temporary.appendingPathComponent("msw")
-        let olderHandshake = protocolCompatibleHandshake
-            .replacingOccurrences(of: #""protocolVersion":2,"preview""#, with: #""protocolVersion":1,"preview""#)
+        let missingArchiveBytes = protocolCompatibleHandshake
             .replacingOccurrences(of: ",\"archiveBytes\":true", with: "")
-        let script = """
-        #!/bin/sh
-        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
-            printf '%s\\n' '\(olderHandshake)'
-        elif [ "$1" = "app" ] && [ "$2" = "backup-start" ]; then
-            : > "\(invocation.path)"
-            exit 64
-        else
-            exit 64
-        fi
-        """
-        try Data(script.utf8).write(to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: temporary, configuredExecutable: executable))
-        let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: runner)))
+        let olderMissingArchiveBytes = missingArchiveBytes
+            .replacingOccurrences(of: #""protocolVersion":2,"preview""#, with: #""protocolVersion":1,"preview""#)
+        let futureSchema = protocolCompatibleHandshake
+            .replacingOccurrences(of: #""protocolVersion":2,"preview""#, with: #""protocolVersion":3,"preview""#)
 
-        model.createBackup(to: destination)
-        for _ in 0..<50 where model.isDetailLoading { try await Task.sleep(for: .milliseconds(20)) }
+        for (label, handshake) in [
+            ("older-missing-archive-bytes", olderMissingArchiveBytes),
+            ("current-missing-archive-bytes", missingArchiveBytes),
+            ("future", futureSchema),
+        ] {
+            let caseDirectory = temporary.appendingPathComponent(label, isDirectory: true)
+            let destination = caseDirectory.appendingPathComponent("Backups", isDirectory: true)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            let invocation = caseDirectory.appendingPathComponent("backup-start-invoked")
+            let executable = caseDirectory.appendingPathComponent("msw")
+            let script = """
+            #!/bin/sh
+            if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+                printf '%s\\n' '\(handshake)'
+            elif [ "$1" = "app" ] && [ "$2" = "backup-start" ]; then
+                : > "\(invocation.path)"
+                exit 64
+            else
+                exit 64
+            fi
+            """
+            try Data(script.utf8).write(to: executable)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            let runner = MSWCommandRunner(configuration: .init(
+                homeDirectory: caseDirectory, configuredExecutable: executable
+            ))
+            let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: runner)))
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: invocation.path))
-        XCTAssertTrue(model.backupRequiresRuntimeRepair)
-        XCTAssertEqual(model.detailError, MSWClientError.incompatibleExecutable.localizedDescription)
+            model.createBackup(to: destination)
+            for _ in 0..<50 where model.isDetailLoading { try await Task.sleep(for: .milliseconds(20)) }
+
+            XCTAssertFalse(FileManager.default.fileExists(atPath: invocation.path), label)
+            XCTAssertTrue(model.backupRequiresRuntimeRepair, label)
+            XCTAssertEqual(model.detailError, MSWClientError.incompatibleExecutable.localizedDescription, label)
+        }
     }
 
     func testBackupFixtureTracksIndependentConcurrentOperationsAndAdvancingProgress() throws {
@@ -435,6 +448,77 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(completed.result?.archive, archive)
         XCTAssertEqual(completed.result?.archiveBytes, 3_145_728)
         XCTAssertNil(relaunchedModel.detailError)
+    }
+
+    func testBackupListRejectsOlderCompletedResultMissingArchiveBytesWithSetupRepair() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-backup-list-old-result-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let archive = destination.appendingPathComponent("persisted.tar.zst")
+        let listResponse = #"""
+        {"schemaVersion":1,"requestId":"backup-list","ok":true,"command":"backup-list","observedAt":"2026-08-26T12:00:10Z","result":[{"contractVersion":2,"kind":"backup","operationId":"persisted-completed-0002","requestKey":"request-completed","state":"completed","phase":"completed","message":"Archive completed.","destination":"DESTINATION","startedAt":"2026-08-26T11:59:00Z","updatedAt":"2026-08-26T11:59:10Z","completedAt":"2026-08-26T11:59:10Z","elapsedSeconds":10,"ownerPid":null,"ownerProcessState":"exited","sourceAllocatedBytes":8000000,"archiveEstimate":null,"runningWorkspaces":["dev"],"progress":{"processedBytes":8000000,"writtenBytes":3145728,"throughputBytesPerSecond":800000,"totalBytes":null,"etaSeconds":null},"result":{"contractVersion":2,"archive":"ARCHIVE","checksum":"ARCHIVE.sha256","info":"ARCHIVE.info.txt","completedAt":"2026-08-26T11:59:10Z","stoppedWorkspaces":["dev"],"restartedWorkspaces":["dev"]},"error":null,"warnings":[]}],"warnings":[],"error":null}
+        """#
+            .replacingOccurrences(of: "DESTINATION", with: destination.path)
+            .replacingOccurrences(of: "ARCHIVE", with: archive.path)
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "backup-list" ]; then
+            printf '%s\\n' '\(listResponse)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: MSWCommandRunner(
+            configuration: .init(homeDirectory: temporary, configuredExecutable: executable)
+        ))))
+
+        await model.refreshBackupOperations()
+
+        XCTAssertTrue(model.backupOperations.isEmpty)
+        XCTAssertTrue(model.backupRequiresRuntimeRepair)
+        XCTAssertEqual(
+            model.detailError,
+            "The installed MSW runtime returned an incompatible backup schema. Open Setup and repair the MSW installation, then retry."
+        )
+    }
+
+    func testBackupListProtocolRejectionRequiresSetupRepair() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-backup-list-protocol-rejection-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let executable = temporary.appendingPathComponent("msw")
+        let rejection = #"{"schemaVersion":1,"requestId":"backup-list-rejected","ok":false,"command":"backup-list","observedAt":null,"result":null,"warnings":[],"error":{"code":"MSW_BACKUP_RECORD_INCOMPATIBLE","message":"A retained backup operation uses an unsupported schema.","recovery":"Open Setup and repair MSW before refreshing backup operations.","workspace":null,"retryable":false}}"#
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "backup-list" ]; then
+            printf '%s\\n' '\(rejection)'
+            exit 78
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: MSWCommandRunner(
+            configuration: .init(homeDirectory: temporary, configuredExecutable: executable)
+        ))))
+
+        await model.refreshBackupOperations()
+
+        XCTAssertTrue(model.backupOperations.isEmpty)
+        XCTAssertTrue(model.backupRequiresRuntimeRepair)
+        XCTAssertTrue(model.detailError?.contains("Open Setup and repair MSW") == true)
     }
 
     func testInitialWorkspacesAreFixedAndStopped() {

@@ -4541,8 +4541,12 @@ backup_snapshot_join() {
       backup_snapshot_store '.members += [$member] | .updatedAt=$now' --argjson member "$member" --arg now "$(app_now)" || { backup_snapshot_lock_release; return 1; }
     fi
     original="$($JQ_BIN -c '.originallyRunning' "$BACKUP_SNAPSHOT_SESSION")"
-    backup_record_update "$operation_id" '.runningWorkspaces=$running | .snapshotSessionId=$sessionId' \
-      --argjson running "$original" --arg sessionId "$($JQ_BIN -r '.sessionId' "$BACKUP_SNAPSHOT_SESSION")" 2>/dev/null || true
+    if [[ "$operation_id" != direct-* ]] && ! backup_record_update "$operation_id" \
+      '.runningWorkspaces=$running | .snapshotSessionId=$sessionId' \
+      --argjson running "$original" --arg sessionId "$($JQ_BIN -r '.sessionId' "$BACKUP_SNAPSHOT_SESSION")"; then
+      backup_snapshot_lock_release
+      return 1
+    fi
     backup_snapshot_lock_release
     return 0
   done
@@ -4914,9 +4918,84 @@ backup_owner_is_alive() {
   [[ -n "$expected" && -n "$current" && "$current" == "$expected" ]]
 }
 
+backup_record_is_compatible() {
+  "$JQ_BIN" -e '
+    select(.contractVersion == 2 and .kind == "backup") |
+    select((.operationId | type == "string" and test("^[a-z0-9-]{8,64}$")) and
+      (.requestKey | type == "string" and test("^[A-Za-z0-9._-]{1,128}$")) and
+      (.state == "queued" or .state == "running" or .state == "completed" or .state == "failed") and
+      (.phase == "preparing" or .phase == "archive-writing" or .phase == "checksumming" or
+        .phase == "finalizing" or .phase == "completed" or .phase == "failed") and
+      (.message | type == "string" and length > 0) and
+      (.destination | type == "string" and startswith("/")) and
+      (.startedAt | type == "string" and length > 0) and
+      (.updatedAt | type == "string" and length > 0) and
+      ((.completedAt == null) or (.completedAt | type == "string" and length > 0)) and
+      (.elapsedSeconds | type == "number" and floor == . and . >= 0) and
+      ((.ownerPid == null) or (.ownerPid | type == "number" and floor == . and . > 1)) and
+      (.ownerProcessState | type == "string" and length > 0) and
+      (.sourceAllocatedBytes | type == "number" and floor == . and . > 0) and
+      ((.archiveEstimate == null) or
+        ((.archiveEstimate | keys) == ["basisRatio","changedSourceRatio","lowerBytes","provenance","upperBytes"] and
+         (.archiveEstimate.lowerBytes | type == "number" and floor == . and . > 0) and
+         (.archiveEstimate.upperBytes | type == "number" and floor == . and . > 0) and
+         (.archiveEstimate.upperBytes >= .archiveEstimate.lowerBytes) and
+         (.archiveEstimate.basisRatio | type == "number" and . > 0) and
+         (.archiveEstimate.changedSourceRatio | type == "number" and . > 0) and
+         (.archiveEstimate.provenance | type == "string" and length > 0))) and
+      (.runningWorkspaces | type == "array") and all(.runningWorkspaces[]; type == "string") and
+      ((.runningWorkspaces | unique | length) == (.runningWorkspaces | length)) and
+      (.progress | type == "object") and
+      ((.progress | keys) == ["etaSeconds","processedBytes","throughputBytesPerSecond","totalBytes","writtenBytes"]) and
+      (.progress.processedBytes | type == "number" and floor == . and . >= 0) and
+      (.progress.writtenBytes | type == "number" and floor == . and . >= 0) and
+      (.progress.throughputBytesPerSecond | type == "number" and floor == . and . >= 0) and
+      ((.progress.totalBytes == null) or
+        ((.progress.totalBytes | type == "number" and floor == . and . > 0) and
+         .progress.totalBytes >= .progress.processedBytes)) and
+      ((.progress.etaSeconds == null) or
+        ((.progress.etaSeconds | type == "number" and floor == . and . >= 0) and
+         .progress.totalBytes != null)) and
+      (.warnings | type == "array") and all(.warnings[]; type == "string")) |
+    select(
+      if .state == "completed" then
+        .phase == "completed" and .completedAt != null and .error == null and
+        (.result | type == "object") and
+        ((.result | keys) == ["archive","archiveBytes","checksum","completedAt","contractVersion","info","restartedWorkspaces","stoppedWorkspaces"]) and
+        .result.contractVersion == 2 and
+        (.result.archive | type == "string" and startswith("/")) and
+        (.result.archiveBytes | type == "number" and floor == . and . > 0) and
+        (.result.checksum | type == "string" and startswith("/")) and
+        (.result.info | type == "string" and startswith("/")) and
+        (.result.completedAt | type == "string" and length > 0) and
+        (.result.stoppedWorkspaces | type == "array") and all(.result.stoppedWorkspaces[]; type == "string") and
+        (.result.restartedWorkspaces | type == "array") and all(.result.restartedWorkspaces[]; type == "string") and
+        ((.result.stoppedWorkspaces | unique | length) == (.result.stoppedWorkspaces | length)) and
+        ((.result.restartedWorkspaces | unique | length) == (.result.restartedWorkspaces | length)) and
+        ((.result.restartedWorkspaces - .result.stoppedWorkspaces | length) == 0) and
+        (.result.stoppedWorkspaces == .runningWorkspaces) and
+        (.progress.writtenBytes == .result.archiveBytes)
+      elif .state == "failed" then
+        .phase == "failed" and .completedAt != null and .result == null and
+        (.error | type == "object") and
+        ((.error | keys) == ["code","message","recovery","retryable"]) and
+        (.error.code | type == "string" and length > 0) and
+        (.error.message | type == "string" and length > 0) and
+        (.error.recovery | type == "string" and length > 0) and
+        (.error.retryable | type == "boolean")
+      elif .state == "queued" then
+        .phase == "preparing" and .completedAt == null and .result == null and .error == null
+      else
+        (.phase == "preparing" or .phase == "archive-writing" or .phase == "checksumming" or .phase == "finalizing") and
+        .completedAt == null and .result == null and .error == null
+      end)
+  ' "$1" >/dev/null 2>&1
+}
+
 backup_reconcile_record() {
   local path="$1" operation_id state pid sidecar now updated_epoch now_epoch
   [[ -f "$path" && ! -L "$path" ]] || return 1
+  backup_record_is_compatible "$path" || return 1
   operation_id="$($JQ_BIN -er 'select(.contractVersion == 2 and .kind == "backup") | .operationId' "$path" 2>/dev/null)" || return 1
   state="$($JQ_BIN -r '.state' "$path")"
   [[ "$state" == running || "$state" == queued ]] || return 0
@@ -4961,7 +5040,7 @@ backup_prune_records() {
   local path operation_id state count=0 listing=""
   backup_state_prepare
   while IFS= read -r path; do
-    backup_reconcile_record "$path" || true
+    backup_reconcile_record "$path" || continue
     state="$($JQ_BIN -r '.state // empty' "$path" 2>/dev/null || true)"
     if [[ "$state" == completed || "$state" == failed ]]; then
       operation_id="$(basename "$path" .json)"
@@ -4973,6 +5052,7 @@ backup_prune_records() {
     [[ -n "$path" ]] || continue
     count=$((count + 1))
     if (( count > 40 )); then
+      backup_record_is_compatible "$path" || continue
       case "$($JQ_BIN -r '.state // empty' "$path" 2>/dev/null || true)" in
         completed|failed)
           operation_id="$(basename "$path" .json)"
@@ -6295,10 +6375,23 @@ app_cmd_backup_start() {
     sleep 0.05
   done
   printf '%s\n' "$$" >"$lock_dir/owner"
-  local existing=""
+  local existing="" existing_destination="" existing_id=""
   existing="$($JQ_BIN -cs --arg key "$request_key" '[.[] | select(.contractVersion == 2 and .requestKey == $key)] | sort_by(.startedAt) | last // empty' "$BACKUP_OPERATION_ROOT"/*.json 2>/dev/null || true)"
   if [[ -n "$existing" ]]; then
+    existing_id="$($JQ_BIN -r '.operationId // empty' <<<"$existing")"
+    if ! backup_record_is_compatible "$(backup_record_path "$existing_id")"; then
+      rm -f "$lock_dir/owner"; rmdir "$lock_dir"
+      app_emit_error backup-start "MSW_BACKUP_RECORD_INCOMPATIBLE" \
+        "The request key belongs to an incompatible retained backup operation." \
+        "Open Setup and repair MSW, then retry with a new request key." "" false 78
+    fi
     rm -f "$lock_dir/owner"; rmdir "$lock_dir"
+    existing_destination="$($JQ_BIN -r '.destination' <<<"$existing")"
+    if [[ "$existing_destination" != "$directory" ]]; then
+      app_emit_error backup-start "MSW_BACKUP_IDEMPOTENCY_CONFLICT" \
+        "The request key already belongs to a backup with a different destination." \
+        "Reuse the original destination or start this backup with a new request key." "" false 73
+    fi
     app_emit_success backup-start "$("$JQ_BIN" -c "$(backup_operation_wire_filter)" <<<"$existing")"
     return
   fi
@@ -6321,8 +6414,11 @@ app_cmd_backup_start() {
 app_cmd_backup_list() {
   [[ $# == 2 && "$1" == --format && "$2" == json ]] || app_usage_error backup-list "backup-list requires --format json"
   app_require_config backup-list; require_command_path jq "$JQ_BIN"; backup_state_prepare; backup_prune_records
-  local path
-  while IFS= read -r path; do backup_reconcile_record "$path" || true; done < <(/usr/bin/find "$BACKUP_OPERATION_ROOT" -type f -name '*.json' -print)
+  local path incompatible=0
+  while IFS= read -r path; do
+    backup_reconcile_record "$path" || incompatible=1
+  done < <(/usr/bin/find "$BACKUP_OPERATION_ROOT" -type f -name '[a-z0-9]*.json' -print)
+  (( incompatible == 0 )) || app_emit_error backup-list "MSW_BACKUP_RECORD_INCOMPATIBLE" "A retained backup operation uses an unsupported schema." "Open Setup and repair MSW before refreshing backup operations." "" false 78
   local result wire_filter
   wire_filter="$(backup_operation_wire_filter)"
   result="$($JQ_BIN -cs "map(select(.contractVersion == 2 and .kind == \"backup\") | $wire_filter) | sort_by(.startedAt) | reverse" "$BACKUP_OPERATION_ROOT"/*.json 2>/dev/null || printf '[]')"
