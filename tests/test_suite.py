@@ -482,10 +482,12 @@ class SyntaxAndStaticTests(MSWTestCase):
         # ever touched, and only for the box being recreated.
         self.assertIn('ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/msw_known_hosts"', setup)
         self.assertIn("msw_known_hosts", msw)
-        # No code path may touch the GLOBAL ~/.ssh/known_hosts: bin/msw never
-        # removes host keys at all, and setup's only removal names the
-        # dedicated file explicitly.
-        self.assertNotIn("ssh-keygen -R", msw)
+        # No code path may touch the GLOBAL ~/.ssh/known_hosts. Both setup and
+        # the typed workspace-reconciliation path may remove only the named
+        # workspace from MSW's dedicated known-hosts file.
+        reconcile_removal = 'ssh-keygen -R "${old_box}.msb" -f "$HOME/.ssh/msw_known_hosts"'
+        self.assertIn(reconcile_removal, msw)
+        self.assertNotIn("ssh-keygen -R", msw.replace(reconcile_removal, ""))
         self.assertNotIn("ssh-keygen -R", setup.replace(
             'ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/msw_known_hosts"', ""))
         # Fresh-home release blocker: ~/.local/state/msw is created (mode
@@ -3267,7 +3269,8 @@ class PackagedBehaviorTests(MSWTestCase):
         interrupted.update({
             "state": "running", "phase": "finalizing", "ownerPid": 99999999,
             "ownerProcessState": "missing", "result": None, "completedAt": None,
-            "updatedEpoch": 0,
+            "startedEpoch": int(time.time()) - 20, "updatedEpoch": 0,
+            "elapsedSeconds": 1,
         })
         record_path.write_text(json.dumps(interrupted))
         record_path.chmod(0o600)
@@ -3278,6 +3281,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(reconciled["state"], "completed")
         self.assertEqual(reconciled["phase"], "completed")
         self.assertEqual(reconciled["result"]["archiveBytes"], result["archiveBytes"])
+        self.assertGreaterEqual(reconciled["elapsedSeconds"], 20)
         self.assertIn("verified after owner-process reconciliation", reconciled["message"])
 
         history_preview = json.loads(self.env.msw(

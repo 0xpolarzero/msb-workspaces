@@ -4598,7 +4598,7 @@ backup_owner_is_alive() {
   kill -0 "$pid" 2>/dev/null || return 1
   expected="$($JQ_BIN -r '.ownerProcessStarted // empty' "$(backup_record_path "$operation_id")" 2>/dev/null || true)"
   current="$(backup_process_signature "$pid")"
-  [[ -n "$current" && ( -z "$expected" || "$current" == "$expected" ) ]]
+  [[ -n "$expected" && -n "$current" && "$current" == "$expected" ]]
 }
 
 backup_reconcile_record() {
@@ -4619,9 +4619,24 @@ backup_reconcile_record() {
   if [[ -n "$sidecar" ]] && backup_sidecar_is_verified "$sidecar" "$($JQ_BIN -r '.expectedArchive' "$path")"; then
     local result
     result="$($JQ_BIN -c '.' "$sidecar")"
-    backup_record_update "$operation_id" '.state="completed" | .phase="completed" | .message="Archive and checksum verified after owner-process reconciliation." | .updatedAt=$now | .completedAt=$now | .ownerProcessState="exited" | .result=$result | .error=null' --arg now "$now" --argjson result "$result"
+    backup_record_update "$operation_id" '
+      .state="completed" | .phase="completed" |
+      .message="Archive and checksum verified after owner-process reconciliation." |
+      .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now |
+      .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
+      .ownerProcessState="exited" | .progress.writtenBytes=$archiveBytes |
+      .result=$result | .error=null
+    ' --arg now "$now" --argjson epoch "$now_epoch" \
+      --argjson archiveBytes "$($JQ_BIN -r '.archiveBytes' "$sidecar")" --argjson result "$result"
   else
-    backup_record_update "$operation_id" '.state="failed" | .phase="failed" | .message="The detached backup process is no longer running and no verified final sidecar was found." | .updatedAt=$now | .completedAt=$now | .ownerProcessState="missing" | .error={code:"MSW_BACKUP_OWNER_LOST",message:.message,recovery:"Review the destination, then start a new backup with a new request key.",retryable:true}' --arg now "$now"
+    backup_record_update "$operation_id" '
+      .state="failed" | .phase="failed" |
+      .message="The detached backup process is no longer running and no verified final sidecar was found." |
+      .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now |
+      .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
+      .ownerProcessState="missing" |
+      .error={code:"MSW_BACKUP_OWNER_LOST",message:.message,recovery:"Review the destination, then start a new backup with a new request key.",retryable:true}
+    ' --arg now "$now" --argjson epoch "$now_epoch"
   fi
 }
 
@@ -4652,7 +4667,7 @@ backup_prune_records() {
 }
 
 backup_operation_worker() {
-  local operation_id="$1" directory="$2" record output archive checksum info archive_bytes source_bytes stopped_json restarted_json warnings_json result_sidecar now box pipeline_lock lock_owner owner_started
+  local operation_id="$1" directory="$2" record output archive checksum info archive_bytes source_bytes stopped_json restarted_json warnings_json result_sidecar result_sidecar_tmp="" now box pipeline_lock lock_owner lock_expected lock_current owner_started
   umask 077
   backup_state_prepare
   record="$(backup_record_path "$operation_id")"
@@ -4661,7 +4676,18 @@ backup_operation_worker() {
   pipeline_lock="$BACKUP_OPERATION_ROOT/.pipeline-lock"
   while ! mkdir "$pipeline_lock" 2>/dev/null; do
     lock_owner="$(/bin/cat "$pipeline_lock/owner" 2>/dev/null || printf 0)"
-    if [[ ! "$lock_owner" =~ ^[0-9]+$ || "$lock_owner" -le 1 ]] || ! kill -0 "$lock_owner" 2>/dev/null; then
+    lock_expected="$(/bin/cat "$pipeline_lock/owner-started" 2>/dev/null || true)"
+    # The lock directory exists briefly before its owner metadata is written.
+    # Give that initialization window one bounded retry rather than deleting a
+    # live lock and allowing two consistent-snapshot pipelines to overlap.
+    if [[ ! "$lock_owner" =~ ^[0-9]+$ || "$lock_owner" -le 1 || -z "$lock_expected" ]]; then
+      sleep 1
+      lock_owner="$(/bin/cat "$pipeline_lock/owner" 2>/dev/null || printf 0)"
+      lock_expected="$(/bin/cat "$pipeline_lock/owner-started" 2>/dev/null || true)"
+    fi
+    lock_current="$(backup_process_signature "$lock_owner")"
+    if [[ ! "$lock_owner" =~ ^[0-9]+$ || "$lock_owner" -le 1 ]] ||
+      ! kill -0 "$lock_owner" 2>/dev/null || [[ -z "$lock_expected" || "$lock_current" != "$lock_expected" ]]; then
       rm -rf "$pipeline_lock"
       continue
     fi
@@ -4669,8 +4695,26 @@ backup_operation_worker() {
     sleep 1
   done
   printf '%s\n' "$$" >"$pipeline_lock/owner"
-  cleanup_backup_worker_lock() { rm -rf "$BACKUP_OPERATION_ROOT/.pipeline-lock"; }
-  trap cleanup_backup_worker_lock EXIT
+  printf '%s\n' "$owner_started" >"$pipeline_lock/owner-started"
+  cleanup_backup_worker() {
+    local rc=$? state failed_at failed_epoch
+    trap - EXIT
+    [[ -z "$result_sidecar_tmp" ]] || rm -f "$result_sidecar_tmp"
+    state="$($JQ_BIN -r '.state // empty' "$record" 2>/dev/null || true)"
+    if (( rc != 0 )) && [[ "$state" == queued || "$state" == running ]]; then
+      failed_at="$(app_now)"; failed_epoch="$(date +%s)"
+      backup_record_update "$operation_id" '
+        .state="failed" | .phase="failed" | .updatedAt=$now | .updatedEpoch=$epoch |
+        .completedAt=$now | .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
+        .ownerProcessState="exited" |
+        .message="The backup worker could not finalize its durable result." |
+        .error={code:"MSW_BACKUP_FINALIZATION_FAILED",message:.message,recovery:"Review the destination and retained worker log, then retry with a new request key.",retryable:true}
+      ' --arg now "$failed_at" --argjson epoch "$failed_epoch" || true
+    fi
+    rm -rf "$pipeline_lock"
+    return "$rc"
+  }
+  trap cleanup_backup_worker EXIT
   export MSW_BACKUP_OPERATION_ID="$operation_id"
   export MSW_BACKUP_ARCHIVE_PATH="$($JQ_BIN -r '.expectedArchive' "$record")"
   local backup_rc
@@ -4680,7 +4724,13 @@ backup_operation_worker() {
   set -e
   if (( backup_rc != 0 )); then
     now="$(app_now)"
-    backup_record_update "$operation_id" '.state="failed" | .phase="failed" | .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now | .ownerProcessState="exited" | .message="The backup pipeline failed; previously running workspaces were reconciled." | .error={code:"MSW_BACKUP_FAILED",message:.message,recovery:"Review the destination and workspace health, then retry with a new request key.",retryable:true}' --arg now "$now" --argjson epoch "$(date +%s)"
+    backup_record_update "$operation_id" '
+      .state="failed" | .phase="failed" | .updatedAt=$now | .updatedEpoch=$epoch |
+      .completedAt=$now | .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
+      .ownerProcessState="exited" |
+      .message="The backup pipeline failed; previously running workspaces were reconciled." |
+      .error={code:"MSW_BACKUP_FAILED",message:.message,recovery:"Review the destination and workspace health, then retry with a new request key.",retryable:true}
+    ' --arg now "$now" --argjson epoch "$(date +%s)"
     return 1
   fi
   archive="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst$/p' | tail -n 1)"
@@ -4701,16 +4751,22 @@ backup_operation_worker() {
   done < <($JQ_BIN -r '.[]' <<<"$stopped_json")
   result_sidecar="$archive.msw-result.json"
   now="$(app_now)"
+  result_sidecar_tmp="$(mktemp "$(dirname "$result_sidecar")/.msw-backup-result.XXXXXX")"
   "$JQ_BIN" -cn --arg archive "$archive" --arg checksum "$checksum" --arg info "$info" --arg completedAt "$now" \
     --argjson archiveBytes "$archive_bytes" --argjson stopped "$stopped_json" --argjson restarted "$restarted_json" \
-    '{contractVersion:2,archive:$archive,archiveBytes:$archiveBytes,checksum:$checksum,info:$info,completedAt:$completedAt,stoppedWorkspaces:$stopped,restartedWorkspaces:$restarted}' >"$result_sidecar.tmp"
-  chmod 600 "$result_sidecar.tmp"; mv "$result_sidecar.tmp" "$result_sidecar"
+    '{contractVersion:2,archive:$archive,archiveBytes:$archiveBytes,checksum:$checksum,info:$info,completedAt:$completedAt,stoppedWorkspaces:$stopped,restartedWorkspaces:$restarted}' >"$result_sidecar_tmp"
+  chmod 600 "$result_sidecar_tmp"; mv "$result_sidecar_tmp" "$result_sidecar"; result_sidecar_tmp=""
   backup_history_store "$source_bytes" "$archive_bytes"
   local result_json
   result_json="$($JQ_BIN -c '.' "$result_sidecar")"
-  backup_record_update "$operation_id" '.state="completed" | .phase="completed" | .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now | .ownerProcessState="exited" | .message="Archive, checksum, and result metadata completed." | .progress.writtenBytes=$archiveBytes | .result=$result | .error=null | .warnings=$warnings' --arg now "$now" --argjson epoch "$(date +%s)" --argjson archiveBytes "$archive_bytes" --argjson result "$result_json" --argjson warnings "$warnings_json"
+  backup_record_update "$operation_id" '
+    .state="completed" | .phase="completed" | .updatedAt=$now | .updatedEpoch=$epoch |
+    .completedAt=$now | .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
+    .ownerProcessState="exited" | .message="Archive, checksum, and result metadata completed." |
+    .progress.writtenBytes=$archiveBytes | .result=$result | .error=null | .warnings=$warnings
+  ' --arg now "$now" --argjson epoch "$(date +%s)" --argjson archiveBytes "$archive_bytes" --argjson result "$result_json" --argjson warnings "$warnings_json"
   trap - EXIT
-  cleanup_backup_worker_lock
+  cleanup_backup_worker
 }
 
 validate_backup_member() {
