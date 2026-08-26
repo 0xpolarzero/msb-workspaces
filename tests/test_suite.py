@@ -3331,6 +3331,175 @@ class PackagedBehaviorTests(MSWTestCase):
         )
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
+    def test_distinct_durable_backups_overlap_and_restore_after_final_participant(self) -> None:
+        self.env.msw("start", "dev")
+        destination = self.env.root / "overlapping-backups"
+        destination.mkdir()
+        barrier = self.env.root / "backup-archive-barrier"
+        barrier.mkdir()
+        extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+
+        def start(key: str) -> dict:
+            return json.loads(self.env.msw(
+                "app", "backup-start", "--directory", str(destination),
+                "--request-key", key, "--format", "json", extra_env=extra,
+            ).stdout)["result"]
+
+        def status(operation_id: str) -> dict:
+            return json.loads(self.env.msw(
+                "app", "backup-status", "--operation-id", operation_id,
+                "--format", "json",
+            ).stdout)["result"]
+
+        def wait_until(predicate, message: str) -> None:
+            for _ in range(600):
+                if predicate():
+                    return
+                time.sleep(0.05)
+            self.fail(message)
+
+        before_events = list(self.env.state().get("events", []))
+        first = start("overlap-one")
+        duplicate = start("overlap-one")
+        second = start("overlap-two")
+        self.assertEqual(first["operationId"], duplicate["operationId"])
+        self.assertNotEqual(first["operationId"], second["operationId"])
+        first_ready = barrier / f"{first['operationId']}.ready"
+        second_ready = barrier / f"{second['operationId']}.ready"
+        wait_until(lambda: first_ready.exists() and second_ready.exists(),
+                   "both distinct archives did not reach the overlap barrier")
+
+        first_writing = status(first["operationId"])
+        second_writing = status(second["operationId"])
+        self.assertEqual((first_writing["state"], first_writing["phase"]),
+                         ("running", "archive-writing"))
+        self.assertEqual((second_writing["state"], second_writing["phase"]),
+                         ("running", "archive-writing"))
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        session_path = operation_root / ".snapshot-session.json"
+        wait_until(
+            lambda: all("archiveProcessStarted" in member
+                        for member in json.loads(session_path.read_text())["members"]),
+            "archive subprocess leases were not persisted",
+        )
+        session = json.loads(session_path.read_text())
+        self.assertEqual(session["state"], "ready")
+        self.assertEqual(session["originallyRunning"], ["dev"])
+        self.assertEqual({member["operationId"] for member in session["members"]},
+                         {first["operationId"], second["operationId"]})
+        self.assertEqual(stat.S_IMODE(session_path.stat().st_mode), 0o600)
+        self.assertFalse((operation_root / ".pipeline-lock").exists())
+
+        (barrier / f"{first['operationId']}.release").touch()
+        wait_until(lambda: status(first["operationId"])["phase"] == "finalizing",
+                   "first archive did not finish independently")
+        self.assertEqual(status(second["operationId"])["phase"], "archive-writing")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
+        (barrier / f"{second['operationId']}.release").touch()
+        wait_until(
+            lambda: all(
+                status(operation_id)["state"] == "completed"
+                for operation_id in (first["operationId"], second["operationId"])
+            ),
+            "overlapping backups did not complete",
+        )
+        completed = {operation_id: status(operation_id)
+                     for operation_id in (first["operationId"], second["operationId"])}
+        self.assertTrue(all(item["state"] == "completed" for item in completed.values()))
+        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+        for item in completed.values():
+            self.assertEqual(item["result"]["stoppedWorkspaces"], ["dev"])
+            self.assertEqual(item["result"]["restartedWorkspaces"], ["dev"])
+        after_events = self.env.state().get("events", [])[len(before_events):]
+        self.assertEqual(sum(event == {"event": "stop", "box": "dev"} for event in after_events), 1)
+        self.assertEqual(sum(event == {"event": "start", "box": "dev"} for event in after_events), 1)
+        self.assertFalse(session_path.exists())
+
+    def test_dead_shared_snapshot_participant_reconciles_without_restarting_under_live_archive(self) -> None:
+        self.env.msw("start", "dev")
+        destination = self.env.root / "dead-participant-backups"
+        destination.mkdir()
+        barrier = self.env.root / "dead-participant-barrier"
+        barrier.mkdir()
+        extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+
+        def start(key: str) -> dict:
+            return json.loads(self.env.msw(
+                "app", "backup-start", "--directory", str(destination),
+                "--request-key", key, "--format", "json", extra_env=extra,
+            ).stdout)["result"]
+
+        def status(operation_id: str) -> dict:
+            return json.loads(self.env.msw(
+                "app", "backup-status", "--operation-id", operation_id,
+                "--format", "json",
+            ).stdout)["result"]
+
+        def wait_until(predicate, message: str) -> None:
+            for _ in range(600):
+                if predicate():
+                    return
+                time.sleep(0.05)
+            self.fail(message)
+
+        dead = start("dead-member")
+        live = start("live-member")
+        wait_until(
+            lambda: all((barrier / f"{item['operationId']}.ready").exists()
+                        for item in (dead, live)),
+            "participants did not reach the crash barrier",
+        )
+        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        session_path = operation_root / ".snapshot-session.json"
+        wait_until(
+            lambda: all("archiveProcessStarted" in member
+                        for member in json.loads(session_path.read_text())["members"]),
+            "archive subprocess leases were not persisted",
+        )
+        session = json.loads(session_path.read_text())
+        dead_member = next(member for member in session["members"]
+                           if member["operationId"] == dead["operationId"])
+        self.assertTrue(dead_member["processStarted"])
+        self.assertTrue(dead_member["archiveProcessStarted"])
+        archive_shell_pid = int(run_cmd([
+            "/bin/ps", "-p", str(dead_member["archivePid"]), "-o", "ppid=",
+        ]).stdout.strip())
+        os.kill(dead_member["pid"], signal.SIGKILL)
+        os.kill(archive_shell_pid, signal.SIGKILL)
+        dead_record = operation_root / f"{dead['operationId']}.json"
+        record = json.loads(dead_record.read_text())
+        record["updatedEpoch"] = 0
+        dead_record.write_text(json.dumps(record))
+        dead_record.chmod(0o600)
+        stale_lock = operation_root / ".snapshot-coordinator-lock"
+        stale_lock.mkdir(mode=0o700, exist_ok=True)
+        (stale_lock / "owner").write_text("99999999\n")
+        (stale_lock / "owner-started").write_text("stale-process-signature\n")
+        (stale_lock / "owner").chmod(0o600)
+        (stale_lock / "owner-started").chmod(0o600)
+
+        wait_until(lambda: status(dead["operationId"])["state"] == "failed",
+                   "dead participant was not reconciled")
+        self.assertEqual(status(dead["operationId"])["error"]["code"],
+                         "MSW_BACKUP_OWNER_LOST")
+        self.assertEqual(status(live["operationId"])["phase"], "archive-writing")
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+        remaining = json.loads(session_path.read_text())
+        self.assertEqual([member["operationId"] for member in remaining["members"]],
+                         [live["operationId"]])
+        self.assertFalse(stale_lock.exists())
+
+        (barrier / f"{live['operationId']}.release").touch()
+        wait_until(lambda: status(live["operationId"])["state"] == "completed",
+                   "surviving archive did not complete")
+        completed = status(live["operationId"])
+        self.assertEqual(completed["result"]["stoppedWorkspaces"], ["dev"])
+        self.assertEqual(completed["result"]["restartedWorkspaces"], ["dev"])
+        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+        self.assertFalse(session_path.exists())
+
     def test_app_backup_pipeline_failure_returns_only_structured_failure(self) -> None:
         self.env.msw("start", "dev")
         destination = self.env.root / "app-backups-failed"
