@@ -2,7 +2,7 @@
 # MicroSandbox Workspaces configuration.
 # The installer copies this file to ~/.config/msw/config.sh and preserves local edits.
 
-MSW_VERSION="3.1.0"
+MSW_VERSION="3.2.0"
 
 # Shared base image and immutable development snapshot.
 MSW_BASE_IMAGE="ghcr.io/superradcompany/ubuntu-systemd:24.04"

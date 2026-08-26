@@ -719,7 +719,7 @@ class InstallerAndDailyTests(MSWTestCase):
         (self.env.home / ".config/msw/base-version").write_text("0.0.0\n")
         self.env.setup()
         self._assert_volume_sentinels()
-        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.1.0")
+        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.2.0")
 
     def test_reset_config_and_rebuild_base(self) -> None:
         config = self.env.home / ".config/msw/config.sh"
@@ -2745,6 +2745,31 @@ class BackupRestoreTests(MSWTestCase):
         self.assertEqual(len(rollbacks), 1)
         self.assertTrue(os.access(self.env.home / ".local/bin/msw", os.X_OK))
 
+    def test_sparse_archive_contract_preserves_holes_and_payload(self) -> None:
+        source = self.env.home / ".microsandbox" / "sparse-performance-contract.img"
+        logical_size = 512 * 1024 * 1024
+        with source.open("wb") as handle:
+            handle.write(b"MSW-SPARSE-START")
+            handle.seek(logical_size - len(b"MSW-SPARSE-END"))
+            handle.write(b"MSW-SPARSE-END")
+        self.assertEqual(source.stat().st_size, logical_size)
+        self.assertLess(source.stat().st_blocks * 512, logical_size // 8)
+
+        archive = self._backup()
+        restored_root = self.env.root / "sparse-contract-restored"
+        restored_root.mkdir()
+        run_cmd([
+            "bash", "-lc",
+            f"{SYSTEM_ZSTD} -dc -q {archive!s} | {SYSTEM_TAR} --extract -C {restored_root!s} -f - .microsandbox/sparse-performance-contract.img",
+        ], env=self.env.env)
+        restored = restored_root / ".microsandbox" / source.name
+        self.assertEqual(restored.stat().st_size, logical_size)
+        self.assertLess(restored.stat().st_blocks * 512, logical_size // 8)
+        with restored.open("rb") as handle:
+            self.assertEqual(handle.read(len(b"MSW-SPARSE-START")), b"MSW-SPARSE-START")
+            handle.seek(logical_size - len(b"MSW-SPARSE-END"))
+            self.assertEqual(handle.read(), b"MSW-SPARSE-END")
+
     def test_corrupt_checksum_is_rejected_before_mutation(self) -> None:
         marker = self.env.home / ".config/msw/current-marker"
         marker.write_text("current")
@@ -2850,7 +2875,7 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_help_version_docs_without_msb_and_complete_deep_check(self) -> None:
         env = self.env.env.copy()
         env["MSW_MSB_BIN"] = "/does/not/exist"
-        self.assertIn("msw 3.1.0", self.env.msw("version", extra_env=env).stdout)
+        self.assertIn("msw 3.2.0", self.env.msw("version", extra_env=env).stdout)
         self.assertIn("grouped MicroSandbox", self.env.msw("help", extra_env=env).stdout)
         self.assertIn("MSW", self.env.msw("docs", "cheatsheet", extra_env=env).stdout)
         proc = self.env.msw("check", "--deep", timeout=90)
@@ -3130,15 +3155,24 @@ class PackagedBehaviorTests(MSWTestCase):
         handshake = json.loads(self.env.msw(
             "app", "handshake", "--format", "json",
         ).stdout)["result"]
-        self.assertTrue(handshake["capabilities"]["backupPreview"])
+        backup_capability = handshake["capabilities"]["backup"]
+        self.assertEqual(backup_capability, {
+            "protocolVersion": 2, "preview": True, "start": True, "list": True,
+            "status": True, "progress": True, "archiveBytes": True, "concurrent": True,
+        })
 
         preview = json.loads(self.env.msw(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
-        self.assertEqual(set(preview), {"destination", "requiredBytes", "runningWorkspaces"})
+        self.assertEqual(set(preview), {
+            "contractVersion", "destination", "sourceAllocatedBytes", "archiveEstimate",
+            "runningWorkspaces",
+        })
+        self.assertEqual(preview["contractVersion"], 2)
         self.assertEqual(preview["destination"], str(destination.resolve()))
-        self.assertGreater(preview["requiredBytes"], 0)
-        self.assertGreaterEqual(preview["requiredBytes"], compressible_source.stat().st_size)
+        self.assertGreater(preview["sourceAllocatedBytes"], 0)
+        self.assertGreaterEqual(preview["sourceAllocatedBytes"], compressible_source.stat().st_size)
+        self.assertIsNone(preview["archiveEstimate"])
         self.assertEqual(preview["runningWorkspaces"], ["dev"])
 
         preview_with_status_unavailable = json.loads(self.env.msw(
@@ -3156,42 +3190,139 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(failure["error"]["code"], "MSW_INVALID_REQUEST")
         self.assertIn("msw app help", failure["error"]["recovery"])
 
-        document = json.loads(self.env.msw(
-            "app", "backup", "--directory", str(destination), "--format", "json",
-            timeout=90,
-        ).stdout)
+        started = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination),
+            "--request-key", "portable-contract-one", "--format", "json",
+        ).stdout)["result"]
+        duplicate = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination),
+            "--request-key", "portable-contract-one", "--format", "json",
+        ).stdout)["result"]
+        distinct = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination),
+            "--request-key", "portable-contract-two", "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(started["operationId"], duplicate["operationId"])
+        self.assertNotEqual(started["operationId"], distinct["operationId"])
 
-        result = document["result"]
+        def terminal(operation_id: str) -> dict:
+            last = None
+            for _ in range(300):
+                last = json.loads(self.env.msw(
+                    "app", "backup-status", "--operation-id", operation_id,
+                    "--format", "json",
+                ).stdout)["result"]
+                if last["state"] in {"completed", "failed"}:
+                    return last
+                time.sleep(0.1)
+            self.fail(f"backup operation did not complete: {last}")
+
+        completed = terminal(started["operationId"])
+        completed_distinct = terminal(distinct["operationId"])
+        self.assertEqual(completed["contractVersion"], 2)
+        self.assertEqual(completed["phase"], "completed")
+        self.assertGreaterEqual(completed["updatedAt"], completed["startedAt"])
+        self.assertGreaterEqual(completed["progress"]["processedBytes"], 0)
+        self.assertGreater(completed["progress"]["writtenBytes"], 0)
+        self.assertGreaterEqual(completed["progress"]["throughputBytesPerSecond"], 0)
+        self.assertIsNone(completed["progress"]["totalBytes"])
+        self.assertIsNone(completed["progress"]["etaSeconds"])
+        result = completed["result"]
         self.assertTrue(result["archive"].endswith(".tar.zst"), result)
         self.assertTrue(Path(result["archive"]).is_file())
         self.assertEqual(result["archiveBytes"], Path(result["archive"]).stat().st_size)
         self.assertGreater(result["archiveBytes"], 0)
-        self.assertLess(result["archiveBytes"], preview["requiredBytes"])
-        self.assertNotIn("archiveBytes", preview)
-        self.assertNotIn("requiredBytes", result)
+        self.assertLess(result["archiveBytes"], preview["sourceAllocatedBytes"])
         self.assertEqual(result["checksum"], result["archive"] + ".sha256")
         self.assertEqual(result["stoppedWorkspaces"], ["dev"])
         self.assertEqual(result["restartedWorkspaces"], ["dev"])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+        self.assertEqual(completed_distinct["state"], "completed")
+        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        self.assertEqual(stat.S_IMODE(operation_root.stat().st_mode), 0o700)
+        record_path = operation_root / f"{started['operationId']}.json"
+        self.assertEqual(stat.S_IMODE(record_path.stat().st_mode), 0o600)
+        listed = json.loads(self.env.msw("app", "backup-list", "--format", "json").stdout)["result"]
+        self.assertTrue({started["operationId"], distinct["operationId"]}.issubset({item["operationId"] for item in listed}))
+
+        legacy_record = operation_root / "legacy-schema-0001.json"
+        legacy_record.write_text(json.dumps({
+            "contractVersion": 1, "kind": "backup", "operationId": "legacy-schema-0001",
+            "state": "completed", "result": {"archive": result["archive"]},
+        }))
+        legacy_record.chmod(0o600)
+        incompatible = self.env.msw(
+            "app", "backup-status", "--operation-id", "legacy-schema-0001",
+            "--format", "json", check=False,
+        )
+        self.assertEqual(incompatible.returncode, 78)
+        self.assertEqual(json.loads(incompatible.stdout)["error"]["code"], "MSW_BACKUP_RECORD_INCOMPATIBLE")
+        legacy_record.unlink()
+
+        # Simulate an app/worker crash after the verified result sidecar was
+        # committed but before the operation record's final presentation
+        # update. Status must recover completed truth from the archive and
+        # checksum, never downgrade it because the owner is gone.
+        interrupted = json.loads(record_path.read_text())
+        interrupted.update({
+            "state": "running", "phase": "finalizing", "ownerPid": 99999999,
+            "ownerProcessState": "missing", "result": None, "completedAt": None,
+            "updatedEpoch": 0,
+        })
+        record_path.write_text(json.dumps(interrupted))
+        record_path.chmod(0o600)
+        reconciled = json.loads(self.env.msw(
+            "app", "backup-status", "--operation-id", started["operationId"],
+            "--format", "json",
+        ).stdout)["result"]
+        self.assertEqual(reconciled["state"], "completed")
+        self.assertEqual(reconciled["phase"], "completed")
+        self.assertEqual(reconciled["result"]["archiveBytes"], result["archiveBytes"])
+        self.assertIn("verified after owner-process reconciliation", reconciled["message"])
+
+        history_preview = json.loads(self.env.msw(
+            "app", "backup-preview", "--directory", str(destination), "--format", "json",
+        ).stdout)["result"]
+        estimate = history_preview["archiveEstimate"]
+        self.assertIsNotNone(estimate)
+        self.assertGreaterEqual(estimate["upperBytes"], estimate["lowerBytes"])
+        self.assertGreater(estimate["basisRatio"], 0)
+        self.assertIn("prior completed backup", estimate["provenance"])
+        original_width = estimate["upperBytes"] - estimate["lowerBytes"]
+        changed_source = self.env.home / ".microsandbox" / "changed-after-history.bin"
+        changed_source.write_bytes(b"B" * (16 * 1024 * 1024))
+        changed_preview = json.loads(self.env.msw(
+            "app", "backup-preview", "--directory", str(destination), "--format", "json",
+        ).stdout)["result"]
+        changed_estimate = changed_preview["archiveEstimate"]
+        self.assertGreater(changed_estimate["changedSourceRatio"], 1)
+        self.assertGreater(changed_estimate["upperBytes"] - changed_estimate["lowerBytes"], original_width)
+        self.assertGreaterEqual(changed_estimate["lowerBytes"], 1)
 
     def test_app_backup_reports_archive_when_workspace_restart_is_incomplete(self) -> None:
         self.env.msw("start", "dev")
         destination = self.env.root / "app-backups-partial"
         destination.mkdir()
 
-        document = json.loads(self.env.msw(
-            "app", "backup", "--directory", str(destination), "--format", "json",
-            timeout=90, extra_env={"MSW_FAKE_START_FAIL": "1"},
-        ).stdout)
-
-        result = document["result"]
-        self.assertTrue(document["ok"])
+        started = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination), "--request-key", "partial",
+            "--format", "json", extra_env={"MSW_FAKE_START_FAIL": "1"},
+        ).stdout)["result"]
+        operation = started
+        for _ in range(300):
+            operation = json.loads(self.env.msw(
+                "app", "backup-status", "--operation-id", started["operationId"], "--format", "json",
+            ).stdout)["result"]
+            if operation["state"] in {"completed", "failed"}: break
+            time.sleep(0.1)
+        self.assertEqual(operation["state"], "completed")
+        result = operation["result"]
         self.assertTrue(Path(result["archive"]).is_file())
         self.assertEqual(result["archiveBytes"], Path(result["archive"]).stat().st_size)
         self.assertEqual(result["stoppedWorkspaces"], ["dev"])
         self.assertEqual(result["restartedWorkspaces"], [])
         self.assertEqual(
-            document["warnings"],
+            operation["warnings"],
             ["MSW could not confirm that dev returned to its pre-backup running state"],
         )
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
@@ -3199,23 +3330,26 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_app_backup_pipeline_failure_returns_only_structured_failure(self) -> None:
         self.env.msw("start", "dev")
         destination = self.env.root / "app-backups-failed"
+        destination.mkdir()
         fake_zstd = self.env.root / "tools/failing-app-zstd"
         fake_zstd.write_text("#!/bin/sh\nexit 42\n")
         fake_zstd.chmod(0o755)
 
-        failed = self.env.msw(
-            "app", "backup", "--directory", str(destination), "--format", "json",
-            timeout=90, check=False, extra_env={"MSW_ZSTD_BIN": str(fake_zstd)},
-        )
-
-        self.assertEqual(failed.returncode, 1, (failed.stdout, failed.stderr))
-        self.assertEqual(len(failed.stdout.splitlines()), 1)
-        document = json.loads(failed.stdout)
-        self.assertFalse(document["ok"])
-        self.assertEqual(document["command"], "backup")
-        self.assertEqual(document["error"]["code"], "MSW_BACKUP_FAILED")
-        self.assertEqual(document["warnings"], [])
-        self.assertNotIn("result", document)
+        started = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination), "--request-key", "failure",
+            "--format", "json", extra_env={"MSW_ZSTD_BIN": str(fake_zstd)},
+        ).stdout)["result"]
+        operation = started
+        for _ in range(300):
+            operation = json.loads(self.env.msw(
+                "app", "backup-status", "--operation-id", started["operationId"], "--format", "json",
+            ).stdout)["result"]
+            if operation["state"] in {"completed", "failed"}: break
+            time.sleep(0.1)
+        self.assertEqual(operation["state"], "failed")
+        self.assertEqual(operation["phase"], "failed")
+        self.assertEqual(operation["error"]["code"], "MSW_BACKUP_FAILED")
+        self.assertIsNone(operation["result"])
         self.assertEqual(list(destination.glob("*")), [])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 

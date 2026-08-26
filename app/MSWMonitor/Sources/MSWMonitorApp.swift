@@ -372,6 +372,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 destination: backupDestination,
                 resultScenario: backupResultScenario
             )
+            if arguments.contains("--ui-test-backup-reattach"), let backupDestination {
+                model.installConcurrentBackupReattachmentFixture(
+                    destination: backupDestination,
+                    advanced: arguments.contains("--ui-test-backup-reattach-advanced")
+                )
+            }
         }
         applicationState.model = model
         githubSettingsState.configure(provider: fixtureProvider ?? provider)

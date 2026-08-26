@@ -4321,6 +4321,74 @@ managed_backup_paths() {
 PATHS
 }
 
+readonly MSW_BACKUP_PROTOCOL_VERSION=2
+readonly BACKUP_OPERATION_ROOT="${MSW_BACKUP_OPERATION_ROOT:-$HOME/.local/state/msw/backup-operations}"
+readonly BACKUP_HISTORY_FILE="${MSW_BACKUP_HISTORY_FILE:-$HOME/.local/state/msw/backup-history.json}"
+
+backup_state_prepare() {
+  umask 077
+  mkdir -p "$BACKUP_OPERATION_ROOT"
+  chmod 700 "$HOME/.local/state" "$HOME/.local/state/msw" "$BACKUP_OPERATION_ROOT" 2>/dev/null || true
+}
+
+backup_record_path() { printf '%s/%s.json\n' "$BACKUP_OPERATION_ROOT" "$1"; }
+
+# Internal persistence includes reconciliation-only fields. App consumers see
+# exactly this canonical v2 projection from start, list, and status.
+backup_operation_wire_filter() {
+  cat <<'JQ'
+{contractVersion,kind,operationId,requestKey,state,phase,message,destination,
+ startedAt,updatedAt,completedAt,elapsedSeconds,ownerPid,ownerProcessState,
+ sourceAllocatedBytes,archiveEstimate,runningWorkspaces,progress,result,error,warnings}
+JQ
+}
+
+backup_record_update() {
+  local operation_id="$1" filter="$2" path tmp
+  shift 2
+  path="$(backup_record_path "$operation_id")"
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  tmp="$(mktemp "$BACKUP_OPERATION_ROOT/.record.XXXXXX")"
+  if ! "$JQ_BIN" "$@" "$filter" "$path" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$path"
+}
+
+backup_record_progress() {
+  local operation_id="$1" phase="$2" processed="$3" written="$4" message="$5" now started_epoch now_epoch elapsed throughput
+  now="$(app_now)"
+  now_epoch="$(date +%s)"
+  started_epoch="$($JQ_BIN -r '.startedEpoch' "$(backup_record_path "$operation_id")" 2>/dev/null || printf '%s' "$now_epoch")"
+  [[ "$started_epoch" =~ ^[0-9]+$ ]] || started_epoch="$now_epoch"
+  elapsed=$((now_epoch - started_epoch)); (( elapsed > 0 )) || elapsed=0
+  throughput=0; (( elapsed > 0 )) && throughput=$((processed / elapsed))
+  backup_record_update "$operation_id" '
+    .updatedAt=$updated | .updatedEpoch=$updatedEpoch | .phase=$phase | .message=$message |
+    .elapsedSeconds=$elapsed | .progress.processedBytes=$processed |
+    .progress.writtenBytes=$written | .progress.throughputBytesPerSecond=$throughput |
+    .ownerProcessState="running"
+  ' --arg updated "$now" --argjson updatedEpoch "$now_epoch" --arg phase "$phase" --arg message "$message" \
+    --argjson elapsed "$elapsed" --argjson processed "$processed" --argjson written "$written" --argjson throughput "$throughput"
+}
+
+backup_tar_sparse_arguments() {
+  local probe_dir probe_error
+  printf '%s\n' --sparse
+  "$GTAR_BIN" --help 2>/dev/null | /usr/bin/grep -q -- '--hole-detection' || return 0
+  probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/msw-tar-hole-probe.XXXXXX")"
+  probe_error="$probe_dir/stderr"
+  /usr/bin/truncate -s 1048576 "$probe_dir/sparse"
+  printf 'MSW' | /bin/dd of="$probe_dir/sparse" bs=1 seek=1048573 conv=notrunc 2>/dev/null
+  if "$GTAR_BIN" --sparse --hole-detection=seek -C "$probe_dir" -cf /dev/null sparse 2>"$probe_error" &&
+    ! /usr/bin/grep -q 'not supported' "$probe_error"; then
+    printf '%s\n' --hole-detection=seek
+  fi
+  /usr/bin/find "$probe_dir" -depth -delete
+}
+
 backup_estimated_source_bytes() {
   local rel
   local -a paths=()
@@ -4342,7 +4410,7 @@ running_workspaces() {
 }
 
 cmd_backup() {
-  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info temp running_file box rel home_real
+  local destination="${1:-$MSW_BACKUP_DIR}" stamp archive partial checksum info result_sidecar temp running_file box rel home_real
   require_command_path gtar "$GTAR_BIN"
   require_command_path zstd "$ZSTD_BIN"
   require_command_path shasum "$SHASUM_BIN"
@@ -4357,7 +4425,8 @@ cmd_backup() {
   esac
 
   stamp="$(date +%Y%m%d-%H%M%S)"
-  archive="$destination/microsandbox-all-$stamp.tar.zst"
+  archive="${MSW_BACKUP_ARCHIVE_PATH:-$destination/microsandbox-all-$stamp.tar.zst}"
+  [[ "$archive" == "$destination"/* && "$archive" == *.tar.zst ]] || fatal "invalid managed backup archive path"
   partial="$archive.partial"
   checksum="$archive.sha256"
   info="$archive.info.txt"
@@ -4365,30 +4434,41 @@ cmd_backup() {
   running_file="$temp/running"
   running_workspaces >"$running_file"
 
-  (
+  if ! (
+    export MSW_BACKUP_CLEANUP_PARTIAL="$partial"
+    export MSW_BACKUP_CLEANUP_ARCHIVE="$archive"
+    export MSW_BACKUP_CLEANUP_CHECKSUM="$checksum"
+    export MSW_BACKUP_CLEANUP_INFO="$info"
+    export MSW_BACKUP_CLEANUP_RUNNING_FILE="$running_file"
+    export MSW_BACKUP_CLEANUP_TEMP="$temp"
     cleanup_backup() {
       local rc=$? running_box
       trap - EXIT
-      rm -f "$partial"
-      if (( rc != 0 )); then rm -f "$archive" "$checksum" "$info"; fi
+      rm -f "$MSW_BACKUP_CLEANUP_PARTIAL"
+      if (( rc != 0 )); then
+        rm -f "$MSW_BACKUP_CLEANUP_ARCHIVE" "$MSW_BACKUP_CLEANUP_CHECKSUM" "$MSW_BACKUP_CLEANUP_INFO"
+      fi
       while IFS= read -r running_box; do
         [[ -n "$running_box" ]] || continue
         if ! workspace_msb "$running_box" ping -q "$running_box" >/dev/null 2>&1; then
           start_sandbox "$running_box" >/dev/null 2>&1 || warn "could not restart $running_box after backup"
         fi
-      done <"$running_file"
-      rm -rf "$temp"
+      done <"$MSW_BACKUP_CLEANUP_RUNNING_FILE"
+      rm -rf "$MSW_BACKUP_CLEANUP_TEMP"
       return "$rc"
     }
     trap cleanup_backup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
 
+    if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
+      backup_record_progress "$MSW_BACKUP_OPERATION_ID" preparing 0 0 "Flushing and stopping the previously running workspaces."
+    fi
     note "Flushing and stopping managed workspaces"
     while IFS= read -r box; do
       [[ -n "$box" ]] || continue
-      guest_exec "$box" sync >/dev/null
-      workspace_msb "$box" stop -q -t 120 "$box"
+      guest_exec "$box" sync >/dev/null || fatal "could not flush $box before backup"
+      workspace_msb "$box" stop -q -t 120 "$box" || fatal "could not stop $box for a consistent backup"
     done <"$running_file"
     sync
 
@@ -4410,17 +4490,227 @@ cmd_backup() {
     } >"$info"
 
     note "Creating sparse compressed archive"
-    "$GTAR_BIN" --sparse --xattrs --acls -C "$HOME" -cf - "${paths[@]}" |
-      "$ZSTD_BIN" -T0 -8 -q -o "$partial"
+    local count_file="$temp/processed-bytes" pipeline_pid processed=0 written=0
+    local -a sparse_args=()
+    while IFS= read -r rel; do sparse_args+=("$rel"); done < <(backup_tar_sparse_arguments)
+    printf '0\n' >"$count_file"
+    if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
+      backup_record_progress "$MSW_BACKUP_OPERATION_ID" archive-writing 0 0 "Scanning and archiving sparse source data while compressing and writing the destination."
+    fi
+    "$GTAR_BIN" "${sparse_args[@]}" --xattrs --acls -C "$HOME" -cf - "${paths[@]}" |
+      "$MSW_PYTHON_BIN" -c 'import os,sys,tempfile
+p=sys.argv[1]; n=0
+while True:
+ b=sys.stdin.buffer.read(1024*1024)
+ if not b: break
+ sys.stdout.buffer.write(b); n+=len(b)
+ t=p+".tmp"; open(t,"w").write(str(n)+"\n"); os.replace(t,p)
+sys.stdout.buffer.flush()' "$count_file" |
+      "$ZSTD_BIN" -T0 -8 -q -o "$partial" &
+    pipeline_pid=$!
+    while kill -0 "$pipeline_pid" 2>/dev/null &&
+      ! /bin/ps -p "$pipeline_pid" -o stat= 2>/dev/null | /usr/bin/grep -q 'Z'; do
+      processed="$(/bin/cat "$count_file" 2>/dev/null || printf 0)"
+      if [[ -f "$partial" ]]; then
+        written="$(/usr/bin/wc -c <"$partial" | /usr/bin/awk '{print $1}')"
+      else
+        written=0
+      fi
+      [[ "$processed" =~ ^[0-9]+$ ]] || processed=0
+      [[ "$written" =~ ^[0-9]+$ ]] || written=0
+      if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
+        backup_record_progress "$MSW_BACKUP_OPERATION_ID" archive-writing "$processed" "$written" "Scanning and archiving sparse source data while compressing and writing the destination."
+      fi
+      sleep 1
+    done
+    wait "$pipeline_pid" || fatal "backup archive pipeline failed"
     [[ -s "$partial" ]] || fatal "backup archive is empty"
-    mv "$partial" "$archive"
-    (cd "$destination" && "$SHASUM_BIN" -a 256 "$(basename "$archive")" >"$(basename "$checksum")")
-  )
+    mv "$partial" "$archive" || fatal "could not finalize the backup archive"
+    if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
+      processed="$(/bin/cat "$count_file" 2>/dev/null || printf 0)"
+      written="$(/usr/bin/wc -c <"$archive" | /usr/bin/awk '{print $1}')"
+      backup_record_progress "$MSW_BACKUP_OPERATION_ID" checksumming "$processed" "$written" "Checksumming the completed archive."
+    fi
+    (cd "$destination" && "$SHASUM_BIN" -a 256 "$(basename "$archive")" >"$(basename "$checksum")") || fatal "could not checksum the backup archive"
+    if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
+      backup_record_progress "$MSW_BACKUP_OPERATION_ID" finalizing "$processed" "$written" "Finalizing durable result metadata and workspace reconciliation."
+    fi
+  ); then
+    return 1
+  fi
 
   ok "backup complete"
   printf '%s\n' "$archive"
   printf '%s\n' "$checksum"
   printf '%s\n' "$info"
+}
+
+backup_history_estimate_json() {
+  local source_bytes="$1" history_source history_archive ratio lower upper change
+  [[ -f "$BACKUP_HISTORY_FILE" && ! -L "$BACKUP_HISTORY_FILE" ]] || { printf 'null'; return; }
+  history_source="$($JQ_BIN -er 'select(.schemaVersion == 1 and .scope == "managed-v1") | .sourceAllocatedBytes' "$BACKUP_HISTORY_FILE" 2>/dev/null)" || { printf 'null'; return; }
+  history_archive="$($JQ_BIN -er '.archiveBytes' "$BACKUP_HISTORY_FILE" 2>/dev/null)" || { printf 'null'; return; }
+  [[ "$history_source" =~ ^[0-9]+$ && "$history_archive" =~ ^[0-9]+$ && "$history_source" -gt 0 && "$history_archive" -gt 0 ]] || { printf 'null'; return; }
+  read -r ratio lower upper change < <(/usr/bin/awk -v s="$source_bytes" -v hs="$history_source" -v ha="$history_archive" 'BEGIN {
+    r=ha/hs; c=s/hs; drift=(c>1?c-1:1-c); spread=0.25+drift; if (spread>0.75) spread=0.75;
+    lo=s*r*(1-spread); hi=s*r*(1+spread); if (lo<1) lo=1;
+    printf "%.6f %.0f %.0f %.6f\n", r, lo, hi, c
+  }')
+  "$JQ_BIN" -cn --argjson ratio "$ratio" --argjson lower "$lower" --argjson upper "$upper" --argjson change "$change" \
+    --arg recordedAt "$($JQ_BIN -r '.recordedAt' "$BACKUP_HISTORY_FILE")" \
+    '{lowerBytes:$lower,upperBytes:$upper,basisRatio:$ratio,changedSourceRatio:$change,provenance:("same managed scope, prior completed backup at " + $recordedAt)}'
+}
+
+backup_history_store() {
+  local source_bytes="$1" archive_bytes="$2" tmp
+  mkdir -p "$(dirname "$BACKUP_HISTORY_FILE")"
+  tmp="$(mktemp "$(dirname "$BACKUP_HISTORY_FILE")/.backup-history.XXXXXX")"
+  "$JQ_BIN" -cn --arg recordedAt "$(app_now)" --argjson source "$source_bytes" --argjson archive "$archive_bytes" \
+    '{schemaVersion:1,scope:"managed-v1",recordedAt:$recordedAt,sourceAllocatedBytes:$source,archiveBytes:$archive}' >"$tmp"
+  chmod 600 "$tmp"; mv "$tmp" "$BACKUP_HISTORY_FILE"
+}
+
+backup_sidecar_is_verified() {
+  local sidecar="$1" expected_archive="$2" archive archive_bytes actual_bytes checksum info
+  [[ -f "$sidecar" && ! -L "$sidecar" ]] || return 1
+  archive="$($JQ_BIN -er '
+    select(keys == ["archive","archiveBytes","checksum","completedAt","contractVersion","info","restartedWorkspaces","stoppedWorkspaces"]) |
+    select(.contractVersion == 2 and (.archiveBytes | type == "number") and (.archiveBytes > 0)) | .archive
+  ' "$sidecar" 2>/dev/null)" || return 1
+  [[ "$archive" == "$expected_archive" ]] || return 1
+  archive_bytes="$($JQ_BIN -er '.archiveBytes' "$sidecar" 2>/dev/null)" || return 1
+  checksum="$($JQ_BIN -er '.checksum' "$sidecar" 2>/dev/null)" || return 1
+  info="$($JQ_BIN -er '.info' "$sidecar" 2>/dev/null)" || return 1
+  [[ "$checksum" == "$archive.sha256" && "$info" == "$archive.info.txt" ]] || return 1
+  [[ -f "$archive" && ! -L "$archive" && -f "$checksum" && ! -L "$checksum" && -f "$info" && ! -L "$info" ]] || return 1
+  actual_bytes="$(/usr/bin/wc -c <"$archive" | /usr/bin/awk '{print $1}')"
+  [[ "$archive_bytes" == "$actual_bytes" ]] || return 1
+  (cd "$(dirname "$archive")" && "$SHASUM_BIN" -a 256 -c "$(basename "$checksum")" >/dev/null 2>&1)
+}
+
+backup_process_signature() {
+  /bin/ps -p "$1" -o lstart= 2>/dev/null | /usr/bin/xargs 2>/dev/null || true
+}
+
+backup_owner_is_alive() {
+  local operation_id="$1" pid="$2" expected current
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  expected="$($JQ_BIN -r '.ownerProcessStarted // empty' "$(backup_record_path "$operation_id")" 2>/dev/null || true)"
+  current="$(backup_process_signature "$pid")"
+  [[ -n "$current" && ( -z "$expected" || "$current" == "$expected" ) ]]
+}
+
+backup_reconcile_record() {
+  local path="$1" operation_id state pid sidecar now updated_epoch now_epoch
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  operation_id="$($JQ_BIN -er 'select(.contractVersion == 2 and .kind == "backup") | .operationId' "$path" 2>/dev/null)" || return 1
+  state="$($JQ_BIN -r '.state' "$path")"
+  [[ "$state" == running || "$state" == queued ]] || return 0
+  pid="$($JQ_BIN -r '.ownerPid // 0' "$path")"
+  if backup_owner_is_alive "$operation_id" "$pid"; then return 0; fi
+  # A just-exited child may still be between its atomic sidecar/record writes.
+  # Give that bounded finalization window precedence over presentation polling.
+  updated_epoch="$($JQ_BIN -r '.updatedEpoch // 0' "$path")"
+  now_epoch="$(date +%s)"
+  if [[ "$updated_epoch" =~ ^[0-9]+$ ]] && (( now_epoch - updated_epoch < 3 )); then return 0; fi
+  sidecar="$($JQ_BIN -r '.resultSidecar // empty' "$path")"
+  now="$(app_now)"
+  if [[ -n "$sidecar" ]] && backup_sidecar_is_verified "$sidecar" "$($JQ_BIN -r '.expectedArchive' "$path")"; then
+    local result
+    result="$($JQ_BIN -c '.' "$sidecar")"
+    backup_record_update "$operation_id" '.state="completed" | .phase="completed" | .message="Archive and checksum verified after owner-process reconciliation." | .updatedAt=$now | .completedAt=$now | .ownerProcessState="exited" | .result=$result | .error=null' --arg now "$now" --argjson result "$result"
+  else
+    backup_record_update "$operation_id" '.state="failed" | .phase="failed" | .message="The detached backup process is no longer running and no verified final sidecar was found." | .updatedAt=$now | .completedAt=$now | .ownerProcessState="missing" | .error={code:"MSW_BACKUP_OWNER_LOST",message:.message,recovery:"Review the destination, then start a new backup with a new request key.",retryable:true}' --arg now "$now"
+  fi
+}
+
+backup_prune_records() {
+  local path operation_id state count=0 listing=""
+  backup_state_prepare
+  while IFS= read -r path; do
+    backup_reconcile_record "$path" || true
+    state="$($JQ_BIN -r '.state // empty' "$path" 2>/dev/null || true)"
+    if [[ "$state" == completed || "$state" == failed ]]; then
+      operation_id="$(basename "$path" .json)"
+      rm -f "$path" "$BACKUP_OPERATION_ROOT/$operation_id.log" "$BACKUP_OPERATION_ROOT/$operation_id.stdout"
+    fi
+  done < <(/usr/bin/find "$BACKUP_OPERATION_ROOT" -type f -name '*.json' -mtime +30 -print 2>/dev/null)
+  listing="$(/bin/ls -1t "$BACKUP_OPERATION_ROOT"/*.json 2>/dev/null || true)"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    count=$((count + 1))
+    if (( count > 40 )); then
+      case "$($JQ_BIN -r '.state // empty' "$path" 2>/dev/null || true)" in
+        completed|failed)
+          operation_id="$(basename "$path" .json)"
+          rm -f "$path" "$BACKUP_OPERATION_ROOT/$operation_id.log" "$BACKUP_OPERATION_ROOT/$operation_id.stdout"
+          ;;
+      esac
+    fi
+  done <<<"$listing"
+}
+
+backup_operation_worker() {
+  local operation_id="$1" directory="$2" record output archive checksum info archive_bytes source_bytes stopped_json restarted_json warnings_json result_sidecar now box pipeline_lock lock_owner owner_started
+  umask 077
+  backup_state_prepare
+  record="$(backup_record_path "$operation_id")"
+  owner_started="$(backup_process_signature "$$")"
+  backup_record_update "$operation_id" '.ownerPid=$pid | .ownerProcessStarted=$ownerStarted | .ownerProcessState="running" | .state="running" | .updatedAt=$now' --argjson pid "$$" --arg ownerStarted "$owner_started" --arg now "$(app_now)"
+  pipeline_lock="$BACKUP_OPERATION_ROOT/.pipeline-lock"
+  while ! mkdir "$pipeline_lock" 2>/dev/null; do
+    lock_owner="$(/bin/cat "$pipeline_lock/owner" 2>/dev/null || printf 0)"
+    if [[ ! "$lock_owner" =~ ^[0-9]+$ || "$lock_owner" -le 1 ]] || ! kill -0 "$lock_owner" 2>/dev/null; then
+      rm -rf "$pipeline_lock"
+      continue
+    fi
+    backup_record_progress "$operation_id" preparing 0 0 "Waiting for the CLI-owned consistent-snapshot lane; distinct backup operations remain independently durable."
+    sleep 1
+  done
+  printf '%s\n' "$$" >"$pipeline_lock/owner"
+  cleanup_backup_worker_lock() { rm -rf "$BACKUP_OPERATION_ROOT/.pipeline-lock"; }
+  trap cleanup_backup_worker_lock EXIT
+  export MSW_BACKUP_OPERATION_ID="$operation_id"
+  export MSW_BACKUP_ARCHIVE_PATH="$($JQ_BIN -r '.expectedArchive' "$record")"
+  local backup_rc
+  set +e
+  output="$(cmd_backup "$directory" 2>"$BACKUP_OPERATION_ROOT/$operation_id.log")"
+  backup_rc=$?
+  set -e
+  if (( backup_rc != 0 )); then
+    now="$(app_now)"
+    backup_record_update "$operation_id" '.state="failed" | .phase="failed" | .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now | .ownerProcessState="exited" | .message="The backup pipeline failed; previously running workspaces were reconciled." | .error={code:"MSW_BACKUP_FAILED",message:.message,recovery:"Review the destination and workspace health, then retry with a new request key.",retryable:true}' --arg now "$now" --argjson epoch "$(date +%s)"
+    return 1
+  fi
+  archive="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst$/p' | tail -n 1)"
+  checksum="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst\.sha256$/p' | tail -n 1)"
+  info="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.info\.txt$/p' | tail -n 1)"
+  [[ -f "$archive" && -f "$checksum" ]] || return 1
+  archive_bytes="$(/usr/bin/wc -c <"$archive" | /usr/bin/awk '{print $1}')"
+  source_bytes="$($JQ_BIN -r '.sourceAllocatedBytes' "$record")"
+  stopped_json="$($JQ_BIN -c '.runningWorkspaces' "$record")"
+  restarted_json='[]'; warnings_json='[]'
+  while IFS= read -r box; do
+    [[ -n "$box" ]] || continue
+    if workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
+      restarted_json="$($JQ_BIN -cn --argjson a "$restarted_json" --arg value "$box" '$a + [$value]')"
+    else
+      warnings_json="$($JQ_BIN -cn --argjson a "$warnings_json" --arg value "MSW could not confirm that $box returned to its pre-backup running state" '$a + [$value]')"
+    fi
+  done < <($JQ_BIN -r '.[]' <<<"$stopped_json")
+  result_sidecar="$archive.msw-result.json"
+  now="$(app_now)"
+  "$JQ_BIN" -cn --arg archive "$archive" --arg checksum "$checksum" --arg info "$info" --arg completedAt "$now" \
+    --argjson archiveBytes "$archive_bytes" --argjson stopped "$stopped_json" --argjson restarted "$restarted_json" \
+    '{contractVersion:2,archive:$archive,archiveBytes:$archiveBytes,checksum:$checksum,info:$info,completedAt:$completedAt,stoppedWorkspaces:$stopped,restartedWorkspaces:$restarted}' >"$result_sidecar.tmp"
+  chmod 600 "$result_sidecar.tmp"; mv "$result_sidecar.tmp" "$result_sidecar"
+  backup_history_store "$source_bytes" "$archive_bytes"
+  local result_json
+  result_json="$($JQ_BIN -c '.' "$result_sidecar")"
+  backup_record_update "$operation_id" '.state="completed" | .phase="completed" | .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now | .ownerProcessState="exited" | .message="Archive, checksum, and result metadata completed." | .progress.writtenBytes=$archiveBytes | .result=$result | .error=null | .warnings=$warnings' --arg now "$now" --argjson epoch "$(date +%s)" --argjson archiveBytes "$archive_bytes" --argjson result "$result_json" --argjson warnings "$warnings_json"
+  trap - EXIT
+  cleanup_backup_worker_lock
 }
 
 validate_backup_member() {
@@ -4665,7 +4955,7 @@ Machine-readable app integration
   msw app handshake|state|metrics|logs|repositories|directory-list|directory-search|editor-target|ports|github-state
   msw app github-policy-get|github-policy-set|github-policy-apply
   msw app url|clone|pull|identity|disk|resize|clean|upgrade|update
-  msw app check|backup-preview|backup|restore|push-plan|plan|apply|bootstrap|help
+  msw app check|backup-preview|backup-start|backup-list|backup-status|restore|push-plan|plan|apply|bootstrap|help
 HELP
 }
 
@@ -5582,56 +5872,88 @@ app_cmd_check() {
   app_emit_success check "{\"deep\":$([[ "$deep" == 1 ]] && printf true || printf false),\"passed\":true,\"checks\":[{\"id\":\"msw-check\",\"title\":\"MSW check\",\"status\":\"pass\",\"detail\":\"MSW check completed successfully.\",\"recovery\":null}],\"outcome\":\"all requested checks passed\"}"
 }
 
-app_cmd_backup() {
-  local directory="" output archive archive_bytes checksum box running_json="" restarted_json="" warnings="[]" warning=""
+app_cmd_backup_start() {
+  local directory="" request_key="" operation_id source_bytes estimate_json running_json now_epoch now record lock_dir pid sidecar stamp archive owner_started
   while (( $# > 0 )); do
     case "$1" in
-      --directory) [[ $# -ge 2 ]] || app_usage_error backup "missing value for --directory"; directory="$2"; shift 2 ;;
-      --format) [[ "${2:-}" == json ]] || app_usage_error backup "backup requires --format json"; shift 2 ;;
-      *) app_usage_error backup "unknown backup option '$1'" ;;
+      --directory) [[ $# -ge 2 ]] || app_usage_error backup-start "missing value for --directory"; directory="$2"; shift 2 ;;
+      --request-key) [[ $# -ge 2 ]] || app_usage_error backup-start "missing value for --request-key"; request_key="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error backup-start "backup-start requires --format json"; shift 2 ;;
+      *) app_usage_error backup-start "unknown backup-start option '$1'" ;;
     esac
   done
-  [[ -n "$directory" && "$directory" != -* ]] || app_usage_error backup "backup directory is required"
-  app_valid_control_free "$directory" || app_usage_error backup "backup directory contains a control character"
-  app_require_config backup
-  app_require_runtime backup
-  while IFS= read -r box; do
-    [[ -n "$box" ]] || continue
-    [[ -n "$running_json" ]] && running_json+=","
-    running_json+="$(app_json_string "$box")"
-  done < <(running_workspaces)
-  if ! output="$("$MSW_SCRIPT_ROOT/msw" backup "$directory" 2>/dev/null)"; then
-    app_emit_error backup "MSW_BACKUP_FAILED" "The backup could not be created." "Review the destination and workspace health, then retry." "" true 1
-    return 1
-  fi
+  [[ -d "$directory" && ! -L "$directory" ]] || app_usage_error backup-start "backup directory must be an existing real directory"
+  [[ "$request_key" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || app_usage_error backup-start "request key is required"
+  app_require_config backup-start; app_require_runtime backup-start
+  require_command_path jq "$JQ_BIN"
   directory="$(cd "$directory" && pwd -P)"
-  archive="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst$/p' | tail -n 1)"
-  checksum="$(printf '%s\n' "$output" | /usr/bin/sed -n '/\.tar\.zst\.sha256$/p' | tail -n 1)"
-  if [[ -z "$archive" || "$archive" != "$directory"/* || "$archive" != *.tar.zst || ! -f "$archive" || -L "$archive" ]]; then
-    app_emit_error backup "MSW_BACKUP_FAILED" "MSW returned an invalid backup archive path." "Retry the backup after checking diagnostics." "" false 78
-    return 78
-  fi
-  archive_bytes="$(/usr/bin/wc -c <"$archive" | /usr/bin/awk '{ print $1 }')"
-  if [[ ! "$archive_bytes" =~ ^[0-9]+$ || "$archive_bytes" -le 0 ]]; then
-    app_emit_error backup "MSW_BACKUP_FAILED" "MSW could not validate the completed backup archive size." "Retry the backup after checking diagnostics." "" false 78
-    return 78
-  fi
-  [[ -n "$checksum" && "$checksum" == "$archive.sha256" && -f "$checksum" && ! -L "$checksum" ]] || checksum=""
-  for box in "${WORKSPACES[@]}"; do
-    [[ ",$running_json," == *",\"$box\","* ]] || continue
-    if workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
-      [[ -n "$restarted_json" ]] && restarted_json+=","
-      restarted_json+="$(app_json_string "$box")"
-    else
-      warning="MSW could not confirm that $box returned to its pre-backup running state"
-      if [[ "$warnings" == "[]" ]]; then warnings="[$(app_json_string "$warning")]"; else warnings="${warnings%]},$(app_json_string "$warning")]"; fi
+  local home_real="$(cd "$HOME" && pwd -P)"
+  case "$directory/" in "$home_real/.microsandbox/"*|"$home_real/.config/msw/"*|"$home_real/.local/share/msw/"*) app_usage_error backup-start "backup destination may not be inside managed state" ;; esac
+  source_bytes="$(backup_estimated_source_bytes)" || app_emit_error backup-start "MSW_BACKUP_PREVIEW_FAILED" "The allocated managed source size could not be measured." "Run diagnostics and retry." "" true 69
+  estimate_json="$(backup_history_estimate_json "$source_bytes")"
+  running_json='[]'
+  while IFS= read -r box; do [[ -n "$box" ]] && running_json="$($JQ_BIN -cn --argjson a "$running_json" --arg v "$box" '$a+[$v]')"; done < <(running_workspaces)
+  backup_state_prepare; backup_prune_records
+  lock_dir="$BACKUP_OPERATION_ROOT/.start-lock"
+  local attempts=0 lock_owner
+  until mkdir "$lock_dir" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    lock_owner="$(/bin/cat "$lock_dir/owner" 2>/dev/null || printf 0)"
+    if (( attempts > 5 )) && { [[ ! "$lock_owner" =~ ^[0-9]+$ || "$lock_owner" -le 1 ]] || ! kill -0 "$lock_owner" 2>/dev/null; }; then
+      rm -rf "$lock_dir"
+      continue
     fi
+    (( attempts < 100 )) || app_emit_error backup-start "MSW_BACKUP_LOCKED" "Backup operation registration is busy." "Retry shortly." "" true 73
+    sleep 0.05
   done
-  app_emit_success backup "{\"archive\":$(app_json_string "$archive"),\"archiveBytes\":$archive_bytes,\"checksum\":$(app_json_optional "$checksum"),\"stoppedWorkspaces\":[$running_json],\"restartedWorkspaces\":[$restarted_json]}" "$warnings"
+  printf '%s\n' "$$" >"$lock_dir/owner"
+  local existing=""
+  existing="$($JQ_BIN -cs --arg key "$request_key" '[.[] | select(.contractVersion == 2 and .requestKey == $key)] | sort_by(.startedAt) | last // empty' "$BACKUP_OPERATION_ROOT"/*.json 2>/dev/null || true)"
+  if [[ -n "$existing" ]]; then
+    rm -f "$lock_dir/owner"; rmdir "$lock_dir"
+    app_emit_success backup-start "$("$JQ_BIN" -c "$(backup_operation_wire_filter)" <<<"$existing")"
+    return
+  fi
+  operation_id="$(app_request_id | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  now="$(app_now)"; now_epoch="$(date +%s)"; stamp="$(date +%Y%m%d-%H%M%S)-${operation_id:0:8}"
+  archive="$directory/microsandbox-all-$stamp.tar.zst"; sidecar="$archive.msw-result.json"
+  record="$(backup_record_path "$operation_id")"
+  "$JQ_BIN" -cn --arg operationId "$operation_id" --arg requestKey "$request_key" --arg destination "$directory" --arg now "$now" --arg archive "$archive" --arg sidecar "$sidecar" \
+    --argjson epoch "$now_epoch" --argjson source "$source_bytes" --argjson estimate "$estimate_json" --argjson running "$running_json" \
+    '{contractVersion:2,kind:"backup",operationId:$operationId,requestKey:$requestKey,state:"queued",phase:"preparing",message:"Backup accepted by the CLI and waiting for its detached owner process.",destination:$destination,startedAt:$now,startedEpoch:$epoch,updatedAt:$now,updatedEpoch:$epoch,completedAt:null,elapsedSeconds:0,ownerPid:null,ownerProcessStarted:null,ownerProcessState:"detached",sourceAllocatedBytes:$source,archiveEstimate:$estimate,runningWorkspaces:$running,expectedArchive:$archive,resultSidecar:$sidecar,progress:{processedBytes:0,writtenBytes:0,throughputBytesPerSecond:0,totalBytes:null,etaSeconds:null},result:null,error:null,warnings:[]}' >"$record.tmp"
+  chmod 600 "$record.tmp"; mv "$record.tmp" "$record"
+  rm -f "$lock_dir/owner"; rmdir "$lock_dir"
+  nohup "$MSW_SCRIPT_ROOT/msw" __backup-worker "$operation_id" "$directory" </dev/null >"$BACKUP_OPERATION_ROOT/$operation_id.stdout" 2>&1 &
+  pid=$!
+  owner_started="$(backup_process_signature "$pid")"
+  backup_record_update "$operation_id" '.ownerPid=$pid | .ownerProcessStarted=$ownerStarted | .ownerProcessState="running" | .state="running" | .updatedAt=$now' --argjson pid "$pid" --arg ownerStarted "$owner_started" --arg now "$(app_now)"
+  app_emit_success backup-start "$($JQ_BIN -c "$(backup_operation_wire_filter)" "$record")"
+}
+
+app_cmd_backup_list() {
+  [[ $# == 2 && "$1" == --format && "$2" == json ]] || app_usage_error backup-list "backup-list requires --format json"
+  app_require_config backup-list; require_command_path jq "$JQ_BIN"; backup_state_prepare; backup_prune_records
+  local path
+  while IFS= read -r path; do backup_reconcile_record "$path" || true; done < <(/usr/bin/find "$BACKUP_OPERATION_ROOT" -type f -name '*.json' -print)
+  local result wire_filter
+  wire_filter="$(backup_operation_wire_filter)"
+  result="$($JQ_BIN -cs "map(select(.contractVersion == 2 and .kind == \"backup\") | $wire_filter) | sort_by(.startedAt) | reverse" "$BACKUP_OPERATION_ROOT"/*.json 2>/dev/null || printf '[]')"
+  app_emit_success backup-list "$result"
+}
+
+app_cmd_backup_status() {
+  local operation_id=""
+  while (( $# > 0 )); do case "$1" in --operation-id) [[ $# -ge 2 ]] || app_usage_error backup-status "missing operation id"; operation_id="$2"; shift 2 ;; --format) [[ "${2:-}" == json ]] || app_usage_error backup-status "backup-status requires --format json"; shift 2 ;; *) app_usage_error backup-status "unknown option" ;; esac; done
+  [[ "$operation_id" =~ ^[a-z0-9-]{8,64}$ ]] || app_usage_error backup-status "invalid operation id"
+  app_require_config backup-status; require_command_path jq "$JQ_BIN"; backup_state_prepare
+  local path="$(backup_record_path "$operation_id")"
+  [[ -f "$path" && ! -L "$path" ]] || app_emit_error backup-status "MSW_BACKUP_NOT_FOUND" "The backup operation was not found." "Refresh the Backup tab to list retained operations." "" false 78
+  backup_reconcile_record "$path" || app_emit_error backup-status "MSW_BACKUP_RECORD_INCOMPATIBLE" "The backup operation record uses an unsupported schema." "Repair MSW in Setup; the archive destination has not been modified by this read." "" false 78
+  app_emit_success backup-status "$($JQ_BIN -c "$(backup_operation_wire_filter)" "$path")"
 }
 
 app_cmd_backup_preview() {
-  local directory="" estimated_source_bytes box running_json="" home_real
+  local directory="" estimated_source_bytes box running_json="" home_real estimate_json
   while (( $# > 0 )); do
     case "$1" in
       --directory) [[ $# -ge 2 ]] || app_usage_error backup-preview "missing value for --directory"; directory="$2"; shift 2 ;;
@@ -5661,7 +5983,8 @@ app_cmd_backup_preview() {
     [[ -n "$running_json" ]] && running_json+=","
     running_json+="$(app_json_string "$box")"
   done < <(running_workspaces)
-  app_emit_success backup-preview "{\"destination\":$(app_json_string "$directory"),\"requiredBytes\":$estimated_source_bytes,\"runningWorkspaces\":[$running_json]}"
+  estimate_json="$(backup_history_estimate_json "$estimated_source_bytes")"
+  app_emit_success backup-preview "{\"contractVersion\":2,\"destination\":$(app_json_string "$directory"),\"sourceAllocatedBytes\":$estimated_source_bytes,\"archiveEstimate\":$estimate_json,\"runningWorkspaces\":[$running_json]}"
 }
 
 app_cmd_restore() {
@@ -5690,7 +6013,7 @@ app_cmd_handshake() {
   (( MSW_CONFIG_AVAILABLE == 1 )) && config_available=true
   [[ -n "${MSB_BIN:-}" && -x "${MSB_BIN:-}" ]] && runtime_available=true
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] && jq_available=true
-  app_emit_success handshake "{\"protocolVersion\":1,\"mswVersion\":$(app_json_string "${MSW_VERSION:-unknown}"),\"platform\":{\"os\":$(app_json_string "$(uname -s)"),\"architecture\":$(app_json_string "$(uname -m)")},\"configurationAvailable\":$config_available,\"runtimeAvailable\":$runtime_available,\"capabilities\":{\"jsonState\":true,\"jsonMetrics\":true,\"jsonLogs\":true,\"plans\":true,\"bootstrapEvents\":true,\"backupPreview\":true,\"jq\":$jq_available,\"workspaceCount\":${#WORKSPACES[@]}},\"exitCodes\":{\"success\":0,\"operationFailed\":1,\"usage\":64,\"dependencyUnavailable\":69,\"lockConflict\":73,\"authorizationDenied\":77,\"configurationRequired\":78,\"cancelled\":130}}"
+  app_emit_success handshake "{\"protocolVersion\":1,\"mswVersion\":$(app_json_string "${MSW_VERSION:-unknown}"),\"platform\":{\"os\":$(app_json_string "$(uname -s)"),\"architecture\":$(app_json_string "$(uname -m)")},\"configurationAvailable\":$config_available,\"runtimeAvailable\":$runtime_available,\"capabilities\":{\"jsonState\":true,\"jsonMetrics\":true,\"jsonLogs\":true,\"plans\":true,\"bootstrapEvents\":true,\"backup\":{\"protocolVersion\":2,\"preview\":true,\"start\":true,\"list\":true,\"status\":true,\"progress\":true,\"archiveBytes\":true,\"concurrent\":true},\"jq\":$jq_available,\"workspaceCount\":${#WORKSPACES[@]}},\"exitCodes\":{\"success\":0,\"operationFailed\":1,\"usage\":64,\"dependencyUnavailable\":69,\"lockConflict\":73,\"authorizationDenied\":77,\"configurationRequired\":78,\"cancelled\":130}}"
 }
 
 app_cmd_state() {
@@ -7647,7 +7970,9 @@ Machine-readable MSW Monitor commands:
   msw app update --confirmation-fd FD --format json
   msw app check [--deep --confirmation-fd FD] --format json
   msw app backup-preview --directory DIRECTORY --format json
-  msw app backup --directory DIRECTORY --format json
+  msw app backup-start --directory DIRECTORY --request-key KEY --format json
+  msw app backup-list --format json
+  msw app backup-status --operation-id ID --format json
   msw app restore --archive ARCHIVE --confirmation-fd FD --format json
   msw app plan ACTION --workspace WORKSPACE --format json
   msw app apply PLAN_ID --confirmation-fd FD --format json
@@ -7679,7 +8004,9 @@ cmd_app() {
     update) app_cmd_update "$@" ;;
     check) app_cmd_check "$@" ;;
     backup-preview) app_cmd_backup_preview "$@" ;;
-    backup) app_cmd_backup "$@" ;;
+    backup-start) app_cmd_backup_start "$@" ;;
+    backup-list) app_cmd_backup_list "$@" ;;
+    backup-status) app_cmd_backup_status "$@" ;;
     restore) app_cmd_restore "$@" ;;
     push-plan) app_cmd_push_plan "$@" ;;
     metrics) app_cmd_metrics "$@" ;;
@@ -7786,6 +8113,10 @@ main() {
     __workspace-state-init)
       (( $# == 1 )) || fatal "internal workspace state arguments missing"
       __workspace_state_init "$@"
+      ;;
+    __backup-worker)
+      (( $# == 2 )) || fatal "internal backup worker arguments missing"
+      backup_operation_worker "$1" "$2"
       ;;
     __port-forwarder-start)
       (( $# == 1 )) || fatal "internal port forwarder arguments missing"

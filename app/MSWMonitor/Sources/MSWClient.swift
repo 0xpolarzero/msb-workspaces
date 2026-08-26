@@ -87,7 +87,7 @@ actor MSWClient {
     }
 
     func metrics(workspace: String) async throws -> MSWEnvelope<MSWMetricsResponse> {
-        try await execute(
+        return try await execute(
             arguments: ["app", "metrics", "--workspace", workspace, "--format", "json", "--once"],
             as: MSWMetricsResponse.self,
             command: "metrics",
@@ -837,13 +837,37 @@ actor MSWClient {
         )
     }
 
-    func backup(directory: URL) async throws -> MSWEnvelope<MSWBackupResponse> {
-        try await execute(
-            arguments: ["app", "backup", "--directory", directory.path, "--format", "json"],
-            as: MSWBackupResponse.self,
-            command: "backup",
+    func startBackup(directory: URL, requestKey: String) async throws -> MSWEnvelope<MSWBackupOperationResponse> {
+        guard requestKey.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil else {
+            throw MSWClientError.invalidArguments
+        }
+        return try await execute(
+            arguments: ["app", "backup-start", "--directory", directory.path, "--request-key", requestKey, "--format", "json"],
+            as: MSWBackupOperationResponse.self,
+            command: "backup-start",
             includeGuestCredentials: true,
-            timeout: .seconds(1800)
+            timeout: .seconds(30)
+        )
+    }
+
+    func listBackups() async throws -> MSWEnvelope<[MSWBackupOperationResponse]> {
+        try await execute(
+            arguments: ["app", "backup-list", "--format", "json"],
+            as: [MSWBackupOperationResponse].self,
+            command: "backup-list",
+            timeout: .seconds(30)
+        )
+    }
+
+    func backupStatus(id: String) async throws -> MSWEnvelope<MSWBackupOperationResponse> {
+        guard id.range(of: #"^[a-z0-9-]{8,64}$"#, options: .regularExpression) != nil else {
+            throw MSWClientError.invalidArguments
+        }
+        return try await execute(
+            arguments: ["app", "backup-status", "--operation-id", id, "--format", "json"],
+            as: MSWBackupOperationResponse.self,
+            command: "backup-status",
+            timeout: .seconds(30)
         )
     }
 

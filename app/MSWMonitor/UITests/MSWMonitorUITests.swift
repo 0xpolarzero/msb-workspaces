@@ -225,7 +225,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(confirmationTitle.value as? String, "Create new backup")
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.required-space.label"].value as? String,
-            "Estimated source data size"
+            "Allocated source data"
         )
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.required-space.value"].value as? String,
@@ -233,7 +233,7 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertEqual(
             app.descendants(matching: .any)["backup.estimate.explanation"].value as? String,
-            "This estimates managed on-disk data before sparse tar/zstd compression. The final compressed archive is usually smaller and its actual size is reported after creation."
+            "Estimated archive size: unavailable until a same-scope backup completes. Exact compressed size is unknowable without compressing; no synthetic estimate is shown."
         )
         XCTAssertEqual(app.buttons["backup.confirmation.create"].label, "Create Backup")
         app.buttons["backup.confirmation.cancel"].click()
@@ -290,11 +290,12 @@ final class MSWMonitorUITests: XCTestCase {
 
             switch scenario {
             case "running":
-                assertText("Creating backup", identifier: "backup.running.status", in: app)
-                assertText("Creating backup.", identifier: "backup.running.message", in: app)
+                assertText("Archiving and writing", identifier: "backup.running.status", in: app)
+                assertText("Fixture archive pipeline is advancing.", identifier: "backup.running.message", in: app)
                 assertIdentifier("backup.running.spinner", in: app)
                 assertIdentifier("backup.running.started", in: app)
                 assertIdentifier("backup.running.updated", in: app)
+                assertIdentifier("backup.running.counters", in: app)
                 XCTAssertFalse(app.descendants(matching: .any)["backup.running.percentage"].exists)
                 XCTAssertFalse(app.descendants(matching: .any)["backup.result.archive"].exists)
                 XCTAssertFalse(app.staticTexts["Request failed"].exists)
@@ -343,6 +344,71 @@ final class MSWMonitorUITests: XCTestCase {
             }
 
             app.typeKey("q", modifierFlags: .command)
+            XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+        }
+    }
+
+    func testBackupConcurrentFixtureReattachesAfterRelaunchAndAdvancesCounters() throws {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MSWMonitor Backup Reattach-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let arguments = [
+            "--ui-test-open-popover",
+            "--ui-test-backup-destination=\(destination.path)",
+            "--ui-test-backup-reattach",
+            "-AppleLanguages", "(en)",
+            "-AppleLocale", "en_FR"
+        ]
+
+        var initialCounters: String?
+        var initialUpdated: String?
+        for launchIndex in 0..<2 {
+            let launchArguments = launchIndex == 0
+                ? arguments
+                : arguments + ["--ui-test-backup-reattach-advanced"]
+            let app = launchFixture(launchArguments, environment: ["TZ": "Europe/Paris"])
+            defer { terminateIfNeeded(app) }
+            XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 3))
+            app.buttons["open-monitor.button"].click()
+            XCTAssertTrue(app.toolbars.buttons["Backup"].waitForExistence(timeout: 3))
+            app.toolbars.buttons["Backup"].click()
+
+            let cards = app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier == %@", "backup.operation.card")
+            )
+            XCTAssertEqual(cards.count, 2)
+            assertText("Archive created", identifier: "backup.result.status", in: app)
+            assertText("fixture-completed.tar.zst", identifier: "backup.result.archive", in: app)
+            assertText("Archiving and writing", identifier: "backup.running.status", in: app)
+            assertText(
+                launchIndex == 0
+                    ? "Fixture reattached to CLI-owned operation."
+                    : "Fixture counters advanced after reattachment.",
+                identifier: "backup.running.message", in: app
+            )
+            let counters = app.descendants(matching: .any)["backup.running.counters"]
+            XCTAssertTrue(counters.waitForExistence(timeout: 2))
+            let countersValue = counters.value as? String
+            let updated = app.descendants(matching: .any)["backup.running.updated"]
+            XCTAssertTrue(updated.waitForExistence(timeout: 2))
+            let updatedValue = updated.value as? String
+            if launchIndex == 0 {
+                initialCounters = countersValue
+                initialUpdated = updatedValue
+            } else {
+                XCTAssertNotEqual(countersValue, initialCounters)
+                XCTAssertNotEqual(updatedValue, initialUpdated)
+            }
+
+            if launchIndex == 0 {
+                app.typeKey("q", modifierFlags: .command)
+            } else {
+                app.typeKey("w", modifierFlags: .command)
+                XCTAssertTrue(app.statusItems["statusItem.button"].waitForExistence(timeout: 2))
+                app.statusItems["statusItem.button"].click()
+                app.buttons["quit.button"].click()
+            }
             XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
         }
     }

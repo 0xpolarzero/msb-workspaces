@@ -145,7 +145,7 @@ struct DetailView: View {
                 RestoreConfirmationView(
                     archive: restoreArchive,
                     workspaces: model.workspaces,
-                    isBusy: model.isMaintenanceOperationInFlight,
+                    isBusy: model.isMaintenanceOperationInFlight || model.hasActiveBackupOperations,
                     confirmation: $restoreConfirmation,
                     cancel: { confirmRestore = false },
                     apply: {
@@ -1853,7 +1853,7 @@ private extension DetailView {
                             .accessibilityAddTraits(.isHeader)
                         Spacer()
                         Button("Choose Restore Archive…") { chooseRestoreArchive() }
-                            .disabled(model.isMaintenanceOperationInFlight)
+                            .disabled(model.isMaintenanceOperationInFlight || model.hasActiveBackupOperations)
                     }
 
                     if let restoreArchive {
@@ -1875,12 +1875,18 @@ private extension DetailView {
                     }
                 }
 
-                if latestBackupOperation != nil || model.backupResult != nil {
-                    BackupOperationCard(
-                        operation: latestBackupOperation,
-                        result: model.backupResult,
-                        refreshWorkspaceState: model.refreshBackupWorkspaceState
-                    )
+                if !model.backupOperations.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("CLI-owned backup operations")
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(model.backupOperations) { operation in
+                            BackupOperationCard(
+                                operation: operation,
+                                refreshWorkspaceState: model.refreshBackupWorkspaceState
+                            )
+                        }
+                    }
                 }
 
                 if let operation = latestRestoreOperation {
@@ -1913,6 +1919,7 @@ private extension DetailView {
             }
             .padding(20)
         }
+        .task { await model.refreshBackupOperations() }
     }
 
     private var systemHealth: some View {
@@ -2052,12 +2059,6 @@ private extension DetailView {
         maintenanceOperation = operation
     }
 
-    private var latestBackupOperation: MSWOperationState? {
-        model.operationStates.values
-            .filter { $0.kind == .backup }
-            .max { $0.updatedAt < $1.updatedAt }
-    }
-
     private var latestRestoreOperation: MSWOperationState? {
         model.operationStates.values
             .filter { $0.kind == .restore }
@@ -2065,8 +2066,8 @@ private extension DetailView {
     }
 
     private var showsBackupFailureCard: Bool {
-        guard let operation = latestBackupOperation,
-              operation.outcome == .failed,
+        guard let operation = model.backupOperations.first,
+              operation.state == .failed,
               let error = model.detailError else { return false }
         return error == operation.message
     }
@@ -2371,16 +2372,27 @@ private struct BackupReviewView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                Text("Estimated source data size")
+                Text("Allocated source data")
                     .accessibilityIdentifier("backup.required-space.label")
                 Spacer()
-                Text(ByteCountFormatter.string(fromByteCount: preview.estimatedSourceBytes, countStyle: .file))
+                Text(ByteCountFormatter.string(fromByteCount: preview.sourceAllocatedBytes, countStyle: .file))
                     .accessibilityIdentifier("backup.required-space.value")
             }
-            Text("This estimates managed on-disk data before sparse tar/zstd compression. The final compressed archive is usually smaller and its actual size is reported after creation.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("backup.estimate.explanation")
+            if let estimate = preview.archiveEstimate {
+                HStack {
+                    Text("Estimated archive size")
+                    Spacer()
+                    Text("\(ByteCountFormatter.string(fromByteCount: estimate.lowerBytes, countStyle: .file))–\(ByteCountFormatter.string(fromByteCount: estimate.upperBytes, countStyle: .file))")
+                        .accessibilityIdentifier("backup.archive-estimate.value")
+                }
+                Text("Historical estimate from \(estimate.provenance). Exact compressed size is unknowable without creating the archive; source changes widen this range.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("backup.estimate.explanation")
+            } else {
+                Text("Estimated archive size: unavailable until a same-scope backup completes. Exact compressed size is unknowable without compressing; no synthetic estimate is shown.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("backup.estimate.explanation")
+            }
             if isBusy {
                 Text("Another backup or restore is already in progress. Wait for it to finish before starting this operation.")
                     .font(.caption)
@@ -2464,14 +2476,13 @@ private struct MaintenanceOperation: Equatable {
 }
 
 private struct BackupOperationCard: View {
-    let operation: MSWOperationState?
-    let result: MSWBackupResult?
+    let operation: MSWBackupOperation
     let refreshWorkspaceState: () -> Void
 
     var body: some View {
-        GroupBox(operation?.outcome == .pending ? "Backup status" : "Backup result") {
+        GroupBox(operation.state == .queued || operation.state == .running ? "Backup status" : "Backup result") {
             VStack(alignment: .leading, spacing: 8) {
-                if let operation, operation.outcome == .pending {
+                if operation.state == .queued || operation.state == .running {
                     HStack {
                         ProgressView()
                             .controlSize(.small)
@@ -2480,8 +2491,8 @@ private struct BackupOperationCard: View {
                             .font(.body.weight(.medium))
                             .accessibilityIdentifier("backup.running.status")
                         Spacer()
-                        if let fraction = operation.fraction {
-                            Text("\(Int((fraction * 100).rounded()))%")
+                        if let total = operation.totalBytes, total > 0 {
+                            Text("\(Int((Double(operation.processedBytes) / Double(total) * 100).rounded()))%")
                                 .font(.caption.monospacedDigit())
                                 .accessibilityIdentifier("backup.running.percentage")
                         }
@@ -2498,7 +2509,10 @@ private struct BackupOperationCard: View {
                     }
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-                } else if let result {
+                    Text("Processed \(ByteCountFormatter.string(fromByteCount: operation.processedBytes, countStyle: .file)) · Written \(ByteCountFormatter.string(fromByteCount: operation.writtenBytes, countStyle: .file)) · \(ByteCountFormatter.string(fromByteCount: operation.throughputBytesPerSecond, countStyle: .file))/s · Elapsed \(operation.elapsedSeconds)s")
+                        .font(.caption.monospacedDigit())
+                        .accessibilityIdentifier("backup.running.counters")
+                } else if let result = operation.result {
                     Label("Archive created", systemImage: "checkmark.circle.fill")
                         .font(.body.weight(.medium))
                         .foregroundStyle(.green)
@@ -2527,10 +2541,10 @@ private struct BackupOperationCard: View {
                             .foregroundStyle(.orange)
                             .accessibilityIdentifier("backup.result.restart-warning")
                         Button("Refresh Workspace State", action: refreshWorkspaceState)
-                            .disabled(operation?.outcome == .pending)
+                            .disabled(operation.state == .queued || operation.state == .running)
                             .accessibilityIdentifier("backup.result.refresh-workspaces")
                     }
-                } else if let operation, operation.outcome == .failed {
+                } else if operation.state == .failed {
                     Label("Request failed", systemImage: "exclamationmark.triangle.fill")
                         .font(.body.weight(.medium))
                         .foregroundStyle(.orange)
@@ -2538,8 +2552,8 @@ private struct BackupOperationCard: View {
                     Text(operation.message)
                         .font(.caption)
                         .textSelection(.enabled)
-                    if let recovery = operation.recovery {
-                        Text(recovery.recovery ?? recovery.reason)
+                    if let recovery = operation.error {
+                        Text(recovery.recovery)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2551,13 +2565,14 @@ private struct BackupOperationCard: View {
         .accessibilityIdentifier("backup.operation.card")
     }
 
-    private func runningPhaseTitle(_ phase: MSWOperationState.Phase) -> String {
+    private func runningPhaseTitle(_ phase: MSWBackupOperation.Phase) -> String {
         switch phase {
         case .preparing: return "Preparing backup"
-        case .awaitingConfirmation: return "Awaiting confirmation"
-        case .running: return "Creating backup"
-        case .verifying: return "Verifying backup"
-        case .finished: return "Finishing backup"
+        case .archiveWriting: return "Archiving and writing"
+        case .checksumming: return "Checksumming"
+        case .finalizing: return "Finalizing"
+        case .completed: return "Completed"
+        case .failed: return "Failed"
         }
     }
 }

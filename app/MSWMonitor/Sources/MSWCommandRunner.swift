@@ -328,7 +328,7 @@ actor MSWCommandRunner {
                 return output.status == 0 &&
                     envelope.error == nil &&
                     envelope.result?.protocolVersion == 1 &&
-                    envelope.result?.capabilities.backupPreview == true
+                    envelope.result?.capabilities.backup.isCompatible == true
                     ? envelope.result
                     : nil
             }

@@ -1,5 +1,17 @@
 import Foundation
 
+private extension KeyedDecodingContainer where Key: CaseIterable {
+    func requireExactKeys() throws {
+        let actual = Set(allKeys.map(\.stringValue))
+        let expected = Set(Key.allCases.map(\.stringValue))
+        guard actual == expected else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: codingPath, debugDescription: "Wire object keys do not match the supported protocol schema.")
+            )
+        }
+    }
+}
+
 struct SetupWorkspaceConfiguration: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     var name: String
@@ -244,13 +256,13 @@ struct MSWHandshake: Codable, Sendable {
         let jsonLogs: Bool
         let plans: Bool
         let bootstrapEvents: Bool
-        let backupPreview: Bool
+        let backup: MSWBackupCapability
         let jq: Bool
         let workspaceCount: Int
 
         private enum CodingKeys: String, CodingKey {
             case jsonState, jsonMetrics, jsonLogs, plans, bootstrapEvents
-            case backupPreview, jq, workspaceCount
+            case backup, jq, workspaceCount
         }
 
         init(from decoder: Decoder) throws {
@@ -260,10 +272,45 @@ struct MSWHandshake: Codable, Sendable {
             jsonLogs = try container.decode(Bool.self, forKey: .jsonLogs)
             plans = try container.decode(Bool.self, forKey: .plans)
             bootstrapEvents = try container.decode(Bool.self, forKey: .bootstrapEvents)
-            backupPreview = try container.decodeIfPresent(Bool.self, forKey: .backupPreview) ?? false
+            backup = try container.decode(MSWBackupCapability.self, forKey: .backup)
             jq = try container.decode(Bool.self, forKey: .jq)
             workspaceCount = try container.decode(Int.self, forKey: .workspaceCount)
         }
+    }
+}
+
+struct MSWBackupCapability: Codable, Sendable, Equatable {
+    static let supportedProtocolVersion = 2
+
+    let protocolVersion: Int
+    let preview: Bool
+    let start: Bool
+    let list: Bool
+    let status: Bool
+    let progress: Bool
+    let archiveBytes: Bool
+    let concurrent: Bool
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case protocolVersion, preview, start, list, status, progress, archiveBytes, concurrent
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        preview = try container.decode(Bool.self, forKey: .preview)
+        start = try container.decode(Bool.self, forKey: .start)
+        list = try container.decode(Bool.self, forKey: .list)
+        status = try container.decode(Bool.self, forKey: .status)
+        progress = try container.decode(Bool.self, forKey: .progress)
+        archiveBytes = try container.decode(Bool.self, forKey: .archiveBytes)
+        concurrent = try container.decode(Bool.self, forKey: .concurrent)
+    }
+
+    var isCompatible: Bool {
+        protocolVersion == Self.supportedProtocolVersion && preview && start && list && status &&
+            progress && archiveBytes && concurrent
     }
 }
 
@@ -880,18 +927,182 @@ struct MSWCheckResult: Codable, Sendable {
     let outcome: String
 }
 
-struct MSWBackupResponse: Codable, Sendable {
+struct MSWBackupFinalResponse: Codable, Sendable, Equatable {
+    let contractVersion: Int
     let archive: String
     let archiveBytes: Int64
-    let checksum: String?
+    let checksum: String
+    let info: String
+    let completedAt: Date
     let stoppedWorkspaces: [String]
     let restartedWorkspaces: [String]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case contractVersion, archive, archiveBytes, checksum, info, completedAt
+        case stoppedWorkspaces, restartedWorkspaces
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        contractVersion = try container.decode(Int.self, forKey: .contractVersion)
+        archive = try container.decode(String.self, forKey: .archive)
+        archiveBytes = try container.decode(Int64.self, forKey: .archiveBytes)
+        checksum = try container.decode(String.self, forKey: .checksum)
+        info = try container.decode(String.self, forKey: .info)
+        completedAt = try container.decode(Date.self, forKey: .completedAt)
+        stoppedWorkspaces = try container.decode([String].self, forKey: .stoppedWorkspaces)
+        restartedWorkspaces = try container.decode([String].self, forKey: .restartedWorkspaces)
+    }
+}
+
+struct MSWBackupEstimateResponse: Codable, Sendable, Equatable {
+    let lowerBytes: Int64
+    let upperBytes: Int64
+    let basisRatio: Double
+    let changedSourceRatio: Double
+    let provenance: String
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case lowerBytes, upperBytes, basisRatio, changedSourceRatio, provenance
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        lowerBytes = try container.decode(Int64.self, forKey: .lowerBytes)
+        upperBytes = try container.decode(Int64.self, forKey: .upperBytes)
+        basisRatio = try container.decode(Double.self, forKey: .basisRatio)
+        changedSourceRatio = try container.decode(Double.self, forKey: .changedSourceRatio)
+        provenance = try container.decode(String.self, forKey: .provenance)
+    }
 }
 
 struct MSWBackupPreviewResponse: Codable, Sendable {
+    let contractVersion: Int
     let destination: String
-    let requiredBytes: Int64
+    let sourceAllocatedBytes: Int64
+    let archiveEstimate: MSWBackupEstimateResponse?
     let runningWorkspaces: [String]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case contractVersion, destination, sourceAllocatedBytes, archiveEstimate, runningWorkspaces
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        contractVersion = try container.decode(Int.self, forKey: .contractVersion)
+        destination = try container.decode(String.self, forKey: .destination)
+        sourceAllocatedBytes = try container.decode(Int64.self, forKey: .sourceAllocatedBytes)
+        archiveEstimate = try container.decodeIfPresent(MSWBackupEstimateResponse.self, forKey: .archiveEstimate)
+        runningWorkspaces = try container.decode([String].self, forKey: .runningWorkspaces)
+    }
+}
+
+struct MSWBackupProgressResponse: Codable, Sendable, Equatable {
+    let processedBytes: Int64
+    let writtenBytes: Int64
+    let throughputBytesPerSecond: Int64
+    let totalBytes: Int64?
+    let etaSeconds: Int64?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case processedBytes, writtenBytes, throughputBytesPerSecond, totalBytes, etaSeconds
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        processedBytes = try container.decode(Int64.self, forKey: .processedBytes)
+        writtenBytes = try container.decode(Int64.self, forKey: .writtenBytes)
+        throughputBytesPerSecond = try container.decode(Int64.self, forKey: .throughputBytesPerSecond)
+        totalBytes = try container.decodeIfPresent(Int64.self, forKey: .totalBytes)
+        etaSeconds = try container.decodeIfPresent(Int64.self, forKey: .etaSeconds)
+    }
+}
+
+struct MSWBackupOperationErrorResponse: Codable, Sendable, Equatable {
+    let code: String
+    let message: String
+    let recovery: String
+    let retryable: Bool
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case code, message, recovery, retryable
+    }
+
+    init(code: String, message: String, recovery: String, retryable: Bool) {
+        self.code = code
+        self.message = message
+        self.recovery = recovery
+        self.retryable = retryable
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        code = try container.decode(String.self, forKey: .code)
+        message = try container.decode(String.self, forKey: .message)
+        recovery = try container.decode(String.self, forKey: .recovery)
+        retryable = try container.decode(Bool.self, forKey: .retryable)
+    }
+}
+
+struct MSWBackupOperationResponse: Codable, Sendable, Equatable {
+    let contractVersion: Int
+    let kind: String
+    let operationId: String
+    let requestKey: String
+    let state: String
+    let phase: String
+    let message: String
+    let destination: String
+    let startedAt: Date
+    let updatedAt: Date
+    let completedAt: Date?
+    let elapsedSeconds: Int64
+    let ownerPid: Int32?
+    let ownerProcessState: String
+    let sourceAllocatedBytes: Int64
+    let archiveEstimate: MSWBackupEstimateResponse?
+    let runningWorkspaces: [String]
+    let progress: MSWBackupProgressResponse
+    let result: MSWBackupFinalResponse?
+    let error: MSWBackupOperationErrorResponse?
+    let warnings: [String]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case contractVersion, kind, operationId, requestKey, state, phase, message, destination
+        case startedAt, updatedAt, completedAt, elapsedSeconds, ownerPid, ownerProcessState
+        case sourceAllocatedBytes, archiveEstimate, runningWorkspaces, progress, result, error, warnings
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try container.requireExactKeys()
+        contractVersion = try container.decode(Int.self, forKey: .contractVersion)
+        kind = try container.decode(String.self, forKey: .kind)
+        operationId = try container.decode(String.self, forKey: .operationId)
+        requestKey = try container.decode(String.self, forKey: .requestKey)
+        state = try container.decode(String.self, forKey: .state)
+        phase = try container.decode(String.self, forKey: .phase)
+        message = try container.decode(String.self, forKey: .message)
+        destination = try container.decode(String.self, forKey: .destination)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+        elapsedSeconds = try container.decode(Int64.self, forKey: .elapsedSeconds)
+        ownerPid = try container.decodeIfPresent(Int32.self, forKey: .ownerPid)
+        ownerProcessState = try container.decode(String.self, forKey: .ownerProcessState)
+        sourceAllocatedBytes = try container.decode(Int64.self, forKey: .sourceAllocatedBytes)
+        archiveEstimate = try container.decodeIfPresent(MSWBackupEstimateResponse.self, forKey: .archiveEstimate)
+        runningWorkspaces = try container.decode([String].self, forKey: .runningWorkspaces)
+        progress = try container.decode(MSWBackupProgressResponse.self, forKey: .progress)
+        result = try container.decodeIfPresent(MSWBackupFinalResponse.self, forKey: .result)
+        error = try container.decodeIfPresent(MSWBackupOperationErrorResponse.self, forKey: .error)
+        warnings = try container.decode([String].self, forKey: .warnings)
+    }
 }
 
 // JSON values are used only for opaque, schema-validated snapshots such as

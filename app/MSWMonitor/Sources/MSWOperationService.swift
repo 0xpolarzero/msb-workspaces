@@ -133,10 +133,54 @@ struct MSWBackupResult: Codable, Sendable, Equatable {
     }
 }
 
+struct MSWBackupEstimate: Codable, Sendable, Equatable {
+    let lowerBytes: Int64
+    let upperBytes: Int64
+    let basisRatio: Double
+    let changedSourceRatio: Double
+    let provenance: String
+}
+
 struct MSWBackupPreview: Codable, Sendable, Equatable {
     let destination: URL
-    let estimatedSourceBytes: Int64
+    let sourceAllocatedBytes: Int64
+    let archiveEstimate: MSWBackupEstimate?
     let runningWorkspaces: [String]
+}
+
+struct MSWBackupOperation: Codable, Sendable, Equatable, Identifiable {
+    enum State: String, Codable, Sendable { case queued, running, completed, failed }
+    enum Phase: String, Codable, Sendable {
+        case preparing
+        case archiveWriting = "archive-writing"
+        case checksumming
+        case finalizing
+        case completed
+        case failed
+    }
+
+    let id: String
+    let requestKey: String
+    let state: State
+    let phase: Phase
+    let message: String
+    let destination: URL
+    let startedAt: Date
+    let updatedAt: Date
+    let completedAt: Date?
+    let elapsedSeconds: Int64
+    let ownerPID: Int32?
+    let ownerProcessState: String
+    let sourceAllocatedBytes: Int64
+    let archiveEstimate: MSWBackupEstimate?
+    let processedBytes: Int64
+    let writtenBytes: Int64
+    let throughputBytesPerSecond: Int64
+    let totalBytes: Int64?
+    let etaSeconds: Int64?
+    let result: MSWBackupResult?
+    let error: MSWBackupOperationErrorResponse?
+    let warnings: [String]
 }
 
 actor MSWDiagnostics {
@@ -151,6 +195,9 @@ actor MSWDiagnostics {
         try validateDirectory(directory)
         let envelope = try await client.previewBackup(directory: directory)
         guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-preview") }
+        guard result.contractVersion == MSWBackupCapability.supportedProtocolVersion else {
+            throw MSWClientError.unsupportedBackupProtocol(result.contractVersion)
+        }
         let selectedDestination = directory.resolvingSymlinksInPath().standardizedFileURL
         let previewDestination = URL(fileURLWithPath: result.destination)
             .resolvingSymlinksInPath()
@@ -158,43 +205,52 @@ actor MSWDiagnostics {
         guard result.destination.hasPrefix("/"),
               !result.destination.contains("\0"),
               previewDestination.path == selectedDestination.path,
-              result.requiredBytes > 0,
+              result.sourceAllocatedBytes > 0,
+              result.archiveEstimate.map({
+                  $0.lowerBytes > 0 && $0.upperBytes >= $0.lowerBytes &&
+                    $0.basisRatio > 0 && $0.changedSourceRatio > 0 && !$0.provenance.isEmpty
+              }) ?? true,
               Set(result.runningWorkspaces).count == result.runningWorkspaces.count,
               result.runningWorkspaces.allSatisfy(WorkspaceID.isValid) else {
             throw MSWClientError.malformedJSON(command: "backup-preview")
         }
         return MSWBackupPreview(
             destination: previewDestination,
-            estimatedSourceBytes: result.requiredBytes,
+            sourceAllocatedBytes: result.sourceAllocatedBytes,
+            archiveEstimate: result.archiveEstimate.map {
+                MSWBackupEstimate(
+                    lowerBytes: $0.lowerBytes,
+                    upperBytes: $0.upperBytes,
+                    basisRatio: $0.basisRatio,
+                    changedSourceRatio: $0.changedSourceRatio,
+                    provenance: $0.provenance
+                )
+            },
             runningWorkspaces: result.runningWorkspaces
         )
     }
 
-    func backup(to directory: URL) async throws -> MSWBackupResult {
+    func startBackup(to directory: URL, requestKey: String) async throws -> MSWBackupOperation {
         try validateDirectory(directory)
-        let envelope = try await client.backup(directory: directory)
-        guard let result = envelope.result,
-              let completedAt = envelope.observedAt else {
-            throw MSWClientError.missingResult(command: "backup")
+        let envelope = try await client.startBackup(directory: directory, requestKey: requestKey)
+        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-start") }
+        return try validate(result, command: "backup-start")
+    }
+
+    func listBackups() async throws -> [MSWBackupOperation] {
+        let envelope = try await client.listBackups()
+        guard let results = envelope.result else { throw MSWClientError.missingResult(command: "backup-list") }
+        let operations = try results.map { try validate($0, command: "backup-list") }
+        guard Set(operations.map(\.id)).count == operations.count else {
+            throw MSWClientError.malformedJSON(command: "backup-list")
         }
-        guard result.archive.hasPrefix("/"), !result.archive.contains("\0"),
-              result.archiveBytes > 0,
-              result.checksum.map({ $0.hasPrefix("/") && !$0.contains("\0") }) ?? true,
-              Set(result.stoppedWorkspaces).count == result.stoppedWorkspaces.count,
-              Set(result.restartedWorkspaces).count == result.restartedWorkspaces.count,
-              result.stoppedWorkspaces.allSatisfy(WorkspaceID.isValid),
-              result.restartedWorkspaces.allSatisfy(WorkspaceID.isValid),
-              Set(result.restartedWorkspaces).isSubset(of: Set(result.stoppedWorkspaces)) else {
-            throw MSWClientError.malformedJSON(command: "backup")
-        }
-        return MSWBackupResult(
-            archive: URL(fileURLWithPath: result.archive),
-            archiveBytes: result.archiveBytes,
-            completedAt: completedAt,
-            checksum: result.checksum.map { URL(fileURLWithPath: $0) },
-            stoppedWorkspaces: result.stoppedWorkspaces,
-            restartedWorkspaces: result.restartedWorkspaces
-        )
+        return operations
+    }
+
+    func backupStatus(id: String) async throws -> MSWBackupOperation {
+        let envelope = try await client.backupStatus(id: id)
+        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-status") }
+        return try validate(result, command: "backup-status")
     }
 
     func restore(archive: URL, confirmation: String) async throws {
@@ -211,6 +267,76 @@ actor MSWDiagnostics {
               directory.path.rangeOfCharacter(from: .controlCharacters) == nil else {
             throw MSWClientError.invalidArguments
         }
+    }
+
+    private func validate(_ value: MSWBackupOperationResponse, command: String) throws -> MSWBackupOperation {
+        guard value.contractVersion == MSWBackupCapability.supportedProtocolVersion else {
+            throw MSWClientError.unsupportedBackupProtocol(value.contractVersion)
+        }
+        guard value.kind == "backup",
+              value.operationId.range(of: #"^[a-z0-9-]{8,64}$"#, options: .regularExpression) != nil,
+              value.requestKey.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil,
+              let state = MSWBackupOperation.State(rawValue: value.state),
+              let phase = MSWBackupOperation.Phase(rawValue: value.phase),
+              value.destination.hasPrefix("/"), !value.destination.contains("\0"),
+              value.updatedAt >= value.startedAt, value.elapsedSeconds >= 0,
+              value.ownerPid.map({ $0 > 1 }) ?? true,
+              value.sourceAllocatedBytes > 0,
+              value.archiveEstimate.map({
+                  $0.lowerBytes > 0 && $0.upperBytes >= $0.lowerBytes &&
+                    $0.basisRatio > 0 && $0.changedSourceRatio > 0 && !$0.provenance.isEmpty
+              }) ?? true,
+              value.progress.processedBytes >= 0, value.progress.writtenBytes >= 0,
+              value.progress.throughputBytesPerSecond >= 0,
+              value.progress.totalBytes.map({ $0 > 0 }) ?? true,
+              value.progress.etaSeconds.map({ $0 >= 0 }) ?? true else {
+            throw MSWClientError.malformedJSON(command: command)
+        }
+        let result: MSWBackupResult?
+        if let final = value.result {
+            guard final.contractVersion == MSWBackupCapability.supportedProtocolVersion else {
+                throw MSWClientError.unsupportedBackupProtocol(final.contractVersion)
+            }
+            guard final.archive.hasPrefix("/"), !final.archive.contains("\0"), final.archiveBytes > 0,
+                  final.checksum.hasPrefix("/"), !final.checksum.contains("\0"),
+                  final.info.hasPrefix("/"), !final.info.contains("\0"),
+                  Set(final.stoppedWorkspaces).count == final.stoppedWorkspaces.count,
+                  Set(final.restartedWorkspaces).isSubset(of: Set(final.stoppedWorkspaces)),
+                  final.stoppedWorkspaces.allSatisfy(WorkspaceID.isValid),
+                  final.restartedWorkspaces.allSatisfy(WorkspaceID.isValid) else {
+                throw MSWClientError.malformedJSON(command: command)
+            }
+            result = MSWBackupResult(
+                archive: URL(fileURLWithPath: final.archive), archiveBytes: final.archiveBytes,
+                completedAt: final.completedAt, checksum: URL(fileURLWithPath: final.checksum),
+                stoppedWorkspaces: final.stoppedWorkspaces, restartedWorkspaces: final.restartedWorkspaces
+            )
+        } else {
+            result = nil
+        }
+        guard (state == .completed) == (result != nil),
+              (state == .completed) == (phase == .completed),
+              (state == .failed) == (value.error != nil),
+              (state == .failed) == (phase == .failed),
+              (state == .completed || state == .failed) == (value.completedAt != nil),
+              (state == .queued || state == .running) == (result == nil && value.error == nil) else {
+            throw MSWClientError.malformedJSON(command: command)
+        }
+        return MSWBackupOperation(
+            id: value.operationId, requestKey: value.requestKey, state: state, phase: phase,
+            message: value.message, destination: URL(fileURLWithPath: value.destination),
+            startedAt: value.startedAt, updatedAt: value.updatedAt, completedAt: value.completedAt,
+            elapsedSeconds: value.elapsedSeconds, ownerPID: value.ownerPid,
+            ownerProcessState: value.ownerProcessState, sourceAllocatedBytes: value.sourceAllocatedBytes,
+            archiveEstimate: value.archiveEstimate.map {
+                MSWBackupEstimate(lowerBytes: $0.lowerBytes, upperBytes: $0.upperBytes,
+                    basisRatio: $0.basisRatio, changedSourceRatio: $0.changedSourceRatio,
+                    provenance: $0.provenance)
+            }, processedBytes: value.progress.processedBytes, writtenBytes: value.progress.writtenBytes,
+            throughputBytesPerSecond: value.progress.throughputBytesPerSecond,
+            totalBytes: value.progress.totalBytes, etaSeconds: value.progress.etaSeconds,
+            result: result, error: value.error, warnings: value.warnings
+        )
     }
 
 }

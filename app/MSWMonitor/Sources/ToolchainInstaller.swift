@@ -7,6 +7,7 @@ struct ToolchainManifest: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let version: String
     let architecture: String
+    let backupProtocolVersion: Int
     let artifacts: [Artifact]
     let signature: String?
 
@@ -102,6 +103,7 @@ actor ToolchainInstaller {
     func install(manifestData: Data) async throws -> ToolchainInstallResult {
         let manifest = try decodeManifest(manifestData)
         guard manifest.schemaVersion == 1,
+              manifest.backupProtocolVersion == MSWBackupCapability.supportedProtocolVersion,
               !manifest.version.isEmpty,
               isSafeVersion(manifest.version),
               !manifest.artifacts.isEmpty else {
@@ -119,6 +121,7 @@ actor ToolchainInstaller {
             schemaVersion: manifest.schemaVersion,
             version: manifest.version,
             architecture: manifest.architecture,
+            backupProtocolVersion: manifest.backupProtocolVersion,
             artifacts: manifest.artifacts
         ))
         guard trustedManifestKey.isValidSignature(signatureData, for: unsigned) else {
@@ -334,6 +337,7 @@ actor ToolchainInstaller {
         let schemaVersion: Int
         let version: String
         let architecture: String
+        let backupProtocolVersion: Int
         let artifacts: [ToolchainManifest.Artifact]
     }
 

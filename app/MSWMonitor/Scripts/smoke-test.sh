@@ -30,6 +30,9 @@ case "${1:-}" in
   --backup-result-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testBackupResultCardSuccessPartialAndFailure"
     ;;
+  --backup-operations-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testBackupConcurrentFixtureReattachesAfterRelaunchAndAdvancesCounters"
+    ;;
   --network-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testNetworkShowsActivePortsFirst"
     ;;
@@ -40,7 +43,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--backup-only|--backup-result-only|--network-only|--files-cache-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--picker-only|--preferences-only|--navigation-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
     exit 64
     ;;
 esac

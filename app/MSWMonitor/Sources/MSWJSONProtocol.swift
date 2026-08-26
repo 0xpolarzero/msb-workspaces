@@ -10,6 +10,7 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
     case invalidUTF8
     case malformedJSON(command: String)
     case unsupportedSchema(Int)
+    case unsupportedBackupProtocol(Int)
     case missingResult(command: String)
     case protocolFailure(MSWProtocolError)
     case unavailable(String)
@@ -30,6 +31,8 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
         case .invalidUTF8: return "MSW returned invalid UTF-8 output."
         case .malformedJSON(let command): return "MSW returned malformed JSON for \(command)."
         case .unsupportedSchema(let version): return "MSW returned unsupported schema version \(version)."
+        case .unsupportedBackupProtocol(let version):
+            return "MSW returned unsupported backup protocol version \(version). Open Setup and repair the MSW installation before starting another backup."
         case .missingResult(let command): return "MSW returned no result for \(command)."
         case .protocolFailure(let error): return error.localizedDescription
         case .unavailable(let message): return message
