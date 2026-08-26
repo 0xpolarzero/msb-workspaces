@@ -4674,12 +4674,15 @@ cmd_backup() {
       ;;
   esac
 
-  stamp="$(date +%Y%m%d-%H%M%S)"
+  stamp="$(date +%Y%m%d-%H%M%S)-$(app_request_id | /usr/bin/tr '[:upper:]' '[:lower:]' | /usr/bin/cut -c1-8)"
   archive="${MSW_BACKUP_ARCHIVE_PATH:-$destination/microsandbox-all-$stamp.tar.zst}"
   [[ "$archive" == "$destination"/* && "$archive" == *.tar.zst ]] || fatal "invalid managed backup archive path"
   partial="$archive.partial"
   checksum="$archive.sha256"
   info="$archive.info.txt"
+  for rel in "$archive" "$partial" "$checksum" "$info" "$archive.msw-result.json"; do
+    [[ ! -e "$rel" && ! -L "$rel" ]] || fatal "backup output already exists: $rel"
+  done
   temp="$(mktemp -d "${TMPDIR:-/tmp}/msw-backup.XXXXXX")"
   running_file="$temp/running"
   if [[ -n "${MSW_BACKUP_OPERATION_ID:-}" ]]; then
@@ -4888,11 +4891,21 @@ backup_history_store() {
 }
 
 backup_sidecar_is_verified() {
-  local sidecar="$1" expected_archive="$2" archive archive_bytes actual_bytes checksum info
+  local sidecar="$1" expected_archive="$2" record="$3" archive archive_bytes actual_bytes checksum info stopped box
   [[ -f "$sidecar" && ! -L "$sidecar" ]] || return 1
   archive="$($JQ_BIN -er '
     select(keys == ["archive","archiveBytes","checksum","completedAt","contractVersion","info","restartedWorkspaces","stoppedWorkspaces"]) |
-    select(.contractVersion == 2 and (.archiveBytes | type == "number") and (.archiveBytes > 0)) | .archive
+    select(.contractVersion == 2 and
+      (.archive | type == "string" and startswith("/")) and
+      (.archiveBytes | type == "number" and floor == . and . > 0) and
+      (.checksum | type == "string" and startswith("/")) and
+      (.info | type == "string" and startswith("/")) and
+      (.completedAt | type == "string" and length > 0) and
+      (.stoppedWorkspaces | type == "array") and all(.stoppedWorkspaces[]; type == "string") and
+      (.restartedWorkspaces | type == "array") and all(.restartedWorkspaces[]; type == "string") and
+      ((.stoppedWorkspaces | unique | length) == (.stoppedWorkspaces | length)) and
+      ((.restartedWorkspaces | unique | length) == (.restartedWorkspaces | length)) and
+      ((.restartedWorkspaces - .stoppedWorkspaces | length) == 0)) | .archive
   ' "$sidecar" 2>/dev/null)" || return 1
   [[ "$archive" == "$expected_archive" ]] || return 1
   archive_bytes="$($JQ_BIN -er '.archiveBytes' "$sidecar" 2>/dev/null)" || return 1
@@ -4900,6 +4913,12 @@ backup_sidecar_is_verified() {
   info="$($JQ_BIN -er '.info' "$sidecar" 2>/dev/null)" || return 1
   [[ "$checksum" == "$archive.sha256" && "$info" == "$archive.info.txt" ]] || return 1
   [[ -f "$archive" && ! -L "$archive" && -f "$checksum" && ! -L "$checksum" && -f "$info" && ! -L "$info" ]] || return 1
+  stopped="$($JQ_BIN -c '.stoppedWorkspaces' "$sidecar")"
+  [[ "$stopped" == "$($JQ_BIN -c '.runningWorkspaces' "$record")" ]] || return 1
+  while IFS= read -r box; do
+    [[ -n "$box" ]] || continue
+    is_workspace "$box" || return 1
+  done < <("$JQ_BIN" -r '.stoppedWorkspaces[],.restartedWorkspaces[]' "$sidecar")
   actual_bytes="$(/usr/bin/wc -c <"$archive" | /usr/bin/awk '{print $1}')"
   [[ "$archive_bytes" == "$actual_bytes" ]] || return 1
   (cd "$(dirname "$archive")" && "$SHASUM_BIN" -a 256 -c "$(basename "$checksum")" >/dev/null 2>&1)
@@ -4921,6 +4940,10 @@ backup_owner_is_alive() {
 backup_record_is_compatible() {
   "$JQ_BIN" -e '
     select(.contractVersion == 2 and .kind == "backup") |
+    select((keys | sort) == (["contractVersion","kind","operationId","requestKey","state","phase","message","destination",
+      "startedAt","startedEpoch","updatedAt","updatedEpoch","completedAt","elapsedSeconds","ownerPid","ownerProcessStarted",
+      "ownerProcessState","sourceAllocatedBytes","archiveEstimate","runningWorkspaces","expectedArchive","resultSidecar",
+      "snapshotSessionId","progress","result","error","warnings"] | sort)) |
     select((.operationId | type == "string" and test("^[a-z0-9-]{8,64}$")) and
       (.requestKey | type == "string" and test("^[A-Za-z0-9._-]{1,128}$")) and
       (.state == "queued" or .state == "running" or .state == "completed" or .state == "failed") and
@@ -4929,12 +4952,21 @@ backup_record_is_compatible() {
       (.message | type == "string" and length > 0) and
       (.destination | type == "string" and startswith("/")) and
       (.startedAt | type == "string" and length > 0) and
+      (.startedEpoch | type == "number" and floor == . and . > 0) and
       (.updatedAt | type == "string" and length > 0) and
+      (.updatedEpoch | type == "number" and floor == .) and (.updatedEpoch >= .startedEpoch) and
       ((.completedAt == null) or (.completedAt | type == "string" and length > 0)) and
       (.elapsedSeconds | type == "number" and floor == . and . >= 0) and
-      ((.ownerPid == null) or (.ownerPid | type == "number" and floor == . and . > 1)) and
+      (((.ownerPid == null) and (.ownerProcessStarted == null)) or
+        ((.ownerPid | type == "number" and floor == . and . > 1) and
+         (.ownerProcessStarted | type == "string" and length > 0))) and
       (.ownerProcessState | type == "string" and length > 0) and
+      ((.snapshotSessionId == null) or
+        (.snapshotSessionId | type == "string" and test("^[a-z0-9-]{8,64}$"))) and
       (.sourceAllocatedBytes | type == "number" and floor == . and . > 0) and
+      (.expectedArchive | type == "string" and endswith(".tar.zst")) and
+      (.expectedArchive[:((.destination | length) + 1)] == (.destination + "/")) and
+      (.resultSidecar == (.expectedArchive + ".msw-result.json")) and
       ((.archiveEstimate == null) or
         ((.archiveEstimate | keys) == ["basisRatio","changedSourceRatio","lowerBytes","provenance","upperBytes"] and
          (.archiveEstimate.lowerBytes | type == "number" and floor == . and . > 0) and
@@ -4997,6 +5029,7 @@ backup_reconcile_record() {
   [[ -f "$path" && ! -L "$path" ]] || return 1
   backup_record_is_compatible "$path" || return 1
   operation_id="$($JQ_BIN -er 'select(.contractVersion == 2 and .kind == "backup") | .operationId' "$path" 2>/dev/null)" || return 1
+  [[ "$(basename "$path")" == "$operation_id.json" ]] || return 1
   state="$($JQ_BIN -r '.state' "$path")"
   [[ "$state" == running || "$state" == queued ]] || return 0
   pid="$($JQ_BIN -r '.ownerPid // 0' "$path")"
@@ -5012,7 +5045,7 @@ backup_reconcile_record() {
   if [[ "$updated_epoch" =~ ^[0-9]+$ ]] && (( now_epoch - updated_epoch < 3 )); then return 0; fi
   sidecar="$($JQ_BIN -r '.resultSidecar // empty' "$path")"
   now="$(app_now)"
-  if [[ -n "$sidecar" ]] && backup_sidecar_is_verified "$sidecar" "$($JQ_BIN -r '.expectedArchive' "$path")"; then
+  if [[ -n "$sidecar" ]] && backup_sidecar_is_verified "$sidecar" "$($JQ_BIN -r '.expectedArchive' "$path")" "$path"; then
     local result
     result="$($JQ_BIN -c '.' "$sidecar")"
     backup_record_update "$operation_id" '
@@ -5020,8 +5053,11 @@ backup_reconcile_record() {
       .message="Archive and checksum verified after owner-process reconciliation." |
       .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now |
       .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
-      .ownerProcessState="exited" | .progress.writtenBytes=$archiveBytes |
-      .result=$result | .error=null
+      .ownerPid=null | .ownerProcessStarted=null | .ownerProcessState="exited" |
+      .progress.writtenBytes=$archiveBytes |
+      .result=$result | .error=null |
+      .warnings=($result.stoppedWorkspaces - $result.restartedWorkspaces |
+        map("MSW could not confirm that \(.) returned to its pre-backup running state"))
     ' --arg now "$now" --argjson epoch "$now_epoch" \
       --argjson archiveBytes "$($JQ_BIN -r '.archiveBytes' "$sidecar")" --argjson result "$result"
   else
@@ -5030,7 +5066,7 @@ backup_reconcile_record() {
       .message="The detached backup process is no longer running and no verified final sidecar was found." |
       .updatedAt=$now | .updatedEpoch=$epoch | .completedAt=$now |
       .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
-      .ownerProcessState="missing" |
+      .ownerPid=null | .ownerProcessStarted=null | .ownerProcessState="missing" |
       .error={code:"MSW_BACKUP_OWNER_LOST",message:.message,recovery:"Review the destination, then start a new backup with a new request key.",retryable:true}
     ' --arg now "$now" --argjson epoch "$now_epoch"
   fi
@@ -5096,7 +5132,7 @@ backup_operation_worker() {
       backup_record_update "$operation_id" '
         .state="failed" | .phase="failed" | .updatedAt=$now | .updatedEpoch=$epoch |
         .completedAt=$now | .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
-        .ownerProcessState="exited" |
+        .ownerPid=null | .ownerProcessStarted=null | .ownerProcessState="exited" |
         .message="The backup worker could not finalize its durable result." |
         .error={code:"MSW_BACKUP_FINALIZATION_FAILED",message:.message,recovery:"Review the destination and retained worker log, then retry with a new request key.",retryable:true}
       ' --arg now "$failed_at" --argjson epoch "$failed_epoch" || true
@@ -5137,7 +5173,7 @@ backup_operation_worker() {
     backup_record_update "$operation_id" '
       .state="failed" | .phase="failed" | .updatedAt=$now | .updatedEpoch=$epoch |
       .completedAt=$now | .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
-      .ownerProcessState="exited" |
+      .ownerPid=null | .ownerProcessStarted=null | .ownerProcessState="exited" |
       .message="The backup pipeline failed; previously running workspaces were reconciled." |
       .error={code:"MSW_BACKUP_FAILED",message:.message,recovery:"Review the destination and workspace health, then retry with a new request key.",retryable:true}
     ' --arg now "$now" --argjson epoch "$(date +%s)"
@@ -5174,7 +5210,8 @@ backup_operation_worker() {
   backup_record_update "$operation_id" '
     .state="completed" | .phase="completed" | .updatedAt=$now | .updatedEpoch=$epoch |
     .completedAt=$now | .elapsedSeconds=(($epoch - .startedEpoch) | if . < 0 then 0 else . end) |
-    .ownerProcessState="exited" | .message="Archive, checksum, and result metadata completed." |
+    .ownerPid=null | .ownerProcessStarted=null | .ownerProcessState="exited" |
+    .message="Archive, checksum, and result metadata completed." |
     .progress.writtenBytes=$archiveBytes | .result=$result | .error=null | .warnings=$warnings
   ' --arg now "$now" --argjson epoch "$(date +%s)" --argjson archiveBytes "$archive_bytes" --argjson result "$result_json" --argjson warnings "$warnings_json"
   trap - EXIT
@@ -5223,16 +5260,40 @@ validate_backup_listing() {
 }
 
 validate_staged_backup() {
-  local stage="$1" link target
-  if find "$stage" \( -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+  local stage="$1" unsafe_link
+  if find "$stage" \( -type b -o -type c -o -type p \) -print -quit | grep -q .; then
     fatal "backup contains a device, FIFO, or socket"
   fi
-  # Absolute symlinks in managed state are unnecessary for this setup and can
-  # unexpectedly escape the restored tree when followed later.
-  while IFS= read -r -d '' link; do
-    target="$(readlink "$link")"
-    [[ "$target" != /* ]] || fatal "backup contains an absolute symlink: ${link#$stage/}"
-  done < <(find "$stage" -type l -print0)
+  # Preserve relative in-scope links, but reject absolute links, parent escapes,
+  # and chains that eventually resolve outside the staged managed tree.
+  unsafe_link="$($MSW_PYTHON_BIN - "$stage" <<'PY'
+import os
+import sys
+
+stage = os.path.realpath(sys.argv[1])
+for root, directories, files in os.walk(stage, followlinks=False):
+    for name in directories + files:
+        path = os.path.join(root, name)
+        if not os.path.islink(path):
+            continue
+        target = os.readlink(path)
+        resolved = os.path.realpath(path)
+        try:
+            safe = not os.path.isabs(target) and os.path.commonpath((stage, resolved)) == stage
+        except ValueError:
+            safe = False
+        if not safe:
+            kind = "absolute" if os.path.isabs(target) else "escape"
+            print(f"{kind}:{os.path.relpath(path, stage)}")
+            raise SystemExit(1)
+PY
+  )" || {
+    case "$unsafe_link" in
+      absolute:*) fatal "backup contains an absolute symlink: ${unsafe_link#absolute:}" ;;
+      escape:*) fatal "backup contains a symlink that escapes managed state: ${unsafe_link#escape:}" ;;
+      *) fatal "backup contains an unsafe symlink" ;;
+    esac
+  }
 }
 
 restore_state_health() {
@@ -5269,11 +5330,11 @@ cmd_restore() {
   fi
 
   stage="$(mktemp -d "${TMPDIR:-/tmp}/msw-restore-stage.XXXXXX")"
-  rollback="$HOME/.msw-restore-rollback-$(date +%Y%m%d-%H%M%S)"
+  rollback="$(mktemp -d "$HOME/.msw-restore-rollback-$(date +%Y%m%d-%H%M%S).XXXXXX")"
   listing="$stage.members"
 
   (
-    local transaction_active=0 rel source target item rc
+    local transaction_active=0 restore_committed=0 rel source target item rc
     local -a installed=() saved=()
 
     rollback_restore() {
@@ -5292,6 +5353,7 @@ cmd_restore() {
       if (( transaction_active == 1 )); then rollback_restore; fi
       rm -rf "$stage"
       rm -f "$listing"
+      if (( restore_committed == 0 )); then rm -rf "$rollback"; fi
       exit "$rc"
     }
     trap cleanup_restore EXIT
@@ -5321,7 +5383,6 @@ CONFIRM
 
     note "Stopping current managed workspaces"
     cmd_stop all >/dev/null 2>&1 || true
-    mkdir -p "$rollback"
     transaction_active=1
 
     while IFS= read -r rel; do
@@ -5340,6 +5401,7 @@ CONFIRM
 
     restore_state_health || fatal "restored state did not pass health checks"
     transaction_active=0
+    restore_committed=1
   )
 
   ok "restore complete; workspaces remain stopped"
@@ -6401,7 +6463,7 @@ app_cmd_backup_start() {
   record="$(backup_record_path "$operation_id")"
   "$JQ_BIN" -cn --arg operationId "$operation_id" --arg requestKey "$request_key" --arg destination "$directory" --arg now "$now" --arg archive "$archive" --arg sidecar "$sidecar" \
     --argjson epoch "$now_epoch" --argjson source "$source_bytes" --argjson estimate "$estimate_json" --argjson running "$running_json" \
-    '{contractVersion:2,kind:"backup",operationId:$operationId,requestKey:$requestKey,state:"queued",phase:"preparing",message:"Backup accepted by the CLI and waiting for its detached owner process.",destination:$destination,startedAt:$now,startedEpoch:$epoch,updatedAt:$now,updatedEpoch:$epoch,completedAt:null,elapsedSeconds:0,ownerPid:null,ownerProcessStarted:null,ownerProcessState:"detached",sourceAllocatedBytes:$source,archiveEstimate:$estimate,runningWorkspaces:$running,expectedArchive:$archive,resultSidecar:$sidecar,progress:{processedBytes:0,writtenBytes:0,throughputBytesPerSecond:0,totalBytes:null,etaSeconds:null},result:null,error:null,warnings:[]}' >"$record.tmp"
+    '{contractVersion:2,kind:"backup",operationId:$operationId,requestKey:$requestKey,state:"queued",phase:"preparing",message:"Backup accepted by the CLI and waiting for its detached owner process.",destination:$destination,startedAt:$now,startedEpoch:$epoch,updatedAt:$now,updatedEpoch:$epoch,completedAt:null,elapsedSeconds:0,ownerPid:null,ownerProcessStarted:null,ownerProcessState:"detached",sourceAllocatedBytes:$source,archiveEstimate:$estimate,runningWorkspaces:$running,expectedArchive:$archive,resultSidecar:$sidecar,snapshotSessionId:null,progress:{processedBytes:0,writtenBytes:0,throughputBytesPerSecond:0,totalBytes:null,etaSeconds:null},result:null,error:null,warnings:[]}' >"$record.tmp"
   chmod 600 "$record.tmp"; mv "$record.tmp" "$record"
   rm -f "$lock_dir/owner"; rmdir "$lock_dir"
   nohup "$MSW_SCRIPT_ROOT/msw" __backup-worker "$operation_id" "$directory" </dev/null >"$BACKUP_OPERATION_ROOT/$operation_id.stdout" 2>&1 &

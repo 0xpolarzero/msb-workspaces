@@ -1,14 +1,35 @@
 import Foundation
 
-private extension KeyedDecodingContainer where Key: CaseIterable {
-    func requireExactKeys() throws {
-        let actual = Set(allKeys.map(\.stringValue))
-        let expected = Set(Key.allCases.map(\.stringValue))
-        guard actual == expected else {
-            throw DecodingError.dataCorrupted(
-                .init(codingPath: codingPath, debugDescription: "Wire object keys do not match the supported protocol schema.")
-            )
-        }
+private struct MSWAnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+private func requireExactKeys<Key: CodingKey & CaseIterable>(
+    in decoder: Decoder,
+    _: Key.Type
+) throws {
+    // A container keyed by the concrete CodingKeys enum silently omits keys
+    // that the enum does not know about. Inspect through a dynamic key first
+    // so future fields are rejected instead of being mistaken for the current
+    // canonical backup contract.
+    let container = try decoder.container(keyedBy: MSWAnyCodingKey.self)
+    let actual = Set(container.allKeys.map(\.stringValue))
+    let expected = Set(Key.allCases.map(\.stringValue))
+    guard actual == expected else {
+        throw DecodingError.dataCorrupted(
+            .init(codingPath: decoder.codingPath, debugDescription: "Wire object keys do not match the supported protocol schema.")
+        )
     }
 }
 
@@ -296,8 +317,8 @@ struct MSWBackupCapability: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
         preview = try container.decode(Bool.self, forKey: .preview)
         start = try container.decode(Bool.self, forKey: .start)
@@ -943,8 +964,8 @@ struct MSWBackupFinalResponse: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         contractVersion = try container.decode(Int.self, forKey: .contractVersion)
         archive = try container.decode(String.self, forKey: .archive)
         archiveBytes = try container.decode(Int64.self, forKey: .archiveBytes)
@@ -968,8 +989,8 @@ struct MSWBackupEstimateResponse: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         lowerBytes = try container.decode(Int64.self, forKey: .lowerBytes)
         upperBytes = try container.decode(Int64.self, forKey: .upperBytes)
         basisRatio = try container.decode(Double.self, forKey: .basisRatio)
@@ -990,8 +1011,8 @@ struct MSWBackupPreviewResponse: Codable, Sendable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         contractVersion = try container.decode(Int.self, forKey: .contractVersion)
         destination = try container.decode(String.self, forKey: .destination)
         sourceAllocatedBytes = try container.decode(Int64.self, forKey: .sourceAllocatedBytes)
@@ -1012,8 +1033,8 @@ struct MSWBackupProgressResponse: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         processedBytes = try container.decode(Int64.self, forKey: .processedBytes)
         writtenBytes = try container.decode(Int64.self, forKey: .writtenBytes)
         throughputBytesPerSecond = try container.decode(Int64.self, forKey: .throughputBytesPerSecond)
@@ -1040,8 +1061,8 @@ struct MSWBackupOperationErrorResponse: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         code = try container.decode(String.self, forKey: .code)
         message = try container.decode(String.self, forKey: .message)
         recovery = try container.decode(String.self, forKey: .recovery)
@@ -1079,8 +1100,8 @@ struct MSWBackupOperationResponse: Codable, Sendable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        try container.requireExactKeys()
         contractVersion = try container.decode(Int.self, forKey: .contractVersion)
         kind = try container.decode(String.self, forKey: .kind)
         operationId = try container.decode(String.self, forKey: .operationId)

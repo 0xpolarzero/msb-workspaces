@@ -2772,6 +2772,21 @@ class BackupRestoreTests(MSWTestCase):
             handle.seek(logical_size - len(b"MSW-SPARSE-END"))
             self.assertEqual(handle.read(), b"MSW-SPARSE-END")
 
+    def test_backup_restore_preserves_safe_relative_managed_symlink(self) -> None:
+        target = self.env.home / ".config/msw/relative-link-target"
+        link = self.env.home / ".config/msw/relative-link"
+        target.write_text("managed-relative-link-payload")
+        link.symlink_to(target.name)
+
+        archive = self._backup()
+        link.unlink()
+        target.unlink()
+        self.env.msw("restore", str(archive), "--yes", timeout=90)
+
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), target.name)
+        self.assertEqual(link.read_text(), "managed-relative-link-payload")
+
     def test_corrupt_checksum_is_rejected_before_mutation(self) -> None:
         marker = self.env.home / ".config/msw/current-marker"
         marker.write_text("current")
@@ -2837,6 +2852,12 @@ class BackupRestoreTests(MSWTestCase):
         link.type = tarfile.SYMTYPE; link.linkname = "/etc/passwd"
         symlink.append(link)
         variants.append(("absolute-symlink", symlink, "absolute symlink"))
+
+        escaping_symlink = self._required_tar_members()
+        relative_link = tarfile.TarInfo(".microsandbox/escaping-link")
+        relative_link.type = tarfile.SYMTYPE; relative_link.linkname = "../../outside-managed-state"
+        escaping_symlink.append(relative_link)
+        variants.append(("escaping-relative-symlink", escaping_symlink, "escapes managed state"))
 
         for label, members, expected in variants:
             with self.subTest(label=label):
@@ -3301,8 +3322,9 @@ class PackagedBehaviorTests(MSWTestCase):
         interrupted = json.loads(record_path.read_text())
         interrupted.update({
             "state": "running", "phase": "finalizing", "ownerPid": 99999999,
-            "ownerProcessState": "missing", "result": None, "completedAt": None,
-            "startedEpoch": int(time.time()) - 20, "updatedEpoch": 0,
+            "ownerProcessStarted": "stale-process-signature", "ownerProcessState": "missing",
+            "result": None, "completedAt": None,
+            "startedEpoch": int(time.time()) - 20, "updatedEpoch": int(time.time()) - 10,
             "elapsedSeconds": 1,
         })
         record_path.write_text(json.dumps(interrupted))
@@ -3533,7 +3555,7 @@ class PackagedBehaviorTests(MSWTestCase):
         session_path.chmod(0o600)
         dead_record = operation_root / f"{dead['operationId']}.json"
         record = json.loads(dead_record.read_text())
-        record["updatedEpoch"] = 0
+        record["updatedEpoch"] = record["startedEpoch"]
         dead_record.write_text(json.dumps(record))
         dead_record.chmod(0o600)
         coordinator_owner = operation_root / ".snapshot-coordinator-owner.json"

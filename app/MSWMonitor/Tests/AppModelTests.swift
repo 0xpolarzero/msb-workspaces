@@ -326,11 +326,14 @@ final class AppModelTests: XCTestCase {
             .replacingOccurrences(of: #""protocolVersion":2,"preview""#, with: #""protocolVersion":1,"preview""#)
         let futureSchema = protocolCompatibleHandshake
             .replacingOccurrences(of: #""protocolVersion":2,"preview""#, with: #""protocolVersion":3,"preview""#)
+        let futureCapabilityField = protocolCompatibleHandshake
+            .replacingOccurrences(of: #""concurrent":true"#, with: #""concurrent":true,"futureField":true"#)
 
         for (label, handshake) in [
             ("older-missing-archive-bytes", olderMissingArchiveBytes),
             ("current-missing-archive-bytes", missingArchiveBytes),
             ("future", futureSchema),
+            ("future-capability-field", futureCapabilityField),
         ] {
             let caseDirectory = temporary.appendingPathComponent(label, isDirectory: true)
             let destination = caseDirectory.appendingPathComponent("Backups", isDirectory: true)
