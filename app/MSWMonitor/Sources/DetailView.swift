@@ -2293,9 +2293,6 @@ private struct OperationRow: View {
                         .foregroundStyle(.secondary)
                 }
                 Text(detail).font(.caption2).foregroundStyle(.secondary)
-                Text("Progress: indeterminate; no fraction is exposed by the current model contract.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)
@@ -2488,7 +2485,7 @@ private struct MaintenanceOperationView: View {
                 }
                 switch operation.outcome {
                 case .running:
-                    Text("Progress is indeterminate because the current model does not expose event fractions. Do not close the app or replay the operation.")
+                    Text("Do not close the app or replay the operation.")
                         .font(.caption).foregroundStyle(.secondary)
                 case .succeeded(let message):
                     Label(message, systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
@@ -2564,7 +2561,7 @@ private struct ModelOperationView: View {
         switch operation.phase {
         case .preparing: return "Preparing"
         case .awaitingConfirmation: return "Awaiting confirmation"
-        case .running: return operation.fraction.map { "Running — \(Int($0 * 100))%" } ?? "Running — progress indeterminate"
+        case .running: return operation.fraction.map { "Running — \(Int($0 * 100))%" } ?? "Running"
         case .verifying: return "Verifying outcome"
         case .finished:
             switch operation.outcome {
