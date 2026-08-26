@@ -206,6 +206,23 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotNil(model.detailError)
         XCTAssertFalse(model.isBackupPreviewLoading)
         XCTAssertFalse(model.backupRequiresRuntimeRepair)
+
+        let renamedFieldResponse = previewResponse.replacingOccurrences(
+            of: #""requiredBytes":"#,
+            with: #""estimatedSourceBytes":"#
+        )
+        let renamedFieldScript = script.replacingOccurrences(
+            of: previewResponse,
+            with: renamedFieldResponse
+        )
+        try Data(renamedFieldScript.utf8).write(to: executable)
+
+        let renamedFieldPreview = await model.prepareBackup(to: destination)
+        XCTAssertNil(renamedFieldPreview)
+        XCTAssertNil(model.pendingBackupPreview)
+        XCTAssertEqual(model.detailError, "MSW returned malformed JSON for backup-preview.")
+        XCTAssertFalse(model.isBackupPreviewLoading)
+        XCTAssertFalse(model.backupRequiresRuntimeRepair)
     }
 
     func testBackupPreviewUsesResolvedInstalledShippedCLIAndReturnsEstimatedSourceBytes() async throws {
