@@ -1,6 +1,6 @@
 f6a2b62d1a730628f58953cb15eace4b3ba51529b682f99fb802aa74f4e67a15  README.md
 b2f44d3b6e29f8b1b73ea4735f006affc4d198e1fd9c7d50e736159b1ef636c6  VERSION
-204ff07d8b5dd76d9625a50f8418e068bc4306839e8a0ecb4cbe13977559910a  bin/msw
+5ff341d165cf92de132857f17fdc29c807b85d7d2d269cd9e93fecf5c5e5bd38  bin/msw
 5369b9cefa7ee61d863a2cfda43a1e253a132d793b9ebf0df86cec9012d884bb  bin/msw-git-askpass
 1e1d91d2dce191048be525a8655ef5ad12eb6a0cd53998eb01bd2d3d3afc3466  bin/msw-github-host-token
 a8b723dffae313e6e276341b664361b43fb1d09d17afdbbe74b9cbfdcf090385  bin/msw-github-proxy
@@ -30,7 +30,7 @@ c3e124ee31dcbd4efb0856dacc1d4ded4ac0172bd1a48947f3d3b12391f7bbab  tests/fake_sec
 8dc4cec3bce33686fc0aea05dc6676a30e5323c3f1143344ea117a5d03302eb7  tests/fake_ssh_forwarder.py
 77d61370396c9fd9f239a8c215e455bb758d54ddeafbf5aebf8404ff486db8f1  tests/fake_zed.sh
 e2b0533522dc3326bc5cf2ddaebd91263d05a837ae134b44b322d9cd3e48fe13  tests/run-tests.sh
-0907a7a583023fa25adc0a7bf67631c6340fa1bd7a6c05c4b105cfe59c734c2e  tests/test_suite.py
+c2ac0f01f672facba3e19221aa5821476aa3adaf8cc244355c4950083727ce62  tests/test_suite.py
 # Vendored h11 0.16.0 (lib/vendor/h11/) — pin and hashes per VENDORED.md; update only via the bump procedure there.
 37db5bb85926db28a427a25867f10b1232003aea1be69ccb851138adb8e6f361  lib/vendor/h11/LICENSE.txt
 88ed4ace448ee36c99e9f7e0f953206f1fd9553586518d349d16045a7facde46  lib/vendor/h11/__init__.py

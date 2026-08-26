@@ -150,14 +150,14 @@ final class AppModelTests: XCTestCase {
         XCTAssertNotEqual(panel.prompt, "Review Destination")
     }
 
-    func testBackupPreviewFlowsThroughTypedModelBoundary() async throws {
+    func testBackupPreviewDecodesOlderCapableRequiredBytesResponseIntoEstimatedSourceBytesModel() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-backup-preview-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let destination = temporary.appendingPathComponent("Backups..Archive", isDirectory: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let previewResponse = #"{"schemaVersion":1,"requestId":"backup-preview","ok":true,"command":"backup-preview","observedAt":"2026-08-08T00:00:00Z","result":{"destination":"DESTINATION","estimatedSourceBytes":16000000000,"runningWorkspaces":["dev"]},"warnings":[],"error":null}"#
+        let previewResponse = #"{"schemaVersion":1,"requestId":"backup-preview","ok":true,"command":"backup-preview","observedAt":"2026-08-08T00:00:00Z","result":{"destination":"DESTINATION","requiredBytes":16000000000,"runningWorkspaces":["dev"]},"warnings":[],"error":null}"#
             .replacingOccurrences(of: "DESTINATION", with: destination.path)
         let executable = temporary.appendingPathComponent("msw")
         let script = """
@@ -208,7 +208,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(model.backupRequiresRuntimeRepair)
     }
 
-    func testBackupPreviewUsesResolvedShippedCLIAndReturnsEstimatedSourceBytes() async throws {
+    func testBackupPreviewUsesResolvedInstalledShippedCLIAndReturnsEstimatedSourceBytes() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-backup-preview-integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -229,6 +229,9 @@ final class AppModelTests: XCTestCase {
         for directory in [configDirectory, toolDirectory, managedDirectory, destination] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
+        let installedExecutable = toolDirectory.appendingPathComponent("msw")
+        try FileManager.default.copyItem(at: sourceExecutable, to: installedExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedExecutable.path)
         try Data(repeating: 0x41, count: 4_096).write(
             to: managedDirectory.appendingPathComponent("managed-state.bin")
         )
@@ -246,10 +249,7 @@ final class AppModelTests: XCTestCase {
         let workspaces = #"{"schemaVersion":1,"workspaces":[{"name":"dev","cpu":4,"cpuCeiling":4,"memoryGiB":16,"memoryCeilingGiB":16,"workspaceStorageGiB":60,"runtimeStorageGiB":60}]}"#
         try Data(workspaces.utf8).write(to: configDirectory.appendingPathComponent("workspaces.json"))
 
-        let runner = MSWCommandRunner(configuration: .init(
-            homeDirectory: temporary,
-            configuredExecutable: sourceExecutable
-        ))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: temporary))
         let client = MSWClient(runner: runner)
         let model = AppModel(diagnostics: MSWDiagnostics(client: client))
 
@@ -257,10 +257,36 @@ final class AppModelTests: XCTestCase {
         let preview = try XCTUnwrap(returnedPreview)
         let resolvedExecutable = await client.executableURL()
 
-        XCTAssertEqual(resolvedExecutable, sourceExecutable)
+        XCTAssertEqual(resolvedExecutable, installedExecutable)
         XCTAssertEqual(preview.destination, destination)
         XCTAssertGreaterThan(preview.estimatedSourceBytes, 4_096)
         XCTAssertEqual(preview.runningWorkspaces, [])
+        XCTAssertNil(model.detailError)
+    }
+
+    func testBackupPreviewDecodesCurrentlyResolvedHostCLIWhenAvailable() async throws {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-backup-preview-host-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
+
+        let client = MSWClient(runner: MSWCommandRunner())
+        guard let handshake = try? await client.handshake().result,
+              handshake.configurationAvailable,
+              handshake.runtimeAvailable,
+              handshake.capabilities.backupPreview else {
+            throw XCTSkip("No configured backup-preview-capable host MSW installation is currently resolved.")
+        }
+        let model = AppModel(diagnostics: MSWDiagnostics(client: client))
+
+        let returnedPreview = await model.prepareBackup(to: destination)
+        let executableURL = await client.executableURL()
+        let preview = try XCTUnwrap(returnedPreview)
+        let resolvedExecutable = try XCTUnwrap(executableURL)
+
+        XCTAssertEqual(resolvedExecutable.lastPathComponent, "msw")
+        XCTAssertEqual(preview.destination, destination)
+        XCTAssertGreaterThan(preview.estimatedSourceBytes, 0)
         XCTAssertNil(model.detailError)
     }
 

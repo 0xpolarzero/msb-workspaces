@@ -3135,10 +3135,10 @@ class PackagedBehaviorTests(MSWTestCase):
         preview = json.loads(self.env.msw(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
-        self.assertEqual(set(preview), {"destination", "estimatedSourceBytes", "runningWorkspaces"})
+        self.assertEqual(set(preview), {"destination", "requiredBytes", "runningWorkspaces"})
         self.assertEqual(preview["destination"], str(destination.resolve()))
-        self.assertGreater(preview["estimatedSourceBytes"], 0)
-        self.assertGreaterEqual(preview["estimatedSourceBytes"], compressible_source.stat().st_size)
+        self.assertGreater(preview["requiredBytes"], 0)
+        self.assertGreaterEqual(preview["requiredBytes"], compressible_source.stat().st_size)
         self.assertEqual(preview["runningWorkspaces"], ["dev"])
 
         preview_with_status_unavailable = json.loads(self.env.msw(
@@ -3166,9 +3166,9 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(Path(result["archive"]).is_file())
         self.assertEqual(result["archiveBytes"], Path(result["archive"]).stat().st_size)
         self.assertGreater(result["archiveBytes"], 0)
-        self.assertLess(result["archiveBytes"], preview["estimatedSourceBytes"])
+        self.assertLess(result["archiveBytes"], preview["requiredBytes"])
         self.assertNotIn("archiveBytes", preview)
-        self.assertNotIn("estimatedSourceBytes", result)
+        self.assertNotIn("requiredBytes", result)
         self.assertEqual(result["checksum"], result["archive"] + ".sha256")
         self.assertEqual(result["stoppedWorkspaces"], ["dev"])
         self.assertEqual(result["restartedWorkspaces"], ["dev"])

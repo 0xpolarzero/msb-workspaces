@@ -890,7 +890,7 @@ struct MSWBackupResponse: Codable, Sendable {
 
 struct MSWBackupPreviewResponse: Codable, Sendable {
     let destination: String
-    let estimatedSourceBytes: Int64
+    let requiredBytes: Int64
     let runningWorkspaces: [String]
 }
 

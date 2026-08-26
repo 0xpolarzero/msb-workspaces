@@ -158,14 +158,14 @@ actor MSWDiagnostics {
         guard result.destination.hasPrefix("/"),
               !result.destination.contains("\0"),
               previewDestination.path == selectedDestination.path,
-              result.estimatedSourceBytes > 0,
+              result.requiredBytes > 0,
               Set(result.runningWorkspaces).count == result.runningWorkspaces.count,
               result.runningWorkspaces.allSatisfy(WorkspaceID.isValid) else {
             throw MSWClientError.malformedJSON(command: "backup-preview")
         }
         return MSWBackupPreview(
             destination: previewDestination,
-            estimatedSourceBytes: result.estimatedSourceBytes,
+            estimatedSourceBytes: result.requiredBytes,
             runningWorkspaces: result.runningWorkspaces
         )
     }

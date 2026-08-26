@@ -5661,7 +5661,7 @@ app_cmd_backup_preview() {
     [[ -n "$running_json" ]] && running_json+=","
     running_json+="$(app_json_string "$box")"
   done < <(running_workspaces)
-  app_emit_success backup-preview "{\"destination\":$(app_json_string "$directory"),\"estimatedSourceBytes\":$estimated_source_bytes,\"runningWorkspaces\":[$running_json]}"
+  app_emit_success backup-preview "{\"destination\":$(app_json_string "$directory"),\"requiredBytes\":$estimated_source_bytes,\"runningWorkspaces\":[$running_json]}"
 }
 
 app_cmd_restore() {
