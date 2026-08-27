@@ -602,6 +602,25 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testStatusItemPublishesRepairStateWithoutChangingItsStableIdentityOrProductionBehavior() {
+        let model = AppModel(initialRuntimeRepairRequired: true)
+        let controller = StatusBarController(
+            model: model,
+            applicationPreferences: model.applicationPreferences
+        )
+        defer { controller.tearDown() }
+
+        let button = controller.statusButton
+        XCTAssertEqual(button?.accessibilityIdentifier(), "statusItem.button")
+        XCTAssertEqual(button?.accessibilityLabel(), "MSW Monitor")
+        XCTAssertEqual(button?.accessibilityValue() as? String, RuntimeRepairPresentation.statusValue)
+        XCTAssertEqual(
+            button?.accessibilityHelp(),
+            RuntimeRepairAccessibilityIdentifier.statusWarning
+        )
+        XCTAssertEqual(controller.popover.behavior, .transient)
+    }
+
     func testInitialWorkspacesAreFixedAndStopped() {
         let model = AppModel()
 

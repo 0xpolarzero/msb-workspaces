@@ -80,11 +80,11 @@ struct MonitorView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
-            Text("MSW installation needs repair")
+            Text(RuntimeRepairPresentation.message)
                 .font(.caption.weight(.medium))
                 .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverMessage)
             Spacer(minLength: 4)
-            Button("Repair…") {
+            Button(RuntimeRepairPresentation.actionTitle) {
                 NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
             }
             .controlSize(.small)

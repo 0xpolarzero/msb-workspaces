@@ -351,6 +351,12 @@ enum RuntimeRepairAccessibilityIdentifier {
     static let popoverAction = "runtime-repair.popover.action"
 }
 
+enum RuntimeRepairPresentation {
+    static let message = "MSW installation needs repair"
+    static let actionTitle = "Repair…"
+    static let statusValue = "MSW Monitor. Repair needed. MSW installation needs repair."
+}
+
 @Observable
 @MainActor
 final class ApplicationPreferenceStore {

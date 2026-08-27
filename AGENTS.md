@@ -84,6 +84,13 @@ changes, use the focused flow so onboarding is not replayed:
 app/MSWMonitor/Scripts/smoke-test.sh --monitor-only
 ```
 
+For the centralized runtime-repair warning, Setup action, and compatible-state
+cutover across the status item, popover, and unified-window tabs, use:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --repair-only
+```
+
 For the status-popover folder browser, run only its Finder-style interaction:
 
 ```bash
@@ -194,6 +201,9 @@ Use accessibility identifiers rather than screen coordinates:
 | `open-monitor.button` | Unified-window shortcut | Opens the Overview top tab |
 | `quit.button` | Quit button | Terminates the app |
 | `settings.tabs` | Unified window | Hosts all top-level destinations |
+| `runtime-repair.window.banner` / `.message` / `.action` | Global repair banner | One banner with `MSW installation needs repair` and one `Repair…` action on every top tab |
+| `runtime-repair.status-item.warning` | Status warning state | Status item value communicates repair while its label remains `MSW Monitor` |
+| `runtime-repair.popover.row` / `.message` / `.action` | Popover repair row | One compact repair row and one `Repair…` action |
 | `workspace.section-picker` / `workspace.section.<name>` | Workspace tools | Switches Summary, Files, Logs, Network, Repositories, and Maintenance |
 | `folders.path-bar` / `folders.search.field` | Folder scope and search | Clickable `/workspace` breadcrumbs and bounded search |
 | `folders.tree` / `folders.entry.<safe-path>.expand` | Lazy folder tree | Selects, expands, or double-clicks a real VM directory |
@@ -384,7 +394,9 @@ unredacted system logs.
   `Test session results, code coverage, and logs:` path printed by that run.
 - The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`;
   `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` runs
-  `testStatusItemMinimalPopoverAndQuit()`; `--picker-only` runs
+  `testStatusItemMinimalPopoverAndQuit()`; `--repair-only` runs
+  `testGlobalRuntimeRepairStateClearsEverySurfaceAfterSetupRepair()`;
+  `--picker-only` runs
   `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs
   `testApplicationPreferencesUpdateWorkspaceActions()`; `--navigation-only`
   runs `testUnifiedWindowUsesTopTabsAndWorkspaceSections()`; `--backup-only`

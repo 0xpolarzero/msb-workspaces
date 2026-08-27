@@ -377,11 +377,11 @@ private struct RuntimeRepairBanner: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
-            Text("MSW installation needs repair")
+            Text(RuntimeRepairPresentation.message)
                 .font(.callout.weight(.medium))
                 .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowMessage)
             Spacer()
-            Button("Repair…") {
+            Button(RuntimeRepairPresentation.actionTitle) {
                 NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
             }
             .controlSize(.small)
@@ -488,44 +488,44 @@ struct SettingsView: View {
                         Divider()
                     }
                     TabView(selection: $navigation.tab) {
-                    DetailView(model: model, navigation: navigation, mode: .overview)
-                        .tabItem {
-                            Label("Overview", systemImage: "rectangle.grid.1x2")
-                        }
-                        .tag(AppTab.overview)
+                        DetailView(model: model, navigation: navigation, mode: .overview)
+                            .tabItem {
+                                Label("Overview", systemImage: "rectangle.grid.1x2")
+                            }
+                            .tag(AppTab.overview)
 
-                    VStack(spacing: 0) {
-                        workspaceSectionMenu
-                        DetailView(model: model, navigation: navigation, mode: .workspaces)
-                    }
-                    .tabItem {
-                        Label("Workspaces", systemImage: "square.grid.3x3")
-                    }
-                    .tag(AppTab.workspaces)
-
-                    githubSettings
-                        .tabItem {
-                            Label("GitHub", systemImage: "person.crop.circle.badge.checkmark")
+                        VStack(spacing: 0) {
+                            workspaceSectionMenu
+                            DetailView(model: model, navigation: navigation, mode: .workspaces)
                         }
-                        .tag(AppTab.github)
-
-                    notificationSettings
                         .tabItem {
-                            Label("Notifications", systemImage: "bell")
+                            Label("Workspaces", systemImage: "square.grid.3x3")
                         }
-                        .tag(AppTab.notifications)
+                        .tag(AppTab.workspaces)
 
-                    DetailView(model: model, navigation: navigation, mode: .backup)
-                        .tabItem {
-                            Label("Backup", systemImage: "externaldrive")
-                        }
-                        .tag(AppTab.backup)
+                        githubSettings
+                            .tabItem {
+                                Label("GitHub", systemImage: "person.crop.circle.badge.checkmark")
+                            }
+                            .tag(AppTab.github)
 
-                    generalSettings
-                        .tabItem {
-                            Label("General", systemImage: "gear")
-                        }
-                        .tag(AppTab.general)
+                        notificationSettings
+                            .tabItem {
+                                Label("Notifications", systemImage: "bell")
+                            }
+                            .tag(AppTab.notifications)
+
+                        DetailView(model: model, navigation: navigation, mode: .backup)
+                            .tabItem {
+                                Label("Backup", systemImage: "externaldrive")
+                            }
+                            .tag(AppTab.backup)
+
+                        generalSettings
+                            .tabItem {
+                                Label("General", systemImage: "gear")
+                            }
+                            .tag(AppTab.general)
                     }
                     .accessibilityIdentifier("settings.tabs")
                 }

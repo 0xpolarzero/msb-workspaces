@@ -207,8 +207,8 @@ final class StatusBarController {
             button.image = image
         }
         if model.runtimeRepairRequired {
-            button.toolTip = "MSW Monitor — MSW installation needs repair"
-            button.setAccessibilityValue("MSW Monitor. Repair needed. MSW installation needs repair.")
+            button.toolTip = "MSW Monitor — \(RuntimeRepairPresentation.message)"
+            button.setAccessibilityValue(RuntimeRepairPresentation.statusValue)
             button.setAccessibilityHelp(RuntimeRepairAccessibilityIdentifier.statusWarning)
             popover.contentSize = NSSize(width: 340, height: 324)
         } else {

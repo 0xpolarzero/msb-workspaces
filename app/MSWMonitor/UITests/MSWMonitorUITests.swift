@@ -84,6 +84,10 @@ final class MSWMonitorUITests: XCTestCase {
             app.descendants(matching: .any).matching(identifier: "runtime-repair.popover.row").count,
             1
         )
+        XCTAssertEqual(
+            app.staticTexts.matching(identifier: "runtime-repair.popover.message").count,
+            1
+        )
         XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.popover.action").count, 1)
         XCTAssertEqual(app.buttons["runtime-repair.popover.action"].label, "Repair…")
         XCTAssertEqual(app.buttons["open-monitor.button"].label, "Open MSW Monitor…")
@@ -91,6 +95,15 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["details.button"].exists)
         XCTAssertFalse(app.buttons["settings.button"].exists)
         XCTAssertFalse(app.buttons["setup.button"].exists)
+
+        app.buttons["runtime-repair.popover.action"].click()
+        let setup = app.windows["setup.window"]
+        XCTAssertTrue(setup.waitForExistence(timeout: 3))
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
+
+        statusItem.click()
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
 
         app.buttons["open-monitor.button"].click()
         XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
@@ -108,12 +121,15 @@ final class MSWMonitorUITests: XCTestCase {
                     .matching(identifier: "runtime-repair.window.banner").count,
                 1
             )
+            XCTAssertEqual(
+                app.staticTexts.matching(identifier: "runtime-repair.window.message").count,
+                1
+            )
             XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 1)
             XCTAssertEqual(app.buttons["runtime-repair.window.action"].label, "Repair…")
         }
 
         app.buttons["runtime-repair.window.action"].click()
-        let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 3))
@@ -125,19 +141,24 @@ final class MSWMonitorUITests: XCTestCase {
                 .waitForNonExistence(timeout: 3)
         )
         XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 0)
+        XCTAssertEqual(app.staticTexts.matching(identifier: "runtime-repair.window.message").count, 0)
         for tab in ["Overview", "Workspaces", "GitHub", "Notifications", "Backup", "General"] {
             app.toolbars.buttons[tab].click()
             XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.window.banner"].exists)
+            XCTAssertFalse(app.staticTexts["runtime-repair.window.message"].exists)
             XCTAssertFalse(app.buttons["runtime-repair.window.action"].exists)
         }
-        XCTAssertEqual(
-            statusItem.value as? String,
+        let compatibleStatus = NSPredicate(
+            format: "value == %@",
             "Not observed. No authoritative workspace state is available yet."
         )
+        expectation(for: compatibleStatus, evaluatedWith: statusItem)
+        waitForExpectations(timeout: 3)
 
         statusItem.click()
         XCTAssertTrue(app.descendants(matching: .any)["monitor.title"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.popover.row"].exists)
+        XCTAssertFalse(app.staticTexts["runtime-repair.popover.message"].exists)
         XCTAssertFalse(app.buttons["runtime-repair.popover.action"].exists)
         app.buttons["quit.button"].click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
