@@ -3105,6 +3105,32 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(failure.diagnosticDetails?.hasSuffix(finalError) == true)
     }
 
+    func testRuntimeRepairVerifiesExactActivatedCLIWithoutRuntimePrerequisites() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-runtime-repair-exact-cli-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: temporary))
+        let coordinator = BootstrapCoordinator(
+            client: MSWClient(runner: runner),
+            runner: runner,
+            stateStore: BootstrapStateStore(url: temporary.appendingPathComponent("bootstrap-state.json")),
+            hostService: EnabledHostService()
+        )
+
+        try await coordinator.repairRuntime()
+
+        let selected = await runner.mswResolution().selected?.standardizedFileURL
+        let expected = ToolchainLayout.managedRoot(homeDirectory: temporary)
+            .appendingPathComponent("current/bin/msw")
+            .standardizedFileURL
+        XCTAssertEqual(selected, expected)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: temporary.appendingPathComponent(".config/msw/config.sh").path
+        ))
+    }
+
 
     func testCommandRunnerTerminatesTimedOutProcessGroup() async {
         let runner = MSWCommandRunner()

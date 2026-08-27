@@ -802,9 +802,13 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         running = true
         defer { running = false }
         do {
-            _ = try await installBundledToolchain()
+            let activated = try await installBundledToolchain()
             await runner.invalidateMSWResolution()
-            guard await runtimeIsReady() else {
+            let resolution = await runner.mswResolution(forceRefresh: true)
+            let expectedExecutable = activated.root
+                .appendingPathComponent("bin/msw")
+                .standardizedFileURL
+            guard resolution.selected?.standardizedFileURL == expectedExecutable else {
                 throw BootstrapCoordinatorError.unavailable
             }
         } catch {
