@@ -1678,7 +1678,7 @@ final class AppModel {
                   generation == refreshGeneration else { return .superseded }
             guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
             guard requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
-            guard !isPreCommandLifecycleObservation(
+            guard !shouldRejectLifecycleObservation(
                 observationGeneration: requestSequence
             ) else { return .superseded }
             if let observedAt = response.observedAt,
@@ -1722,7 +1722,7 @@ final class AppModel {
             guard !Task.isCancelled,
                   generation == refreshGeneration,
                   requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
-            if hasOwnedLifecycleVerification {
+            if hasPendingLifecycleVerification {
                 // A successful lifecycle command can temporarily outlive the
                 // host agent that serves state. Keep the command-owned
                 // transition visible and non-error while verification retries.
@@ -3359,12 +3359,14 @@ final class AppModel {
         return detail == summaryLine && !hasAdditionalLine ? nil : detail
     }
 
-    private var hasOwnedLifecycleVerification: Bool {
+    private var hasPendingLifecycleVerification: Bool {
         lifecycleVerifications.contains { workspace, verification in
             guard let operation = operationStates[
                 operationKey(kind: .lifecycle, workspace: workspace)
             ] else { return false }
             return operation.id == verification.operationID &&
+                operation.phase == .verifying &&
+                operation.outcome == .pending &&
                 lifecycleOperationOwners[workspace]?.generation == verification.operationGeneration
         }
     }
@@ -3390,16 +3392,23 @@ final class AppModel {
             verification.operationGeneration == ownership.generation
     }
 
-    private func isPreCommandLifecycleObservation(observationGeneration: Int) -> Bool {
-        lifecycleVerifications.contains { workspace, verification in
-            guard observationGeneration <= verification.commandBoundaryObservationGeneration,
-                  lifecycleOperationOwners[workspace]?.operationID == verification.operationID,
-                  lifecycleOperationOwners[workspace]?.generation == verification.operationGeneration else {
+    private func shouldRejectLifecycleObservation(observationGeneration: Int) -> Bool {
+        lifecycleOperationOwners.contains { workspace, ownership in
+            guard let operation = operationStates[
+                operationKey(kind: .lifecycle, workspace: workspace)
+            ],
+            operation.id == ownership.operationID,
+            operation.outcome == .pending else {
                 return false
             }
-            return operationStates[
-                operationKey(kind: .lifecycle, workspace: workspace)
-            ]?.id == verification.operationID
+            guard let verification = lifecycleVerifications[workspace],
+                  verification.operationID == ownership.operationID,
+                  verification.operationGeneration == ownership.generation else {
+                // Until the typed command returns, no state request can prove
+                // that it observed the command boundary.
+                return true
+            }
+            return observationGeneration <= verification.commandBoundaryObservationGeneration
         }
     }
 

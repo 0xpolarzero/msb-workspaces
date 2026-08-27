@@ -323,12 +323,16 @@ struct DetailView: View {
             return failure.reason
         }
         let latestLifecycleSuccess = model.operationStates["lifecycle:\(workspace.id.rawValue)"].flatMap {
-            $0.outcome == .succeeded ? $0.updatedAt : nil
+            $0.outcome == .succeeded ? (action: $0.action, updatedAt: $0.updatedAt) : nil
         }
         return model.activities.reversed().first { activity in
-            activity.workspace == workspace.id.rawValue &&
-                activity.isFailure &&
-                (latestLifecycleSuccess.map { $0 < activity.createdAt } ?? true)
+            guard activity.workspace == workspace.id.rawValue,
+                  activity.isFailure else { return false }
+            guard let latestLifecycleSuccess else { return true }
+            let matchingLifecycleFailure = activity.title ==
+                "\(latestLifecycleSuccess.action.capitalized) failed"
+            return !matchingLifecycleFailure ||
+                latestLifecycleSuccess.updatedAt < activity.createdAt
         }.flatMap { $0.detail ?? $0.title }
     }
 
@@ -2220,6 +2224,15 @@ private struct WorkspaceSummaryRow: View {
                 }
             }
 
+            if let lifecycleTransition {
+                Text(lifecycleTransition)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier(
+                        "workspace.\(workspace.id.rawValue).summary-transition"
+                    )
+            }
+
             if let attention {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Label(
@@ -2267,6 +2280,15 @@ private struct WorkspaceSummaryRow: View {
             )
         }
         return nil
+    }
+
+    private var lifecycleTransition: String? {
+        guard let operation = model.operationStates[
+            "lifecycle:\(workspace.id.rawValue)"
+        ], operation.outcome == .pending else { return nil }
+        return operation.phase == .verifying
+            ? "Verifying \(operation.action)…"
+            : workspace.nextAction
     }
 
     private var stateColor: Color {

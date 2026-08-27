@@ -1793,10 +1793,13 @@ final class AppModelTests: XCTestCase {
         let model = try makeLifecycleVerificationModel(
             action: .restart,
             initial: (.running, baseline.addingTimeInterval(-1)),
-            observations: [(.stopped, baseline.addingTimeInterval(1), 0.2)],
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0.2),
+                (.stopped, baseline.addingTimeInterval(2), 0.2)
+            ],
             applyObservedAt: baseline,
             delays: [.milliseconds(50)],
-            failingObservationIndices: [0]
+            failingObservationIndices: [0, 1]
         )
 
         await model.refreshRemote()
@@ -1805,6 +1808,8 @@ final class AppModelTests: XCTestCase {
             if model.operationStates["lifecycle:dev"]?.phase == .verifying { break }
             try await Task.sleep(for: .milliseconds(5))
         }
+        let periodicRefresh = Task { await model.refreshRemote() }
+        await periodicRefresh.value
 
         XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .pending)
         XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .restarting)
@@ -1840,6 +1845,46 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.lastError)
     }
 
+    func testPeriodicFailureAfterLifecycleTimeoutMarksStateStaleWithoutPreventingLaterReconciliation() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0),
+                (.stopped, baseline.addingTimeInterval(2), 0),
+                (.running, baseline.addingTimeInterval(3), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [],
+            failingObservationIndices: [1]
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let timedOut = try await waitForLifecycleCompletion(in: model)
+        XCTAssertEqual(timedOut.outcome, .unknown)
+        let timeoutNotice = try XCTUnwrap(model.latestOperationFailure)
+
+        await model.refreshRemote()
+
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.id, timedOut.id)
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .unknown)
+        XCTAssertEqual(model.latestOperationFailure, timeoutNotice)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.freshness, .stale)
+        XCTAssertNotNil(model.lastError)
+        XCTAssertTrue(model.activities.contains { $0.title == "Refresh failed" })
+
+        await model.refreshRemote()
+
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.id, timedOut.id)
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.freshness, .fresh)
+        XCTAssertNil(model.latestOperationFailure)
+        XCTAssertNil(model.lastError)
+    }
+
     func testSameSecondPostCommandObservationUsesNewerAppGeneration() async throws {
         let baseline = Date(
             timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 5
@@ -1867,12 +1912,13 @@ final class AppModelTests: XCTestCase {
             action: .restart,
             initial: (.running, baseline.addingTimeInterval(-1)),
             observations: [
-                (.running, baseline.addingTimeInterval(2), 0.25),
+                (.running, baseline.addingTimeInterval(2), 0.1),
                 (.stopped, baseline.addingTimeInterval(1), 0)
             ],
             applyObservedAt: baseline,
             delays: [],
-            failingObservationIndices: [1]
+            failingObservationIndices: [1],
+            applyDelay: 0.3
         )
 
         await model.refreshRemote()
@@ -1887,6 +1933,34 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .restarting)
         XCTAssertNotEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
         XCTAssertNotNil(model.latestOperationFailure)
+    }
+
+    func testCancelledOlderRefreshCannotOverwriteNewerRestartSuccess() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0.25),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: []
+        )
+
+        await model.refreshRemote()
+        let olderRefresh = Task { await model.refreshRemote() }
+        try await Task.sleep(for: .milliseconds(30))
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+        olderRefresh.cancel()
+        await olderRefresh.value
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNil(model.latestOperationFailure)
+        XCTAssertNil(model.lastError)
     }
 
     func testGenuineRestartCommandFailureStaysFailed() async throws {
@@ -3774,7 +3848,8 @@ final class AppModelTests: XCTestCase {
         delays: [Duration],
         observationStatusObservedAts: [Date]? = nil,
         failingObservationIndices: Set<Int> = [],
-        applyFailure: MSWProtocolError? = nil
+        applyFailure: MSWProtocolError? = nil,
+        applyDelay: Double = 0
     ) throws -> AppModel {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
@@ -3862,6 +3937,7 @@ final class AppModelTests: XCTestCase {
         elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then
             /bin/cat "\(temporary.path)/plan.json"
         elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
+            if [ "\(applyDelay)" != "0.0" ]; then /bin/sleep "\(applyDelay)"; fi
             /bin/cat "\(temporary.path)/apply.json"
         else
             exit 64

@@ -937,6 +937,17 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["monitor.popover"].exists)
         app.typeKey(.return, modifierFlags: [])
         let state = window.staticTexts["workspace.dev.summary-state"]
+        let transition = window.staticTexts["workspace.dev.summary-transition"]
+        XCTAssertEqual(
+            XCTWaiter.wait(
+                for: [XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "value == %@", "Verifying restart…"),
+                    object: transition
+                )],
+                timeout: 2
+            ),
+            .completed
+        )
         XCTAssertEqual(
             XCTWaiter.wait(
                 for: [XCTNSPredicateExpectation(
