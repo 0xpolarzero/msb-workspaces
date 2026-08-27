@@ -373,12 +373,8 @@ enum RuntimeRepairIssueClassifier {
     static func isRepairRelated(_ error: Error) -> Bool {
         guard let clientError = error as? MSWClientError else { return false }
         switch clientError {
-        case .invalidExecutable, .incompatibleExecutable, .unsupportedBackupProtocol:
+        case .invalidExecutable:
             return true
-        case .malformedJSON(let command):
-            return backupCommands.contains(command)
-        case .protocolFailure(let error):
-            return error.code == "MSW_BACKUP_RECORD_INCOMPATIBLE"
         default:
             return false
         }
@@ -395,25 +391,13 @@ enum RuntimeRepairIssueClassifier {
     }
 
     static func isRepairRelated(_ operation: MSWBackupOperation) -> Bool {
-        isRepairRelated(operation.message) ||
-            operation.error.map {
-                $0.code == "MSW_BACKUP_RECORD_INCOMPATIBLE" ||
-                    isRepairRelated($0.message) ||
-                    isRepairRelated($0.recovery)
-            } == true
+        isRepairRelated(operation.message)
     }
-
-    private static let backupCommands = [
-        "backup-preview", "backup-start", "backup-list", "backup-status"
-    ]
 
     private static let repairMessageMarkers = [
         "msw executable is unavailable",
-        "installed msw runtime is older",
-        "unsupported backup protocol",
-        "incompatible backup schema",
-        "repair the msw installation",
-        "repair msw before"
+        "bundled msw payload is unavailable",
+        "bundled msw command failed its version handshake"
     ]
 }
 
@@ -817,7 +801,7 @@ final class AppModel {
     private(set) var backupOperations: [MSWBackupOperation] = []
     private(set) var pendingBackupPreview: MSWBackupPreview?
     private(set) var isBackupPreviewLoading = false
-    /// Single application-wide runtime compatibility state. The authoritative
+    /// Single application-wide runtime repair state. The authoritative
     /// value comes from executable resolution plus the protocol handshake.
     private(set) var runtimeRepairRequired: Bool
     private(set) var maintenanceMessage: String?
@@ -1983,12 +1967,12 @@ final class AppModel {
     }
 
     func installRuntimeRepairUITestFixture() {
-        detailError = "The installed MSW runtime returned an incompatible backup schema. Use Repair… to repair the MSW installation, then retry."
+        detailError = MSWClientError.invalidExecutable.localizedDescription
         let now = Date()
         let error = MSWBackupOperationErrorResponse(
-            code: "MSW_BACKUP_RECORD_INCOMPATIBLE",
-            message: "The installed MSW runtime returned an incompatible backup schema.",
-            recovery: "Use Repair… to repair the MSW installation.",
+            code: "MSW_RUNTIME_UNAVAILABLE",
+            message: MSWClientError.invalidExecutable.localizedDescription,
+            recovery: "Use Repair… to reinstall the bundled runtime.",
             retryable: false
         )
         backupOperations = [MSWBackupOperation(
@@ -2182,8 +2166,8 @@ final class AppModel {
     private func noteRuntimeRepairFailure(_ error: Error) {
         if isRuntimeRepairFailure(error) {
             // An operation-level protocol failure is newer evidence than any
-            // compatibility probe already in flight. Supersede that probe so
-            // its stale compatible result cannot hide the repair warning.
+            // runtime probe already in flight. Supersede that probe so its
+            // stale result cannot hide the repair warning.
             runtimeRepairRefreshGeneration &+= 1
             runtimeRepairFailureRefreshTask?.cancel()
             runtimeRepairFailureRefreshTask = nil
@@ -2210,7 +2194,7 @@ final class AppModel {
         if let clientError = error as? MSWClientError,
            case .malformedJSON(let command) = clientError,
            ["backup-preview", "backup-start", "backup-list", "backup-status"].contains(command) {
-            return "The installed MSW runtime returned an incompatible backup schema. Use Repair… to repair the MSW installation, then retry."
+            return "MSW returned malformed backup data for \(command)."
         }
         return error.localizedDescription
     }

@@ -56,7 +56,6 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
     case configurationInstallationFailed(String)
     case invalidWorkspaceConfiguration(String)
     case toolchainInstallationFailed(String)
-    case runtimeContractMismatch(installedVersion: String?)
     case hostRegistrationFailed(String)
 
     var errorDescription: String? {
@@ -65,15 +64,12 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
         case .preflightBlocked: return "Setup cannot continue until required preflight checks pass."
         case .unavailable: return "Setup is unavailable until the MSW runtime is installed."
         case .toolchainUnavailable:
-            return "The MSW runtime is not bundled with this build, and the source setup installer could not be found."
+            return "The MSW runtime is not bundled with this build."
         case .configurationUnavailable: return "The default MSW configuration is not included in this app build."
         case .configurationInstallationFailed(let detail): return "The MSW configuration could not be installed: \(detail)"
         case .invalidWorkspaceConfiguration(let detail): return "Workspace configuration is invalid: \(detail)"
         case .toolchainInstallationFailed(let detail): return "MSW runtime setup failed: \(detail)"
         case .hostRegistrationFailed(let detail): return "Host integration could not be completed: \(detail)"
-        case .runtimeContractMismatch(let installedVersion):
-            let runtime = installedVersion.map { " (\($0))" } ?? ""
-            return "The installed MSW command\(runtime) rejected this build's workspace setup command, so it predates MSW Monitor's workspace bootstrap contract. Update or reinstall the MSW runtime to match this build of MSW Monitor, then retry setup."
         }
     }
 }
@@ -551,33 +547,19 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             ))
         }
         let mswResolution = await runner.mswResolution(forceRefresh: true)
-        let canInstallToolchain = bundledToolchainConfigurationAvailable || sourceSetup.isAvailable
-        let repairRuntimeAction = bundledToolchainConfigurationAvailable
-            ? "Continue to install the signed MSW toolchain during setup."
-            : "Continue to run the local MSW setup installer during setup."
-        if mswResolution.selected == nil, !mswResolution.hasInstalledExecutable {
+        let canInstallToolchain = bundledToolchainAvailable
+        let repairRuntimeAction = "Use Repair… to reinstall the bundled MSW runtime."
+        if mswResolution.selected == nil {
             record(MSWPreflightCheck(
                 id: "msw-runtime",
                 title: "MSW runtime",
                 status: canInstallToolchain ? .needsAction : .unavailable,
                 detail: canInstallToolchain
-                    ? "MSW is not installed yet. Continuing will install it and verify the runtime."
-                    : "No compatible MSW runtime is installed, and this build has no runtime installer.",
+                    ? "The activated bundled MSW runtime needs repair."
+                    : "This app build is missing its bundled MSW runtime.",
                 remediation: canInstallToolchain
                     ? repairRuntimeAction
-                    : "Use an MSW Monitor build that bundles the runtime, or launch this app from the source checkout."
-            ))
-        } else if mswResolution.selected == nil {
-            record(MSWPreflightCheck(
-                id: "msw-runtime",
-                title: "MSW runtime",
-                status: canInstallToolchain ? .needsAction : .unavailable,
-                detail: canInstallToolchain
-                    ? "The installed MSW command is from an older release and does not support MSW Monitor."
-                    : "The installed MSW command is incompatible, and this build has no runtime installer.",
-                remediation: canInstallToolchain
-                    ? "Continue to replace it with a protocol-compatible runtime."
-                    : "Use an MSW Monitor build with a compatible runtime, or repair the MSW source checkout."
+                    : "Reinstall MSW Monitor from a complete app bundle."
             ))
         } else {
             // Resolution already handshook the selected candidate; only fall
@@ -594,14 +576,11 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                     id: "msw-runtime",
                     title: "MSW runtime",
                     status: ready ? .pass : .needsAction,
-                    detail: ready
-                        ? (mswResolution.incompatibleCandidates.isEmpty
-                            ? "MSW Monitor can communicate with the installed runtime."
-                            : "MSW Monitor is using a compatible runtime and ignoring an older command found earlier.")
+                    detail: ready ? "MSW Monitor verified its coupled runtime."
                         : "MSW is present, but its configuration, JSON adapter, or MicroSandbox runtime is incomplete.",
                     remediation: ready ? nil : (canInstallToolchain
                         ? repairRuntimeAction
-                        : "Repair the MSW installation or use a build with a compatible runtime.")
+                        : "Reinstall MSW Monitor from a complete app bundle.")
                 ))
             } else {
                 record(MSWPreflightCheck(
@@ -611,7 +590,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                     detail: "MSW Monitor could not verify the installed runtime.",
                     remediation: canInstallToolchain
                         ? repairRuntimeAction
-                        : "Repair the MSW installation or use a build with a compatible runtime."
+                        : "Reinstall MSW Monitor from a complete app bundle."
                 ))
             }
         }
@@ -737,110 +716,19 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
         return !MSWHostRepairVerifier.hostsFileMatches(records: records)
     }
-    func installToolchain(
-        manifestData: Data,
-        installationRoot: URL,
-        trustedManifestPublicKey: Data,
-        sourceRoot: URL? = nil,
-        allowNetworkSources: Bool = false,
-        allowExternalFileSources: Bool = true
-    ) async throws -> ToolchainInstallResult {
-        do {
-            let installer = try ToolchainInstaller(
-                installationRoot: installationRoot,
-                sourceRoot: sourceRoot,
-                trustedManifestPublicKey: trustedManifestPublicKey,
-                allowNetworkSources: allowNetworkSources,
-                allowExternalFileSources: allowExternalFileSources
-            )
-            let result = try await installer.install(manifestData: manifestData)
-            var current = await stateStore.load()
-            current.phase = .hostIntegration
-            current.completedPhases.insert(.toolchain)
-            current.updatedAt = Date()
-            try await stateStore.save(current)
-            return result
-        } catch let error as BootstrapCoordinatorError {
-            throw error
-        } catch {
-            throw BootstrapCoordinatorError.toolchainInstallationFailed(error.localizedDescription)
-        }
-    }
-
     func installBundledToolchain() async throws -> ToolchainInstallResult {
-        let bundledURL = Bundle.main.url(forResource: "ToolchainManifest", withExtension: "json")
-        let configuredURL = (Bundle.main.object(forInfoDictionaryKey: "MSWToolchainManifestURL") as? String)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .flatMap { value -> URL? in
-                guard !value.isEmpty, !value.hasPrefix("$(") else { return nil }
-                return URL(string: value)
-            }
-        guard let manifestURL = bundledURL ?? configuredURL,
-              let keyString = Bundle.main.object(forInfoDictionaryKey: "MSWToolchainManifestPublicKey") as? String,
-              !keyString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !keyString.hasPrefix("$("),
-              let publicKey = Data(base64Encoded: keyString),
-              publicKey.count == 32 else {
+        guard let bundledRoot = ToolchainLayout.bundledRoot() else {
             throw BootstrapCoordinatorError.toolchainUnavailable
         }
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?
-            .appendingPathComponent("MSW Monitor/Toolchains", isDirectory: true)
-            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-                .appendingPathComponent("Library/Application Support/MSW Monitor/Toolchains", isDirectory: true)
         do {
-            let manifestData = try await loadManifestData(from: manifestURL)
-            return try await installToolchain(
-                manifestData: manifestData,
-                installationRoot: root,
-                trustedManifestPublicKey: publicKey,
-                sourceRoot: manifestURL.isFileURL ? manifestURL.deletingLastPathComponent() : nil,
-                allowNetworkSources: true,
-                allowExternalFileSources: false
+            let homeDirectory = await runner.homeDirectory()
+            let installer = ToolchainInstaller(
+                bundledRoot: bundledRoot,
+                installationRoot: ToolchainLayout.managedRoot(homeDirectory: homeDirectory)
             )
-        } catch let error as BootstrapCoordinatorError {
-            throw error
+            return try await installer.activate()
         } catch {
             throw BootstrapCoordinatorError.toolchainInstallationFailed(error.localizedDescription)
-        }
-    }
-
-    private func loadManifestData(from url: URL) async throws -> Data {
-        if url.isFileURL {
-            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]),
-                  values.isRegularFile == true,
-                  values.isSymbolicLink != true,
-                  let fileSize = values.fileSize,
-                  fileSize >= 0,
-                  fileSize <= 16 * 1024 * 1024 else {
-                throw BootstrapCoordinatorError.toolchainInstallationFailed("The signed MSW toolchain manifest could not be read.")
-            }
-            do {
-                return try Data(contentsOf: url)
-            } catch {
-                throw BootstrapCoordinatorError.toolchainInstallationFailed("The signed MSW toolchain manifest could not be read.")
-            }
-        }
-        guard url.scheme?.lowercased() == "https",
-              url.host != nil,
-              url.user == nil,
-              url.password == nil,
-              url.fragment == nil else {
-            throw BootstrapCoordinatorError.toolchainUnavailable
-        }
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard let response = response as? HTTPURLResponse,
-                  (200..<300).contains(response.statusCode),
-                  response.url?.scheme?.lowercased() == "https",
-                  data.count <= 16 * 1024 * 1024 else {
-                throw BootstrapCoordinatorError.toolchainInstallationFailed("The signed MSW toolchain manifest could not be downloaded.")
-            }
-            return data
-        } catch let error as BootstrapCoordinatorError {
-            throw error
-        } catch {
-            throw BootstrapCoordinatorError.toolchainInstallationFailed("The signed MSW toolchain manifest could not be downloaded.")
         }
     }
 
@@ -856,10 +744,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         )
         guard !FileManager.default.fileExists(atPath: destination.path) else { return }
 
-        let bundles = [Bundle.main, Bundle(identifier: "org.microsandbox.MSWMonitor")].compactMap { $0 }
-        guard let source = bundles.lazy.compactMap({
-            $0.url(forResource: "config", withExtension: "sh")
-        }).first,
+        guard let source = ToolchainLayout.bundledRoot()?
+            .appendingPathComponent("payload/config.sh"),
               let values = try? source.resourceValues(forKeys: [
                   .fileSizeKey,
                   .isRegularFileKey,
@@ -911,34 +797,12 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
     }
 
-    private func installAvailableToolchain(forRepair: Bool = false) async throws {
-        do {
-            _ = try await installBundledToolchain()
-        } catch let error as BootstrapCoordinatorError where error == .toolchainUnavailable {
-            do {
-                if forRepair {
-                    try await sourceSetup.repairRuntime()
-                } else {
-                    try await sourceSetup.installRuntime()
-                }
-            } catch let error as MSWSourceSetupService.Failure {
-                switch error {
-                case .unavailable:
-                    throw BootstrapCoordinatorError.toolchainUnavailable
-                case .failed(let detail):
-                    throw BootstrapCoordinatorError.toolchainInstallationFailed(detail)
-                }
-            }
-        }
-    }
-
     func repairRuntime() async throws {
         guard !running else { throw BootstrapCoordinatorError.busy }
         running = true
         defer { running = false }
         do {
-            try await installDefaultConfigurationIfNeeded()
-            try await installAvailableToolchain(forRepair: true)
+            _ = try await installBundledToolchain()
             await runner.invalidateMSWResolution()
             guard await runtimeIsReady() else {
                 throw BootstrapCoordinatorError.unavailable
@@ -970,14 +834,11 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         do {
             try await installDefaultConfigurationIfNeeded()
             let resolution = await runner.mswResolution(forceRefresh: true)
-            var runtimeReady = false
+            let runtimeReady: Bool
             if resolution.selected != nil {
                 runtimeReady = await runtimeIsReady()
-            }
-            if !runtimeReady {
-                try await installAvailableToolchain()
-                await runner.invalidateMSWResolution()
-                runtimeReady = await runtimeIsReady()
+            } else {
+                runtimeReady = false
             }
             guard runtimeReady else { throw BootstrapCoordinatorError.unavailable }
             current = await stateStore.load()
@@ -1146,22 +1007,6 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         } catch {
             if let clientError = error as? MSWClientError,
                case .protocolFailure(let protocolError) = clientError,
-               protocolError.code == "MSW_INVALID_REQUEST" {
-                // A handshake-compatible runtime that rejects the typed
-                // bootstrap invocation means the installed command predates
-                // this build's workspace configuration contract. Name the
-                // detected version instead of surfacing a bare CLI message.
-                let installedVersion = try? await client.handshake()
-                let mismatch = BootstrapCoordinatorError.runtimeContractMismatch(
-                    installedVersion: installedVersion?.result?.mswVersion
-                )
-                current.lastError = mismatch.localizedDescription
-                current.updatedAt = Date()
-                try? await stateStore.save(current)
-                throw mismatch
-            }
-            if let clientError = error as? MSWClientError,
-               case .protocolFailure(let protocolError) = clientError,
                protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
                let installed = await runner.installedWorkspaceConfigurations(),
                MSWBootstrapConfiguration(installed) == MSWBootstrapConfiguration(workspaceConfigurations) {
@@ -1185,29 +1030,9 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         check.status == .pass || (check.id == "memory" && check.status == .needsAction)
     }
 
-    private var bundledToolchainConfigurationAvailable: Bool {
-        let bundledURL = Bundle.main.url(forResource: "ToolchainManifest", withExtension: "json")
-        let configuredURL = (Bundle.main.object(forInfoDictionaryKey: "MSWToolchainManifestURL") as? String)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .flatMap { value -> URL? in
-                guard !value.isEmpty, !value.hasPrefix("$(") else { return nil }
-                return URL(string: value)
-            }
-        guard let manifestURL = bundledURL ?? configuredURL,
-              (manifestURL.isFileURL || manifestURL.scheme?.lowercased() == "https"),
-              let keyString = Bundle.main.object(forInfoDictionaryKey: "MSWToolchainManifestPublicKey") as? String,
-              let publicKey = Data(base64Encoded: keyString.trimmingCharacters(in: .whitespacesAndNewlines)),
-              publicKey.count == 32 else {
-            return false
-        }
-        if manifestURL.isFileURL {
-            guard let values = try? manifestURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
-                  values.isRegularFile == true,
-                  values.isSymbolicLink != true else {
-                return false
-            }
-        }
-        return true
+    private var bundledToolchainAvailable: Bool {
+        guard let root = ToolchainLayout.bundledRoot() else { return false }
+        return (try? ToolchainValidator.validateBundled(root: root)) != nil
     }
 
     private func commandOutput(executable: URL, arguments: [String]) async -> String? {
@@ -1226,7 +1051,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                   value.protocolVersion == 1,
                   value.configurationAvailable,
                   value.runtimeAvailable,
-                  value.capabilities.backup.isCompatible,
+                  value.capabilities.isComplete,
                   value.capabilities.jq else {
                 return false
             }

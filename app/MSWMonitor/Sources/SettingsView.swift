@@ -184,7 +184,7 @@ final class GitHubSettingsState {
     }
 
     func installRuntimeRepairUITestFixture() {
-        error = "GitHub request failed because the installed MSW runtime is older. Use Repair… to repair the MSW installation."
+        error = "GitHub request failed because the MSW executable is unavailable. Use Repair… to reinstall the bundled runtime."
     }
 
     func runtimeRepairDidSucceed() {

@@ -251,7 +251,7 @@ class TestEnv:
         self.root = root
         self.home = home
         self.env = env
-        self.msw_bin = home / ".local" / "bin" / "msw"
+        self.msw_bin = Path(env.get("MSW_TEST_CLI", home / ".local" / "bin" / "msw"))
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -3175,23 +3175,13 @@ class PackagedBehaviorTests(MSWTestCase):
         compressible_source = self.env.home / ".microsandbox" / "backup-size-semantics.bin"
         compressible_source.write_bytes(b"A" * (2 * 1024 * 1024))
 
-        handshake = json.loads(self.env.msw(
-            "app", "handshake", "--format", "json",
-        ).stdout)["result"]
-        backup_capability = handshake["capabilities"]["backup"]
-        self.assertEqual(backup_capability, {
-            "protocolVersion": 2, "preview": True, "start": True, "list": True,
-            "status": True, "progress": True, "archiveBytes": True, "concurrent": True,
-        })
-
         preview = json.loads(self.env.msw(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
         self.assertEqual(set(preview), {
-            "contractVersion", "destination", "sourceAllocatedBytes", "archiveEstimate",
+            "destination", "sourceAllocatedBytes", "archiveEstimate",
             "runningWorkspaces",
         })
-        self.assertEqual(preview["contractVersion"], 2)
         self.assertEqual(preview["destination"], str(destination.resolve()))
         self.assertGreater(preview["sourceAllocatedBytes"], 0)
         self.assertGreaterEqual(preview["sourceAllocatedBytes"], compressible_source.stat().st_size)
@@ -3253,7 +3243,6 @@ class PackagedBehaviorTests(MSWTestCase):
 
         completed = terminal(started["operationId"])
         completed_distinct = terminal(distinct["operationId"])
-        self.assertEqual(completed["contractVersion"], 2)
         self.assertEqual(completed["phase"], "completed")
         self.assertGreaterEqual(completed["updatedAt"], completed["startedAt"])
         self.assertGreaterEqual(completed["progress"]["processedBytes"], 0)
@@ -3279,39 +3268,39 @@ class PackagedBehaviorTests(MSWTestCase):
         listed = json.loads(self.env.msw("app", "backup-list", "--format", "json").stdout)["result"]
         self.assertTrue({started["operationId"], distinct["operationId"]}.issubset({item["operationId"] for item in listed}))
 
-        legacy_record = operation_root / "legacy-schema-0001.json"
-        legacy_record.write_text(json.dumps({
-            "contractVersion": 1, "kind": "backup", "operationId": "legacy-schema-0001",
+        corrupt_record = operation_root / "corrupt-record-0001.json"
+        corrupt_record.write_text(json.dumps({
+            "kind": "backup", "operationId": "corrupt-record-0001",
             "state": "completed", "result": {"archive": result["archive"]},
         }))
-        legacy_record.chmod(0o600)
-        incompatible = self.env.msw(
-            "app", "backup-status", "--operation-id", "legacy-schema-0001",
+        corrupt_record.chmod(0o600)
+        invalid = self.env.msw(
+            "app", "backup-status", "--operation-id", "corrupt-record-0001",
             "--format", "json", check=False,
         )
-        self.assertEqual(incompatible.returncode, 78)
-        self.assertEqual(json.loads(incompatible.stdout)["error"]["code"], "MSW_BACKUP_RECORD_INCOMPATIBLE")
-        legacy_record.unlink()
+        self.assertEqual(invalid.returncode, 78)
+        self.assertEqual(json.loads(invalid.stdout)["error"]["code"], "MSW_BACKUP_RECORD_INVALID")
+        corrupt_record.unlink()
 
         valid_record = json.loads(record_path.read_text())
         missing_archive_bytes = json.loads(json.dumps(valid_record))
         missing_archive_bytes["result"].pop("archiveBytes")
         record_path.write_text(json.dumps(missing_archive_bytes))
         record_path.chmod(0o600)
-        incompatible_current = self.env.msw(
+        invalid_current = self.env.msw(
             "app", "backup-status", "--operation-id", started["operationId"],
             "--format", "json", check=False,
         )
-        self.assertEqual(incompatible_current.returncode, 78)
+        self.assertEqual(invalid_current.returncode, 78)
         self.assertEqual(
-            json.loads(incompatible_current.stdout)["error"]["code"],
-            "MSW_BACKUP_RECORD_INCOMPATIBLE",
+            json.loads(invalid_current.stdout)["error"]["code"],
+            "MSW_BACKUP_RECORD_INVALID",
         )
         expired = time.time() - 31 * 24 * 60 * 60
         os.utime(record_path, (expired, expired))
-        incompatible_list = self.env.msw("app", "backup-list", "--format", "json", check=False)
-        self.assertEqual(incompatible_list.returncode, 78)
-        self.assertTrue(record_path.exists(), "incompatible retained records must never be pruned")
+        invalid_list = self.env.msw("app", "backup-list", "--format", "json", check=False)
+        self.assertEqual(invalid_list.returncode, 78)
+        self.assertTrue(record_path.exists(), "corrupt durable records must never be removed automatically")
         record_path.write_text(json.dumps(valid_record))
         record_path.chmod(0o600)
 

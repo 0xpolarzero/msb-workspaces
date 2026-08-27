@@ -1,42 +1,18 @@
 import CryptoKit
 import Darwin
 import Foundation
-import Security
 
 struct ToolchainManifest: Codable, Sendable, Equatable {
+    static let schemaVersion = 1
+
     let schemaVersion: Int
     let version: String
-    let architecture: String
-    let backupProtocolVersion: Int
     let artifacts: [Artifact]
-    let signature: String?
 
-    struct Artifact: Codable, Sendable, Equatable, Identifiable {
-        let id: String
-        let source: URL
-        let destination: String
+    struct Artifact: Codable, Sendable, Equatable {
+        let path: String
         let sha256: String
         let executable: Bool
-        let architecture: String?
-        let codeSigningRequirement: String?
-
-        init(
-            id: String,
-            source: URL,
-            destination: String,
-            sha256: String,
-            executable: Bool,
-            architecture: String? = nil,
-            codeSigningRequirement: String? = nil
-        ) {
-            self.id = id
-            self.source = source
-            self.destination = destination
-            self.sha256 = sha256
-            self.executable = executable
-            self.architecture = architecture
-            self.codeSigningRequirement = codeSigningRequirement
-        }
     }
 }
 
@@ -47,304 +23,273 @@ struct ToolchainInstallResult: Sendable, Equatable {
 }
 
 enum ToolchainInstallerError: Error, LocalizedError, Sendable, Equatable {
+    case bundledPayloadUnavailable
     case invalidManifest
-    case unsupportedArchitecture
-    case invalidSignature
     case checksumMismatch(String)
-    case unsafeDestination(String)
-    case invalidArtifactSource(String)
-    case downloadFailed(String)
+    case unsafeArtifact(String)
+    case invalidPermissions(String)
+    case handshakeFailed
     case installFailed
 
     var errorDescription: String? {
         switch self {
-        case .invalidManifest: return "The MSW toolchain manifest is invalid."
-        case .unsupportedArchitecture: return "The selected MSW toolchain is not built for Apple Silicon."
-        case .invalidSignature: return "The MSW toolchain manifest signature is invalid."
-        case .checksumMismatch(let artifact): return "The MSW toolchain checksum did not match for \(artifact)."
-        case .unsafeDestination(let path): return "The MSW toolchain contains an unsafe destination path: \(path)."
-        case .invalidArtifactSource(let artifact): return "The MSW toolchain source is invalid for \(artifact)."
-        case .downloadFailed(let artifact): return "The MSW toolchain artifact could not be downloaded: \(artifact)."
-        case .installFailed: return "The MSW toolchain could not be installed atomically."
+        case .bundledPayloadUnavailable:
+            return "The bundled MSW payload is unavailable."
+        case .invalidManifest:
+            return "The bundled MSW manifest is invalid."
+        case .checksumMismatch(let artifact):
+            return "The bundled MSW checksum did not match for \(artifact)."
+        case .unsafeArtifact(let artifact):
+            return "The bundled MSW artifact is missing or unsafe: \(artifact)."
+        case .invalidPermissions(let artifact):
+            return "The bundled MSW artifact has invalid permissions: \(artifact)."
+        case .handshakeFailed:
+            return "The bundled MSW command failed its version handshake."
+        case .installFailed:
+            return "The bundled MSW payload could not be activated atomically."
+        }
+    }
+}
+
+enum ToolchainLayout {
+    static let bundledDirectoryName = "MSWToolchain"
+    static let manifestName = "manifest.json"
+    static let payloadDirectoryName = "payload"
+
+    static func bundledRoot(in bundle: Bundle = .main) -> URL? {
+        bundle.resourceURL?.appendingPathComponent(bundledDirectoryName, isDirectory: true)
+    }
+
+    static func managedRoot(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        homeDirectory.appendingPathComponent(
+            "Library/Application Support/MSW Monitor/Toolchain",
+            isDirectory: true
+        )
+    }
+}
+
+struct ValidatedToolchain: Sendable, Equatable {
+    let manifest: ToolchainManifest
+    let executable: URL
+}
+
+enum ToolchainValidator {
+    static func validateBundled(root: URL) throws -> ValidatedToolchain {
+        try validate(
+            manifestURL: root.appendingPathComponent(ToolchainLayout.manifestName),
+            payloadRoot: root.appendingPathComponent(ToolchainLayout.payloadDirectoryName, isDirectory: true)
+        )
+    }
+
+    static func validateActivated(root: URL) throws -> ValidatedToolchain {
+        try validate(
+            manifestURL: root.appendingPathComponent(ToolchainLayout.manifestName),
+            payloadRoot: root
+        )
+    }
+
+    private static func validate(manifestURL: URL, payloadRoot: URL) throws -> ValidatedToolchain {
+        let manifestData = try readRegularFile(manifestURL, maximumBytes: 2 * 1_024 * 1_024)
+        let manifestPermissions = ((try? FileManager.default.attributesOfItem(atPath: manifestURL.path)[.posixPermissions]) as? NSNumber)?.intValue ?? -1
+        guard manifestPermissions & 0o777 == 0o644 else {
+            throw ToolchainInstallerError.invalidPermissions(ToolchainLayout.manifestName)
+        }
+        let manifest: ToolchainManifest
+        do {
+            guard let root = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+                  Set(root.keys) == ["schemaVersion", "version", "artifacts"],
+                  let artifacts = root["artifacts"] as? [[String: Any]],
+                  artifacts.allSatisfy({ Set($0.keys) == ["path", "sha256", "executable"] }) else {
+                throw ToolchainInstallerError.invalidManifest
+            }
+            manifest = try JSONDecoder().decode(ToolchainManifest.self, from: manifestData)
+        } catch let error as ToolchainInstallerError {
+            throw error
+        } catch {
+            throw ToolchainInstallerError.invalidManifest
+        }
+        guard manifest.schemaVersion == ToolchainManifest.schemaVersion,
+              manifest.version.range(
+                of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#,
+                options: .regularExpression
+              ) != nil,
+              !manifest.artifacts.isEmpty else {
+            throw ToolchainInstallerError.invalidManifest
+        }
+
+        var paths = Set<String>()
+        for artifact in manifest.artifacts {
+            guard isSafeRelativePath(artifact.path),
+                  paths.insert(artifact.path).inserted,
+                  artifact.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+                throw ToolchainInstallerError.invalidManifest
+            }
+            let url = payloadRoot.appendingPathComponent(artifact.path)
+            let data: Data
+            do {
+                data = try readRegularFile(url, maximumBytes: 2 * 1_024 * 1_024 * 1_024)
+            } catch {
+                throw ToolchainInstallerError.unsafeArtifact(artifact.path)
+            }
+            let digest = SHA256.hash(data: data).hexString
+            guard digest == artifact.sha256 else {
+                throw ToolchainInstallerError.checksumMismatch(artifact.path)
+            }
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let permissions = (attributes?[.posixPermissions] as? NSNumber)?.intValue ?? -1
+            let expected = artifact.executable ? 0o755 : 0o644
+            guard permissions & 0o777 == expected else {
+                throw ToolchainInstallerError.invalidPermissions(artifact.path)
+            }
+        }
+        guard paths.contains("VERSION"), paths.contains("config.sh"), paths.contains("bin/msw") else {
+            throw ToolchainInstallerError.invalidManifest
+        }
+        let executable = payloadRoot.appendingPathComponent("bin/msw")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw ToolchainInstallerError.invalidPermissions("bin/msw")
+        }
+        return ValidatedToolchain(manifest: manifest, executable: executable)
+    }
+
+    static func verifyHandshake(_ toolchain: ValidatedToolchain) throws {
+        let process = Process()
+        process.executableURL = toolchain.executable
+        process.arguments = ["app", "handshake", "--format", "json"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let temporaryHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MSWMonitor-Handshake-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryHome, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryHome) }
+        process.environment = [
+            "HOME": temporaryHome.path,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "LC_ALL": "C",
+            "LANG": "C",
+            "NO_COLOR": "1"
+        ]
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw ToolchainInstallerError.handshakeFailed
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard process.terminationReason == .exit, process.terminationStatus == 0,
+              data.count <= 256 * 1_024,
+              let envelope = try? MSWProtocolDecoder.decodeStrictHandshake(data),
+              let handshake = envelope.result,
+              handshake.protocolVersion == 1,
+              handshake.mswVersion == toolchain.manifest.version,
+              handshake.capabilities.isComplete else {
+            throw ToolchainInstallerError.handshakeFailed
+        }
+    }
+
+    private static func readRegularFile(_ url: URL, maximumBytes: Int) throws -> Data {
+        let values = try url.resourceValues(forKeys: [
+            .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey
+        ])
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              let size = values.fileSize,
+              size >= 0,
+              size <= maximumBytes else {
+            throw ToolchainInstallerError.unsafeArtifact(url.lastPathComponent)
+        }
+        return try Data(contentsOf: url, options: [.mappedIfSafe])
+    }
+
+    private static func isSafeRelativePath(_ path: String) -> Bool {
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\\"), !path.contains("\0") else {
+            return false
+        }
+        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".."
         }
     }
 }
 
 actor ToolchainInstaller {
-    private static let maxTransferBytes = 2 * 1024 * 1024 * 1024
-
+    private let bundledRoot: URL
     private let installationRoot: URL
-    private let sourceRoot: URL?
-    private let trustedManifestKey: Curve25519.Signing.PublicKey?
-    private let session: URLSession
-    private let allowNetworkSources: Bool
-    private let allowExternalFileSources: Bool
 
-    init(
-        installationRoot: URL,
-        sourceRoot: URL? = nil,
-        trustedManifestPublicKey: Data? = nil,
-        session: URLSession = .shared,
-        allowNetworkSources: Bool = false,
-        allowExternalFileSources: Bool = true
-    ) throws {
-        self.installationRoot = installationRoot
-        self.sourceRoot = sourceRoot?.standardizedFileURL
-        self.session = session
-        self.allowNetworkSources = allowNetworkSources
-        self.allowExternalFileSources = allowExternalFileSources
-        if let trustedManifestPublicKey {
-            self.trustedManifestKey = try Curve25519.Signing.PublicKey(rawRepresentation: trustedManifestPublicKey)
-        } else {
-            self.trustedManifestKey = nil
-        }
+    init(bundledRoot: URL, installationRoot: URL) {
+        self.bundledRoot = bundledRoot.standardizedFileURL
+        self.installationRoot = installationRoot.standardizedFileURL
     }
 
-    func install(manifestData: Data) async throws -> ToolchainInstallResult {
-        let manifest = try decodeManifest(manifestData)
-        guard manifest.schemaVersion == 1,
-              manifest.backupProtocolVersion == MSWBackupCapability.supportedProtocolVersion,
-              !manifest.version.isEmpty,
-              isSafeVersion(manifest.version),
-              !manifest.artifacts.isEmpty else {
-            throw ToolchainInstallerError.invalidManifest
-        }
-        guard manifest.architecture == "arm64" else {
-            throw ToolchainInstallerError.unsupportedArchitecture
-        }
-        guard let trustedManifestKey else { throw ToolchainInstallerError.invalidSignature }
-        guard let signature = manifest.signature,
-              let signatureData = Data(base64Encoded: signature) else {
-            throw ToolchainInstallerError.invalidSignature
-        }
-        let unsigned = try Self.canonicalEncoder().encode(UnsignedManifest(
-            schemaVersion: manifest.schemaVersion,
-            version: manifest.version,
-            architecture: manifest.architecture,
-            backupProtocolVersion: manifest.backupProtocolVersion,
-            artifacts: manifest.artifacts
-        ))
-        guard trustedManifestKey.isValidSignature(signatureData, for: unsigned) else {
-            throw ToolchainInstallerError.invalidSignature
-        }
+    func activate() throws -> ToolchainInstallResult {
+        let bundled = try ToolchainValidator.validateBundled(root: bundledRoot)
+        try ToolchainValidator.verifyHandshake(bundled)
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: installationRoot, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installationRoot.path)
 
-        var seenArtifactIDs = Set<String>()
-        var seenDestinations = Set<String>()
-        guard manifest.artifacts.allSatisfy({ artifact in
-            !artifact.id.isEmpty &&
-                seenArtifactIDs.insert(artifact.id).inserted &&
-                seenDestinations.insert(artifact.destination).inserted
-        }) else {
-            throw ToolchainInstallerError.invalidManifest
-        }
-
-        let versionRoot = installationRoot.appendingPathComponent(manifest.version, isDirectory: true)
-        let stagingRoot = installationRoot.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
+        let staging = installationRoot.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
+        let current = installationRoot.appendingPathComponent("current", isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: true)
-            var installed: [String] = []
-            for artifact in manifest.artifacts {
-                guard isSafeRelativePath(artifact.destination) else {
-                    throw ToolchainInstallerError.unsafeDestination(artifact.destination)
-                }
-                guard let source = resolvedSource(for: artifact.source) else {
-                    throw ToolchainInstallerError.invalidArtifactSource(artifact.id)
-                }
-                let artifactData = try await loadArtifactData(from: source, artifactID: artifact.id)
-                let digest = SHA256.hash(data: artifactData).hexString
-                guard digest.caseInsensitiveCompare(artifact.sha256) == .orderedSame else {
-                    throw ToolchainInstallerError.checksumMismatch(artifact.id)
-                }
-                let destination = stagingRoot.appendingPathComponent(artifact.destination)
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try artifactData.write(to: destination, options: .withoutOverwriting)
-                try FileManager.default.setAttributes(
+            try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+            for artifact in bundled.manifest.artifacts {
+                let source = bundledRoot
+                    .appendingPathComponent(ToolchainLayout.payloadDirectoryName, isDirectory: true)
+                    .appendingPathComponent(artifact.path)
+                let destination = staging.appendingPathComponent(artifact.path)
+                try fileManager.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                let data = try Data(contentsOf: source, options: [.mappedIfSafe])
+                try data.write(to: destination, options: .withoutOverwriting)
+                try fileManager.setAttributes(
                     [.posixPermissions: artifact.executable ? 0o755 : 0o644],
                     ofItemAtPath: destination.path
                 )
-                if let architecture = artifact.architecture {
-                    guard architecture == "arm64", try verifyArchitecture(of: destination) else {
-                        throw ToolchainInstallerError.unsupportedArchitecture
-                    }
-                }
-                if let requirement = artifact.codeSigningRequirement {
-                    guard artifact.executable, verifyCodeSignature(of: destination, requirement: requirement) else {
-                        throw ToolchainInstallerError.invalidSignature
-                    }
-                }
-                installed.append(artifact.id)
             }
-            try FileManager.default.createDirectory(at: installationRoot, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: versionRoot.path) {
-                _ = try FileManager.default.replaceItemAt(
-                    versionRoot,
-                    withItemAt: stagingRoot,
-                    backupItemName: nil,
-                    options: [.usingNewMetadataOnly]
-                )
+            let manifestData = try Data(contentsOf: bundledRoot.appendingPathComponent(ToolchainLayout.manifestName))
+            let stagedManifest = staging.appendingPathComponent(ToolchainLayout.manifestName)
+            try manifestData.write(to: stagedManifest, options: .withoutOverwriting)
+            try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: stagedManifest.path)
+            let staged = try ToolchainValidator.validateActivated(root: staging)
+            try ToolchainValidator.verifyHandshake(staged)
+
+            if fileManager.fileExists(atPath: current.path) {
+                guard renameatx_np(AT_FDCWD, staging.path, AT_FDCWD, current.path, UInt32(RENAME_SWAP)) == 0 else {
+                    throw ToolchainInstallerError.installFailed
+                }
+                try fileManager.removeItem(at: staging)
             } else {
-                try FileManager.default.moveItem(at: stagingRoot, to: versionRoot)
+                guard Darwin.rename(staging.path, current.path) == 0 else {
+                    throw ToolchainInstallerError.installFailed
+                }
             }
-            try activate(version: manifest.version)
-            return ToolchainInstallResult(version: manifest.version, root: versionRoot, installedArtifacts: installed)
+            try removeNonCurrentEntries(except: current)
+            let activated = try ToolchainValidator.validateActivated(root: current)
+            try ToolchainValidator.verifyHandshake(activated)
+            return ToolchainInstallResult(
+                version: activated.manifest.version,
+                root: current,
+                installedArtifacts: activated.manifest.artifacts.map(\.path)
+            )
         } catch let error as ToolchainInstallerError {
-            try? FileManager.default.removeItem(at: stagingRoot)
+            try? fileManager.removeItem(at: staging)
             throw error
         } catch {
-            try? FileManager.default.removeItem(at: stagingRoot)
+            try? fileManager.removeItem(at: staging)
             throw ToolchainInstallerError.installFailed
         }
     }
 
-    private func decodeManifest(_ data: Data) throws -> ToolchainManifest {
-        do { return try JSONDecoder().decode(ToolchainManifest.self, from: data) }
-        catch { throw ToolchainInstallerError.invalidManifest }
-    }
-
-    private func loadArtifactData(from source: URL, artifactID: String) async throws -> Data {
-        if source.isFileURL {
-            guard let values = try? source.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]),
-                  values.isRegularFile == true,
-                  values.isSymbolicLink != true,
-                  let fileSize = values.fileSize,
-                  fileSize >= 0,
-                  fileSize <= Self.maxTransferBytes else {
-                throw ToolchainInstallerError.installFailed
-            }
-            do {
-                return try Data(contentsOf: source)
-            } catch {
-                throw ToolchainInstallerError.installFailed
-            }
+    private func removeNonCurrentEntries(except current: URL) throws {
+        for entry in try FileManager.default.contentsOfDirectory(
+            at: installationRoot,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) where entry.standardizedFileURL != current.standardizedFileURL {
+            try FileManager.default.removeItem(at: entry)
         }
-
-        var request = URLRequest(
-            url: source,
-            cachePolicy: .reloadIgnoringLocalCacheData,
-            timeoutInterval: 300
-        )
-        request.setValue("MSW-Monitor-Toolchain/1", forHTTPHeaderField: "User-Agent")
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let response = response as? HTTPURLResponse,
-                  (200..<300).contains(response.statusCode),
-                  response.url?.scheme?.lowercased() == "https",
-                  data.count <= Self.maxTransferBytes else {
-                throw ToolchainInstallerError.downloadFailed(artifactID)
-            }
-            return data
-        } catch let error as ToolchainInstallerError {
-            throw error
-        } catch {
-            throw ToolchainInstallerError.downloadFailed(artifactID)
-        }
-    }
-
-    private func isSafeVersion(_ value: String) -> Bool {
-        value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._+-]*$"#, options: .regularExpression) != nil
-    }
-
-    private func activate(version: String) throws {
-        let stable = installationRoot.appendingPathComponent("current")
-        let temporary = installationRoot.appendingPathComponent(".current-\(UUID().uuidString)")
-        do {
-            try FileManager.default.createSymbolicLink(atPath: temporary.path, withDestinationPath: version)
-            guard Darwin.rename(temporary.path, stable.path) == 0 else {
-                throw ToolchainInstallerError.installFailed
-            }
-        } catch let error as ToolchainInstallerError {
-            try? FileManager.default.removeItem(at: temporary)
-            throw error
-        } catch {
-            try? FileManager.default.removeItem(at: temporary)
-            throw ToolchainInstallerError.installFailed
-        }
-    }
-
-    private func resolvedSource(for source: URL) -> URL? {
-        if source.isFileURL {
-            if !allowExternalFileSources {
-                guard let sourceRoot, isDescendant(source, of: sourceRoot) else { return nil }
-            }
-            return source
-        }
-        if source.scheme?.lowercased() == "https" {
-            guard allowNetworkSources,
-                  source.host != nil,
-                  source.user == nil,
-                  source.password == nil,
-                  source.fragment == nil else { return nil }
-            return source
-        }
-        guard source.scheme == nil,
-              let sourceRoot,
-              isSafeRelativePath(source.path) else { return nil }
-        return sourceRoot.appendingPathComponent(source.path, isDirectory: false)
-    }
-
-    private func isDescendant(_ candidate: URL, of root: URL) -> Bool {
-        let rootPath = root.standardizedFileURL.path
-        let candidatePath = candidate.standardizedFileURL.path
-        return candidatePath == rootPath || candidatePath.hasPrefix(rootPath.hasSuffix("/") ? rootPath : "\(rootPath)/")
-    }
-
-    private func isSafeRelativePath(_ path: String) -> Bool {
-        guard !path.isEmpty,
-              !path.hasPrefix("/"),
-              !path.contains("\\"),
-              !path.contains("\0") else { return false }
-        return path.split(separator: "/", omittingEmptySubsequences: false).allSatisfy {
-            !$0.isEmpty && $0 != "." && $0 != ".."
-        }
-    }
-
-    private func verifyArchitecture(of executable: URL) throws -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/lipo")
-        process.arguments = ["-archs", executable.path]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            throw ToolchainInstallerError.unsupportedArchitecture
-        }
-        guard process.terminationReason == .exit, process.terminationStatus == 0 else { return false }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        guard data.count <= 4_096 else { return false }
-        let architectures = String(decoding: data, as: UTF8.self)
-            .split(whereSeparator: \.isWhitespace)
-            .map(String.init)
-        return architectures == ["arm64"]
-    }
-
-    private func verifyCodeSignature(of executable: URL, requirement: String) -> Bool {
-        guard !requirement.isEmpty else { return false }
-        var staticCode: SecStaticCode?
-        var securityRequirement: SecRequirement?
-        guard SecStaticCodeCreateWithPath(executable as CFURL, [], &staticCode) == errSecSuccess,
-              let staticCode,
-              SecRequirementCreateWithString(requirement as CFString, [], &securityRequirement) == errSecSuccess,
-              let securityRequirement else {
-            return false
-        }
-        return SecStaticCodeCheckValidity(staticCode, [], securityRequirement) == errSecSuccess
-    }
-
-    private struct UnsignedManifest: Codable {
-        let schemaVersion: Int
-        let version: String
-        let architecture: String
-        let backupProtocolVersion: Int
-        let artifacts: [ToolchainManifest.Artifact]
-    }
-
-    private static func canonicalEncoder() -> JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return encoder
     }
 }
 

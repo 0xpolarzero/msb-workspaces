@@ -253,6 +253,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func recoverAndInstall() async {
+        var runtimeActivationFailed = false
+        if let bundledRoot = ToolchainLayout.bundledRoot() {
+            do {
+                let installer = ToolchainInstaller(
+                    bundledRoot: bundledRoot,
+                    installationRoot: ToolchainLayout.managedRoot()
+                )
+                _ = try await installer.activate()
+                await runner.invalidateMSWResolution()
+            } catch {
+                runtimeActivationFailed = true
+            }
+        } else {
+            runtimeActivationFailed = true
+        }
         let recoveryResult: Result<Void, Error>
         do {
             try LegacyDirectGitHubCredentialRetirement.remove()
@@ -270,12 +285,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch recoveryResult {
         case .success:
-            installApplication(fixtureMode: false, credentialAccessAllowed: true)
+            installApplication(
+                fixtureMode: false,
+                credentialAccessAllowed: true,
+                startupRuntimeRepairRequired: runtimeActivationFailed
+            )
         case .failure(let error):
             installApplication(
                 fixtureMode: false,
                 credentialAccessAllowed: false,
-                startupRecoveryBlockedReason: error.localizedDescription
+                startupRecoveryBlockedReason: error.localizedDescription,
+                startupRuntimeRepairRequired: runtimeActivationFailed
             )
         }
     }
@@ -289,7 +309,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installApplication(
         fixtureMode: Bool,
         credentialAccessAllowed: Bool,
-        startupRecoveryBlockedReason: String? = nil
+        startupRecoveryBlockedReason: String? = nil,
+        startupRuntimeRepairRequired: Bool = false
     ) {
         let arguments = ProcessInfo.processInfo.arguments
         if fixtureMode {
@@ -331,7 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry,
                 initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil,
                 applicationPreferences: applicationPreferences,
-                initialRuntimeRepairRequired: runtimeRepairFixture
+                initialRuntimeRepairRequired: runtimeRepairFixture || startupRuntimeRepairRequired
             )
             operationCoordinator = nil
         } else {
@@ -346,7 +367,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 provider: provider,
                 accessMode: accessMode,
                 workspaceConfigurations: configuredWorkspaces,
-                applicationPreferences: applicationPreferences
+                applicationPreferences: applicationPreferences,
+                initialRuntimeRepairRequired: startupRuntimeRepairRequired
             )
         }
         if folderBrowserFixture {

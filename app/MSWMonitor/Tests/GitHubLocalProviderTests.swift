@@ -24,7 +24,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         try! Data(json.utf8).write(to: url)
     }
 
-    private static let handshakeLine = #"{"schemaVersion":1,"requestId":"handshake","ok":true,"command":"handshake","observedAt":"2026-08-21T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"backup":{"protocolVersion":2,"preview":true,"start":true,"list":true,"status":true,"progress":true,"archiveBytes":true,"concurrent":true},"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
+    private static let handshakeLine = #"{"schemaVersion":1,"requestId":"handshake","ok":true,"command":"handshake","observedAt":"2026-08-21T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
     private static let policyApplyLine = #"{"schemaVersion":1,"requestId":"apply","ok":true,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":{"applied":true,"provisioned":true,"committed":true,"workspaces":[{"workspace":"dev","capability":"0123456789abcdef0123456789abcdef0123456789abcdef","repos":[]}]},"warnings":[],"error":null}"#
     private static let policyConflictLine = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Wait for it to finish, then retry the policy apply.","workspace":null,"retryable":true}}"#
@@ -332,7 +332,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false},{"canonical":"acme/one","name":"one","owner":"acme","private":true,"permissions":{"pull":true,"push":false},"inPolicy":true},{"canonical":"org/repo","name":"repo","owner":"org","private":false,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
@@ -375,7 +375,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         // Load, then refresh (a second load): BOTH must re-merge the grant.
@@ -420,7 +420,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"missing","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"missing"}]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let catalog = try await provider.loadCatalog()
@@ -450,7 +450,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             reposJSON: #"{"ok":false,"error":{"code":"MSW_REPOSITORY_DISCOVERY_FAILED","message":"GitHub API discovery failed","remedies":["Retry"]}}"#,
             reposExit: 1
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -472,7 +472,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             directory: directory,
             statusJSON: #"{"mode":"connect","workspaces":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -498,7 +498,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
@@ -574,7 +574,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         )
         let runner = MSWCommandRunner(configuration: .init(
             homeDirectory: directory,
-            configuredExecutable: executable
+            testMSWExecutable: executable
         ))
         let provider = GitHubLocalProvider(
             client: MSWClient(runner: runner),
@@ -612,7 +612,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
@@ -658,7 +658,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: notApplied
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
@@ -690,7 +690,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             applyJSON: failure,
             applyExit: 77
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
@@ -721,7 +721,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.25
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(
             client: MSWClient(runner: runner),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
@@ -754,7 +754,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let progress = try await provider.beginPolicyApply([
@@ -779,7 +779,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             applyDelay: 0.35,
             identityJSON: identity
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
         let first = try await provider.beginPolicyApply([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)])
@@ -821,7 +821,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.35
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         _ = try await provider.beginPolicyApply([
@@ -860,7 +860,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.35
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         _ = try await provider.beginPolicyApply([
@@ -896,7 +896,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
@@ -930,7 +930,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         )
         let runner = MSWCommandRunner(configuration: .init(
             homeDirectory: directory,
-            configuredExecutable: executable
+            testMSWExecutable: executable
         ))
         let provider = GitHubLocalProvider(
             client: MSWClient(runner: runner),
@@ -1002,7 +1002,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":2,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let account = try await provider.connectAccount()
@@ -1019,7 +1019,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"ok":false,"error":{"code":"MSW_HOST_CREDENTIAL_VERIFICATION_FAILED","message":"verification failed; nothing was stored","remedies":["Retry"]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -1041,7 +1041,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"ok":false,"error":{"code":"MSW_HOST_OAUTH_NOT_CONFIGURED","message":"gh is not authenticated and the OAuth Device Flow client ID (MSW_HOST_OAUTH_CLIENT_ID) is not set","remedies":["Run 'gh auth login' then retry","Set MSW_HOST_OAUTH_CLIENT_ID to the release's public client ID, or use the device flow (--device)"]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -1062,7 +1062,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"ok":false,"error":{"code":"MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED","message":"OAuth Device Flow requires an interactive terminal for plain 'msw github auth'","remedies":["Use 'msw github auth --device' and complete it with --device-complete"]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -1137,7 +1137,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner, ghResolver: { fakeGh })
         let provider = GitHubLocalProvider(client: client, policyStore: GitHubPolicyStore(policyURL: policyURL))
 
@@ -1158,7 +1158,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             deviceJSON: #"{"ok":false,"error":{"code":"MSW_HOST_OAUTH_NOT_CONFIGURED","message":"host GitHub credential is not configured: gh is not authenticated and the OAuth Device Flow client ID is not set (MSW_HOST_OAUTH_CLIENT_ID)","remedies":["Run 'gh auth login'"]}}"#,
             deviceExit: 66
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -1179,7 +1179,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             deviceJSON: #"{"ok":true,"deviceId":"device-code-1","code":"ABCD-EFGH","verificationUri":"https://github.com/login/device","expiresAt":"2026-08-21T12:00:00Z","interval":5}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let start = try await provider.startDeviceFlow()
@@ -1321,7 +1321,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             deviceCompleteJSON: #"{"ok":true,"status":"authorized","metadata":{"provider":"oauth-device-flow","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let client = MSWClient(runner: runner)
         let provider = GitHubLocalProvider(client: client, policyStore: GitHubPolicyStore(policyURL: policyURL))
 
@@ -1340,7 +1340,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             deviceCompleteJSON: #"{"ok":false,"status":"expired","error":{"code":"MSW_DEVICE_EXPIRED","message":"The code expired"}}"#,
             deviceCompleteExit: 76
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, configuredExecutable: executable))
+        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let poll = try await provider.pollDeviceFlow(deviceId: "device-code-1")

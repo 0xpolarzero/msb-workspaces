@@ -44,10 +44,6 @@ struct MSWCommandResult: Sendable {
 
 struct MSWExecutableResolution: Sendable, Equatable {
     let selected: URL?
-    let candidates: [URL]
-    let incompatibleCandidates: [URL]
-
-    var hasInstalledExecutable: Bool { !candidates.isEmpty }
 }
 
 struct GitIdentityConfiguration: Sendable, Equatable {
@@ -81,17 +77,20 @@ struct GitIdentityPrefill: Sendable, Equatable {
 actor MSWCommandRunner {
     struct Configuration: Sendable {
         let homeDirectory: URL
-        let configuredExecutable: URL?
         let additionalSearchPaths: [URL]
+        let managedToolchainRoot: URL
+        let testMSWExecutable: URL?
 
         init(
             homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-            configuredExecutable: URL? = nil,
-            additionalSearchPaths: [URL] = []
+            additionalSearchPaths: [URL] = [],
+            managedToolchainRoot: URL? = nil,
+            testMSWExecutable: URL? = nil
         ) {
             self.homeDirectory = homeDirectory
-            self.configuredExecutable = configuredExecutable
             self.additionalSearchPaths = additionalSearchPaths
+            self.managedToolchainRoot = managedToolchainRoot ?? ToolchainLayout.managedRoot(homeDirectory: homeDirectory)
+            self.testMSWExecutable = testMSWExecutable
         }
     }
 
@@ -230,7 +229,7 @@ actor MSWCommandRunner {
     }
 
     func resolveMSW() -> URL? {
-        mswCandidates().first
+        mswCandidates().first?.executable
     }
 
     func mswResolution(forceRefresh: Bool = false) async -> MSWExecutableResolution {
@@ -240,17 +239,15 @@ actor MSWCommandRunner {
         mswResolutionGeneration &+= 1
         let generation = mswResolutionGeneration
         let candidates = mswCandidates()
-        var incompatibleCandidates: [URL] = []
         for candidate in candidates {
-            if let handshake = await handshakeIfCompatible(candidate) {
-                let resolution = MSWExecutableResolution(
-                    selected: candidate,
-                    candidates: candidates,
-                    incompatibleCandidates: incompatibleCandidates
-                )
+            if let handshake = await handshakeIfCompatible(
+                candidate.executable,
+                expectedVersion: candidate.expectedVersion
+            ) {
+                let resolution = MSWExecutableResolution(selected: candidate.executable)
                 if generation == mswResolutionGeneration {
                     cachedMSWResolution = resolution
-                    cachedSelectedHandshake = (url: candidate, handshake: handshake)
+                    cachedSelectedHandshake = (url: candidate.executable, handshake: handshake)
                 }
                 return resolution
             }
@@ -259,19 +256,10 @@ actor MSWCommandRunner {
             // transient result; a queued mutation must be able to resolve the
             // same executable after the cancelled process group has exited.
             if Task.isCancelled {
-                return MSWExecutableResolution(
-                    selected: nil,
-                    candidates: candidates,
-                    incompatibleCandidates: incompatibleCandidates
-                )
+                return MSWExecutableResolution(selected: nil)
             }
-            incompatibleCandidates.append(candidate)
         }
-        let resolution = MSWExecutableResolution(
-            selected: nil,
-            candidates: candidates,
-            incompatibleCandidates: incompatibleCandidates
-        )
+        let resolution = MSWExecutableResolution(selected: nil)
         if generation == mswResolutionGeneration {
             cachedMSWResolution = resolution
             cachedSelectedHandshake = nil
@@ -295,41 +283,37 @@ actor MSWCommandRunner {
         cachedSelectedHandshake = nil
     }
 
-    private func mswCandidates() -> [URL] {
-        var candidates: [URL] = []
-        if let configuredExecutable = configuration.configuredExecutable {
-            candidates.append(configuredExecutable)
-        }
-        // An activated managed runtime is the result of the app's repair
-        // flow. Prefer it over a compatible but incomplete legacy CLI so a
-        // successful repair changes the runtime used by this process.
-        candidates.append(configuration.homeDirectory.appending(path: "Library/Application Support/MSW Monitor/Toolchains/current/bin/msw"))
-        candidates.append(configuration.homeDirectory.appending(path: ".local/bin/msw"))
-        candidates.append(contentsOf: configuration.additionalSearchPaths)
-        candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/msw"))
-        candidates.append(URL(fileURLWithPath: "/usr/local/bin/msw"))
-        var seen: Set<String> = []
-        return candidates.filter { candidate in
-            let path = candidate.standardizedFileURL.path
-            return seen.insert(path).inserted && Self.isExecutableCandidate(candidate)
-        }
+    private struct MSWCandidate {
+        let executable: URL
+        let expectedVersion: String?
     }
 
-    /// Runs the protocol handshake against one candidate and returns the
-    /// decoded handshake when the executable speaks the app-compatible
-    /// protocol, otherwise nil. The handshake is the same command the client
-    /// issues later, so callers can reuse it instead of spawning twice.
-    private func handshakeIfCompatible(_ executable: URL) async -> MSWHandshake? {
-        struct HandshakeEnvelope: Decodable {
-            let schemaVersion: Int
-            let requestId: String
-            let ok: Bool
-            let command: String
-            let observedAt: Date?
-            let result: MSWHandshake?
-            let error: MSWProtocolError?
+    private func mswCandidates() -> [MSWCandidate] {
+        if let testExecutable = configuration.testMSWExecutable,
+           Self.isExecutableCandidate(testExecutable) {
+            return [MSWCandidate(executable: testExecutable, expectedVersion: nil)]
         }
+        var candidates: [MSWCandidate] = []
+        let current = configuration.managedToolchainRoot.appendingPathComponent("current", isDirectory: true)
+        if let bundledRoot = ToolchainLayout.bundledRoot(),
+           let bundled = try? ToolchainValidator.validateBundled(root: bundledRoot),
+           let validated = try? ToolchainValidator.validateActivated(root: current),
+           validated.manifest == bundled.manifest {
+            candidates.append(MSWCandidate(
+                executable: validated.executable,
+                expectedVersion: validated.manifest.version
+            ))
+        }
+        return candidates
+    }
 
+    /// Runs the exact protocol handshake against one permitted executable.
+    /// The handshake is the same command the client
+    /// issues later, so callers can reuse it instead of spawning twice.
+    private func handshakeIfCompatible(
+        _ executable: URL,
+        expectedVersion: String?
+    ) async -> MSWHandshake? {
         do {
             let output = try await run(MSWCommand(
                 executable: executable,
@@ -337,7 +321,7 @@ actor MSWCommandRunner {
                 timeout: .seconds(5),
                 captureLimit: 256 * 1024
             ))
-            let envelope = try MSWProtocolDecoder.decoder().decode(HandshakeEnvelope.self, from: output.stdout)
+            let envelope = try MSWProtocolDecoder.decodeStrictHandshake(output.stdout)
             guard envelope.schemaVersion == 1,
                   envelope.command == "handshake",
                   !envelope.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -345,15 +329,17 @@ actor MSWCommandRunner {
                 return nil
             }
             if envelope.ok {
-                return output.status == 0 &&
-                    envelope.error == nil &&
-                    envelope.result?.protocolVersion == 1 &&
-                    envelope.result?.capabilities.backup.isCompatible == true
-                    ? envelope.result
-                    : nil
+                guard output.status == 0,
+                      envelope.error == nil,
+                      let result = envelope.result,
+                      result.protocolVersion == 1,
+                      result.capabilities.isComplete,
+                      expectedVersion.map({ result.mswVersion == $0 }) ?? true else {
+                    return nil
+                }
+                return result
             }
-            // A protocol-aware but erroring envelope is incompatible too;
-            // only a clean ok envelope with protocolVersion 1 carries a result.
+            // Only a clean ok envelope with protocolVersion 1 carries a result.
             return nil
         } catch {
             return nil
@@ -362,11 +348,10 @@ actor MSWCommandRunner {
 
     func resolveExecutable(named name: String) -> URL? {
         guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return nil }
-        if name == "msw", let resolved = resolveMSW() { return resolved }
+        if name == "msw" { return resolveMSW() }
         var directories = [configuration.homeDirectory.appending(path: ".local/bin")]
         directories.append(contentsOf: configuration.additionalSearchPaths.map { $0.deletingLastPathComponent() })
         directories.append(contentsOf: [
-            configuration.homeDirectory.appending(path: "Library/Application Support/MSW Monitor/Toolchains/current/bin"),
             URL(fileURLWithPath: "/opt/homebrew/bin"),
             URL(fileURLWithPath: "/usr/local/bin"),
             URL(fileURLWithPath: "/usr/bin"),
@@ -414,9 +399,7 @@ actor MSWCommandRunner {
     ) async throws -> MSWCommand {
         let resolution = await mswResolution()
         guard let executable = resolution.selected else {
-            throw resolution.hasInstalledExecutable
-                ? MSWClientError.incompatibleExecutable
-                : MSWClientError.invalidExecutable
+            throw MSWClientError.invalidExecutable
         }
         return MSWCommand(
             executable: executable,
@@ -478,7 +461,7 @@ actor MSWCommandRunner {
     private func deterministicPath() -> String {
         var paths = [configuration.homeDirectory.appending(path: ".local/bin").path]
         paths.append(contentsOf: configuration.additionalSearchPaths.map { $0.deletingLastPathComponent().path })
-        paths.append(configuration.homeDirectory.appending(path: "Library/Application Support/MSW Monitor/Toolchains/current/bin").path)
+        paths.append(configuration.managedToolchainRoot.appending(path: "current/bin").path)
         paths.append(contentsOf: [
             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"
         ])

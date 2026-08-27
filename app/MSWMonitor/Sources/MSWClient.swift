@@ -33,9 +33,8 @@ actor MSWClient {
         await runner.mswResolution().selected
     }
 
-    /// Resolves the executable and negotiates the app protocol, including the
-    /// complete Backup Protocol v2 capability set. Resolution performs only
-    /// `app handshake`; it never starts or previews a backup.
+    /// Resolves only the coupled bundled or activated executable and verifies
+    /// its exact app handshake. It never starts or previews a backup.
     func runtimeRepairRequired(forceRefresh: Bool = false) async -> Bool? {
         let resolution = await runner.mswResolution(forceRefresh: forceRefresh)
         // Cancellation deliberately returns an unselected transient resolution

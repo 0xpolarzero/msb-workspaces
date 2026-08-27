@@ -335,7 +335,7 @@ private struct RuntimeRepairView: View {
             .font(.title2.weight(.semibold))
             .foregroundStyle(.orange)
 
-            Text("Replace the incompatible MSW runtime and verify that MSW Monitor can use it.")
+            Text("Reinstall the bundled MSW runtime and verify its exact command identity.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairMessage)

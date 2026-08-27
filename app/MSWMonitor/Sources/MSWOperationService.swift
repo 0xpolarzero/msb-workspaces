@@ -195,9 +195,6 @@ actor MSWDiagnostics {
         try validateDirectory(directory)
         let envelope = try await client.previewBackup(directory: directory)
         guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-preview") }
-        guard result.contractVersion == MSWBackupCapability.supportedProtocolVersion else {
-            throw MSWClientError.unsupportedBackupProtocol(result.contractVersion)
-        }
         let selectedDestination = directory.resolvingSymlinksInPath().standardizedFileURL
         let previewDestination = URL(fileURLWithPath: result.destination)
             .resolvingSymlinksInPath()
@@ -270,9 +267,6 @@ actor MSWDiagnostics {
     }
 
     private func validate(_ value: MSWBackupOperationResponse, command: String) throws -> MSWBackupOperation {
-        guard value.contractVersion == MSWBackupCapability.supportedProtocolVersion else {
-            throw MSWClientError.unsupportedBackupProtocol(value.contractVersion)
-        }
         guard value.kind == "backup",
               value.operationId.range(of: #"^[a-z0-9-]{8,64}$"#, options: .regularExpression) != nil,
               value.requestKey.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil,
@@ -299,9 +293,6 @@ actor MSWDiagnostics {
         }
         let result: MSWBackupResult?
         if let final = value.result {
-            guard final.contractVersion == MSWBackupCapability.supportedProtocolVersion else {
-                throw MSWClientError.unsupportedBackupProtocol(final.contractVersion)
-            }
             guard final.archive.hasPrefix("/"), !final.archive.contains("\0"), final.archiveBytes > 0,
                   final.checksum.hasPrefix("/"), !final.checksum.contains("\0"),
                   final.info.hasPrefix("/"), !final.info.contains("\0"),
