@@ -62,9 +62,7 @@ private actor RecordingHostAgent: MSWHostAgentControlling {
     }
 }
 
-private struct AvailableSourceSetup: MSWSourceSetupControlling {
-    let isAvailable = true
-
+private struct AvailableUserIntegration: MSWUserIntegrationControlling {
     func configureUserIntegrationIfAvailable() async throws {}
 }
 
@@ -2374,7 +2372,7 @@ final class AppModelTests: XCTestCase {
             ),
             hostAgent: hostAgent,
             hostService: hostService,
-            sourceSetup: AvailableSourceSetup(),
+            userIntegration: AvailableUserIntegration(),
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
 
@@ -2507,7 +2505,7 @@ final class AppModelTests: XCTestCase {
             ),
             hostAgent: RecordingHostAgent(),
             hostService: EnabledHostService(),
-            sourceSetup: AvailableSourceSetup(),
+            userIntegration: AvailableUserIntegration(),
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
 
@@ -2607,7 +2605,7 @@ final class AppModelTests: XCTestCase {
             ),
             hostAgent: RecordingHostAgent(),
             hostService: EnabledHostService(),
-            sourceSetup: AvailableSourceSetup(),
+            userIntegration: AvailableUserIntegration(),
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
         let selected = [
@@ -3059,32 +3057,31 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testSourceCheckoutIsUsedOnlyForDevelopmentHostIntegration() async throws {
+    func testUserIntegrationUsesOnlyResolvedCoupledRuntime() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-source-setup-test-\(UUID().uuidString)", isDirectory: true)
-        let bin = root.appendingPathComponent("bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
         let hostRepairMarker = root.appendingPathComponent("host-repair-marker")
-        let launcher = """
+        let launcher = root.appendingPathComponent("msw")
+        let script = """
         #!/bin/sh
         set -eu
-        printf '%s %s %s\\n' "$1" "$2" "${MSW_SKIP_HOST_REPAIR:-unset}" > "\(hostRepairMarker.path)"
+        if [ "$1" = app ] && [ "$2" = handshake ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        else
+            printf '%s %s %s\\n' "$1" "$2" "${MSW_SKIP_HOST_REPAIR:-unset}" > "\(hostRepairMarker.path)"
+        fi
         """
-        try Data("#!/bin/sh\n".utf8).write(to: root.appendingPathComponent("config.sh"))
-        try Data(launcher.utf8).write(to: bin.appendingPathComponent("msw"))
-        for url in [root.appendingPathComponent("config.sh"), bin.appendingPathComponent("msw")] {
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-        }
+        try Data(script.utf8).write(to: launcher)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
 
-        let service = MSWSourceSetupService(
-            runner: MSWCommandRunner(configuration: .init(homeDirectory: root)),
-            bundleURL: root.appending(path: "build/MSWMonitor.app"),
-            workingDirectory: root
-        )
+        let service = MSWUserIntegrationService(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: root,
+            testMSWExecutable: launcher
+        )))
 
-        XCTAssertTrue(service.isAvailable)
         try await service.configureUserIntegrationIfAvailable()
         XCTAssertEqual(try String(contentsOf: hostRepairMarker, encoding: .utf8), "host repair 1\n")
     }
@@ -3215,9 +3212,10 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(validated.manifest.schemaVersion, 1)
         XCTAssertEqual(Set(validated.manifest.artifacts.map(\.path)), [
-            "VERSION", "config.sh", "bin/msw", "bin/msw-git-askpass",
+            "VERSION", "MANIFEST.txt", "config.sh", "bin/msw", "bin/msw-git-askpass",
             "bin/msw-github-host-token", "bin/msw-github-proxy", "bin/msw-keychain-bridge",
-            "bin/msw-ssh-proxy", "lib/bootstrap-base.sh", "lib/msw-github-relay.py",
+            "bin/msw-ssh-proxy", "launchd/org.microsandbox.MSWMonitor.github-proxy.plist",
+            "lib/bootstrap-base.sh", "lib/msw-github-relay.py",
             "lib/msw-github-shuttle.py", "lib/msw-port-forwarder.py", "lib/proxy-upstream.py",
             "lib/proxycore.py", "lib/vendor/h11/LICENSE.txt", "lib/vendor/h11/__init__.py",
             "lib/vendor/h11/_abnf.py", "lib/vendor/h11/_connection.py",
@@ -3232,6 +3230,29 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "lib/proxycore.py" }?.executable == true)
     }
 
+    func testBundledToolchainManifestRequiresEveryCoupledArtifact() throws {
+        let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-toolchain-incomplete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.copyItem(at: bundledRoot, to: temporary)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let manifestURL = temporary.appendingPathComponent(ToolchainLayout.manifestName)
+        let data = try Data(contentsOf: manifestURL)
+        var manifest = try JSONDecoder().decode(ToolchainManifest.self, from: data)
+        manifest = ToolchainManifest(
+            schemaVersion: manifest.schemaVersion,
+            version: manifest.version,
+            artifacts: manifest.artifacts.filter { $0.path != "lib/msw-github-relay.py" }
+        )
+        try JSONEncoder().encode(manifest).write(to: manifestURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: manifestURL.path)
+
+        XCTAssertThrowsError(try ToolchainValidator.validateBundled(root: temporary)) { error in
+            XCTAssertEqual(error as? ToolchainInstallerError, .invalidManifest)
+        }
+    }
+
     func testToolchainUpdateAtomicallyReplacesCorruptionAndLeavesOnlyCurrent() async throws {
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
         let temporary = FileManager.default.temporaryDirectory
@@ -3241,6 +3262,10 @@ final class AppModelTests: XCTestCase {
         let installer = ToolchainInstaller(bundledRoot: bundledRoot, installationRoot: temporary)
 
         let first = try await installer.activate()
+        try Data("unexpected".utf8).write(to: first.root.appendingPathComponent("unexpected"))
+        XCTAssertThrowsError(try ToolchainValidator.validateActivated(root: first.root)) { error in
+            XCTAssertEqual(error as? ToolchainInstallerError, .invalidManifest)
+        }
         try Data("corrupt".utf8).write(to: first.root.appendingPathComponent("bin/msw"))
         try FileManager.default.createDirectory(
             at: temporary.appendingPathComponent("historical-1.0.0"),

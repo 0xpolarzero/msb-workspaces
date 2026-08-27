@@ -2016,7 +2016,7 @@ Host *.msb
   IdentityFile $HOME/.ssh/msw_ed25519
   IdentitiesOnly yes
   UserKnownHostsFile $HOME/.ssh/msw_known_hosts
-  ProxyCommand $HOME/.local/bin/msw-ssh-proxy %h
+  ProxyCommand $MSW_SCRIPT_ROOT/msw-ssh-proxy %h
 SSH
   chmod 600 "$HOME/.ssh/config.d/msw.conf"
   touch "$HOME/.ssh/msw_known_hosts"; chmod 600 "$HOME/.ssh/msw_known_hosts"
@@ -2107,7 +2107,7 @@ Host *.msb
   IdentityFile $HOME/.ssh/msw_ed25519
   IdentitiesOnly yes
   UserKnownHostsFile $HOME/.ssh/msw_known_hosts
-  ProxyCommand $HOME/.local/bin/msw-ssh-proxy %h
+  ProxyCommand $MSW_SCRIPT_ROOT/msw-ssh-proxy %h
   ServerAliveInterval 30
   ServerAliveCountMax 3
   StrictHostKeyChecking accept-new
@@ -3572,10 +3572,12 @@ proxy_shuttle_start() {
 github_proxy_launchd_label() { printf 'org.microsandbox.MSWMonitor.github-proxy'; }
 github_proxy_plist_file() { printf '%s/Library/LaunchAgents/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$HOME"; }
 github_proxy_plist_template() {
-  if [[ -f "$HOME/.local/share/msw/github-proxy.plist" ]]; then
+  if [[ -f "$MSW_SCRIPT_ROOT/../launchd/org.microsandbox.MSWMonitor.github-proxy.plist" ]]; then
+    printf '%s/../launchd/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$MSW_SCRIPT_ROOT"
+  elif [[ -f "$HOME/.local/share/msw/github-proxy.plist" ]]; then
     printf '%s\n' "$HOME/.local/share/msw/github-proxy.plist"
   else
-    printf '%s/../launchd/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$MSW_SCRIPT_ROOT"
+    return 1
   fi
 }
 github_proxy_log_file() { printf '%s/Library/Logs/MSWMonitor/github-proxy.log\n' "$HOME"; }
@@ -3585,10 +3587,17 @@ github_proxy_render_plist() {
   # unique labels/ports/env via MSW_PROXY_PLIST_* seams so a real
   # socket-activated proxy can be exercised without touching the production
   # agent (which Main bootstraps on 18446 after a real setup).
-  local plist template log_dir log_file label root port
+  local plist template log_dir log_file label root port host_token keychain_bridge
   plist="${MSW_PROXY_PLIST_FILE:-$(github_proxy_plist_file)}"
   label="${MSW_PROXY_PLIST_LABEL:-$(github_proxy_launchd_label)}"
   root="${MSW_PROXY_PLIST_ROOT:-$HOME/.local}"
+  if [[ -d "$MSW_SCRIPT_ROOT/../launchd" ]]; then
+    root="${MSW_PROXY_PLIST_ROOT:-$(cd "$MSW_SCRIPT_ROOT/.." && pwd -P)}"
+  fi
+  host_token="$root/libexec/msw-github-host-token"
+  keychain_bridge="$root/libexec/msw-keychain-bridge"
+  [[ -x "$root/bin/msw-github-host-token" ]] && host_token="$root/bin/msw-github-host-token"
+  [[ -x "$root/bin/msw-keychain-bridge" ]] && keychain_bridge="$root/bin/msw-keychain-bridge"
   log_file="${MSW_PROXY_PLIST_LOG:-$(github_proxy_log_file)}"
   # config.sh assigns MSW_GITHUB_PROXY_PORT unconditionally, so the test
   # seam is a separate variable (defaults to the configured port).
@@ -3596,7 +3605,9 @@ github_proxy_render_plist() {
   log_dir="$(dirname "$log_file")"
   template="$(github_proxy_plist_template)"
   mkdir -p "$log_dir" "$(dirname "$plist")" || return 1
-  sed -e "s|__MSW_ROOT__|$root|g" \
+  sed -e "s|__MSW_ROOT__/libexec/msw-github-host-token|$host_token|g" \
+      -e "s|__MSW_ROOT__/libexec/msw-keychain-bridge|$keychain_bridge|g" \
+      -e "s|__MSW_ROOT__|$root|g" \
       -e "s|/tmp/msw-github-proxy.stderr.log|$log_file|g" \
       -e "s|<string>18446</string>|<string>$port</string>|g" \
       -e "s|org.microsandbox.MSWMonitor.github-proxy|$label|g" \
@@ -4185,7 +4196,7 @@ cmd_check_quick() {
   note "Host browser and SSH integration"
   host_network_check || failed=1
   [[ -f "$HOME/.ssh/config.d/msw.conf" ]] || { echo "SSH config missing" >&2; failed=1; }
-  [[ -x "$HOME/.local/bin/msw-ssh-proxy" ]] || { echo "SSH proxy missing" >&2; failed=1; }
+  [[ -x "$MSW_SCRIPT_ROOT/msw-ssh-proxy" ]] || { echo "SSH proxy missing beside the active MSW command" >&2; failed=1; }
   [[ -x "$ASKPASS_BIN" ]] || { echo "Git askpass helper missing" >&2; failed=1; }
   note "Base snapshot and workspace storage"
   snapshot_exists "$MSW_BASE_SNAPSHOT" || { echo "snapshot $MSW_BASE_SNAPSHOT missing" >&2; failed=1; }

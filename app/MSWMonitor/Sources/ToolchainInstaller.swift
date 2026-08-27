@@ -55,6 +55,37 @@ enum ToolchainLayout {
     static let bundledDirectoryName = "MSWToolchain"
     static let manifestName = "manifest.json"
     static let payloadDirectoryName = "payload"
+    static let requiredArtifacts: [String: Bool] = [
+        "VERSION": false,
+        "MANIFEST.txt": false,
+        "config.sh": true,
+        "bin/msw": true,
+        "bin/msw-git-askpass": true,
+        "bin/msw-github-host-token": true,
+        "bin/msw-github-proxy": true,
+        "bin/msw-keychain-bridge": true,
+        "bin/msw-ssh-proxy": true,
+        "launchd/org.microsandbox.MSWMonitor.github-proxy.plist": false,
+        "lib/bootstrap-base.sh": true,
+        "lib/msw-github-relay.py": true,
+        "lib/msw-github-shuttle.py": true,
+        "lib/msw-port-forwarder.py": true,
+        "lib/proxy-upstream.py": true,
+        "lib/proxycore.py": true,
+        "lib/vendor/h11/LICENSE.txt": false,
+        "lib/vendor/h11/__init__.py": false,
+        "lib/vendor/h11/_abnf.py": false,
+        "lib/vendor/h11/_connection.py": false,
+        "lib/vendor/h11/_events.py": false,
+        "lib/vendor/h11/_headers.py": false,
+        "lib/vendor/h11/_readers.py": false,
+        "lib/vendor/h11/_receivebuffer.py": false,
+        "lib/vendor/h11/_state.py": false,
+        "lib/vendor/h11/_util.py": false,
+        "lib/vendor/h11/_version.py": false,
+        "lib/vendor/h11/_writers.py": false,
+        "lib/vendor/h11/py.typed": false
+    ]
 
     static func bundledRoot(in bundle: Bundle = .main) -> URL? {
         bundle.resourceURL?.appendingPathComponent(bundledDirectoryName, isDirectory: true)
@@ -77,18 +108,24 @@ enum ToolchainValidator {
     static func validateBundled(root: URL) throws -> ValidatedToolchain {
         try validate(
             manifestURL: root.appendingPathComponent(ToolchainLayout.manifestName),
-            payloadRoot: root.appendingPathComponent(ToolchainLayout.payloadDirectoryName, isDirectory: true)
+            payloadRoot: root.appendingPathComponent(ToolchainLayout.payloadDirectoryName, isDirectory: true),
+            manifestInsidePayload: false
         )
     }
 
     static func validateActivated(root: URL) throws -> ValidatedToolchain {
         try validate(
             manifestURL: root.appendingPathComponent(ToolchainLayout.manifestName),
-            payloadRoot: root
+            payloadRoot: root,
+            manifestInsidePayload: true
         )
     }
 
-    private static func validate(manifestURL: URL, payloadRoot: URL) throws -> ValidatedToolchain {
+    private static func validate(
+        manifestURL: URL,
+        payloadRoot: URL,
+        manifestInsidePayload: Bool
+    ) throws -> ValidatedToolchain {
         let manifestData = try readRegularFile(manifestURL, maximumBytes: 2 * 1_024 * 1_024)
         let manifestPermissions = ((try? FileManager.default.attributesOfItem(atPath: manifestURL.path)[.posixPermissions]) as? NSNumber)?.intValue ?? -1
         guard manifestPermissions & 0o777 == 0o644 else {
@@ -116,11 +153,12 @@ enum ToolchainValidator {
               !manifest.artifacts.isEmpty else {
             throw ToolchainInstallerError.invalidManifest
         }
+        try validatePayloadEntries(at: payloadRoot, manifestInsidePayload: manifestInsidePayload)
 
-        var paths = Set<String>()
+        var declaredArtifacts: [String: Bool] = [:]
         for artifact in manifest.artifacts {
             guard isSafeRelativePath(artifact.path),
-                  paths.insert(artifact.path).inserted,
+                  declaredArtifacts.updateValue(artifact.executable, forKey: artifact.path) == nil,
                   artifact.sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
                 throw ToolchainInstallerError.invalidManifest
             }
@@ -142,7 +180,13 @@ enum ToolchainValidator {
                 throw ToolchainInstallerError.invalidPermissions(artifact.path)
             }
         }
-        guard paths.contains("VERSION"), paths.contains("config.sh"), paths.contains("bin/msw") else {
+        guard declaredArtifacts == ToolchainLayout.requiredArtifacts else {
+            throw ToolchainInstallerError.invalidManifest
+        }
+        let versionURL = payloadRoot.appendingPathComponent("VERSION")
+        let versionData = try readRegularFile(versionURL, maximumBytes: 128)
+        guard String(decoding: versionData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines) == manifest.version else {
             throw ToolchainInstallerError.invalidManifest
         }
         let executable = payloadRoot.appendingPathComponent("bin/msw")
@@ -200,6 +244,58 @@ enum ToolchainValidator {
             throw ToolchainInstallerError.unsafeArtifact(url.lastPathComponent)
         }
         return try Data(contentsOf: url, options: [.mappedIfSafe])
+    }
+
+    private static func validatePayloadEntries(
+        at payloadRoot: URL,
+        manifestInsidePayload: Bool
+    ) throws {
+        let expectedFiles = Set(ToolchainLayout.requiredArtifacts.keys)
+        let expectedDirectories = Set(expectedFiles.flatMap { path -> [String] in
+            let components = path.split(separator: "/").dropLast()
+            return components.indices.map { index in
+                components[...index].joined(separator: "/")
+            }
+        })
+        guard let enumerator = FileManager.default.enumerator(
+            at: payloadRoot,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [],
+            errorHandler: { _, _ in false }
+        ) else {
+            throw ToolchainInstallerError.bundledPayloadUnavailable
+        }
+
+        var files = Set<String>()
+        var directories = Set<String>()
+        let canonicalRoot = payloadRoot.resolvingSymlinksInPath()
+        let prefix = canonicalRoot.path.hasSuffix("/") ? canonicalRoot.path : canonicalRoot.path + "/"
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [
+                .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey
+            ])
+            guard values.isSymbolicLink != true else {
+                throw ToolchainInstallerError.unsafeArtifact(url.lastPathComponent)
+            }
+            let canonicalURL = url.resolvingSymlinksInPath()
+            guard canonicalURL.path.hasPrefix(prefix) else {
+                throw ToolchainInstallerError.unsafeArtifact(url.lastPathComponent)
+            }
+            let relative = String(canonicalURL.path.dropFirst(prefix.count))
+            if manifestInsidePayload, relative == ToolchainLayout.manifestName {
+                continue
+            }
+            if values.isDirectory == true {
+                directories.insert(relative)
+            } else if values.isRegularFile == true {
+                files.insert(relative)
+            } else {
+                throw ToolchainInstallerError.unsafeArtifact(relative)
+            }
+        }
+        guard files == expectedFiles, directories == expectedDirectories else {
+            throw ToolchainInstallerError.invalidManifest
+        }
     }
 
     private static func isSafeRelativePath(_ path: String) -> Bool {

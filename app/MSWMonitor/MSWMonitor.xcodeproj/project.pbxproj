@@ -34,7 +34,7 @@
 		A0000000000000000000001F /* HostAgentMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAgentMain.swift; sourceTree = "<group>"; };
 		A00000000000000000000020 /* org.microsandbox.MSWMonitor.host-agent.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = org.microsandbox.MSWMonitor.host-agent.plist; sourceTree = "<group>"; };
 		A0000000000000000000001D /* GitHubAuthorizationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAuthorizationCoordinator.swift; sourceTree = "<group>"; };
-		A00000000000000000000027 /* MSWSourceSetupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWSourceSetupService.swift; sourceTree = "<group>"; };
+		A00000000000000000000027 /* MSWUserIntegrationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWUserIntegrationService.swift; sourceTree = "<group>"; };
 		A00000000000000000000028 /* MSWHostRepairVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWHostRepairVerifier.swift; sourceTree = "<group>"; };
 		A0000000000000000000002A /* MSWHostRepairAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWHostRepairAuthorization.swift; sourceTree = "<group>"; };
 		A0000000000000000000002B /* MSWConnectClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MSWConnectClient.swift; sourceTree = "<group>"; };
@@ -70,7 +70,7 @@ A00000000000000000000022 /* WorkspaceNetworkConfiguration.swift */ = {isa = PBXF
 		A10000000000000000000009 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000009 /* AppModelTests.swift */; };
 		A1000000000000000000000A /* MSWMonitorUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000A /* MSWMonitorUITests.swift */; };
 	A10000000000000000000023 /* WorkspaceNetworkConfiguration.swift in MSWHostAgent */ = {isa = PBXBuildFile; fileRef = A00000000000000000000022 /* WorkspaceNetworkConfiguration.swift */; };
-		A10000000000000000000027 /* MSWSourceSetupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000027 /* MSWSourceSetupService.swift */; };
+		A10000000000000000000027 /* MSWUserIntegrationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000027 /* MSWUserIntegrationService.swift */; };
 		A10000000000000000000028 /* MSWHostRepairVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000028 /* MSWHostRepairVerifier.swift */; };
 		A1000000000000000000002A /* MSWHostRepairAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000002A /* MSWHostRepairAuthorization.swift */; };
 		A10000000000000000000029 /* WorkspaceNetworkConfiguration.swift in App Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000022 /* WorkspaceNetworkConfiguration.swift */; };

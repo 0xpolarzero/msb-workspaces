@@ -15,6 +15,7 @@ MANIFEST=$OUTPUT_ROOT/manifest.json
 
 typeset -a artifacts=(
   VERSION
+  MANIFEST.txt
   config.sh
   bin/msw
   bin/msw-git-askpass
@@ -22,6 +23,7 @@ typeset -a artifacts=(
   bin/msw-github-proxy
   bin/msw-keychain-bridge
   bin/msw-ssh-proxy
+  launchd/org.microsandbox.MSWMonitor.github-proxy.plist
   lib/bootstrap-base.sh
   lib/msw-github-relay.py
   lib/msw-github-shuttle.py

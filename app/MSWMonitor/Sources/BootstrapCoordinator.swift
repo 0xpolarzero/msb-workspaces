@@ -412,7 +412,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     private let stateStore: BootstrapStateStore
     private let hostAgent: any MSWHostAgentControlling
     private let hostService: any MSWHostServiceControlling
-    private let sourceSetup: any MSWSourceSetupControlling
+    private let userIntegration: any MSWUserIntegrationControlling
     private let hostRepairVerifier: any MSWHostRepairVerifying
     private let hostRepairAuthorization: any MSWHostRepairAuthorizing
     private let freeDiskBytes: @Sendable () -> Int64?
@@ -426,7 +426,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         stateStore: BootstrapStateStore = BootstrapStateStore(),
         hostAgent: any MSWHostAgentControlling = HostAgentClient(),
         hostService: any MSWHostServiceControlling,
-        sourceSetup: (any MSWSourceSetupControlling)? = nil,
+        userIntegration: (any MSWUserIntegrationControlling)? = nil,
         hostRepairVerifier: (any MSWHostRepairVerifying)? = nil,
         hostRepairAuthorization: (any MSWHostRepairAuthorizing)? = nil,
         freeDiskBytes: @escaping @Sendable () -> Int64? = {
@@ -440,7 +440,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         self.stateStore = stateStore
         self.hostAgent = hostAgent
         self.hostService = hostService
-        self.sourceSetup = sourceSetup ?? MSWSourceSetupService(runner: runner)
+        self.userIntegration = userIntegration ?? MSWUserIntegrationService(runner: runner)
         self.hostRepairVerifier = hostRepairVerifier ?? MSWHostRepairVerifier(runner: runner)
         self.hostRepairAuthorization = hostRepairAuthorization ?? MSWHostRepairAuthorization(runner: runner)
         self.freeDiskBytes = freeDiskBytes
@@ -622,19 +622,9 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 ))
                 return checks
             }
-            if sourceSetup.isAvailable {
-                // Auto-fixed by the administrator prompt during the workspace
-                // apply phase. Not a dependency problem, so it does not appear
-                // here; the Workspaces step surfaces a save-time hint instead.
-                return checks
-            }
-            record(MSWPreflightCheck(
-                id: "host-integration",
-                title: "Host integration",
-                status: .unavailable,
-                detail: hostPackaging.detail,
-                remediation: hostPackaging.remediation
-            ))
+            // Auto-fixed by the activated CLI plus the administrator prompt
+            // during workspace apply. The Workspaces step surfaces the
+            // save-time hint instead of treating this as a missing dependency.
             return checks
         }
         if hostPackaging != .ready {
@@ -885,16 +875,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         if hostPackaging == .signingUnavailable {
             let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
             if !(await hostRepairVerifier.isReady(records: records)) {
-                guard sourceSetup.isAvailable else {
-                    let failure = BootstrapCoordinatorError.hostRegistrationFailed(hostPackaging.detail)
-                    current.lastError = failure.localizedDescription
-                    current.phase = .hostIntegration
-                    current.updatedAt = Date()
-                    try? await stateStore.save(current)
-                    throw failure
-                }
                 do {
-                    try await sourceSetup.configureUserIntegrationIfAvailable()
+                    try await userIntegration.configureUserIntegrationIfAvailable()
                     try await hostRepairAuthorization.repair(records: records)
                 } catch {
                     let failure = BootstrapCoordinatorError.hostRegistrationFailed(error.localizedDescription)
