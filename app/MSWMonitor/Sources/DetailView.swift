@@ -1960,8 +1960,7 @@ private extension DetailView {
 
     private var needsInstallationRepair: Bool {
         model.startupRecoveryBlockedReason != nil || model.systemHealthChecks.contains { check in
-            let repairable = check.id == "msw-runtime" ||
-                check.id == "host-integration" ||
+            let repairable = check.id == "host-integration" ||
                 check.id.hasPrefix("tool-")
             return repairable && check.status != .pass
         }
@@ -1979,15 +1978,8 @@ private extension DetailView {
                 Text("Cached content above is last known, not a fresh verification.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                if model.backupRequiresRuntimeRepair {
-                    Button("Repair MSW installation…") {
-                        NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
-                    }
-                    .accessibilityIdentifier("backup.repair-runtime.button")
-                } else {
-                    Button("Retry", action: retryDetailFailure)
-                        .keyboardShortcut("r", modifiers: [.command, .shift])
-                }
+                Button("Retry", action: retryDetailFailure)
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)

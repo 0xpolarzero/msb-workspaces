@@ -341,6 +341,16 @@ struct SystemApplicationCatalog: Equatable, Sendable {
     }
 }
 
+enum RuntimeRepairAccessibilityIdentifier {
+    static let windowBanner = "runtime-repair.window.banner"
+    static let windowMessage = "runtime-repair.window.message"
+    static let windowAction = "runtime-repair.window.action"
+    static let statusWarning = "runtime-repair.status-item.warning"
+    static let popoverRow = "runtime-repair.popover.row"
+    static let popoverMessage = "runtime-repair.popover.message"
+    static let popoverAction = "runtime-repair.popover.action"
+}
+
 @Observable
 @MainActor
 final class ApplicationPreferenceStore {
@@ -741,7 +751,9 @@ final class AppModel {
     private(set) var backupOperations: [MSWBackupOperation] = []
     private(set) var pendingBackupPreview: MSWBackupPreview?
     private(set) var isBackupPreviewLoading = false
-    private(set) var backupRequiresRuntimeRepair = false
+    /// Single application-wide runtime compatibility state. The authoritative
+    /// value comes from executable resolution plus the protocol handshake.
+    private(set) var runtimeRepairRequired: Bool
     private(set) var maintenanceMessage: String?
     var selectedWorkspace: Workspace.ID?
     private(set) var pendingLifecyclePlan: MSWLifecyclePlan?
@@ -779,6 +791,7 @@ final class AppModel {
     private let activityStore: MSWActivityStore
     private var pollingTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var runtimeRepairRefreshGeneration = 0
     private var refreshGeneration = 0
     private var consecutiveRefreshFailures = 0
     private var sustainedUnavailableNotified = false
@@ -813,7 +826,8 @@ final class AppModel {
         startupRecoveryRetry: (() -> Void)? = nil,
         initialOperationFailure: MSWOperationFailureNotice? = nil,
         applicationPreferences: ApplicationPreferenceStore? = nil,
-        applicationDefaults: SystemApplicationDefaults? = nil
+        applicationDefaults: SystemApplicationDefaults? = nil,
+        initialRuntimeRepairRequired: Bool = false
     ) {
         self.client = client
         self.operationCoordinator = operationCoordinator
@@ -825,6 +839,7 @@ final class AppModel {
         self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
         self.startupRecoveryRetry = startupRecoveryRetry
         self.latestOperationFailure = initialOperationFailure
+        self.runtimeRepairRequired = initialRuntimeRepairRequired
         self.applicationPreferences = applicationPreferences ?? ApplicationPreferenceStore(
             catalogProvider: {
                 let defaults = applicationDefaults ?? .discover()
@@ -1022,7 +1037,37 @@ final class AppModel {
         let generation = refreshGeneration
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
+            await self?.refreshRuntimeRepairState()
             _ = await self?.refreshRemote(generation: generation)
+        }
+    }
+
+    /// Re-negotiates the resolved runtime without invoking a backup command.
+    /// Startup and polling use the resolver cache; Setup success forces a new
+    /// resolution so a repaired managed runtime is visible immediately.
+    func refreshRuntimeRepairState(forceRefresh: Bool = false) async {
+        guard let client else { return }
+        runtimeRepairRefreshGeneration &+= 1
+        let generation = runtimeRepairRefreshGeneration
+        guard let required = await client.runtimeRepairRequired(forceRefresh: forceRefresh),
+              !Task.isCancelled,
+              generation == runtimeRepairRefreshGeneration else {
+            return
+        }
+        runtimeRepairRequired = required
+    }
+
+    func setupRepairDidSucceed() {
+        runtimeRepairRefreshGeneration &+= 1
+        guard let client else {
+            // Deterministic UI fixtures have no process-backed runtime.
+            runtimeRepairRequired = false
+            return
+        }
+        Task { [weak self] in
+            await client.invalidateRuntimeResolution()
+            await self?.refreshRuntimeRepairState(forceRefresh: true)
+            self?.refresh()
         }
     }
 
@@ -1034,6 +1079,7 @@ final class AppModel {
         let hiddenCadence = configuredCadence > 0 ? min(max(configuredCadence, 15), 60) : 30
         let interval: Duration = visible ? .seconds(5) : .seconds(hiddenCadence)
         pollingTask = Task { [weak self] in
+            await self?.refreshRuntimeRepairState()
             await self?.refreshRemote()
             await self?.refreshBackupOperations()
             while !Task.isCancelled {
@@ -1043,6 +1089,7 @@ final class AppModel {
                     break
                 }
                 guard !Task.isCancelled else { break }
+                await self?.refreshRuntimeRepairState(forceRefresh: true)
                 await self?.refreshRemote()
                 await self?.refreshBackupOperations()
             }
@@ -1072,6 +1119,7 @@ final class AppModel {
         }
         Task { [weak self] in
             guard let executable = await client.executableURL() else {
+                self?.runtimeRepairRequired = true
                 self?.lastError = "The MSW executable is unavailable. Repair the toolchain and retry."
                 return
             }
@@ -1119,6 +1167,7 @@ final class AppModel {
             try await SourceEditorLauncher().open(application: editor, target: target)
             return nil
         } catch {
+            noteRuntimeRepairFailure(error)
             lastError = error.localizedDescription
             return lastError
         }
@@ -1185,11 +1234,17 @@ final class AppModel {
         guard let client else {
             throw MSWClientError.unavailable("Folder browsing is unavailable in fixture mode.")
         }
-        let response = try await client.directories(
-            workspace: id.rawValue,
-            path: path,
-            query: normalizedQuery
-        )
+        let response: MSWEnvelope<MSWDirectoryResponse>
+        do {
+            response = try await client.directories(
+                workspace: id.rawValue,
+                path: path,
+                query: normalizedQuery
+            )
+        } catch {
+            noteRuntimeRepairFailure(error)
+            throw error
+        }
         guard let result = response.result else {
             throw MSWClientError.missingResult(
                 command: normalizedQuery == nil ? "directory-list" : "directory-search"
@@ -1407,6 +1462,7 @@ final class AppModel {
                     throw MSWClientError.unavailable("macOS could not open the validated workspace URL.")
                 }
             } catch {
+                self?.noteRuntimeRepairFailure(error)
                 self?.lastError = error.localizedDescription
             }
         }
@@ -1458,6 +1514,7 @@ final class AppModel {
             return .applied(state)
         } catch {
             guard generation == refreshGeneration else { return .superseded }
+            noteRuntimeRepairFailure(error)
             lastError = error.localizedDescription
             lastRecovery = recoveryContext(for: error, fallbackRecovery: "Retry the observation or run diagnostics.")
             markStateStale()
@@ -1526,7 +1583,6 @@ final class AppModel {
         isDetailLoading = true
         if clearsError {
             detailError = nil
-            backupRequiresRuntimeRepair = false
         }
         return detailRequestGeneration
     }
@@ -1565,6 +1621,7 @@ final class AppModel {
                         workspace: id.rawValue
                     )
                 } catch {
+                    self?.noteRuntimeRepairFailure(error)
                     failed.insert(id.rawValue)
                     failureMessage = failureMessage ?? error.localizedDescription
                 }
@@ -1603,6 +1660,7 @@ final class AppModel {
                 self.pendingPushPlan = plan
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
+                self.noteRuntimeRepairFailure(error)
                 self.detailError = error.localizedDescription
             }
             self?.finishDetailRequest(request)
@@ -1667,6 +1725,7 @@ final class AppModel {
                 self.detailError = nil
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
+                self.noteRuntimeRepairFailure(error)
                 self.detailError = error.localizedDescription
             }
             self?.finishDetailRequest(request)
@@ -1692,6 +1751,7 @@ final class AppModel {
                     )
                 } catch {
                     guard let self, request == self.detailRequestGeneration else { return }
+                    self.noteRuntimeRepairFailure(error)
                     self.detailError = error.localizedDescription
                 }
                 self?.finishDetailRequest(request)
@@ -1707,6 +1767,7 @@ final class AppModel {
                 self.githubSnapshot = result
             } catch {
                 guard let self, request == self.detailRequestGeneration else { return }
+                self.noteRuntimeRepairFailure(error)
                 self.detailError = error.localizedDescription
             }
             self?.finishDetailRequest(request)
@@ -1775,6 +1836,7 @@ final class AppModel {
                 do {
                     snapshots[id.rawValue] = try await operationService.logs(workspace: id.rawValue)
                 } catch {
+                    self?.noteRuntimeRepairFailure(error)
                     if Self.protocolFailure(error, hasCode: "MSW_LOGS_UNAVAILABLE") {
                         unavailable.insert(id.rawValue)
                     } else if firstError == nil {
@@ -1880,7 +1942,6 @@ final class AppModel {
         guard !isMaintenanceOperationInFlight, !isBackupPreviewLoading else { return nil }
         detailError = nil
         pendingBackupPreview = nil
-        backupRequiresRuntimeRepair = false
         if let sourceAllocatedBytes = backupPreviewFixtureSourceAllocatedBytes {
             let preview = MSWBackupPreview(
                 destination: directory,
@@ -1902,7 +1963,7 @@ final class AppModel {
             pendingBackupPreview = preview
             return preview
         } catch {
-            backupRequiresRuntimeRepair = backupRepairRequired(for: error)
+            noteRuntimeRepairFailure(error)
             detailError = backupErrorMessage(error)
             return nil
         }
@@ -1916,7 +1977,6 @@ final class AppModel {
         pendingBackupPreview = nil
         maintenanceMessage = nil
         detailError = nil
-        backupRequiresRuntimeRepair = false
         if let scenario = backupUITestResultScenario {
             let now = Date()
             let id = UUID().uuidString.lowercased()
@@ -1983,7 +2043,7 @@ final class AppModel {
                 let operation = try await diagnostics.startBackup(to: directory, requestKey: requestKey)
                 self?.upsertBackupOperation(operation)
             } catch {
-                self?.backupRequiresRuntimeRepair = self?.backupRepairRequired(for: error) ?? false
+                self?.noteRuntimeRepairFailure(error)
                 self?.detailError = self?.backupErrorMessage(error)
             }
             self?.isDetailLoading = false
@@ -2002,12 +2062,18 @@ final class AppModel {
             }
             if detailError?.contains("backup") == true { detailError = nil }
         } catch {
-            backupRequiresRuntimeRepair = backupRepairRequired(for: error)
+            noteRuntimeRepairFailure(error)
             detailError = backupErrorMessage(error)
         }
     }
 
-    private func backupRepairRequired(for error: Error) -> Bool {
+    private func noteRuntimeRepairFailure(_ error: Error) {
+        if isRuntimeRepairFailure(error) {
+            runtimeRepairRequired = true
+        }
+    }
+
+    private func isRuntimeRepairFailure(_ error: Error) -> Bool {
         guard let clientError = error as? MSWClientError else { return false }
         switch clientError {
         case .invalidExecutable, .incompatibleExecutable, .unsupportedBackupProtocol:
@@ -2042,7 +2108,6 @@ final class AppModel {
     }
 
     func restoreBackup(archive: URL, confirmation: String) {
-        backupRequiresRuntimeRepair = false
         guard let diagnostics else {
             detailError = "Restore is unavailable in fixture mode."
             return
@@ -2099,7 +2164,6 @@ final class AppModel {
     func clearDetailError() {
         detailRequestGeneration += 1
         detailError = nil
-        backupRequiresRuntimeRepair = false
         if !isMaintenanceOperationInFlight {
             isDetailLoading = false
         }
@@ -2679,6 +2743,7 @@ final class AppModel {
         error: Error,
         notificationKind: MSWNotificationEvent.Kind = .operationFailure
     ) {
+        noteRuntimeRepairFailure(error)
         let key = operationKey(kind: kind, workspace: workspace)
         if operationStates[key] == nil {
             beginOperation(kind: kind, workspace: workspace, action: action, message: error.localizedDescription)

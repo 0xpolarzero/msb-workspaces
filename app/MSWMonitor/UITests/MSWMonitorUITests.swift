@@ -44,6 +44,105 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
 
+    func testGlobalRuntimeRepairStateClearsEverySurfaceAfterSetupRepair() {
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-runtime-repair"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        let statusItem = app.statusItems["statusItem.button"]
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 3))
+        XCTAssertEqual(statusItem.label, "MSW Monitor")
+        XCTAssertEqual(
+            statusItem.value as? String,
+            "MSW Monitor. Repair needed. MSW installation needs repair."
+        )
+
+        let applicationMenu = app.menuBars.menuBarItems["MSW Monitor"]
+        XCTAssertTrue(applicationMenu.waitForExistence(timeout: 2))
+        applicationMenu.click()
+        XCTAssertTrue(app.menuItems["About MSW Monitor"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.menuItems["Settings…"].exists)
+        XCTAssertTrue(app.menuItems["Hide MSW Monitor"].exists)
+        XCTAssertTrue(app.menuItems["Quit MSW Monitor"].exists)
+        app.typeKey(.escape, modifierFlags: [])
+
+        assertText("MSW Monitor", identifier: "monitor.title", in: app)
+        assertText("dev", identifier: "workspace.dev.name", in: app)
+        assertText("Stopped", identifier: "workspace.dev.state", in: app)
+        assertText("playgrounds", identifier: "workspace.playgrounds.name", in: app)
+        assertText("Stopped", identifier: "workspace.playgrounds.state", in: app)
+        assertText("personal", identifier: "workspace.personal.name", in: app)
+        assertText("Stopped", identifier: "workspace.personal.state", in: app)
+        assertText(
+            "MSW installation needs repair",
+            identifier: "runtime-repair.popover.message",
+            in: app
+        )
+        XCTAssertEqual(
+            app.descendants(matching: .any).matching(identifier: "runtime-repair.popover.row").count,
+            1
+        )
+        XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.popover.action").count, 1)
+        XCTAssertEqual(app.buttons["runtime-repair.popover.action"].label, "Repair…")
+        XCTAssertEqual(app.buttons["open-monitor.button"].label, "Open MSW Monitor…")
+        XCTAssertEqual(app.buttons["quit.button"].label, "Quit")
+        XCTAssertFalse(app.buttons["details.button"].exists)
+        XCTAssertFalse(app.buttons["settings.button"].exists)
+        XCTAssertFalse(app.buttons["setup.button"].exists)
+
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+        for tab in ["Overview", "Workspaces", "GitHub", "Notifications", "Backup", "General"] {
+            let tabButton = app.toolbars.buttons[tab]
+            XCTAssertTrue(tabButton.waitForExistence(timeout: 2), "Missing \(tab) tab")
+            tabButton.click()
+            assertText(
+                "MSW installation needs repair",
+                identifier: "runtime-repair.window.message",
+                in: app
+            )
+            XCTAssertEqual(
+                app.descendants(matching: .any)
+                    .matching(identifier: "runtime-repair.window.banner").count,
+                1
+            )
+            XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 1)
+            XCTAssertEqual(app.buttons["runtime-repair.window.action"].label, "Repair…")
+        }
+
+        app.buttons["runtime-repair.window.action"].click()
+        let setup = app.windows["setup.window"]
+        XCTAssertTrue(setup.waitForExistence(timeout: 3))
+        let done = app.buttons["setup.done.button"]
+        XCTAssertTrue(done.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
+        done.click()
+        XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["runtime-repair.window.banner"]
+                .waitForNonExistence(timeout: 3)
+        )
+        XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 0)
+        for tab in ["Overview", "Workspaces", "GitHub", "Notifications", "Backup", "General"] {
+            app.toolbars.buttons[tab].click()
+            XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.window.banner"].exists)
+            XCTAssertFalse(app.buttons["runtime-repair.window.action"].exists)
+        }
+        XCTAssertEqual(
+            statusItem.value as? String,
+            "Not observed. No authoritative workspace state is available yet."
+        )
+
+        statusItem.click()
+        XCTAssertTrue(app.descendants(matching: .any)["monitor.title"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.popover.row"].exists)
+        XCTAssertFalse(app.buttons["runtime-repair.popover.action"].exists)
+        app.buttons["quit.button"].click()
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
     func testDirectFolderPickerFromStatusPopover() {
         let app = launchFixture([
             "--ui-test-open-popover",

@@ -371,6 +371,30 @@ struct ApplicationPreferenceFields: View {
 }
 
 
+private struct RuntimeRepairBanner: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text("MSW installation needs repair")
+                .font(.callout.weight(.medium))
+                .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowMessage)
+            Spacer()
+            Button("Repair…") {
+                NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+            }
+            .controlSize(.small)
+            .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowAction)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.orange.opacity(0.08))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowBanner)
+    }
+}
+
 struct SettingsView: View {
     @Bindable private var navigation: AppNavigationState
     @Bindable private var applicationState: ApplicationState
@@ -458,7 +482,12 @@ struct SettingsView: View {
     var body: some View {
         Group {
             if let model = applicationState.model {
-                TabView(selection: $navigation.tab) {
+                VStack(spacing: 0) {
+                    if model.runtimeRepairRequired {
+                        RuntimeRepairBanner()
+                        Divider()
+                    }
+                    TabView(selection: $navigation.tab) {
                     DetailView(model: model, navigation: navigation, mode: .overview)
                         .tabItem {
                             Label("Overview", systemImage: "rectangle.grid.1x2")
@@ -497,8 +526,9 @@ struct SettingsView: View {
                             Label("General", systemImage: "gear")
                         }
                         .tag(AppTab.general)
+                    }
+                    .accessibilityIdentifier("settings.tabs")
                 }
-                .accessibilityIdentifier("settings.tabs")
             } else {
                 ProgressView("Loading MSW Monitor…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

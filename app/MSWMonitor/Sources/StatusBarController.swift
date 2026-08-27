@@ -160,12 +160,14 @@ final class StatusBarController {
                 closeSetup: { [weak self] configurations in
                     self?.setupWindowController?.close()
                     self?.model.reloadWorkspaceConfiguration(configurations)
-                    self?.model.refresh()
+                    self?.model.setupRepairDidSucceed()
                 },
                 uiTestMode: arguments.contains("--ui-test-setup") ||
                     arguments.contains("--ui-test-setup-review") ||
+                    arguments.contains("--ui-test-runtime-repair") ||
                     uiTestGitHubScenario != nil,
-                uiTestStartsInReview: arguments.contains("--ui-test-setup-review"),
+                uiTestStartsInReview: arguments.contains("--ui-test-setup-review") ||
+                    arguments.contains("--ui-test-runtime-repair"),
                 uiTestGitHubScenario: uiTestGitHubScenario,
                 uiTestBootstrapReconnect: arguments.contains("--ui-test-setup-reconnect"),
                 startupRecoveryBlockedReason: startupRecoveryBlockedReason,
@@ -178,6 +180,7 @@ final class StatusBarController {
     private func observeModelStatus() {
         withObservationTracking {
             _ = model.health
+            _ = model.runtimeRepairRequired
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.observeModelStatus()
@@ -189,18 +192,30 @@ final class StatusBarController {
     private func updateStatusItem() {
         guard let button = statusItem.button else { return }
         let health = model.health
-        if health.severity == .critical {
+        if model.runtimeRepairRequired {
+            button.contentTintColor = .systemOrange
+        } else if health.severity == .critical {
             button.contentTintColor = .systemRed
         } else if health.severity == .attention {
             button.contentTintColor = .systemOrange
         } else {
             button.contentTintColor = nil
         }
-        if let image = NSImage(systemSymbolName: health.symbol, accessibilityDescription: "MSW Monitor") {
+        let symbol = model.runtimeRepairRequired ? "wrench.and.screwdriver.fill" : health.symbol
+        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "MSW Monitor") {
             image.isTemplate = true
             button.image = image
         }
-        button.toolTip = "MSW Monitor — \(health.title). \(health.detail)"
-        button.setAccessibilityValue("\(health.title). \(health.detail)")
+        if model.runtimeRepairRequired {
+            button.toolTip = "MSW Monitor — MSW installation needs repair"
+            button.setAccessibilityValue("MSW Monitor. Repair needed. MSW installation needs repair.")
+            button.setAccessibilityHelp(RuntimeRepairAccessibilityIdentifier.statusWarning)
+            popover.contentSize = NSSize(width: 340, height: 324)
+        } else {
+            button.toolTip = "MSW Monitor — \(health.title). \(health.detail)"
+            button.setAccessibilityValue("\(health.title). \(health.detail)")
+            button.setAccessibilityHelp(nil)
+            popover.contentSize = NSSize(width: 340, height: 280)
+        }
     }
 }

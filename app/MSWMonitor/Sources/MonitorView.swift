@@ -24,6 +24,11 @@ struct MonitorView: View {
 
             Divider()
 
+            if model.runtimeRepairRequired {
+                repairRow
+                Divider()
+            }
+
             ForEach(Array(model.workspaces.enumerated()), id: \.element.id) { index, workspace in
                 WorkspaceRow(
                     workspace: workspace,
@@ -68,6 +73,27 @@ struct MonitorView: View {
                 Text("Review the workspace effect before continuing.")
             }
         }
+    }
+
+    private var repairRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+            Text("MSW installation needs repair")
+                .font(.caption.weight(.medium))
+                .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverMessage)
+            Spacer(minLength: 4)
+            Button("Repair…") {
+                NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+            }
+            .controlSize(.small)
+            .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverAction)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverRow)
     }
 
     private func confirmationMessage(for plan: MSWLifecyclePlan) -> String {

@@ -314,6 +314,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : nil
         let model: AppModel
         let folderBrowserFixture = arguments.contains("--ui-test-folder-browser")
+        let runtimeRepairFixture = arguments.contains("--ui-test-runtime-repair")
         let configuredWorkspaces = fixtureMode
             ? SetupWorkspaceConfiguration.defaults
             : BootstrapStateStore.persistedWorkspaceConfigurations()
@@ -329,7 +330,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
                 startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry,
                 initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil,
-                applicationPreferences: applicationPreferences
+                applicationPreferences: applicationPreferences,
+                initialRuntimeRepairRequired: runtimeRepairFixture
             )
             operationCoordinator = nil
         } else {

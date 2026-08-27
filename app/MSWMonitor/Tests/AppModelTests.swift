@@ -302,14 +302,14 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(preview)
         XCTAssertNil(model.pendingBackupPreview)
         XCTAssertFalse(FileManager.default.fileExists(atPath: previewInvocation.path))
-        XCTAssertTrue(model.backupRequiresRuntimeRepair)
+        XCTAssertTrue(model.runtimeRepairRequired)
         XCTAssertEqual(
             model.detailError,
             "The installed MSW runtime is older than this version of MSW Monitor. Open Setup and repair the MSW installation, then retry."
         )
         model.clearDetailError()
         XCTAssertNil(model.detailError)
-        XCTAssertFalse(model.backupRequiresRuntimeRepair)
+        XCTAssertTrue(model.runtimeRepairRequired)
         let resolution = await runner.mswResolution()
         XCTAssertNil(resolution.selected)
         XCTAssertEqual(resolution.incompatibleCandidates, [executable])
@@ -362,7 +362,7 @@ final class AppModelTests: XCTestCase {
             for _ in 0..<50 where model.isDetailLoading { try await Task.sleep(for: .milliseconds(20)) }
 
             XCTAssertFalse(FileManager.default.fileExists(atPath: invocation.path), label)
-            XCTAssertTrue(model.backupRequiresRuntimeRepair, label)
+            XCTAssertTrue(model.runtimeRepairRequired, label)
             XCTAssertEqual(model.detailError, MSWClientError.incompatibleExecutable.localizedDescription, label)
         }
     }
@@ -486,7 +486,7 @@ final class AppModelTests: XCTestCase {
         await model.refreshBackupOperations()
 
         XCTAssertTrue(model.backupOperations.isEmpty)
-        XCTAssertTrue(model.backupRequiresRuntimeRepair)
+        XCTAssertTrue(model.runtimeRepairRequired)
         XCTAssertEqual(
             model.detailError,
             "The installed MSW runtime returned an incompatible backup schema. Open Setup and repair the MSW installation, then retry."
@@ -520,8 +520,86 @@ final class AppModelTests: XCTestCase {
         await model.refreshBackupOperations()
 
         XCTAssertTrue(model.backupOperations.isEmpty)
-        XCTAssertTrue(model.backupRequiresRuntimeRepair)
+        XCTAssertTrue(model.runtimeRepairRequired)
         XCTAssertTrue(model.detailError?.contains("Open Setup and repair MSW") == true)
+    }
+
+    func testRuntimeRepairStateNegotiatesCompatibleRequiredAndSetupRepairedWithoutBackupProbe() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-runtime-repair-state-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let handshakeURL = temporary.appendingPathComponent("handshake.json")
+        let invocationLog = temporary.appendingPathComponent("invocations.log")
+        let executable = temporary.appendingPathComponent("msw")
+        let incompatibleHandshake = protocolCompatibleHandshake.replacingOccurrences(
+            of: #""protocolVersion":2,"preview""#,
+            with: #""protocolVersion":1,"preview""#
+        )
+        let script = """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "\(invocationLog.path)"
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            /bin/cat "\(handshakeURL.path)"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data(protocolCompatibleHandshake.utf8).write(to: handshakeURL)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client)
+
+        await model.refreshRuntimeRepairState(forceRefresh: true)
+        XCTAssertFalse(model.runtimeRepairRequired)
+
+        try Data(incompatibleHandshake.utf8).write(to: handshakeURL)
+        await model.refreshRuntimeRepairState(forceRefresh: true)
+        XCTAssertTrue(model.runtimeRepairRequired)
+
+        try Data(protocolCompatibleHandshake.utf8).write(to: handshakeURL)
+        model.setupRepairDidSucceed()
+        for _ in 0..<100 where model.runtimeRepairRequired {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(model.runtimeRepairRequired)
+        let invocations = try String(contentsOf: invocationLog, encoding: .utf8)
+        XCTAssertFalse(invocations.contains("backup-"), "Runtime negotiation must never probe by launching a backup")
+    }
+
+    func testCancelledRuntimeNegotiationPreservesPublishedRepairState() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-runtime-repair-cancellation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        /bin/sleep 2
+        printf '%s\\n' '\(protocolCompatibleHandshake)'
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client, initialRuntimeRepairRequired: true)
+        let refresh = Task { await model.refreshRuntimeRepairState(forceRefresh: true) }
+        try await Task.sleep(for: .milliseconds(50))
+        refresh.cancel()
+        await refresh.value
+
+        XCTAssertTrue(
+            model.runtimeRepairRequired,
+            "A cancelled handshake must not turn its transient nil resolution into new UI state"
+        )
     }
 
     func testInitialWorkspacesAreFixedAndStopped() {
