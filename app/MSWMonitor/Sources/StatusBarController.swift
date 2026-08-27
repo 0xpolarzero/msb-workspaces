@@ -190,14 +190,11 @@ final class StatusBarController {
                 closeSetup: { [weak self] configurations in
                     self?.setupWindowController?.close()
                     self?.model.reloadWorkspaceConfiguration(configurations)
-                    self?.model.setupRepairDidSucceed()
                 },
                 uiTestMode: arguments.contains("--ui-test-setup") ||
                     arguments.contains("--ui-test-setup-review") ||
-                    arguments.contains("--ui-test-runtime-repair") ||
                     uiTestGitHubScenario != nil,
-                uiTestStartsInReview: arguments.contains("--ui-test-setup-review") ||
-                    arguments.contains("--ui-test-runtime-repair"),
+                uiTestStartsInReview: arguments.contains("--ui-test-setup-review"),
                 uiTestGitHubScenario: uiTestGitHubScenario,
                 uiTestBootstrapReconnect: arguments.contains("--ui-test-setup-reconnect"),
                 startupRecoveryBlockedReason: startupRecoveryBlockedReason,

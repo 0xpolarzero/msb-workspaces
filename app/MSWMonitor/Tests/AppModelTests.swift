@@ -450,7 +450,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.detailError)
     }
 
-    func testRuntimeRepairStateUsesExactHandshakeAndSetupRetryWithoutBackupProbe() async throws {
+    func testRuntimeRepairStateUsesExactHandshakeAndDedicatedRetryWithoutBackupProbe() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-runtime-repair-state-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -489,7 +489,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.runtimeRepairRequired)
 
         try Data(protocolCompatibleHandshake.utf8).write(to: handshakeURL)
-        model.setupRepairDidSucceed()
+        model.runtimeRepairDidSucceed()
         for _ in 0..<100 where model.runtimeRepairRequired {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -2789,6 +2789,24 @@ final class AppModelTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
         }
+
+        let extendedEnvelope = Data(
+            #"{"schemaVersion":1,"requestId":"req","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":"ok","warnings":[],"error":null,"futureField":true}"#.utf8
+        )
+        XCTAssertThrowsError(
+            try MSWProtocolDecoder.decodeEnvelope(extendedEnvelope, as: String.self, expectedCommand: "handshake")
+        ) { error in
+            XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
+        }
+
+        let nullWarnings = Data(
+            #"{"schemaVersion":1,"requestId":"req","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":"ok","warnings":null,"error":null}"#.utf8
+        )
+        XCTAssertThrowsError(
+            try MSWProtocolDecoder.decodeEnvelope(nullWarnings, as: String.self, expectedCommand: "handshake")
+        ) { error in
+            XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
+        }
     }
 
     func testProtocolRedactorRemovesBearerTokenAndCredentialURL() {
@@ -3289,6 +3307,36 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertThrowsError(try ToolchainValidator.validateBundled(root: temporary)) { error in
             XCTAssertEqual(error as? ToolchainInstallerError, .checksumMismatch("bin/msw"))
+        }
+    }
+
+    func testBundledToolchainRejectsAReplacementPayloadDirectorySymlink() throws {
+        let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-toolchain-symlink-\(UUID().uuidString)", isDirectory: true)
+        let externalPayload = temporary.appendingPathComponent("external-payload", isDirectory: true)
+        let candidate = temporary.appendingPathComponent("candidate", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: bundledRoot.appendingPathComponent(ToolchainLayout.payloadDirectoryName),
+            to: externalPayload
+        )
+        try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: bundledRoot.appendingPathComponent(ToolchainLayout.manifestName),
+            to: candidate.appendingPathComponent(ToolchainLayout.manifestName)
+        )
+        try FileManager.default.createSymbolicLink(
+            at: candidate.appendingPathComponent(ToolchainLayout.payloadDirectoryName),
+            withDestinationURL: externalPayload
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        XCTAssertThrowsError(try ToolchainValidator.validateBundled(root: candidate)) { error in
+            XCTAssertEqual(
+                error as? ToolchainInstallerError,
+                .invalidPermissions(ToolchainLayout.payloadDirectoryName)
+            )
         }
     }
 

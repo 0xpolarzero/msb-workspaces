@@ -1101,13 +1101,14 @@ final class AppModel {
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
             await self?.refreshRuntimeRepairState()
+            guard self?.runtimeRepairRequired == false else { return }
             _ = await self?.refreshRemote(generation: generation)
         }
     }
 
-    /// Re-negotiates the resolved runtime without invoking a backup command.
-    /// Startup and polling use the resolver cache; Setup success forces a new
-    /// resolution so a repaired managed runtime is visible immediately.
+    /// Revalidates the resolved runtime without invoking a backup command.
+    /// Startup and polling use the resolver cache; dedicated repair success
+    /// forces a new resolution so the verified managed runtime is visible.
     func refreshRuntimeRepairState(forceRefresh: Bool = false) async {
         guard let client else { return }
         runtimeRepairRefreshGeneration &+= 1
@@ -1142,10 +1143,6 @@ final class AppModel {
         }
     }
 
-    func setupRepairDidSucceed() {
-        runtimeRepairDidSucceed()
-    }
-
     func setPollingVisible(_ visible: Bool) {
         pollingTask?.cancel()
         pollingTask = nil
@@ -1155,8 +1152,10 @@ final class AppModel {
         let interval: Duration = visible ? .seconds(5) : .seconds(hiddenCadence)
         pollingTask = Task { [weak self] in
             await self?.refreshRuntimeRepairState()
-            await self?.refreshRemote()
-            await self?.refreshBackupOperations()
+            if self?.runtimeRepairRequired == false {
+                await self?.refreshRemote()
+                await self?.refreshBackupOperations()
+            }
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: interval)
@@ -1165,8 +1164,10 @@ final class AppModel {
                 }
                 guard !Task.isCancelled else { break }
                 await self?.refreshRuntimeRepairState(forceRefresh: true)
-                await self?.refreshRemote()
-                await self?.refreshBackupOperations()
+                if self?.runtimeRepairRequired == false {
+                    await self?.refreshRemote()
+                    await self?.refreshBackupOperations()
+                }
             }
         }
     }

@@ -84,8 +84,8 @@ changes, use the focused flow so onboarding is not replayed:
 app/MSWMonitor/Scripts/smoke-test.sh --monitor-only
 ```
 
-For the centralized runtime-repair warning, Setup action, and compatible-state
-cutover across the status item, popover, and unified-window tabs, use:
+For the centralized runtime-repair warning, dedicated repair action, and
+verified-state cutover across the status item, popover, and unified-window tabs, use:
 
 ```bash
 app/MSWMonitor/Scripts/smoke-test.sh --repair-only
@@ -395,7 +395,7 @@ unredacted system logs.
 - The scripts use filtered targets: `test.sh` runs only `MSWMonitorTests`;
   `smoke-test.sh` runs `MSWMonitorUITests`; `--monitor-only` runs
   `testStatusItemMinimalPopoverAndQuit()`; `--repair-only` runs
-  `testGlobalRuntimeRepairStateClearsEverySurfaceAfterSetupRepair()`;
+  `testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation()`;
   `--picker-only` runs
   `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs
   `testApplicationPreferencesUpdateWorkspaceActions()`; `--navigation-only`

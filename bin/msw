@@ -4801,7 +4801,7 @@ cmd_backup() {
     (( ${#paths[@]} > 0 )) || fatal "nothing to back up"
 
     {
-      printf 'MSW version: %s\n' "$MSW_VERSION"
+      printf 'MSW version: %s\n' "$MSW_CLI_VERSION"
       printf 'Created UTC: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       printf 'MicroSandbox: '
       "$MSB_BIN" --version 2>/dev/null || true
@@ -8598,7 +8598,7 @@ main() {
   local command="${1:-help}"
   shift || true
   case "$command" in
-    version|--version|-V) printf 'msw %s\n' "$MSW_VERSION"; return ;;
+    version|--version|-V) printf 'msw %s\n' "$MSW_CLI_VERSION"; return ;;
     help|--help|-h) show_help; return ;;
     docs) (( $# <= 1 )) || fatal "usage: msw docs [cheatsheet|setup|github|tests]"; cmd_docs "${1:-cheatsheet}"; return ;;
     app) cmd_app "$@"; return ;;

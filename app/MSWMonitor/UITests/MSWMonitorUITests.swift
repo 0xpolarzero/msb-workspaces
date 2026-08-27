@@ -44,7 +44,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
 
-    func testGlobalRuntimeRepairStateClearsEverySurfaceAfterSetupRepair() {
+    func testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation() {
         let app = launchFixture([
             "--ui-test-open-popover",
             "--ui-test-runtime-repair"

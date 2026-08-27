@@ -126,6 +126,10 @@ enum ToolchainValidator {
         payloadRoot: URL,
         manifestInsidePayload: Bool
     ) throws -> ValidatedToolchain {
+        try validateDirectory(manifestURL.deletingLastPathComponent())
+        if payloadRoot.standardizedFileURL != manifestURL.deletingLastPathComponent().standardizedFileURL {
+            try validateDirectory(payloadRoot)
+        }
         let manifestData = try readRegularFile(manifestURL, maximumBytes: 2 * 1_024 * 1_024)
         let manifestPermissions = ((try? FileManager.default.attributesOfItem(atPath: manifestURL.path)[.posixPermissions]) as? NSNumber)?.intValue ?? -1
         guard manifestPermissions & 0o777 == 0o644 else {
@@ -200,13 +204,21 @@ enum ToolchainValidator {
         let process = Process()
         process.executableURL = toolchain.executable
         process.arguments = ["app", "handshake", "--format", "json"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
         let temporaryHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("MSWMonitor-Handshake-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryHome, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporaryHome) }
+        let outputURL = temporaryHome.appendingPathComponent("stdout.json")
+        guard FileManager.default.createFile(
+            atPath: outputURL.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600]
+        ), let output = try? FileHandle(forWritingTo: outputURL) else {
+            throw ToolchainInstallerError.handshakeFailed
+        }
+        defer { try? output.close() }
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
         process.environment = [
             "HOME": temporaryHome.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -214,15 +226,29 @@ enum ToolchainValidator {
             "LANG": "C",
             "NO_COLOR": "1"
         ]
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             throw ToolchainInstallerError.handshakeFailed
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard terminated.wait(timeout: .now() + .seconds(5)) == .success else {
+            Darwin.kill(process.processIdentifier, SIGTERM)
+            if terminated.wait(timeout: .now() + .milliseconds(250)) == .timedOut {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+                _ = terminated.wait(timeout: .now() + .seconds(1))
+            }
+            throw ToolchainInstallerError.handshakeFailed
+        }
+        try? output.close()
+        let data: Data
+        do {
+            data = try readRegularFile(outputURL, maximumBytes: 256 * 1_024)
+        } catch {
+            throw ToolchainInstallerError.handshakeFailed
+        }
         guard process.terminationReason == .exit, process.terminationStatus == 0,
-              data.count <= 256 * 1_024,
               let envelope = try? MSWProtocolDecoder.decodeStrictHandshake(data),
               let handshake = envelope.result,
               handshake.protocolVersion == 1,
@@ -244,6 +270,16 @@ enum ToolchainValidator {
             throw ToolchainInstallerError.unsafeArtifact(url.lastPathComponent)
         }
         return try Data(contentsOf: url, options: [.mappedIfSafe])
+    }
+
+    private static func validateDirectory(_ url: URL) throws {
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        let permissions = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber)?.intValue ?? -1
+        guard values.isDirectory == true,
+              values.isSymbolicLink != true,
+              permissions & 0o777 == 0o755 else {
+            throw ToolchainInstallerError.invalidPermissions(url.lastPathComponent)
+        }
     }
 
     private static func validatePayloadEntries(
@@ -322,12 +358,20 @@ actor ToolchainInstaller {
         try ToolchainValidator.verifyHandshake(bundled)
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: installationRoot, withIntermediateDirectories: true)
+        let installationValues = try installationRoot.resourceValues(forKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey
+        ])
+        guard installationValues.isDirectory == true,
+              installationValues.isSymbolicLink != true else {
+            throw ToolchainInstallerError.installFailed
+        }
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: installationRoot.path)
 
         let staging = installationRoot.appendingPathComponent(".staging-\(UUID().uuidString)", isDirectory: true)
         let current = installationRoot.appendingPathComponent("current", isDirectory: true)
         do {
             try fileManager.createDirectory(at: staging, withIntermediateDirectories: true)
+            try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staging.path)
             for artifact in bundled.manifest.artifacts {
                 let source = bundledRoot
                     .appendingPathComponent(ToolchainLayout.payloadDirectoryName, isDirectory: true)
@@ -337,6 +381,11 @@ actor ToolchainInstaller {
                     at: destination.deletingLastPathComponent(),
                     withIntermediateDirectories: true
                 )
+                var directory = destination.deletingLastPathComponent()
+                while directory.standardizedFileURL != staging.standardizedFileURL {
+                    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+                    directory.deleteLastPathComponent()
+                }
                 let data = try Data(contentsOf: source, options: [.mappedIfSafe])
                 try data.write(to: destination, options: .withoutOverwriting)
                 try fileManager.setAttributes(

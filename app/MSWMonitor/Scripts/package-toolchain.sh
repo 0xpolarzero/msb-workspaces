@@ -51,6 +51,14 @@ for relative in $artifacts; do
     print -u2 "required bundled MSW artifact is absent or unsafe: $relative"
     exit 1
   fi
+  if [[ $relative != MANIFEST.txt ]]; then
+    expected=$(/usr/bin/awk -v path="$relative" '$2 == path {print $1}' $REPOSITORY_ROOT/MANIFEST.txt)
+    actual=$(/usr/bin/shasum -a 256 $source | /usr/bin/awk '{print $1}')
+    if [[ ! $expected =~ '^[0-9a-f]{64}$' || $actual != $expected ]]; then
+      print -u2 "repository manifest integrity failed for bundled artifact: $relative"
+      exit 1
+    fi
+  fi
 done
 
 version=$(/bin/cat $REPOSITORY_ROOT/VERSION)
@@ -87,6 +95,7 @@ done
 
 print -r -- "{\"schemaVersion\":1,\"version\":\"$version\",\"artifacts\":[$entries]}" >$MANIFEST
 /bin/chmod 0644 $MANIFEST
+/usr/bin/find $OUTPUT_ROOT -type d -exec /bin/chmod 0755 {} +
 
 # Verify the serialized manifest and every copied hash before Xcode signs the
 # completed app. Missing inputs and packaging drift fail the build phase.

@@ -16,7 +16,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testStatusItemMinimalPopoverAndQuit"
     ;;
   --repair-only)
-    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testGlobalRuntimeRepairStateClearsEverySurfaceAfterSetupRepair"
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation"
     ;;
   --picker-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDirectFolderPickerFromStatusPopover"

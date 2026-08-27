@@ -22,7 +22,7 @@ private func requireExactKeys<Key: CodingKey & CaseIterable>(
     // A container keyed by the concrete CodingKeys enum silently omits keys
     // that the enum does not know about. Inspect through a dynamic key first
     // so future fields are rejected instead of being mistaken for the current
-    // canonical backup contract.
+    // canonical protocol contract.
     let container = try decoder.container(keyedBy: MSWAnyCodingKey.self)
     let actual = Set(container.allKeys.map(\.stringValue))
     let expected = Set(Key.allCases.map(\.stringValue))
@@ -224,6 +224,7 @@ struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
         requestId = try container.decode(String.self, forKey: .requestId)
@@ -231,11 +232,35 @@ struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
         command = try container.decode(String.self, forKey: .command)
         observedAt = try container.decodeIfPresent(Date.self, forKey: .observedAt)
         result = try container.decodeIfPresent(Value.self, forKey: .result)
-        warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        warnings = try container.decode([String].self, forKey: .warnings)
         error = try container.decodeIfPresent(MSWProtocolError.self, forKey: .error)
     }
 
-    private enum CodingKeys: String, CodingKey {
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(ok, forKey: .ok)
+        try container.encode(command, forKey: .command)
+        if let observedAt {
+            try container.encode(observedAt, forKey: .observedAt)
+        } else {
+            try container.encodeNil(forKey: .observedAt)
+        }
+        if let result {
+            try container.encode(result, forKey: .result)
+        } else {
+            try container.encodeNil(forKey: .result)
+        }
+        try container.encode(warnings, forKey: .warnings)
+        if let error {
+            try container.encode(error, forKey: .error)
+        } else {
+            try container.encodeNil(forKey: .error)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion, requestId, ok, command, observedAt, result, warnings, error
     }
 }
@@ -246,6 +271,51 @@ struct MSWProtocolError: Codable, Error, LocalizedError, Sendable, Equatable {
     let recovery: String?
     let workspace: String?
     let retryable: Bool
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case code, message, recovery, workspace, retryable
+    }
+
+    init(
+        code: String,
+        message: String,
+        recovery: String?,
+        workspace: String?,
+        retryable: Bool
+    ) {
+        self.code = code
+        self.message = message
+        self.recovery = recovery
+        self.workspace = workspace
+        self.retryable = retryable
+    }
+
+    init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decode(String.self, forKey: .code)
+        message = try container.decode(String.self, forKey: .message)
+        recovery = try container.decodeIfPresent(String.self, forKey: .recovery)
+        workspace = try container.decodeIfPresent(String.self, forKey: .workspace)
+        retryable = try container.decode(Bool.self, forKey: .retryable)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(code, forKey: .code)
+        try container.encode(message, forKey: .message)
+        if let recovery {
+            try container.encode(recovery, forKey: .recovery)
+        } else {
+            try container.encodeNil(forKey: .recovery)
+        }
+        if let workspace {
+            try container.encode(workspace, forKey: .workspace)
+        } else {
+            try container.encodeNil(forKey: .workspace)
+        }
+        try container.encode(retryable, forKey: .retryable)
+    }
 
     var errorDescription: String? {
         var description = message
