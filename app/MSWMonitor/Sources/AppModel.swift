@@ -1721,7 +1721,10 @@ final class AppModel {
         } catch {
             guard !Task.isCancelled,
                   generation == refreshGeneration,
-                  requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
+                  requestSequence > lastAppliedStateRefreshSequence,
+                  !shouldRejectLifecycleObservation(
+                    observationGeneration: requestSequence
+                  ) else { return .superseded }
             if hasPendingLifecycleVerification {
                 // A successful lifecycle command can temporarily outlive the
                 // host agent that serves state. Keep the command-owned
@@ -2640,17 +2643,12 @@ final class AppModel {
                     guard let self,
                           let ownership,
                           self.ownsLifecycleOperation(ownership, workspace: id.rawValue) else { return }
-                    self.markOperationVerifying(
-                        kind: .lifecycle,
-                        workspace: id.rawValue,
-                        message: "\(result.result.outcome) Verifying with a fresh state observation."
-                    )
-                    self.lifecycleVerifications[id.rawValue] = LifecycleVerification(
-                        operationID: ownership.operationID,
-                        operationGeneration: ownership.generation,
+                    self.beginLifecycleVerification(
+                        ownership,
                         action: action,
+                        workspace: id,
                         minimumObservedAt: result.observedAt ?? operationStartedAt,
-                        commandBoundaryObservationGeneration: self.stateRefreshSequence
+                        message: "\(result.result.outcome) Verifying with a fresh state observation."
                     )
                 }
                 guard let ownership else { return }
@@ -2674,6 +2672,18 @@ final class AppModel {
                         )
                         self.lastError = nil
                     }
+                    return
+                }
+                if case .unreconciled = error,
+                   let ownership,
+                   await self?.beginLifecycleVerification(
+                    ownership,
+                    action: action,
+                    workspace: id,
+                    minimumObservedAt: operationStartedAt,
+                    message: "The lifecycle command completed without final reconciliation. Verifying with fresh state observations."
+                   ) == true {
+                    await self?.verifyLifecycle(ownership, action: action, workspace: id)
                     return
                 }
                 let failureWasRecorded = await MainActor.run {
@@ -2726,6 +2736,18 @@ final class AppModel {
                 await self?.append(activity)
                 await self?.refreshRemote()
             } catch {
+                if Self.protocolFailure(error, hasCode: "MSW_RECONCILE_PENDING"),
+                   let ownership,
+                   await self?.beginLifecycleVerification(
+                    ownership,
+                    action: action,
+                    workspace: id,
+                    minimumObservedAt: operationStartedAt,
+                    message: "The lifecycle command completed before readiness was observable. Verifying with fresh state observations."
+                   ) == true {
+                    await self?.verifyLifecycle(ownership, action: action, workspace: id)
+                    return
+                }
                 let failureWasRecorded = await MainActor.run {
                     guard let self else { return false }
                     if isPlanning {
@@ -2779,6 +2801,30 @@ final class AppModel {
         }
     }
 
+    @discardableResult
+    private func beginLifecycleVerification(
+        _ ownership: LifecycleOperationOwnership,
+        action: MSWLifecycleAction,
+        workspace id: Workspace.ID,
+        minimumObservedAt: Date,
+        message: String
+    ) -> Bool {
+        guard ownsLifecycleOperation(ownership, workspace: id.rawValue) else { return false }
+        markOperationVerifying(
+            kind: .lifecycle,
+            workspace: id.rawValue,
+            message: message
+        )
+        lifecycleVerifications[id.rawValue] = LifecycleVerification(
+            operationID: ownership.operationID,
+            operationGeneration: ownership.generation,
+            action: action,
+            minimumObservedAt: minimumObservedAt,
+            commandBoundaryObservationGeneration: stateRefreshSequence
+        )
+        return true
+    }
+
     private func runLifecycleFixture(
         _ action: MSWLifecycleAction,
         id: Workspace.ID,
@@ -2821,16 +2867,11 @@ final class AppModel {
         let commandObservedAt = lifecycleNow()
         lifecycleUITestAction = action
         lifecycleUITestObservationIndex = 0
-        lifecycleVerifications[id.rawValue] = LifecycleVerification(
-            operationID: ownership.operationID,
-            operationGeneration: ownership.generation,
+        beginLifecycleVerification(
+            ownership,
             action: action,
+            workspace: id,
             minimumObservedAt: commandObservedAt,
-            commandBoundaryObservationGeneration: stateRefreshSequence
-        )
-        markOperationVerifying(
-            kind: .lifecycle,
-            workspace: id.rawValue,
             message: "The deterministic command succeeded. Verifying with a fresh state observation."
         )
         Task { [weak self] in
@@ -3397,8 +3438,7 @@ final class AppModel {
             guard let operation = operationStates[
                 operationKey(kind: .lifecycle, workspace: workspace)
             ],
-            operation.id == ownership.operationID,
-            operation.outcome == .pending else {
+            operation.id == ownership.operationID else {
                 return false
             }
             guard let verification = lifecycleVerifications[workspace],
@@ -3406,7 +3446,7 @@ final class AppModel {
                   verification.operationGeneration == ownership.generation else {
                 // Until the typed command returns, no state request can prove
                 // that it observed the command boundary.
-                return true
+                return operation.outcome == .pending
             }
             return observationGeneration <= verification.commandBoundaryObservationGeneration
         }

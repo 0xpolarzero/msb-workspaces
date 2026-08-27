@@ -1963,6 +1963,98 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.lastError)
     }
 
+    func testPreCommandFailureCannotMarkTimedOutRestartStateStale() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0.3),
+                (.stopped, baseline.addingTimeInterval(2), 0),
+                (.running, baseline.addingTimeInterval(3), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [],
+            failingObservationIndices: [0, 1],
+            applyDelay: 0.1
+        )
+
+        await model.refreshRemote()
+        let preCommandRefresh = Task { await model.refreshRemote() }
+        try await Task.sleep(for: .milliseconds(30))
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let timedOut = try await waitForLifecycleCompletion(in: model)
+        let timeoutNotice = try XCTUnwrap(model.latestOperationFailure)
+        await preCommandRefresh.value
+
+        XCTAssertEqual(timedOut.outcome, .unknown)
+        XCTAssertEqual(model.latestOperationFailure, timeoutNotice)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.freshness, .fresh)
+        XCTAssertNil(model.lastError)
+        XCTAssertFalse(model.activities.contains { $0.title == "Refresh failed" })
+
+        await model.refreshRemote()
+
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNil(model.latestOperationFailure)
+    }
+
+    func testReconcilePendingRestartEventuallyAcceptsFreshRunningState() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(20)],
+            applyFailure: MSWProtocolError(
+                code: "MSW_RECONCILE_PENDING",
+                message: "The lifecycle operation completed without a matching fresh state observation.",
+                recovery: "Refresh after checking the workspace runtime; MSW did not claim final state.",
+                workspace: "dev",
+                retryable: true
+            )
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNil(model.latestOperationFailure)
+        XCTAssertNil(model.lastError)
+        XCTAssertFalse(model.activities.contains { $0.title == "Restart failed" })
+    }
+
+    func testUnreconciledReceiptEventuallyAcceptsFreshRunningState() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(20)],
+            applyReconciled: false
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNil(model.latestOperationFailure)
+        XCTAssertFalse(model.activities.contains { $0.title == "Restart failed" })
+    }
+
     func testGenuineRestartCommandFailureStaysFailed() async throws {
         let baseline = Date().addingTimeInterval(5)
         let model = try makeLifecycleVerificationModel(
@@ -3849,6 +3941,7 @@ final class AppModelTests: XCTestCase {
         observationStatusObservedAts: [Date]? = nil,
         failingObservationIndices: Set<Int> = [],
         applyFailure: MSWProtocolError? = nil,
+        applyReconciled: Bool = true,
         applyDelay: Double = 0
     ) throws -> AppModel {
         let temporary = FileManager.default.temporaryDirectory
@@ -3896,7 +3989,7 @@ final class AppModelTests: XCTestCase {
                 ? MSWApplyResult(
                     workspace: "dev",
                     action: action.rawValue,
-                    reconciled: true,
+                    reconciled: applyReconciled,
                     outcome: "\(action.rawValue.capitalized) applied."
                 )
                 : nil,

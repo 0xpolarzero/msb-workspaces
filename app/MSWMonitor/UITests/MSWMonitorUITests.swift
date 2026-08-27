@@ -951,11 +951,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(
             XCTWaiter.wait(
                 for: [XCTNSPredicateExpectation(
-                    predicate: NSPredicate(
-                        format: "value == %@ OR value == %@",
-                        "Restarting",
-                        "Stopped"
-                    ),
+                    predicate: NSPredicate(format: "value == %@", "Stopped"),
                     object: state
                 )],
                 timeout: 2
@@ -974,6 +970,8 @@ final class MSWMonitorUITests: XCTestCase {
             .completed
         )
         XCTAssertFalse(window.descendants(matching: .any)["workspace.dev.summary-error"].exists)
+        XCTAssertFalse(transition.exists)
+        XCTAssertFalse(app.descendants(matching: .any)["lifecycle.failure.summary"].exists)
         app.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
