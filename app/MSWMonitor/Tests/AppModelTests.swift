@@ -1788,6 +1788,132 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(model.lastError)
     }
 
+    func testRestartSuccessWithUnavailableStateRemainsNonErrorVerifying() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [(.stopped, baseline.addingTimeInterval(1), 0.2)],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(50)],
+            failingObservationIndices: [0]
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        for _ in 0..<80 {
+            if model.operationStates["lifecycle:dev"]?.phase == .verifying { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .pending)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .restarting)
+        XCTAssertNil(model.latestOperationFailure)
+        XCTAssertNil(model.lastError)
+        _ = try await waitForLifecycleCompletion(in: model)
+    }
+
+    func testFreshRunningAfterDeadlineReconcilesTimeoutAndClearsErrors() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: []
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let timedOut = try await waitForLifecycleCompletion(in: model)
+        XCTAssertEqual(timedOut.outcome, .unknown)
+        XCTAssertNotNil(model.latestOperationFailure)
+
+        await model.refreshRemote()
+
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNil(model.latestOperationFailure)
+        XCTAssertNil(model.lastError)
+    }
+
+    func testSameSecondPostCommandObservationUsesNewerAppGeneration() async throws {
+        let baseline = Date(
+            timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 5
+        )
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [(.running, baseline, 0)],
+            applyObservedAt: baseline,
+            delays: []
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNil(model.latestOperationFailure)
+    }
+
+    func testPreCommandInFlightRunningCannotReconcileRestart() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.running, baseline.addingTimeInterval(2), 0.25),
+                (.stopped, baseline.addingTimeInterval(1), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [],
+            failingObservationIndices: [1]
+        )
+
+        await model.refreshRemote()
+        let preCommandRefresh = Task { await model.refreshRemote() }
+        try await Task.sleep(for: .milliseconds(30))
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+        await preCommandRefresh.value
+
+        XCTAssertEqual(operation.outcome, .unknown)
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .unknown)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .restarting)
+        XCTAssertNotEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertNotNil(model.latestOperationFailure)
+    }
+
+    func testGenuineRestartCommandFailureStaysFailed() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [(.running, baseline.addingTimeInterval(1), 0)],
+            applyObservedAt: baseline,
+            delays: [],
+            applyFailure: MSWProtocolError(
+                code: "MSW_OPERATION_FAILED",
+                message: "The restart command failed.",
+                recovery: "Repair the runtime and retry.",
+                workspace: "dev",
+                retryable: true
+            )
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .failed)
+        XCTAssertEqual(model.latestOperationFailure?.reason, "The restart command failed.")
+    }
+
     func testRepairInvalidatesResolutionAndSelectsOnlyActivatedRuntime() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-managed-runtime-resolution-\(UUID().uuidString)", isDirectory: true)
@@ -3647,7 +3773,8 @@ final class AppModelTests: XCTestCase {
         applyObservedAt: Date,
         delays: [Duration],
         observationStatusObservedAts: [Date]? = nil,
-        failingObservationIndices: Set<Int> = []
+        failingObservationIndices: Set<Int> = [],
+        applyFailure: MSWProtocolError? = nil
     ) throws -> AppModel {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
@@ -3684,19 +3811,25 @@ final class AppModelTests: XCTestCase {
             observedAt: applyObservedAt,
             result: plan
         )).write(to: temporary.appendingPathComponent("plan.json"))
-        try encoder.encode(MSWEnvelope(
+        let applyEnvelope = MSWEnvelope<MSWApplyResult>(
             schemaVersion: 1,
             requestId: "apply-\(action.rawValue)",
-            ok: true,
+            ok: applyFailure == nil,
             command: "apply",
-            observedAt: applyObservedAt,
-            result: MSWApplyResult(
-                workspace: "dev",
-                action: action.rawValue,
-                reconciled: true,
-                outcome: "\(action.rawValue.capitalized) applied."
-            )
-        )).write(to: temporary.appendingPathComponent("apply.json"))
+            observedAt: applyFailure == nil ? applyObservedAt : nil,
+            result: applyFailure == nil
+                ? MSWApplyResult(
+                    workspace: "dev",
+                    action: action.rawValue,
+                    reconciled: true,
+                    outcome: "\(action.rawValue.capitalized) applied."
+                )
+                : nil,
+            error: applyFailure
+        )
+        try encoder.encode(applyEnvelope).write(
+            to: temporary.appendingPathComponent("apply.json")
+        )
         try Data("0\n".utf8).write(to: temporary.appendingPathComponent("state-count"))
 
         let lastResponse = responses.count

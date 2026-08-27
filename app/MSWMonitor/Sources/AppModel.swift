@@ -835,8 +835,16 @@ final class AppModel {
     }
 
     private struct LifecycleVerification {
+        let operationID: UUID
+        let operationGeneration: Int
         let action: MSWLifecycleAction
         let minimumObservedAt: Date
+        let commandBoundaryObservationGeneration: Int
+    }
+
+    private struct LifecycleOperationOwnership {
+        let operationID: UUID
+        let generation: Int
     }
     enum BackupUITestResultScenario: Equatable {
         case running
@@ -914,6 +922,8 @@ final class AppModel {
     private var stateRefreshSequence = 0
     private var lastAppliedStateRefreshSequence = 0
     private var lifecycleVerifications: [String: LifecycleVerification] = [:]
+    private var lifecycleOperationOwners: [String: LifecycleOperationOwnership] = [:]
+    private var lifecycleOperationGeneration = 0
     private let lifecycleVerificationDelays: [Duration]
     private let lifecycleNow: @Sendable () -> Date
     private var consecutiveRefreshFailures = 0
@@ -1667,15 +1677,21 @@ final class AppModel {
             guard !Task.isCancelled,
                   generation == refreshGeneration else { return .superseded }
             guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
+            guard requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
+            guard !isPreCommandLifecycleObservation(
+                observationGeneration: requestSequence
+            ) else { return .superseded }
             if let observedAt = response.observedAt,
                let lastObservedAt,
-               observedAt <= lastObservedAt {
-                if observedAt < lastObservedAt || requestSequence <= lastAppliedStateRefreshSequence {
-                    return .superseded
-                }
+               observedAt < lastObservedAt {
+                return .superseded
             }
             let previousWorkspaces = workspaces
-            let reconciledOperations = apply(state: state, observedAt: response.observedAt)
+            let reconciledOperations = apply(
+                state: state,
+                observedAt: response.observedAt,
+                observationGeneration: requestSequence
+            )
             lastAppliedStateRefreshSequence = requestSequence
             let stateChanged = workspaces != previousWorkspaces
             if lastError != nil {
@@ -1706,6 +1722,14 @@ final class AppModel {
             guard !Task.isCancelled,
                   generation == refreshGeneration,
                   requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
+            if hasOwnedLifecycleVerification {
+                // A successful lifecycle command can temporarily outlive the
+                // host agent that serves state. Keep the command-owned
+                // transition visible and non-error while verification retries.
+                lastError = nil
+                lastRecovery = nil
+                return .failed
+            }
             noteRuntimeRepairFailure(error)
             lastError = error.localizedDescription
             lastRecovery = recoveryContext(for: error, fallbackRecovery: "Retry the observation or run diagnostics.")
@@ -2583,13 +2607,21 @@ final class AppModel {
 
         let isPlanning = action != .start && confirmation == nil
         let operationStartedAt = lifecycleNow()
+        var ownership: LifecycleOperationOwnership?
         if !isPlanning {
-            beginOperation(
+            let operationID = beginOperation(
                 kind: .lifecycle,
                 workspace: id.rawValue,
                 action: action.rawValue,
                 message: "Applying the reviewed operation."
             )
+            lifecycleOperationGeneration &+= 1
+            let currentOwnership = LifecycleOperationOwnership(
+                operationID: operationID,
+                generation: lifecycleOperationGeneration
+            )
+            lifecycleOperationOwners[id.rawValue] = currentOwnership
+            ownership = currentOwnership
             updateState(
                 id,
                 to: action == .start ? .starting : action == .stop ? .stopping : .restarting
@@ -2605,19 +2637,24 @@ final class AppModel {
                     reviewedPlan: reviewedPlan
                 )
                 await MainActor.run {
-                    guard let self else { return }
+                    guard let self,
+                          let ownership,
+                          self.ownsLifecycleOperation(ownership, workspace: id.rawValue) else { return }
                     self.markOperationVerifying(
                         kind: .lifecycle,
                         workspace: id.rawValue,
                         message: "\(result.result.outcome) Verifying with a fresh state observation."
                     )
-                    let minimumObservedAt = max(operationStartedAt, result.observedAt ?? operationStartedAt)
                     self.lifecycleVerifications[id.rawValue] = LifecycleVerification(
+                        operationID: ownership.operationID,
+                        operationGeneration: ownership.generation,
                         action: action,
-                        minimumObservedAt: minimumObservedAt
+                        minimumObservedAt: result.observedAt ?? operationStartedAt,
+                        commandBoundaryObservationGeneration: self.stateRefreshSequence
                     )
                 }
-                await self?.verifyLifecycle(action, workspace: id)
+                guard let ownership else { return }
+                await self?.verifyLifecycle(ownership, action: action, workspace: id)
             } catch let error as MSWOperationCoordinator.CoordinatorError {
                 if case let .confirmationRequired(plan) = error {
                     await MainActor.run {
@@ -2639,23 +2676,44 @@ final class AppModel {
                     }
                     return
                 }
-                await MainActor.run {
-                    self?.lastError = error.localizedDescription
-                    self?.lastRecovery = self?.recoveryContext(
+                let failureWasRecorded = await MainActor.run {
+                    guard let self else { return false }
+                    if isPlanning {
+                        self.lastError = error.localizedDescription
+                        self.lastRecovery = self.recoveryContext(
+                            for: error,
+                            workspace: id.rawValue,
+                            fallbackRecovery: "Refresh state before retrying."
+                        )
+                        self.failOperation(
+                            kind: .lifecycle,
+                            workspace: id.rawValue,
+                            action: action.rawValue,
+                            error: error
+                        )
+                        return true
+                    }
+                    guard let ownership,
+                          self.ownsLifecycleOperation(ownership, workspace: id.rawValue) else { return false }
+                    self.lastError = error.localizedDescription
+                    self.lastRecovery = self.recoveryContext(
                         for: error,
                         workspace: id.rawValue,
                         fallbackRecovery: "Refresh state before retrying."
                     )
                     if !isPlanning {
-                        self?.updateState(id, to: .unknown)
+                        self.updateState(id, to: .unknown)
                     }
-                    self?.failOperation(
+                    self.failOperation(
                         kind: .lifecycle,
                         workspace: id.rawValue,
                         action: action.rawValue,
-                        error: error
+                        error: error,
+                        expectedOperationID: ownership.operationID
                     )
+                    return true
                 }
+                guard failureWasRecorded else { return }
                 let activity = MSWActivity(
                     id: UUID(),
                     createdAt: Date(),
@@ -2668,23 +2726,44 @@ final class AppModel {
                 await self?.append(activity)
                 await self?.refreshRemote()
             } catch {
-                await MainActor.run {
-                    self?.lastError = error.localizedDescription
-                    self?.lastRecovery = self?.recoveryContext(
+                let failureWasRecorded = await MainActor.run {
+                    guard let self else { return false }
+                    if isPlanning {
+                        self.lastError = error.localizedDescription
+                        self.lastRecovery = self.recoveryContext(
+                            for: error,
+                            workspace: id.rawValue,
+                            fallbackRecovery: "Refresh state before retrying."
+                        )
+                        self.failOperation(
+                            kind: .lifecycle,
+                            workspace: id.rawValue,
+                            action: action.rawValue,
+                            error: error
+                        )
+                        return true
+                    }
+                    guard let ownership,
+                          self.ownsLifecycleOperation(ownership, workspace: id.rawValue) else { return false }
+                    self.lastError = error.localizedDescription
+                    self.lastRecovery = self.recoveryContext(
                         for: error,
                         workspace: id.rawValue,
                         fallbackRecovery: "Refresh state before retrying."
                     )
                     if !isPlanning {
-                        self?.updateState(id, to: .unknown)
+                        self.updateState(id, to: .unknown)
                     }
-                    self?.failOperation(
+                    self.failOperation(
                         kind: .lifecycle,
                         workspace: id.rawValue,
                         action: action.rawValue,
-                        error: error
+                        error: error,
+                        expectedOperationID: ownership.operationID
                     )
+                    return true
                 }
+                guard failureWasRecorded else { return }
                 let activity = MSWActivity(
                     id: UUID(),
                     createdAt: Date(),
@@ -2726,19 +2805,28 @@ final class AppModel {
             lastError = "The lifecycle fixture confirmation was invalid."
             return
         }
-        beginOperation(
+        let operationID = beginOperation(
             kind: .lifecycle,
             workspace: id.rawValue,
             action: action.rawValue,
             message: "Applying the reviewed operation."
         )
+        lifecycleOperationGeneration &+= 1
+        let ownership = LifecycleOperationOwnership(
+            operationID: operationID,
+            generation: lifecycleOperationGeneration
+        )
+        lifecycleOperationOwners[id.rawValue] = ownership
         updateState(id, to: action == .start ? .starting : action == .stop ? .stopping : .restarting)
         let commandObservedAt = lifecycleNow()
         lifecycleUITestAction = action
         lifecycleUITestObservationIndex = 0
         lifecycleVerifications[id.rawValue] = LifecycleVerification(
+            operationID: ownership.operationID,
+            operationGeneration: ownership.generation,
             action: action,
-            minimumObservedAt: commandObservedAt
+            minimumObservedAt: commandObservedAt,
+            commandBoundaryObservationGeneration: stateRefreshSequence
         )
         markOperationVerifying(
             kind: .lifecycle,
@@ -2746,7 +2834,7 @@ final class AppModel {
             message: "The deterministic command succeeded. Verifying with a fresh state observation."
         )
         Task { [weak self] in
-            await self?.verifyLifecycle(action, workspace: id)
+            await self?.verifyLifecycle(ownership, action: action, workspace: id)
         }
     }
 
@@ -2757,10 +2845,15 @@ final class AppModel {
         }
         let index = lifecycleUITestObservationIndex
         lifecycleUITestObservationIndex += 1
+        stateRefreshSequence &+= 1
+        let observationGeneration = stateRefreshSequence
         do {
-            try await Task.sleep(for: index == 0 ? .milliseconds(120) : .milliseconds(2_400))
+            try await Task.sleep(for: index == 0 ? .milliseconds(120) : .milliseconds(50))
         } catch {
             return .superseded
+        }
+        if action == .restart, index == 0 {
+            return .failed
         }
         let lifecycle: MSWLifecycle
         switch action {
@@ -2769,11 +2862,16 @@ final class AppModel {
         case .stop:
             lifecycle = .stopped
         case .restart:
-            lifecycle = index == 0 ? .stopped : .running
+            lifecycle = index <= lifecycleVerificationDelays.count ? .stopped : .running
         }
         let observedAt = verification.minimumObservedAt.addingTimeInterval(Double(index + 1))
         let state = lifecycleUITestState(devLifecycle: lifecycle, observedAt: observedAt)
-        let reconciled = apply(state: state, observedAt: observedAt)
+        let reconciled = apply(
+            state: state,
+            observedAt: observedAt,
+            observationGeneration: observationGeneration
+        )
+        lastAppliedStateRefreshSequence = observationGeneration
         if reconciled.contains(where: { $0.outcome == .succeeded }) {
             lifecycleUITestAction = nil
         }
@@ -2824,14 +2922,20 @@ final class AppModel {
         return MSWStateResponse(schemaVersion: 1, mswVersion: "ui-test", workspaces: snapshots)
     }
 
-    private func verifyLifecycle(_ action: MSWLifecycleAction, workspace id: Workspace.ID) async {
+    private func verifyLifecycle(
+        _ ownership: LifecycleOperationOwnership,
+        action: MSWLifecycleAction,
+        workspace id: Workspace.ID
+    ) async {
         let attempts = action == .start ? 1 : lifecycleVerificationDelays.count + 1
         for attempt in 0..<attempts {
-            guard operationStates[operationKey(kind: .lifecycle, workspace: id.rawValue)]?.phase == .verifying else {
+            guard ownsLifecycleVerification(ownership, workspace: id.rawValue),
+                  operationStates[operationKey(kind: .lifecycle, workspace: id.rawValue)]?.phase == .verifying else {
                 return
             }
             _ = await refreshRemoteResult()
-            guard operationStates[operationKey(kind: .lifecycle, workspace: id.rawValue)]?.phase == .verifying else {
+            guard ownsLifecycleVerification(ownership, workspace: id.rawValue),
+                  operationStates[operationKey(kind: .lifecycle, workspace: id.rawValue)]?.phase == .verifying else {
                 return
             }
             if attempt < attempts - 1 {
@@ -2842,9 +2946,19 @@ final class AppModel {
                 }
             }
         }
-        guard lifecycleVerifications[id.rawValue] != nil else { return }
+        guard ownsLifecycleVerification(ownership, workspace: id.rawValue) else { return }
         let reason = "Timed out waiting for a fresh \(expectedLifecycleDescription(action)) observation after \(action.rawValue)."
-        markOperationUnknown(key: operationKey(kind: .lifecycle, workspace: id.rawValue), reason: reason)
+        markOperationUnknown(
+            key: operationKey(kind: .lifecycle, workspace: id.rawValue),
+            reason: reason,
+            preserveLifecycleVerification: true
+        )
+        if lifecycleUITestFixtureEnabled {
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(200))
+                _ = await self?.refreshRemoteResult()
+            }
+        }
     }
 
     private func expectedLifecycleDescription(_ action: MSWLifecycleAction) -> String {
@@ -2852,7 +2966,11 @@ final class AppModel {
     }
 
     @discardableResult
-    private func apply(state: MSWStateResponse, observedAt: Date?) -> [MSWOperationState] {
+    private func apply(
+        state: MSWStateResponse,
+        observedAt: Date?,
+        observationGeneration: Int
+    ) -> [MSWOperationState] {
         let previousByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         let hadAuthoritativeObservation = lastObservedAt != nil
         lastObservedAt = observedAt ?? Date()
@@ -2930,7 +3048,13 @@ final class AppModel {
             if let previous = previousByID[id] {
                 if let statusObservedAt = snapshot.statusObservedAt,
                    let previousObservedAt = previous.observedAt,
-                   statusObservedAt <= previousObservedAt {
+                   statusObservedAt <= previousObservedAt,
+                   !isOwnedLifecycleObservation(
+                    workspace: id.rawValue,
+                    envelopeObservedAt: observedAt,
+                    workspaceObservedAt: statusObservedAt,
+                    observationGeneration: observationGeneration
+                   ) {
                     return previous
                 }
                 candidate.observedAt = previous.observedAt
@@ -2994,7 +3118,10 @@ final class AppModel {
             }
         }
         invalidatePendingPlansIfUnsafe()
-        return reconcileVerifyingOperations(observedAt: observedAt)
+        return reconcileLifecycleOperations(
+            observedAt: observedAt,
+            observationGeneration: observationGeneration
+        )
     }
 
     private func updateState(_ id: Workspace.ID, to state: Workspace.State) {
@@ -3084,12 +3211,13 @@ final class AppModel {
         "\(kind.rawValue):\(workspace ?? "all")"
     }
 
+    @discardableResult
     private func beginOperation(
         kind: MSWOperationState.Kind,
         workspace: String?,
         action: String,
         message: String
-    ) {
+    ) -> UUID {
         if kind == .lifecycle,
            latestOperationFailure?.workspace?.rawValue == workspace {
             latestOperationFailure = nil
@@ -3101,13 +3229,15 @@ final class AppModel {
             existing.updatedAt = now
             existing.message = message
             operationStates[key] = existing
-            return
+            return existing.id
         }
+        let operationID = UUID()
         operationStates[key] = MSWOperationState(
-            id: UUID(), kind: kind, workspace: workspace, action: action,
+            id: operationID, kind: kind, workspace: workspace, action: action,
             startedAt: now, updatedAt: now, phase: .running, fraction: nil,
             message: message, outcome: .pending, recovery: nil
         )
+        return operationID
     }
 
     private func updateOperation(
@@ -3175,10 +3305,15 @@ final class AppModel {
         workspace: String?,
         action: String,
         error: Error,
-        notificationKind: MSWNotificationEvent.Kind = .operationFailure
+        notificationKind: MSWNotificationEvent.Kind = .operationFailure,
+        expectedOperationID: UUID? = nil
     ) {
-        noteRuntimeRepairFailure(error)
         let key = operationKey(kind: kind, workspace: workspace)
+        if let expectedOperationID,
+           operationStates[key]?.id != expectedOperationID {
+            return
+        }
+        noteRuntimeRepairFailure(error)
         if operationStates[key] == nil {
             beginOperation(kind: kind, workspace: workspace, action: action, message: error.localizedDescription)
         }
@@ -3224,20 +3359,97 @@ final class AppModel {
         return detail == summaryLine && !hasAdditionalLine ? nil : detail
     }
 
-    private func reconcileVerifyingOperations(observedAt: Date?) -> [MSWOperationState] {
+    private var hasOwnedLifecycleVerification: Bool {
+        lifecycleVerifications.contains { workspace, verification in
+            guard let operation = operationStates[
+                operationKey(kind: .lifecycle, workspace: workspace)
+            ] else { return false }
+            return operation.id == verification.operationID &&
+                lifecycleOperationOwners[workspace]?.generation == verification.operationGeneration
+        }
+    }
+
+    private func ownsLifecycleOperation(
+        _ ownership: LifecycleOperationOwnership,
+        workspace: String
+    ) -> Bool {
+        guard lifecycleOperationOwners[workspace]?.generation == ownership.generation,
+              lifecycleOperationOwners[workspace]?.operationID == ownership.operationID else {
+            return false
+        }
+        return operationStates[operationKey(kind: .lifecycle, workspace: workspace)]?.id == ownership.operationID
+    }
+
+    private func ownsLifecycleVerification(
+        _ ownership: LifecycleOperationOwnership,
+        workspace: String
+    ) -> Bool {
+        guard ownsLifecycleOperation(ownership, workspace: workspace),
+              let verification = lifecycleVerifications[workspace] else { return false }
+        return verification.operationID == ownership.operationID &&
+            verification.operationGeneration == ownership.generation
+    }
+
+    private func isPreCommandLifecycleObservation(observationGeneration: Int) -> Bool {
+        lifecycleVerifications.contains { workspace, verification in
+            guard observationGeneration <= verification.commandBoundaryObservationGeneration,
+                  lifecycleOperationOwners[workspace]?.operationID == verification.operationID,
+                  lifecycleOperationOwners[workspace]?.generation == verification.operationGeneration else {
+                return false
+            }
+            return operationStates[
+                operationKey(kind: .lifecycle, workspace: workspace)
+            ]?.id == verification.operationID
+        }
+    }
+
+    private func isOwnedLifecycleObservation(
+        workspace: String,
+        envelopeObservedAt: Date?,
+        workspaceObservedAt: Date?,
+        observationGeneration: Int
+    ) -> Bool {
+        guard let verification = lifecycleVerifications[workspace],
+              lifecycleOperationOwners[workspace]?.operationID == verification.operationID,
+              lifecycleOperationOwners[workspace]?.generation == verification.operationGeneration,
+              operationStates[operationKey(kind: .lifecycle, workspace: workspace)]?.id == verification.operationID,
+              observationGeneration > verification.commandBoundaryObservationGeneration,
+              let envelopeObservedAt,
+              let workspaceObservedAt else { return false }
+        return isAtOrAfterSecondPrecisionBoundary(
+            envelopeObservedAt,
+            boundary: verification.minimumObservedAt
+        ) && isAtOrAfterSecondPrecisionBoundary(
+            workspaceObservedAt,
+            boundary: verification.minimumObservedAt
+        )
+    }
+
+    private func isAtOrAfterSecondPrecisionBoundary(_ observation: Date, boundary: Date) -> Bool {
+        Int64(observation.timeIntervalSince1970.rounded(.down)) >=
+            Int64(boundary.timeIntervalSince1970.rounded(.down))
+    }
+
+    private func reconcileLifecycleOperations(
+        observedAt: Date?,
+        observationGeneration: Int
+    ) -> [MSWOperationState] {
         var reconciled: [MSWOperationState] = []
-        for (key, current) in operationStates where current.phase == .verifying && current.kind == .lifecycle {
-            guard let workspaceID = current.workspace,
+        for (workspaceID, verification) in lifecycleVerifications {
+            let key = operationKey(kind: .lifecycle, workspace: workspaceID)
+            guard let current = operationStates[key],
+                  current.kind == .lifecycle,
+                  current.id == verification.operationID,
+                  current.phase == .verifying || current.outcome == .unknown,
                   let workspace = workspaces.first(where: { $0.id.rawValue == workspaceID }) else {
                 continue
             }
-            guard let verification = lifecycleVerifications[workspaceID],
-                  let observedAt,
-                  observedAt > verification.minimumObservedAt,
-                  let workspaceObservedAt = workspace.observedAt,
-                  workspaceObservedAt > verification.minimumObservedAt else {
-                continue
-            }
+            guard isOwnedLifecycleObservation(
+                workspace: workspaceID,
+                envelopeObservedAt: observedAt,
+                workspaceObservedAt: workspace.observedAt,
+                observationGeneration: observationGeneration
+            ) else { continue }
             let matches: Bool
             switch verification.action {
             case .start, .restart:
@@ -3253,15 +3465,25 @@ final class AppModel {
                 outcome: .succeeded,
                 message: "A fresh observation verified the \(current.action) outcome."
             )
+            lastError = nil
+            lastRecovery = nil
             updateState(workspace.id, to: workspace.state)
             if let operation = operationStates[key] { reconciled.append(operation) }
         }
         return reconciled
     }
 
-    private func markOperationUnknown(key: String, reason: String) {
+    private func markOperationUnknown(
+        key: String,
+        reason: String,
+        preserveLifecycleVerification: Bool = false
+    ) {
         guard let operation = operationStates[key], operation.phase == .verifying else { return }
-        let verification = operation.workspace.flatMap { lifecycleVerifications.removeValue(forKey: $0) }
+        let verification = operation.workspace.flatMap { workspace in
+            preserveLifecycleVerification
+                ? lifecycleVerifications[workspace]
+                : lifecycleVerifications.removeValue(forKey: workspace)
+        }
         let diagnostics: String? = verification.map { verification in
             let formatter = ISO8601DateFormatter()
             let workspaceObservedAt = operation.workspace

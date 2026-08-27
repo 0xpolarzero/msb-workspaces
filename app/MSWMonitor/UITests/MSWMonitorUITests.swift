@@ -940,23 +940,29 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertEqual(
             XCTWaiter.wait(
                 for: [XCTNSPredicateExpectation(
-                    predicate: NSPredicate(format: "value == %@", "Stopped"),
+                    predicate: NSPredicate(
+                        format: "value == %@ OR value == %@",
+                        "Restarting",
+                        "Stopped"
+                    ),
                     object: state
                 )],
                 timeout: 2
             ),
             .completed
         )
+        XCTAssertFalse(window.descendants(matching: .any)["workspace.dev.summary-error"].exists)
         XCTAssertEqual(
             XCTWaiter.wait(
                 for: [XCTNSPredicateExpectation(
                     predicate: NSPredicate(format: "value == %@", "Running"),
                     object: state
                 )],
-                timeout: 4
+                timeout: 6
             ),
             .completed
         )
+        XCTAssertFalse(window.descendants(matching: .any)["workspace.dev.summary-error"].exists)
         app.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }

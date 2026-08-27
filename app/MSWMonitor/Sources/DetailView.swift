@@ -322,8 +322,13 @@ struct DetailView: View {
         if let failure = model.latestOperationFailure, failure.workspace == workspace.id {
             return failure.reason
         }
-        return model.activities.first {
-            $0.workspace == workspace.id.rawValue && $0.isFailure
+        let latestLifecycleSuccess = model.operationStates["lifecycle:\(workspace.id.rawValue)"].flatMap {
+            $0.outcome == .succeeded ? $0.updatedAt : nil
+        }
+        return model.activities.reversed().first { activity in
+            activity.workspace == workspace.id.rawValue &&
+                activity.isFailure &&
+                (latestLifecycleSuccess.map { $0 < activity.createdAt } ?? true)
         }.flatMap { $0.detail ?? $0.title }
     }
 
