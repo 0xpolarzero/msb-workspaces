@@ -1654,11 +1654,20 @@ final class AppModelTests: XCTestCase {
                 (.running, baseline.addingTimeInterval(2), 0)
             ],
             applyObservedAt: baseline,
-            delays: [.milliseconds(1)]
+            delays: [.milliseconds(100)]
         )
 
         await model.refreshRemote()
         try await beginConfirmedLifecycle(.restart, model: model)
+        for _ in 0..<80 {
+            if model.workspaces.first(where: { $0.id == .dev })?.state == .stopped { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let gap = try XCTUnwrap(model.workspaces.first(where: { $0.id == .dev }))
+        XCTAssertEqual(gap.state, .stopped)
+        XCTAssertFalse(gap.canStart)
+        XCTAssertFalse(gap.canStop)
+        XCTAssertFalse(gap.canRestart)
         let operation = try await waitForLifecycleCompletion(in: model)
 
         XCTAssertEqual(operation.outcome, .succeeded)
@@ -1701,8 +1710,9 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(operation.message.contains("Timed out waiting for a fresh running observation"))
         let notice = try XCTUnwrap(model.latestOperationFailure)
         XCTAssertEqual(notice.reason, operation.message)
-        XCTAssertTrue(notice.diagnosticDetails?.contains("Required observation after:") == true)
-        XCTAssertTrue(notice.diagnosticDetails?.contains("Latest accepted observation:") == true)
+        XCTAssertTrue(notice.diagnosticDetails?.contains("Required workspace observation after:") == true)
+        XCTAssertTrue(notice.diagnosticDetails?.contains("Latest workspace observation:") == true)
+        XCTAssertTrue(notice.diagnosticDetails?.contains("Latest state envelope:") == true)
     }
 
     func testLifecycleVerificationRejectsStalePreOperationGeneration() async throws {
@@ -1711,9 +1721,10 @@ final class AppModelTests: XCTestCase {
         let model = try makeLifecycleVerificationModel(
             action: .restart,
             initial: (.running, stale),
-            observations: [(.running, stale, 0)],
+            observations: [(.running, baseline.addingTimeInterval(1), 0)],
             applyObservedAt: baseline,
-            delays: []
+            delays: [],
+            observationStatusObservedAts: [stale]
         )
 
         await model.refreshRemote()
@@ -3542,7 +3553,8 @@ final class AppModelTests: XCTestCase {
     private func makeTestStateEnvelope(
         devLifecycle: MSWLifecycle,
         devQuarantine: MSWQuarantineSnapshot.State,
-        observedAt: Date = Date()
+        observedAt: Date = Date(),
+        devStatusObservedAt: Date? = nil
     ) -> MSWEnvelope<MSWStateResponse> {
         let snapshots = Workspace.ID.fixtureDefaults.map { id in
             let quarantine = id == .dev ? devQuarantine : .clear
@@ -3582,7 +3594,8 @@ final class AppModelTests: XCTestCase {
                     canRestart: true,
                     canOpenTerminal: true,
                     canPush: true
-                )
+                ),
+                statusObservedAt: id == .dev ? devStatusObservedAt : nil
             )
         }
         return MSWEnvelope(
@@ -3604,7 +3617,8 @@ final class AppModelTests: XCTestCase {
         initial: (MSWLifecycle, Date),
         observations: [(MSWLifecycle, Date, Double)],
         applyObservedAt: Date,
-        delays: [Duration]
+        delays: [Duration],
+        observationStatusObservedAts: [Date]? = nil
     ) throws -> AppModel {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
@@ -3615,10 +3629,14 @@ final class AppModelTests: XCTestCase {
         encoder.dateEncodingStrategy = .iso8601
         let responses = [initial] + observations.map { ($0.0, $0.1) }
         for (index, response) in responses.enumerated() {
+            let statusObservedAt = index == 0
+                ? response.1
+                : observationStatusObservedAts?[index - 1] ?? response.1
             try encoder.encode(makeTestStateEnvelope(
                 devLifecycle: response.0,
                 devQuarantine: .clear,
-                observedAt: response.1
+                observedAt: response.1,
+                devStatusObservedAt: statusObservedAt
             )).write(to: temporary.appendingPathComponent("state-\(index + 1).json"))
         }
         let plan = MSWLifecyclePlan(

@@ -954,6 +954,8 @@ final class MSWMonitorUITests: XCTestCase {
             ),
             .completed
         )
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
     func testNetworkShowsActivePortsFirst() {
         let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])

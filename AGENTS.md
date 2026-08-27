@@ -109,6 +109,12 @@ For unified top-tab and workspace navigation changes, use:
 app/MSWMonitor/Scripts/smoke-test.sh --navigation-only
 ```
 
+For unified-window lifecycle confirmation ownership and restart verification, use:
+
+```bash
+app/MSWMonitor/Scripts/smoke-test.sh --lifecycle-only
+```
+
 For backup destination preview semantics, use:
 
 ```bash
@@ -399,8 +405,10 @@ unredacted system logs.
   `--picker-only` runs
   `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs
   `testApplicationPreferencesUpdateWorkspaceActions()`; `--navigation-only`
-  runs `testUnifiedWindowUsesTopTabsAndWorkspaceSections()`; `--backup-only`
-  runs `testBackupDestinationSelectionShowsRequiredSpaceConfirmation()`;
+  runs `testUnifiedWindowUsesTopTabsAndWorkspaceSections()`; `--lifecycle-only`
+  runs
+  `testUnifiedWindowOwnsLifecycleConfirmationAndVerifiesRestartGap()`;
+  `--backup-only` runs `testBackupDestinationSelectionShowsRequiredSpaceConfirmation()`;
   `--backup-result-only` runs
   `testBackupResultCardSuccessPartialAndFailure()`; and
   `--failure-only` runs `testOperationFailureOpensDetailedLogs()`. A bare

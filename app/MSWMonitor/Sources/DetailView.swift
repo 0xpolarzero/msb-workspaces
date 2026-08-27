@@ -99,18 +99,6 @@ struct DetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(isPresented: Binding(
-            get: { model.pendingLifecyclePlan(for: .unifiedWindow) != nil },
-            set: { if !$0 { model.cancelPendingLifecycle(surface: .unifiedWindow) } }
-        )) {
-            if let plan = model.pendingLifecyclePlan(for: .unifiedWindow) {
-                LifecycleConfirmationView(
-                    plan: plan,
-                    cancel: { model.cancelPendingLifecycle(surface: .unifiedWindow) },
-                    confirm: { model.confirmPendingLifecycle(surface: .unifiedWindow) }
-                )
-            }
-        }
-        .sheet(isPresented: Binding(
             get: { model.pendingPushPlan != nil },
             set: { presented in
                 if !presented {

@@ -2796,9 +2796,24 @@ final class AppModel {
             let safeCapabilities = isQuarantined
                 ? MSWActionCapabilities(canStart: false, canStop: snapshot.actionCapabilities.canStop, canRestart: false, canOpenTerminal: false, canPush: false)
                 : snapshot.actionCapabilities
-            let capabilities = snapshot.freshness == .fresh
+            let authoritativeCapabilities = snapshot.freshness == .fresh
                 ? safeCapabilities
                 : MSWActionCapabilities(canStart: false, canStop: false, canRestart: false, canOpenTerminal: false, canPush: false)
+            let lifecycleOperation = operationStates[
+                operationKey(kind: .lifecycle, workspace: id.rawValue)
+            ]
+            let lifecycleIsPending = lifecycleOperation?.outcome == .pending
+            let capabilities = lifecycleIsPending
+                ? MSWActionCapabilities(
+                    canStart: false,
+                    canStop: false,
+                    canRestart: false,
+                    canOpenTerminal: authoritativeCapabilities.canOpenTerminal,
+                    canPush: authoritativeCapabilities.canPush,
+                    reason: authoritativeCapabilities.reason,
+                    recovery: authoritativeCapabilities.recovery
+                )
+                : authoritativeCapabilities
             let stateObservedAt = snapshot.statusObservedAt ?? observedAt
             let reason: String? = isQuarantined
                 ? (snapshot.quarantine.reason ?? "Workspace safety state could not be verified.")
@@ -2817,7 +2832,9 @@ final class AppModel {
                 quarantineReason: isQuarantined ? reason : nil,
                 statusReason: reason,
                 recoveryAction: recovery,
-                nextAction: nextAction(snapshot, isQuarantined: isQuarantined),
+                nextAction: lifecycleIsPending
+                    ? "Verifying \(lifecycleOperation?.action ?? "lifecycle")…"
+                    : nextAction(snapshot, isQuarantined: isQuarantined),
                 canStart: capabilities.canStart,
                 canStop: capabilities.canStop,
                 canRestart: capabilities.canRestart,
@@ -2828,6 +2845,11 @@ final class AppModel {
                 serverCapabilities: snapshot.actionCapabilities
             )
             if let previous = previousByID[id] {
+                if let statusObservedAt = snapshot.statusObservedAt,
+                   let previousObservedAt = previous.observedAt,
+                   statusObservedAt <= previousObservedAt {
+                    return previous
+                }
                 candidate.observedAt = previous.observedAt
                 if candidate == previous {
                     return previous
@@ -3128,7 +3150,9 @@ final class AppModel {
             }
             guard let verification = lifecycleVerifications[workspaceID],
                   let observedAt,
-                  observedAt > verification.minimumObservedAt else {
+                  observedAt > verification.minimumObservedAt,
+                  let workspaceObservedAt = workspace.observedAt,
+                  workspaceObservedAt > verification.minimumObservedAt else {
                 continue
             }
             let matches: Bool
@@ -3146,6 +3170,7 @@ final class AppModel {
                 outcome: .succeeded,
                 message: "A fresh observation verified the \(current.action) outcome."
             )
+            updateState(workspace.id, to: workspace.state)
             if let operation = operationStates[key] { reconciled.append(operation) }
         }
         return reconciled
@@ -3156,10 +3181,20 @@ final class AppModel {
         let verification = operation.workspace.flatMap { lifecycleVerifications.removeValue(forKey: $0) }
         let diagnostics: String? = verification.map { verification in
             let formatter = ISO8601DateFormatter()
-            let latest = lastObservedAt.map(formatter.string(from:)) ?? "No accepted observation"
-            return "Action: \(operation.action)\nWorkspace: \(operation.workspace ?? "unknown")\nRequired observation after: \(formatter.string(from: verification.minimumObservedAt))\nLatest accepted observation: \(latest)"
+            let workspaceObservedAt = operation.workspace
+                .flatMap { workspace in
+                    workspaces.first(where: { $0.id.rawValue == workspace })?.observedAt
+                }
+                .map(formatter.string(from:)) ?? "No accepted workspace observation"
+            let envelopeObservedAt = lastObservedAt.map(formatter.string(from:))
+                ?? "No accepted state envelope"
+            return "Action: \(operation.action)\nWorkspace: \(operation.workspace ?? "unknown")\nRequired workspace observation after: \(formatter.string(from: verification.minimumObservedAt))\nLatest workspace observation: \(workspaceObservedAt)\nLatest state envelope: \(envelopeObservedAt)"
         }
         finishOperation(key: key, outcome: .unknown, message: reason)
+        if let workspaceID = operation.workspace.flatMap(Workspace.ID.init(rawValue:)),
+           let workspace = workspaces.first(where: { $0.id == workspaceID }) {
+            updateState(workspaceID, to: workspace.state)
+        }
         recordOperationFailure(
             action: operation.action,
             workspace: operation.workspace,

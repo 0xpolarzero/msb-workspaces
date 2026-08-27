@@ -594,6 +594,25 @@ struct SettingsView: View {
                 transaction.disablesAnimations = true
             }
         }
+        .sheet(isPresented: Binding(
+            get: {
+                applicationState.model?.pendingLifecyclePlan(for: .unifiedWindow) != nil
+            },
+            set: { presented in
+                if !presented {
+                    applicationState.model?.cancelPendingLifecycle(surface: .unifiedWindow)
+                }
+            }
+        )) {
+            if let model = applicationState.model,
+               let plan = model.pendingLifecyclePlan(for: .unifiedWindow) {
+                LifecycleConfirmationView(
+                    plan: plan,
+                    cancel: { model.cancelPendingLifecycle(surface: .unifiedWindow) },
+                    confirm: { model.confirmPendingLifecycle(surface: .unifiedWindow) }
+                )
+            }
+        }
         .sheet(item: $destructiveAction) { action in
             GitHubImpactConfirmation(action: action, accessMode: accessMode) {
                 destructiveAction = nil
