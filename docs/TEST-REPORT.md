@@ -190,16 +190,20 @@ Optional, not required for normal installation:
 The suite uses temporary directories, simulated MicroSandbox state, and local Git remotes. It does not use your production VMs or GitHub credentials.
 ## 2026-08-27 startup disk diagnosis
 
-The reported `agentd` line is a first-attach race, not evidence that the current
-`dev` data volume is corrupt. Read-only inspection showed that the sandbox's
+The reported `agentd` line is consistent with the implicit first-attach race;
+it does not by itself establish that the current `dev` data volume is corrupt.
+Read-only inspection showed that the sandbox's
 first named disk mount is `msw-dev-workspace` at `/workspace`; agentd identifies
 that attachment as `/dev/vdc`. `msb volume inspect` reports a raw 120 GiB ext4
 disk, `file` identifies an ext4 revision-1 filesystem, and the on-disk
 superblock contains the ext magic `53 ef` at byte 1080. The separate 100 GiB
-runtime disk also has valid ext4 metadata. The retained system log contains the
-initial `/dev/vdc` mount `EINVAL`, while later execution logs show successful
-workspace and Docker activity on the same volumes. No workspace was started and
-no real disk was modified during diagnosis.
+runtime disk has the same valid ext4 identity. Those independent observations
+rule out a currently blank, unformatted, wrong-format, or stale-schema disk at
+the state boundary checked by MSW. They do not replace an offline full-filesystem
+check, so deeper corruption remains a mount-time failure and is never a reason
+to format existing storage. The retained system log contains the reported
+`/dev/vdc` mount `EINVAL`. No workspace was started and no real disk was modified
+during diagnosis.
 
 The source contract now creates each missing disk volume explicitly and waits
 for MicroSandbox's one-time ext4 creation to finish before attaching it. Every
@@ -208,3 +212,9 @@ path, and ext superblock magic. Existing blank, unknown, non-ext4, or damaged
 volumes fail closed with `MSW_WORKSPACE_DISK_INVALID`; MSW never formats an
 existing volume. A mount-time `/dev/vdc` EINVAL receives the same workspace-disk
 classification and is not an installation-repair signal.
+
+This ownership boundary matches MicroSandbox's primary volume contract: disk
+named volumes are managed raw ext4 images mounted through virtio-blk, and an
+explicit `msb volume create NAME --kind disk --size SIZE` creates that managed
+filesystem before it is attached. See
+<https://github.com/superradcompany/microsandbox/blob/main/docs/sandboxes/volumes.mdx>.

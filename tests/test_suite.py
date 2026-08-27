@@ -2988,6 +2988,49 @@ class PackagedBehaviorTests(MSWTestCase):
         events = self.env.state()["events"][before:]
         self.assertEqual([event["event"] for event in events if event["event"] == "start"], ["start"])
 
+    def test_volume_inspection_failure_never_creates_or_attaches_storage(self) -> None:
+        before = self.env.state()
+        before_create_count = sum(
+            event["event"] == "volume-create" for event in before["events"]
+        )
+        rejected_start = self._apply_start(
+            extra_env={"MSW_FAKE_VOLUME_INSPECT_ERROR": "1"},
+        )
+        self.assertEqual(rejected_start.returncode, 69, rejected_start.stdout + rejected_start.stderr)
+        start_error = json.loads(rejected_start.stdout)["error"]
+        self.assertEqual(start_error["code"], "MSW_RUNTIME_UNAVAILABLE")
+        self.assertTrue(start_error["retryable"])
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+
+        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired["workspaces"].append({
+            "name": "lab", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        rejected_setup = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=json.dumps(desired), check=False,
+            extra_env={"MSW_FAKE_VOLUME_INSPECT_ERROR": "1"},
+        )
+        self.assertEqual(rejected_setup.returncode, 69, rejected_setup.stdout + rejected_setup.stderr)
+        setup_error = json.loads(rejected_setup.stdout)["error"]
+        self.assertEqual(setup_error["code"], "MSW_RUNTIME_UNAVAILABLE")
+        after = self.env.state()
+        self.assertNotIn("msw-lab-workspace", after["volumes"])
+        self.assertNotIn("msw-lab-runtime", after["volumes"])
+        self.assertEqual(
+            sum(event["event"] == "volume-create" for event in after["events"]),
+            before_create_count,
+        )
+        self.assertNotIn(
+            "lab",
+            [
+                item["name"] for item in
+                json.loads((self.env.home / ".config/msw/workspaces.json").read_text())["workspaces"]
+            ],
+        )
+
     def test_unknown_nonblank_and_corrupt_workspace_disks_fail_closed_without_mutation(self) -> None:
         cases = (
             ("unknown-nonblank", "unknown", "0000"),

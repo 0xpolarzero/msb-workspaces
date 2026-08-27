@@ -291,45 +291,55 @@ volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 # agentd to race the formatter and retain a misleading EINVAL mount failure.
 # Existing volumes are only inspected. Unknown, blank, or damaged storage is
 # never formatted here.
+VOLUME_INSPECT_OUTPUT=""
+
+volume_probe() {
+  local name="$1" output
+  VOLUME_INSPECT_OUTPUT=""
+  if output="$(LC_ALL=C "$MSB_BIN" volume inspect "$name" 2>&1)"; then
+    VOLUME_INSPECT_OUTPUT="$output"
+    return 0
+  fi
+  [[ "$output" == "error: volume not found: $name" ]] && return 1
+  return 2
+}
+
 volume_inspect_field() {
-  local name="$1" field="$2"
-  LC_ALL=C "$MSB_BIN" volume inspect "$name" 2>/dev/null |
+  local field="$1"
+  printf '%s\n' "$VOLUME_INSPECT_OUTPUT" |
     awk -F: -v field="$field" '$1 == field { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
 }
 
-validate_ext4_volume() {
-  local name="$1" kind filesystem path magic expected
-  kind="$(volume_inspect_field "$name" Kind)"
-  filesystem="$(volume_inspect_field "$name" Filesystem)"
-  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 1
+ext4_volume_status() {
+  local name="$1" kind filesystem path magic expected probe_status
+  if volume_probe "$name"; then :; else probe_status=$?; return "$probe_status"; fi
+  kind="$(volume_inspect_field Kind)"
+  filesystem="$(volume_inspect_field Filesystem)"
+  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 3
   if [[ "$TEST_MODE" == 1 ]]; then
-    magic="$(volume_inspect_field "$name" Magic)"
-    [[ -z "$magic" || "$magic" == 53ef ]]
-    return
+    magic="$(volume_inspect_field Magic)"
+    [[ -z "$magic" || "$magic" == 53ef ]] || return 3
+    return 0
   fi
-  path="$(volume_inspect_field "$name" Path)"
+  path="$(volume_inspect_field Path)"
   expected="$HOME/.microsandbox/volumes/$name/disk.raw"
-  [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 3
   magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
-  [[ "$magic" == 53ef ]]
+  [[ "$magic" == 53ef ]] || return 3
 }
 
 ensure_ext4_volume() {
-  local name="$1" size="$2" created=0
-  if ! volume_exists "$name"; then
-    # `volume create --kind disk` owns the only formatting transition. We call
-    # it only after an authoritative not-found result and never retry it after
-    # the name exists, so a newly allocated blank image is formatted once.
-    "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null ||
-      fatal "could not create workspace storage '$name'"
-    created=1
-  fi
-  validate_ext4_volume "$name" || {
-    if (( created == 1 )); then
-      fatal "new workspace storage '$name' did not initialize as ext4; it was retained for inspection"
-    fi
-    fatal "workspace storage '$name' is not a verified ext4 disk; inspect it and restore from backup instead of formatting it"
-  }
+  local name="$1" size="$2" status
+  if ext4_volume_status "$name"; then return; else status=$?; fi
+  (( status != 2 )) || fatal "could not determine whether workspace storage '$name' exists; no disk was created"
+  (( status != 3 )) || fatal "workspace storage '$name' is not a verified ext4 disk; inspect it and restore from backup instead of formatting it"
+  # `volume create --kind disk` owns the only formatting transition. We call
+  # it only after an authoritative not-found result and never retry it after
+  # the name exists, so a newly allocated blank image is formatted once.
+  "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null ||
+    fatal "could not create workspace storage '$name'"
+  ext4_volume_status "$name" ||
+    fatal "new workspace storage '$name' did not initialize as ext4; it was retained for inspection"
 }
 
 BASE_STAMP="$HOME/.config/msw/base-version"

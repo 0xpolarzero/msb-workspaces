@@ -428,6 +428,8 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertNotNil(model.detailError)
         XCTAssertNil(model.presentedDetailError)
+        XCTAssertNotNil(model.backupError)
+        XCTAssertNil(model.presentedBackupError)
         XCTAssertFalse(model.backupOperations.isEmpty)
         XCTAssertTrue(model.presentedBackupOperations.isEmpty)
         XCTAssertEqual(
@@ -461,6 +463,7 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertFalse(model.runtimeRepairRequired)
         XCTAssertNil(model.detailError)
+        XCTAssertNil(model.backupError)
     }
 
     func testRuntimeRepairStateUsesExactHandshakeAndDedicatedRetryWithoutBackupProbe() async throws {
@@ -1874,6 +1877,7 @@ final class AppModelTests: XCTestCase {
         elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then
             /bin/cat "\(planURL.path)"
         elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
+            printf '%s\n' 'The dev workspace could not start.' 'failed to mount /dev/vdc at /workspace as ext4: EINVAL' >&2
             exit 7
         else
             exit 64
@@ -1905,15 +1909,18 @@ final class AppModelTests: XCTestCase {
         let notice = try XCTUnwrap(model.latestOperationFailure)
         XCTAssertEqual(notice.title, "Start failed")
         XCTAssertEqual(notice.workspace, .dev)
-        XCTAssertEqual(notice.reason, "MSW apply exited with status 7 without returning error details.")
+        XCTAssertEqual(notice.reason, "The dev workspace could not start.")
         XCTAssertEqual(notice.recovery, "Run Diagnostics and Maintenance before retrying start.")
-        XCTAssertNil(notice.diagnosticDetails)
+        XCTAssertEqual(
+            notice.diagnosticDetails,
+            "failed to mount /dev/vdc at /workspace as ext4: EINVAL"
+        )
         XCTAssertEqual(model.health.title, "Start failed")
         XCTAssertNil(model.lastError)
         XCTAssertTrue(model.activities.contains {
             $0.kind == .failure &&
                 $0.workspace == "dev" &&
-                $0.detail?.contains("MSW apply exited with status 7 without returning error details.") == true
+                $0.detail?.contains("The dev workspace could not start.") == true
         })
     }
 

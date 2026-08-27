@@ -1187,6 +1187,9 @@ final class AppModel {
         if let detailError, RuntimeRepairIssueClassifier.isRepairRelated(detailError) {
             self.detailError = nil
         }
+        if let backupError, RuntimeRepairIssueClassifier.isRepairRelated(backupError) {
+            self.backupError = nil
+        }
         if let lastError, RuntimeRepairIssueClassifier.isRepairRelated(lastError) {
             self.lastError = nil
         }
@@ -2027,6 +2030,7 @@ final class AppModel {
 
     func installRuntimeRepairUITestFixture() {
         detailError = MSWClientError.invalidExecutable.localizedDescription
+        backupError = MSWClientError.invalidExecutable.localizedDescription
         let now = Date()
         let error = MSWBackupOperationErrorResponse(
             code: "MSW_RUNTIME_UNAVAILABLE",
@@ -2948,7 +2952,14 @@ final class AppModel {
             return "\(protocolError.message)\nMSW error code: \(protocolError.code)"
         }
         let detail = error.localizedDescription
-        return detail == summary ? nil : detail
+        let summaryLine = summary.components(separatedBy: .newlines)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .trimmingCharacters(in: .whitespaces) ?? summary
+        let hasAdditionalLine = detail.components(separatedBy: .newlines).contains {
+            let line = $0.trimmingCharacters(in: .whitespaces)
+            return !line.isEmpty && line != summaryLine
+        }
+        return detail == summaryLine && !hasAdditionalLine ? nil : detail
     }
 
     private func reconcileVerifyingOperations() -> [MSWOperationState] {

@@ -582,8 +582,12 @@ def main() -> int:
         sub = rest[0]
         name = rest[1] if len(rest) > 1 else ""
         if sub == "inspect":
+            if os.environ.get("MSW_FAKE_VOLUME_INSPECT_ERROR") == "1":
+                print("error: volume registry unavailable", file=sys.stderr)
+                return 2
             entry = state["volumes"].get(name)
             if entry is None:
+                print(f"error: volume not found: {name}", file=sys.stderr)
                 return 1
             print(f"Name:           {name}")
             print(f"Kind:           {entry.get('kind', 'disk')}")

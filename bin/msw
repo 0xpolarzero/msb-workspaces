@@ -1261,43 +1261,73 @@ require_github_tls_interception() {
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 WORKSPACE_STORAGE_ERROR=""
+WORKSPACE_STORAGE_FAILURE_KIND=""
+VOLUME_INSPECT_OUTPUT=""
+
+volume_probe() {
+  local name="$1" output
+  VOLUME_INSPECT_OUTPUT=""
+  if output="$(LC_ALL=C "$MSB_BIN" volume inspect "$name" 2>&1)"; then
+    VOLUME_INSPECT_OUTPUT="$output"
+    return 0
+  fi
+  if [[ "$output" == "error: volume not found: $name" ]]; then
+    return 1
+  fi
+  return 2
+}
 
 volume_inspect_field() {
-  local name="$1" field="$2"
-  LC_ALL=C "$MSB_BIN" volume inspect "$name" 2>/dev/null |
+  local field="$1"
+  printf '%s\n' "$VOLUME_INSPECT_OUTPUT" |
     /usr/bin/awk -F: -v field="$field" '$1 == field { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
 }
 
-volume_ext4_is_valid() {
-  local name="$1" kind filesystem path magic expected
-  kind="$(volume_inspect_field "$name" Kind)"
-  filesystem="$(volume_inspect_field "$name" Filesystem)"
-  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 1
-  if [[ "${MSW_TEST_MODE:-0}" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
-    magic="$(volume_inspect_field "$name" Magic)"
-    [[ -z "$magic" || "$magic" == 53ef ]]
-    return
+volume_ext4_status() {
+  local name="$1" kind filesystem path magic expected probe_status
+  if volume_probe "$name"; then
+    :
+  else
+    probe_status=$?
+    return "$probe_status"
   fi
-  path="$(volume_inspect_field "$name" Path)"
+  kind="$(volume_inspect_field Kind)"
+  filesystem="$(volume_inspect_field Filesystem)"
+  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 3
+  if [[ "${MSW_TEST_MODE:-0}" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
+    magic="$(volume_inspect_field Magic)"
+    [[ -z "$magic" || "$magic" == 53ef ]] || return 3
+    return 0
+  fi
+  path="$(volume_inspect_field Path)"
   expected="$HOME/.microsandbox/volumes/$name/disk.raw"
-  [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 1
+  [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 3
   magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
-  [[ "$magic" == 53ef ]]
+  [[ "$magic" == 53ef ]] || return 3
 }
 
 workspace_storage_check() {
-  local box="$1" role name
+  local box="$1" role name status
   WORKSPACE_STORAGE_ERROR=""
+  WORKSPACE_STORAGE_FAILURE_KIND=""
   for role in workspace runtime; do
     name="$(workspace_volume "$box" "$role")"
-    if ! volume_exists "$name"; then
-      WORKSPACE_STORAGE_ERROR="The $role disk '$name' is missing. Run Setup to create new storage or restore the named volume from backup."
-      return 1
-    fi
-    if ! volume_ext4_is_valid "$name"; then
-      WORKSPACE_STORAGE_ERROR="The $role disk '$name' is not a verified ext4 filesystem. Restore or inspect it; MSW will not format existing storage."
-      return 1
-    fi
+    if volume_ext4_status "$name"; then continue; else status=$?; fi
+    case "$status" in
+      1)
+        WORKSPACE_STORAGE_FAILURE_KIND=invalid
+        WORKSPACE_STORAGE_ERROR="The $role disk '$name' is missing. Run Setup to create new storage or restore the named volume from backup."
+        ;;
+      2)
+        WORKSPACE_STORAGE_FAILURE_KIND=runtime
+        WORKSPACE_STORAGE_ERROR="MSW could not inspect the $role disk '$name'. Verify that MicroSandbox is available, then retry."
+        ;;
+      *)
+        WORKSPACE_STORAGE_FAILURE_KIND=invalid
+        WORKSPACE_STORAGE_ERROR="The $role disk '$name' is not a verified ext4 filesystem. Restore or inspect it; MSW will not format existing storage."
+        ;;
+    esac
+    return "$status"
   done
 }
 
@@ -1306,21 +1336,35 @@ workspace_storage_require() {
 }
 
 ensure_new_ext4_volume() {
-  local name="$1" size="$2"
-  if volume_exists "$name"; then
-    volume_ext4_is_valid "$name" || {
-      warn "existing storage '$name' is not verified ext4 and was left unchanged"
-      return 1
-    }
-    return 0
+  local name="$1" size="$2" status
+  WORKSPACE_STORAGE_ERROR=""
+  WORKSPACE_STORAGE_FAILURE_KIND=""
+  if volume_ext4_status "$name"; then return 0; else status=$?; fi
+  if (( status == 2 )); then
+    WORKSPACE_STORAGE_FAILURE_KIND=runtime
+    WORKSPACE_STORAGE_ERROR="MSW could not determine whether storage '$name' exists. MicroSandbox returned no authoritative not-found result, so no disk was created."
+    warn "$WORKSPACE_STORAGE_ERROR"
+    return 2
+  fi
+  if (( status == 3 )); then
+    WORKSPACE_STORAGE_FAILURE_KIND=invalid
+    WORKSPACE_STORAGE_ERROR="Existing storage '$name' is not verified ext4 and was left unchanged."
+    warn "$WORKSPACE_STORAGE_ERROR"
+    return 3
   fi
   # MicroSandbox owns ext4 creation for a disk volume. An authoritative
   # not-found result is the only state that permits this one formatting call.
-  "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null || return 1
-  volume_ext4_is_valid "$name" || {
-    warn "new storage '$name' did not initialize as ext4 and was retained for inspection"
-    return 1
-  }
+  if ! "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null; then
+    WORKSPACE_STORAGE_FAILURE_KIND=runtime
+    WORKSPACE_STORAGE_ERROR="MicroSandbox could not create new storage '$name'."
+    return 2
+  fi
+  if ! volume_ext4_status "$name"; then
+    WORKSPACE_STORAGE_FAILURE_KIND=invalid
+    WORKSPACE_STORAGE_ERROR="New storage '$name' did not initialize as ext4 and was retained for inspection."
+    warn "$WORKSPACE_STORAGE_ERROR"
+    return 3
+  fi
 }
 quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_file() { printf '%s/%s.lock\n' "$GITHUB_META_DIR" "$1"; }
@@ -8244,10 +8288,18 @@ app_cmd_apply() {
     if app_workspace_quarantined "$box"; then
       app_emit_error apply "MSW_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace before retrying this action." "$box" false 77
     fi
-    if [[ "$action" == start || "$action" == restart ]] && ! workspace_storage_check "$box"; then
-      app_emit_error apply "MSW_WORKSPACE_DISK_INVALID" \
-        "Workspace storage is not a verified ext4 filesystem." \
-        "$WORKSPACE_STORAGE_ERROR" "$box" false 78
+    if [[ "$action" == start || "$action" == restart ]]; then
+      if workspace_storage_check "$box"; then
+        :
+      elif [[ "$WORKSPACE_STORAGE_FAILURE_KIND" == runtime ]]; then
+        app_emit_error apply "MSW_RUNTIME_UNAVAILABLE" \
+          "Workspace storage could not be inspected safely." \
+          "$WORKSPACE_STORAGE_ERROR" "$box" true 69
+      else
+        app_emit_error apply "MSW_WORKSPACE_DISK_INVALID" \
+          "Workspace storage is not a verified ext4 filesystem." \
+          "$WORKSPACE_STORAGE_ERROR" "$box" false 78
+      fi
     fi
   fi
   case "$action" in
@@ -8471,6 +8523,8 @@ app_reconcile_named_volume_capacity() {
 app_reconcile_workspace_configuration() {
   local fd="$1" input old_copy config_dir box desired old_box policy policy_tmp ssh_config ssh_tmp existed
   local workspace_volume_name runtime_volume_name workspace_size runtime_size
+  WORKSPACE_STORAGE_ERROR=""
+  WORKSPACE_STORAGE_FAILURE_KIND=""
   config_dir="$(dirname "$MSW_WORKSPACES_FILE")"
   mkdir -p "$config_dir" || return
   chmod 700 "$config_dir" || return
@@ -8608,6 +8662,16 @@ app_cmd_bootstrap() {
   app_require_runtime bootstrap
 
   if ! app_reconcile_workspace_configuration "$workspace_config_fd"; then
+    if [[ "$WORKSPACE_STORAGE_FAILURE_KIND" == invalid ]]; then
+      app_emit_error bootstrap "MSW_WORKSPACE_DISK_INVALID" \
+        "Workspace storage is not a verified ext4 filesystem." \
+        "$WORKSPACE_STORAGE_ERROR" "" false 78
+    fi
+    if [[ "$WORKSPACE_STORAGE_FAILURE_KIND" == runtime ]]; then
+      app_emit_error bootstrap "MSW_RUNTIME_UNAVAILABLE" \
+        "Workspace storage could not be inspected safely." \
+        "$WORKSPACE_STORAGE_ERROR" "" true 69
+    fi
     app_emit_error bootstrap "MSW_WORKSPACE_CONFIGURATION_FAILED" \
       "The requested workspace configuration could not be applied." \
       "Review workspace names and limits, then retry Setup." "" true 78

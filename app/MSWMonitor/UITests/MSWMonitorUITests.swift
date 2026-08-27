@@ -634,6 +634,12 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(diagnosticText.waitForExistence(timeout: 2))
         XCTAssertTrue(diagnosticText.isEnabled)
         NSPasteboard.general.clearContents()
+        diagnosticText.click()
+        diagnosticText.typeKey("a", modifierFlags: .command)
+        diagnosticText.typeKey("c", modifierFlags: .command)
+        let copiedSelection = NSPasteboard.general.string(forType: .string) ?? ""
+        XCTAssertTrue(copiedSelection.contains("/dev/vdc"))
+        NSPasteboard.general.clearContents()
         let copyDetails = app.buttons["lifecycle.failure.details.copy"]
         XCTAssertTrue(copyDetails.waitForExistence(timeout: 2))
         copyDetails.click()
