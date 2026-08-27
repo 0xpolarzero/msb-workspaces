@@ -927,6 +927,8 @@ final class AppModel {
     private var backupPreviewFixtureDestination: URL?
     private var backupUITestResultScenario: BackupUITestResultScenario?
     private var lifecycleUITestFixtureEnabled = false
+    private var lifecycleUITestAction: MSWLifecycleAction?
+    private var lifecycleUITestObservationIndex = 0
     private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
@@ -1649,6 +1651,9 @@ final class AppModel {
     }
 
     private func refreshRemoteResult() async -> RefreshResult {
+        if lifecycleUITestAction != nil {
+            return await refreshLifecycleUITestResult()
+        }
         guard client != nil else { return .failed }
         return await refreshRemote(generation: refreshGeneration)
     }
@@ -1659,7 +1664,8 @@ final class AppModel {
         let requestSequence = stateRefreshSequence
         do {
             let response = try await client.state()
-            guard generation == refreshGeneration else { return .superseded }
+            guard !Task.isCancelled,
+                  generation == refreshGeneration else { return .superseded }
             guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
             if let observedAt = response.observedAt,
                let lastObservedAt,
@@ -1697,7 +1703,9 @@ final class AppModel {
             }
             return .applied(state)
         } catch {
-            guard generation == refreshGeneration else { return .superseded }
+            guard !Task.isCancelled,
+                  generation == refreshGeneration,
+                  requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
             noteRuntimeRepairFailure(error)
             lastError = error.localizedDescription
             lastRecovery = recoveryContext(for: error, fallbackRecovery: "Retry the observation or run diagnostics.")
@@ -2725,20 +2733,95 @@ final class AppModel {
             message: "Applying the reviewed operation."
         )
         updateState(id, to: action == .start ? .starting : action == .stop ? .stopping : .restarting)
+        let commandObservedAt = lifecycleNow()
+        lifecycleUITestAction = action
+        lifecycleUITestObservationIndex = 0
+        lifecycleVerifications[id.rawValue] = LifecycleVerification(
+            action: action,
+            minimumObservedAt: commandObservedAt
+        )
+        markOperationVerifying(
+            kind: .lifecycle,
+            workspace: id.rawValue,
+            message: "The deterministic command succeeded. Verifying with a fresh state observation."
+        )
         Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard let self else { return }
-            if action == .restart {
-                self.updateState(id, to: .stopped)
-                try? await Task.sleep(for: .milliseconds(2_400))
-            }
-            self.updateState(id, to: action == .stop ? .stopped : .running)
-            self.finishOperation(
-                key: self.operationKey(kind: .lifecycle, workspace: id.rawValue),
-                outcome: .succeeded,
-                message: "A fresh fixture observation verified the \(action.rawValue) outcome."
+            await self?.verifyLifecycle(action, workspace: id)
+        }
+    }
+
+    private func refreshLifecycleUITestResult() async -> RefreshResult {
+        guard let action = lifecycleUITestAction,
+              let verification = lifecycleVerifications[Workspace.ID.dev.rawValue] else {
+            return .failed
+        }
+        let index = lifecycleUITestObservationIndex
+        lifecycleUITestObservationIndex += 1
+        do {
+            try await Task.sleep(for: index == 0 ? .milliseconds(120) : .milliseconds(2_400))
+        } catch {
+            return .superseded
+        }
+        let lifecycle: MSWLifecycle
+        switch action {
+        case .start:
+            lifecycle = .running
+        case .stop:
+            lifecycle = .stopped
+        case .restart:
+            lifecycle = index == 0 ? .stopped : .running
+        }
+        let observedAt = verification.minimumObservedAt.addingTimeInterval(Double(index + 1))
+        let state = lifecycleUITestState(devLifecycle: lifecycle, observedAt: observedAt)
+        let reconciled = apply(state: state, observedAt: observedAt)
+        if reconciled.contains(where: { $0.outcome == .succeeded }) {
+            lifecycleUITestAction = nil
+        }
+        return .applied(state)
+    }
+
+    private func lifecycleUITestState(
+        devLifecycle: MSWLifecycle,
+        observedAt: Date
+    ) -> MSWStateResponse {
+        let snapshots = configuredWorkspaceIDs.map { id in
+            let lifecycle: MSWLifecycle = id == .dev ? devLifecycle : .stopped
+            let running = lifecycle == .running
+            return MSWWorkspaceSnapshot(
+                id: id.rawValue,
+                purpose: "Deterministic lifecycle verification fixture.",
+                lifecycle: lifecycle,
+                freshness: .fresh,
+                quarantine: MSWQuarantineSnapshot(state: .clear, reason: nil),
+                credential: MSWCredentialSnapshot(
+                    state: .ready,
+                    accessMode: "fixture",
+                    verificationRepository: nil,
+                    accountLogin: nil,
+                    installationId: nil,
+                    accessExpiresAt: nil,
+                    refreshExpiresAt: nil,
+                    needsRestart: false
+                ),
+                resources: MSWResourceSnapshot(
+                    cpus: "1",
+                    maxCpus: "1",
+                    memory: "1 GiB",
+                    maxMemory: "1 GiB",
+                    rootDisk: "1 GiB"
+                ),
+                network: MSWNetworkSnapshot(host: "\(id.rawValue).msw.test", ip: "127.0.0.1"),
+                actionCapabilities: MSWActionCapabilities(
+                    canStart: !running,
+                    canStop: running,
+                    canRestart: running,
+                    canOpenTerminal: running,
+                    canPush: true
+                ),
+                statusObservedAt: observedAt
             )
         }
+        return MSWStateResponse(schemaVersion: 1, mswVersion: "ui-test", workspaces: snapshots)
     }
 
     private func verifyLifecycle(_ action: MSWLifecycleAction, workspace id: Workspace.ID) async {

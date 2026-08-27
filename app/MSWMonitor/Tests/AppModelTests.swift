@@ -1760,6 +1760,34 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
     }
 
+    func testLatePeriodicRefreshFailureCannotOverwriteNewerLifecycleVerification() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0.25),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(20)],
+            failingObservationIndices: [0]
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        try await Task.sleep(for: .milliseconds(50))
+        await model.refreshRemote()
+        let operation = try await waitForLifecycleCompletion(in: model)
+        try await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.freshness, .fresh)
+        XCTAssertNil(model.lastError)
+    }
+
     func testRepairInvalidatesResolutionAndSelectsOnlyActivatedRuntime() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-managed-runtime-resolution-\(UUID().uuidString)", isDirectory: true)
@@ -3618,7 +3646,8 @@ final class AppModelTests: XCTestCase {
         observations: [(MSWLifecycle, Date, Double)],
         applyObservedAt: Date,
         delays: [Duration],
-        observationStatusObservedAts: [Date]? = nil
+        observationStatusObservedAts: [Date]? = nil,
+        failingObservationIndices: Set<Int> = []
     ) throws -> AppModel {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
@@ -3671,9 +3700,14 @@ final class AppModelTests: XCTestCase {
         try Data("0\n".utf8).write(to: temporary.appendingPathComponent("state-count"))
 
         let lastResponse = responses.count
-        let delayCases = observations.enumerated().compactMap { index, observation -> String? in
+        let responseCases = observations.enumerated().compactMap { index, observation -> String? in
+            let delay = observation.2 > 0 ? "/bin/sleep \(observation.2)" : ""
+            if failingObservationIndices.contains(index) {
+                let separator = delay.isEmpty ? "" : "; "
+                return "\(index + 2)) \(delay)\(separator)exit 70 ;;"
+            }
             guard observation.2 > 0 else { return nil }
-            return "\(index + 2)) /bin/sleep \(observation.2) ;;"
+            return "\(index + 2)) \(delay) ;;"
         }.joined(separator: "\n")
         let executable = temporary.appendingPathComponent("msw")
         let script = """
@@ -3689,7 +3723,7 @@ final class AppModelTests: XCTestCase {
             selected="$count"
             if [ "$selected" -gt "\(lastResponse)" ]; then selected="\(lastResponse)"; fi
             case "$count" in
-        \(delayCases)
+        \(responseCases)
             esac
             /bin/cat "\(temporary.path)/state-$selected.json"
         elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then

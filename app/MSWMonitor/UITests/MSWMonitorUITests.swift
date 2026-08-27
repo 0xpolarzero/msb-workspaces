@@ -901,39 +901,42 @@ final class MSWMonitorUITests: XCTestCase {
 
         XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
         app.buttons["open-monitor.button"].click()
-        XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 3))
+        let window = app.windows["Overview"]
+        XCTAssertTrue(window.waitForExistence(timeout: 3))
         XCTAssertTrue(
             app.descendants(matching: .any)["monitor.popover"]
                 .waitForNonExistence(timeout: 2)
         )
 
-        let stop = app.buttons["workspace.dev.window-stop"]
+        let stop = window.buttons["workspace.dev.window-stop"]
         XCTAssertTrue(stop.waitForExistence(timeout: 2))
         stop.click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["lifecycle.window-confirmation.sheet"]
-                .waitForExistence(timeout: 2)
-        )
-        let confirmation = app.descendants(matching: .any)["lifecycle.window-confirmation.confirm"]
-        let cancel = app.descendants(matching: .any)["lifecycle.window-confirmation.cancel"]
+        let sheet = window.descendants(matching: .any)["lifecycle.window-confirmation.sheet"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 2))
+        let title = window.staticTexts["lifecycle.window-confirmation.title"]
+        let message = window.staticTexts["lifecycle.window-confirmation.message"]
+        let confirmation = window.buttons["lifecycle.window-confirmation.confirm"]
+        let cancel = window.buttons["lifecycle.window-confirmation.cancel"]
+        XCTAssertEqual(title.value as? String, "Stop dev?")
+        XCTAssertEqual(message.value as? String, "The dev workspace will stop. You can start it again later.")
         XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
         XCTAssertEqual(confirmation.label, "Stop")
+        XCTAssertEqual(cancel.label, "Cancel")
         XCTAssertFalse(app.descendants(matching: .any)["monitor.popover"].exists)
-        cancel.click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["lifecycle.window-confirmation.sheet"]
-                .waitForNonExistence(timeout: 2)
-        )
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 2))
         assertText("Running", identifier: "workspace.dev.summary-state", in: app)
 
-        let restart = app.buttons["workspace.dev.window-restart"]
+        let restart = window.buttons["workspace.dev.window-restart"]
         XCTAssertTrue(restart.waitForExistence(timeout: 2))
         restart.click()
         XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
+        XCTAssertEqual(title.value as? String, "Restart dev?")
+        XCTAssertEqual(message.value as? String, "The dev workspace will restart. Running processes may be interrupted.")
         XCTAssertEqual(confirmation.label, "Restart")
         XCTAssertFalse(app.descendants(matching: .any)["monitor.popover"].exists)
-        confirmation.click()
-        let state = app.staticTexts["workspace.dev.summary-state"]
+        app.typeKey(.return, modifierFlags: [])
+        let state = window.staticTexts["workspace.dev.summary-state"]
         XCTAssertEqual(
             XCTWaiter.wait(
                 for: [XCTNSPredicateExpectation(
