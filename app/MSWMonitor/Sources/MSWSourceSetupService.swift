@@ -4,6 +4,13 @@ protocol MSWSourceSetupControlling: Sendable {
     var isAvailable: Bool { get }
     func configureUserIntegrationIfAvailable() async throws
     func installRuntime() async throws
+    func repairRuntime() async throws
+}
+
+extension MSWSourceSetupControlling {
+    func repairRuntime() async throws {
+        try await installRuntime()
+    }
 }
 
 struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
@@ -50,6 +57,18 @@ struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
 
 
     func installRuntime() async throws {
+        try await installRuntime(environment: [:])
+    }
+
+    func repairRuntime() async throws {
+        try await installRuntime(environment: [
+            "NONINTERACTIVE": "1",
+            "HOMEBREW_NO_AUTO_UPDATE": "1",
+            "HOMEBREW_NO_ENV_HINTS": "1"
+        ])
+    }
+
+    private func installRuntime(environment: [String: String]) async throws {
         guard let root = sourceRoot() else {
             throw Failure.unavailable
         }
@@ -63,7 +82,9 @@ struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
             executable: URL(fileURLWithPath: "/bin/bash"),
             arguments: [setupURL.path, "--skip-workspaces"],
             timeout: .seconds(30 * 60),
-            captureLimit: 4 * 1024 * 1024
+            captureLimit: RuntimeRepairFailure.diagnosticLimit,
+            environment: environment,
+            preserveOutputTail: true
         )
     }
 
@@ -71,7 +92,9 @@ struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
         executable: URL,
         arguments: [String],
         timeout: Duration,
-        captureLimit: Int = 256 * 1024
+        captureLimit: Int = 256 * 1024,
+        environment: [String: String] = [:],
+        preserveOutputTail: Bool = false
     ) async throws -> MSWCommandResult {
         let result: MSWCommandResult
         do {
@@ -79,9 +102,10 @@ struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
                 MSWCommand(
                     executable: executable,
                     arguments: arguments,
-                    environment: ["MSW_SKIP_HOST_REPAIR": "1"],
+                    environment: environment.merging(["MSW_SKIP_HOST_REPAIR": "1"]) { _, required in required },
                     timeout: timeout,
-                    captureLimit: captureLimit
+                    captureLimit: captureLimit,
+                    preserveOutputTail: preserveOutputTail
                 )
             )
         } catch let error as MSWClientError {
@@ -91,9 +115,10 @@ struct MSWSourceSetupService: MSWSourceSetupControlling, Sendable {
         }
 
         guard result.status == 0 else {
-            let detail = [result.stderrString, result.stdoutString]
+            let detail = [result.stdoutString, result.stderrString]
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { !$0.isEmpty } ?? ""
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
             throw Failure.failed(detail)
         }
         return result

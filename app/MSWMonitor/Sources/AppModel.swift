@@ -357,6 +357,9 @@ enum RuntimeRepairAccessibilityIdentifier {
     static let repairAction = "runtime-repair.installation.action"
     static let repairProgress = "runtime-repair.progress"
     static let repairResult = "runtime-repair.result"
+    static let repairDetailsDisclosure = "runtime-repair.details.disclosure"
+    static let repairDetails = "runtime-repair.details.text"
+    static let repairCopyDetails = "runtime-repair.details.copy"
     static let repairClose = "runtime-repair.close"
 }
 

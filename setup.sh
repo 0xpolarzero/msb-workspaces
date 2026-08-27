@@ -258,7 +258,7 @@ log "Configuring browser names, loopback addresses, and SSH"
 "$HOME/.local/bin/msw" host repair
 
 HOST_CPUS="${MSW_TEST_HOST_CPUS:-}"
-if [[ -z "$HOST_CPUS" ]]; then HOST_CPUS="$(sysctl -n hw.logicalcpu)"; fi
+if [[ -z "$HOST_CPUS" ]]; then HOST_CPUS="$(/usr/sbin/sysctl -n hw.logicalcpu)"; fi
 cap_cpu() { local requested="$1"; (( requested > HOST_CPUS )) && printf '%s\n' "$HOST_CPUS" || printf '%s\n' "$requested"; }
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$MSW_BASE_SNAPSHOT" >/dev/null 2>&1; }
 sandbox_exists() { workspace_msb "$1" inspect "$1" >/dev/null 2>&1; }

@@ -260,9 +260,17 @@ private final class RuntimeRepairWindowController {
         repairDidSucceed: @escaping () -> Void,
         close: @escaping () -> Void
     ) {
+        var uiTestRepairAttempt = 0
         let repair: @MainActor () async throws -> Void = {
             if uiTestMode {
-                try await Task.sleep(for: .milliseconds(1_500))
+                uiTestRepairAttempt += 1
+                try await Task.sleep(for: .milliseconds(800))
+                if uiTestRepairAttempt == 1 {
+                    throw RuntimeRepairFailure(diagnosticDetails: """
+                    Installing dependency fixture
+                    Final fixture error: package metadata was unavailable.
+                    """)
+                }
                 return
             }
             guard let coordinator else { throw RuntimeRepairPageError.unavailable }
@@ -278,8 +286,8 @@ private final class RuntimeRepairWindowController {
         window.identifier = NSUserInterfaceItemIdentifier(RuntimeRepairAccessibilityIdentifier.repairWindow)
         hosting.view.setAccessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairWindow)
         window.title = "Repair MSW Installation"
-        window.setContentSize(NSSize(width: 460, height: 320))
-        window.minSize = NSSize(width: 420, height: 280)
+        window.setContentSize(NSSize(width: 500, height: 430))
+        window.minSize = NSSize(width: 460, height: 360)
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.center()
@@ -313,6 +321,8 @@ private struct RuntimeRepairView: View {
     let repairDidSucceed: () -> Void
     let close: () -> Void
     @State private var phase: Phase = .needed
+    @State private var diagnosticDetails: String?
+    @State private var detailsExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -352,7 +362,41 @@ private struct RuntimeRepairView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairResult)
                 }
-                .foregroundStyle(.orange)
+                .foregroundStyle(.primary)
+            }
+
+            if case .failed = phase, let diagnosticDetails {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        detailsExpanded.toggle()
+                    } label: {
+                        Label(
+                            detailsExpanded ? "Hide Details" : "Show Details",
+                            systemImage: detailsExpanded ? "chevron.down" : "chevron.right"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairDetailsDisclosure)
+
+                    if detailsExpanded {
+                        ScrollView([.horizontal, .vertical]) {
+                            Text(diagnosticDetails)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairDetails)
+                        }
+                        .frame(maxHeight: 150)
+                        .padding(8)
+                        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 6))
+
+                        Button("Copy Details") {
+                            NSPasteboard.general.clearContents()
+                            _ = NSPasteboard.general.setString(diagnosticDetails, forType: .string)
+                        }
+                        .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairCopyDetails)
+                    }
+                }
             }
 
             Spacer()
@@ -384,14 +428,19 @@ private struct RuntimeRepairView: View {
 
     private func runRepair() {
         guard phase != .repairing else { return }
+        diagnosticDetails = nil
+        detailsExpanded = false
         phase = .repairing
         Task { @MainActor in
             do {
                 try await repair()
+                diagnosticDetails = nil
                 phase = .succeeded
                 repairDidSucceed()
             } catch {
-                phase = .failed(error.localizedDescription)
+                let failure = (error as? RuntimeRepairFailure) ?? RuntimeRepairFailure(error: error)
+                diagnosticDetails = failure.diagnosticDetails
+                phase = .failed(failure.localizedDescription)
             }
         }
     }

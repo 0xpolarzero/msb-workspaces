@@ -156,12 +156,35 @@ final class MSWMonitorUITests: XCTestCase {
         let repair = app.buttons["runtime-repair.installation.action"]
         XCTAssertTrue(repair.waitForExistence(timeout: 3))
         repair.click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["runtime-repair.progress"].waitForExistence(timeout: 2)
-        )
         let repairResult = app.descendants(matching: .any)["runtime-repair.result"]
         XCTAssertTrue(repairResult.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Installation repaired"].exists)
+        XCTAssertTrue(
+            app.staticTexts["MSW runtime repair could not complete. Show details, then retry."]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.details.text"].exists)
+        let finalDetail = NSPredicate(
+            format: "label CONTAINS %@",
+            "Final fixture error: package metadata was unavailable."
+        )
+        XCTAssertEqual(app.staticTexts.matching(finalDetail).count, 0)
+        let detailsDisclosure = app.buttons["runtime-repair.details.disclosure"]
+        XCTAssertTrue(detailsDisclosure.waitForExistence(timeout: 2))
+        XCTAssertEqual(detailsDisclosure.label, "Show Details")
+        detailsDisclosure.click()
+        let details = app.descendants(matching: .any)["runtime-repair.details.text"]
+        XCTAssertTrue(details.waitForExistence(timeout: 2))
+        NSPasteboard.general.clearContents()
+        app.buttons["runtime-repair.details.copy"].click()
+        XCTAssertEqual(
+            NSPasteboard.general.string(forType: .string),
+            "Installing dependency fixture\nFinal fixture error: package metadata was unavailable."
+        )
+
+        repair.click()
+        XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.details.text"].exists)
+        XCTAssertFalse(app.buttons["runtime-repair.details.copy"].exists)
+        XCTAssertTrue(app.staticTexts["Installation repaired"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.descendants(matching: .any)["runtime-repair.window.banner"]
                 .waitForNonExistence(timeout: 3)

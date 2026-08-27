@@ -3173,12 +3173,18 @@ final class AppModelTests: XCTestCase {
 
         let runtimeMarker = root.appendingPathComponent("runtime-marker")
         let runtimeArgumentsMarker = root.appendingPathComponent("runtime-arguments-marker")
+        let repairEnvironmentMarker = root.appendingPathComponent("repair-environment-marker")
         let hostRepairMarker = root.appendingPathComponent("host-repair-marker")
         let setup = """
         #!/bin/sh
         set -eu
         printf '%s\\n' "${MSW_SKIP_HOST_REPAIR:-unset}" > "\(runtimeMarker.path)"
         printf '%s\\n' "$@" > "\(runtimeArgumentsMarker.path)"
+        printf '%s\\n%s\\n%s\\n%s\\n' \
+          "$PATH" \
+          "${HOMEBREW_NO_AUTO_UPDATE:-unset}" \
+          "${HOMEBREW_NO_ENV_HINTS:-unset}" \
+          "${NONINTERACTIVE:-unset}" > "\(repairEnvironmentMarker.path)"
         """
         let launcher = """
         #!/bin/sh
@@ -3199,7 +3205,7 @@ final class AppModelTests: XCTestCase {
         )
 
         XCTAssertTrue(service.isAvailable)
-        try await service.installRuntime()
+        try await service.repairRuntime()
         try await service.configureUserIntegrationIfAvailable()
         XCTAssertEqual(try String(contentsOf: runtimeMarker, encoding: .utf8), "1\n")
         XCTAssertEqual(
@@ -3207,6 +3213,29 @@ final class AppModelTests: XCTestCase {
             "--skip-workspaces\n"
         )
         XCTAssertEqual(try String(contentsOf: hostRepairMarker, encoding: .utf8), "host repair 1\n")
+        let repairEnvironment = try String(contentsOf: repairEnvironmentMarker, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        XCTAssertEqual(repairEnvironment.count, 4)
+        XCTAssertTrue(repairEnvironment[0].split(separator: ":").contains("/usr/sbin"))
+        XCTAssertTrue(repairEnvironment[0].split(separator: ":").contains("/sbin"))
+        XCTAssertEqual(Array(repairEnvironment.dropFirst()), ["1", "1", "1"])
+    }
+
+    func testRuntimeRepairFailureKeepsConciseSummaryAndBoundedFinalDiagnostics() {
+        let finalError = "Final fixture error: dependency installation failed."
+        let failure = RuntimeRepairFailure(
+            diagnosticDetails: String(repeating: "fixture transcript\n", count: 30_000) + finalError
+        )
+
+        XCTAssertEqual(failure.localizedDescription, RuntimeRepairFailure.summary)
+        XCTAssertFalse(failure.localizedDescription.contains("fixture transcript"))
+        XCTAssertNotNil(failure.diagnosticDetails)
+        XCTAssertLessThanOrEqual(
+            Data((failure.diagnosticDetails ?? "").utf8).count,
+            RuntimeRepairFailure.diagnosticLimit
+        )
+        XCTAssertTrue(failure.diagnosticDetails?.hasSuffix(finalError) == true)
     }
 
 

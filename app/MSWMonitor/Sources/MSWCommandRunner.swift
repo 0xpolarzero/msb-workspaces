@@ -7,6 +7,7 @@ struct MSWCommand: Sendable {
     let environment: [String: String]
     let timeout: Duration
     let captureLimit: Int
+    let preserveOutputTail: Bool
     let stdin: Data?
     let terminationGrace: Duration
 
@@ -16,6 +17,7 @@ struct MSWCommand: Sendable {
         environment: [String: String] = [:],
         timeout: Duration = .seconds(30),
         captureLimit: Int = 4 * 1024 * 1024,
+        preserveOutputTail: Bool = false,
         stdin: Data? = nil,
         terminationGrace: Duration = .milliseconds(250)
     ) {
@@ -24,6 +26,7 @@ struct MSWCommand: Sendable {
         self.environment = environment
         self.timeout = timeout
         self.captureLimit = captureLimit
+        self.preserveOutputTail = preserveOutputTail
         self.stdin = stdin
         self.terminationGrace = terminationGrace
     }
@@ -161,10 +164,18 @@ actor MSWCommandRunner {
 
         let startedAt = ContinuousClock.now
         let stdoutTask = Task.detached(priority: .userInitiated) {
-            Self.readCapped(stdoutPipe.fileHandleForReading, limit: command.captureLimit)
+            Self.readCapped(
+                stdoutPipe.fileHandleForReading,
+                limit: command.captureLimit,
+                preserveTail: command.preserveOutputTail
+            )
         }
         let stderrTask = Task.detached(priority: .userInitiated) {
-            Self.readCapped(stderrPipe.fileHandleForReading, limit: command.captureLimit)
+            Self.readCapped(
+                stderrPipe.fileHandleForReading,
+                limit: command.captureLimit,
+                preserveTail: command.preserveOutputTail
+            )
         }
 
         let status: Int32
@@ -455,6 +466,9 @@ actor MSWCommandRunner {
             || key == "MSW_SKIP_HOST_REPAIR"
             || key == "MSW_TEST_KEYCHAIN_DIR"
             || key == "MSW_TEST_VISIBLE"
+            || key == "NONINTERACTIVE"
+            || key == "HOMEBREW_NO_AUTO_UPDATE"
+            || key == "HOMEBREW_NO_ENV_HINTS"
     }
 
     func executableSearchPath() -> String {
@@ -465,7 +479,9 @@ actor MSWCommandRunner {
         var paths = [configuration.homeDirectory.appending(path: ".local/bin").path]
         paths.append(contentsOf: configuration.additionalSearchPaths.map { $0.deletingLastPathComponent().path })
         paths.append(configuration.homeDirectory.appending(path: "Library/Application Support/MSW Monitor/Toolchains/current/bin").path)
-        paths.append(contentsOf: ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
+        paths.append(contentsOf: [
+            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"
+        ])
         return paths.joined(separator: ":")
     }
 
@@ -638,12 +654,21 @@ actor MSWCommandRunner {
         return 128 + signal
     }
 
-    private nonisolated static func readCapped(_ handle: FileHandle, limit: Int) -> Data {
+    private nonisolated static func readCapped(
+        _ handle: FileHandle,
+        limit: Int,
+        preserveTail: Bool
+    ) -> Data {
         var result = Data()
         while true {
             let chunk = handle.readData(ofLength: 64 * 1024)
             guard !chunk.isEmpty else { break }
-            if result.count < limit {
+            if preserveTail {
+                result.append(chunk)
+                if result.count > limit {
+                    result.removeFirst(result.count - limit)
+                }
+            } else if result.count < limit {
                 result.append(chunk.prefix(limit - result.count))
             }
         }

@@ -77,6 +77,43 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
         }
     }
 }
+
+struct RuntimeRepairFailure: Error, LocalizedError, Sendable, Equatable {
+    static let diagnosticLimit = 256 * 1024
+    static let summary = "MSW runtime repair could not complete. Show details, then retry."
+
+    let diagnosticDetails: String?
+
+    var errorDescription: String? { Self.summary }
+
+    init(error: Error) {
+        let rawDetails: String
+        if case BootstrapCoordinatorError.toolchainInstallationFailed(let detail) = error {
+            rawDetails = detail
+        } else {
+            rawDetails = error.localizedDescription
+        }
+        diagnosticDetails = Self.boundedDetails(rawDetails)
+    }
+
+    init(diagnosticDetails: String) {
+        self.diagnosticDetails = Self.boundedDetails(diagnosticDetails)
+    }
+
+    static func boundedDetails(_ value: String) -> String? {
+        let withoutANSI = value.replacingOccurrences(
+            of: "\u{001B}\\[[0-?]*[ -/]*[@-~]",
+            with: "",
+            options: .regularExpression
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !withoutANSI.isEmpty, withoutANSI != summary else { return nil }
+        let data = Data(withoutANSI.utf8)
+        guard data.count > diagnosticLimit else { return withoutANSI }
+        let notice = "Earlier diagnostic output omitted.\n"
+        let suffixLimit = max(0, diagnosticLimit - Data(notice.utf8).count)
+        return notice + String(decoding: data.suffix(suffixLimit), as: UTF8.self)
+    }
+}
 enum MSWHostServiceStatus: String, Sendable {
     case enabled
     case requiresApproval
@@ -874,12 +911,16 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
     }
 
-    private func installAvailableToolchain() async throws {
+    private func installAvailableToolchain(forRepair: Bool = false) async throws {
         do {
             _ = try await installBundledToolchain()
         } catch let error as BootstrapCoordinatorError where error == .toolchainUnavailable {
             do {
-                try await sourceSetup.installRuntime()
+                if forRepair {
+                    try await sourceSetup.repairRuntime()
+                } else {
+                    try await sourceSetup.installRuntime()
+                }
             } catch let error as MSWSourceSetupService.Failure {
                 switch error {
                 case .unavailable:
@@ -897,15 +938,13 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         defer { running = false }
         do {
             try await installDefaultConfigurationIfNeeded()
-            try await installAvailableToolchain()
+            try await installAvailableToolchain(forRepair: true)
             await runner.invalidateMSWResolution()
             guard await runtimeIsReady() else {
                 throw BootstrapCoordinatorError.unavailable
             }
-        } catch let error as BootstrapCoordinatorError {
-            throw error
         } catch {
-            throw BootstrapCoordinatorError.toolchainInstallationFailed(error.localizedDescription)
+            throw RuntimeRepairFailure(error: error)
         }
     }
 
