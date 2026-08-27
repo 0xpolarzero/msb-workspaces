@@ -1668,6 +1668,54 @@ final class AppModelTests: XCTestCase {
         let afterRepair = await runner.mswResolution()
         XCTAssertEqual(afterRepair.selected?.standardizedFileURL, managed.standardizedFileURL)
     }
+
+    func testSupersededRuntimeResolutionCannotOverwriteRepairedRuntimeCache() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-runtime-resolution-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let executable = temporary.appendingPathComponent("msw")
+        let firstHandshakeStarted = temporary.appendingPathComponent("first-handshake-started")
+        let incompatibleHandshake = protocolCompatibleHandshake.replacingOccurrences(
+            of: #""protocolVersion":2,"preview""#,
+            with: #""protocolVersion":1,"preview""#
+        )
+        let script = """
+        #!/bin/sh
+        if (set -C; : > "\(firstHandshakeStarted.path)") 2>/dev/null; then
+            /bin/sleep 1
+            printf '%s\\n' '\(incompatibleHandshake)'
+        else
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let runner = MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        ))
+        let staleResolution = Task { await runner.mswResolution(forceRefresh: true) }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: firstHandshakeStarted.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstHandshakeStarted.path))
+
+        await runner.invalidateMSWResolution()
+        let repairedResolution = await runner.mswResolution(forceRefresh: true)
+        XCTAssertEqual(repairedResolution.selected?.standardizedFileURL, executable.standardizedFileURL)
+        let supersededResolution = await staleResolution.value
+        XCTAssertNil(supersededResolution.selected)
+
+        let cachedResolution = await runner.mswResolution()
+        XCTAssertEqual(
+            cachedResolution.selected?.standardizedFileURL,
+            executable.standardizedFileURL,
+            "A superseded pre-repair handshake must not replace the repaired runtime cache"
+        )
+    }
+
     func testUnknownQuarantineSnapshotAllowsStopButDisablesOtherLifecycleActions() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("msw-unknown-quarantine-test-\(UUID().uuidString)", isDirectory: true)

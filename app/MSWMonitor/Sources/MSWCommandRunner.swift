@@ -102,6 +102,7 @@ actor MSWCommandRunner {
     private var cancelledOperations: Set<UUID> = []
     private var cachedMSWResolution: MSWExecutableResolution?
     private var cachedSelectedHandshake: (url: URL, handshake: MSWHandshake)?
+    private var mswResolutionGeneration = 0
 
     init(configuration: Configuration = .init()) {
         self.configuration = configuration
@@ -225,6 +226,8 @@ actor MSWCommandRunner {
         if !forceRefresh, let cachedMSWResolution {
             return cachedMSWResolution
         }
+        mswResolutionGeneration &+= 1
+        let generation = mswResolutionGeneration
         let candidates = mswCandidates()
         var incompatibleCandidates: [URL] = []
         for candidate in candidates {
@@ -234,8 +237,10 @@ actor MSWCommandRunner {
                     candidates: candidates,
                     incompatibleCandidates: incompatibleCandidates
                 )
-                cachedMSWResolution = resolution
-                cachedSelectedHandshake = (url: candidate, handshake: handshake)
+                if generation == mswResolutionGeneration {
+                    cachedMSWResolution = resolution
+                    cachedSelectedHandshake = (url: candidate, handshake: handshake)
+                }
                 return resolution
             }
             // Cancellation can interrupt the handshake used for capability
@@ -256,7 +261,10 @@ actor MSWCommandRunner {
             candidates: candidates,
             incompatibleCandidates: incompatibleCandidates
         )
-        cachedMSWResolution = resolution
+        if generation == mswResolutionGeneration {
+            cachedMSWResolution = resolution
+            cachedSelectedHandshake = nil
+        }
         return resolution
     }
 
@@ -271,6 +279,7 @@ actor MSWCommandRunner {
     }
 
     func invalidateMSWResolution() {
+        mswResolutionGeneration &+= 1
         cachedMSWResolution = nil
         cachedSelectedHandshake = nil
     }
