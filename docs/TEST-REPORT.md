@@ -188,3 +188,23 @@ Optional, not required for normal installation:
 ```
 
 The suite uses temporary directories, simulated MicroSandbox state, and local Git remotes. It does not use your production VMs or GitHub credentials.
+## 2026-08-27 startup disk diagnosis
+
+The reported `agentd` line is a first-attach race, not evidence that the current
+`dev` data volume is corrupt. Read-only inspection showed that the sandbox's
+first named disk mount is `msw-dev-workspace` at `/workspace`; agentd identifies
+that attachment as `/dev/vdc`. `msb volume inspect` reports a raw 120 GiB ext4
+disk, `file` identifies an ext4 revision-1 filesystem, and the on-disk
+superblock contains the ext magic `53 ef` at byte 1080. The separate 100 GiB
+runtime disk also has valid ext4 metadata. The retained system log contains the
+initial `/dev/vdc` mount `EINVAL`, while later execution logs show successful
+workspace and Docker activity on the same volumes. No workspace was started and
+no real disk was modified during diagnosis.
+
+The source contract now creates each missing disk volume explicitly and waits
+for MicroSandbox's one-time ext4 creation to finish before attaching it. Every
+later start validates the named-volume kind, filesystem declaration, canonical
+path, and ext superblock magic. Existing blank, unknown, non-ext4, or damaged
+volumes fail closed with `MSW_WORKSPACE_DISK_INVALID`; MSW never formats an
+existing volume. A mount-time `/dev/vdc` EINVAL receives the same workspace-disk
+classification and is not an installation-repair signal.

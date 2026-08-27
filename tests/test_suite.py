@@ -721,7 +721,7 @@ class InstallerAndDailyTests(MSWTestCase):
         (self.env.home / ".config/msw/base-version").write_text("0.0.0\n")
         self.env.setup()
         self._assert_volume_sentinels()
-        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.2.0")
+        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.2.1")
 
     def test_reset_config_and_rebuild_base(self) -> None:
         config = self.env.home / ".config/msw/config.sh"
@@ -2698,6 +2698,44 @@ class BackupRestoreTests(MSWTestCase):
         self.assertEqual(len(archives), 1, proc.stdout)
         return archives[0]
 
+    def test_backup_schema_cutover_quarantines_stale_records_once_and_rejects_current_corruption(self) -> None:
+        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        operation_root.mkdir(parents=True)
+        stale = operation_root / "stale-operation-0001.json"
+        stale.write_text(json.dumps({
+            "kind": "backup", "operationId": "stale-operation-0001",
+            "state": "completed", "legacyResult": {"archive": "/tmp/old.tar.zst"},
+        }))
+        stale.chmod(0o600)
+
+        first = self.env.msw("app", "backup-list", "--format", "json")
+        self.assertEqual(json.loads(first.stdout)["result"], [])
+        quarantined = operation_root / ".incompatible-v2/stale-operation-0001.json"
+        self.assertTrue(quarantined.is_file())
+        self.assertFalse(stale.exists())
+        marker = operation_root / ".schema-v2-activated"
+        self.assertEqual(marker.read_text(), "schemaVersion=2\n")
+
+        second = self.env.msw("app", "backup-list", "--format", "json")
+        self.assertEqual(json.loads(second.stdout)["result"], [])
+        self.assertTrue(quarantined.is_file())
+
+        current_corrupt = operation_root / "current-corrupt-0002.json"
+        current_corrupt.write_text(json.dumps({
+            "schemaVersion": 2, "kind": "backup",
+            "operationId": "current-corrupt-0002", "state": "completed",
+        }))
+        current_corrupt.chmod(0o600)
+        rejected = self.env.msw(
+            "app", "backup-list", "--format", "json", check=False,
+        )
+        self.assertEqual(rejected.returncode, 78)
+        self.assertEqual(
+            json.loads(rejected.stdout)["error"]["code"],
+            "MSW_BACKUP_RECORD_INVALID",
+        )
+        self.assertTrue(current_corrupt.exists())
+
     def test_backup_restores_only_previous_running_set_and_excludes_keychain(self) -> None:
         self.env.msw("start", "dev")
         self.env.msw("start", "personal")
@@ -2895,10 +2933,153 @@ class BackupRestoreTests(MSWTestCase):
 
 
 class PackagedBehaviorTests(MSWTestCase):
+    def _apply_start(
+        self,
+        workspace: str = "dev",
+        *,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        plan = json.loads(self.env.msw(
+            "app", "plan", "start", "--workspace", workspace, "--format", "json",
+        ).stdout)["result"]
+        return self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text=f"START {workspace}\n", check=False, extra_env=extra_env,
+        )
+
+    def test_new_blank_workspace_disks_initialize_ext4_once_before_attach(self) -> None:
+        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired["workspaces"].append({
+            "name": "lab", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        request = json.dumps(desired)
+        first = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, timeout=90,
+        )
+        self.assertTrue(json.loads(first.stdout)["ok"])
+        state = self.env.state()
+        for volume in ("msw-lab-workspace", "msw-lab-runtime"):
+            self.assertEqual(state["volumes"][volume]["filesystem"], "ext4")
+            self.assertEqual(state["volumes"][volume]["magic"], "53ef")
+            self.assertEqual(state["volumes"][volume]["formatCount"], 1)
+            creates = [
+                event for event in state["events"]
+                if event.get("event") == "volume-create" and event.get("volume") == volume
+            ]
+            self.assertEqual(len(creates), 1)
+
+        second = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, timeout=90,
+        )
+        self.assertTrue(json.loads(second.stdout)["ok"])
+        state = self.env.state()
+        self.assertEqual(state["volumes"]["msw-lab-workspace"]["formatCount"], 1)
+        self.assertEqual(state["volumes"]["msw-lab-runtime"]["formatCount"], 1)
+
+    def test_ext4_workspace_disk_starts_normally(self) -> None:
+        before = len(self.env.state()["events"])
+        applied = self._apply_start()
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertTrue(json.loads(applied.stdout)["result"]["reconciled"])
+        events = self.env.state()["events"][before:]
+        self.assertEqual([event["event"] for event in events if event["event"] == "start"], ["start"])
+
+    def test_unknown_nonblank_and_corrupt_workspace_disks_fail_closed_without_mutation(self) -> None:
+        cases = (
+            ("unknown-nonblank", "unknown", "0000"),
+            ("corrupt-ext4", "ext4", "dead"),
+        )
+        for label, filesystem, magic in cases:
+            with self.subTest(label=label):
+                state = self.env.state()
+                entry = state["volumes"]["msw-dev-workspace"]
+                entry["filesystem"] = filesystem
+                entry["magic"] = magic
+                sentinel = Path(entry["path"]) / f"{label}.sentinel"
+                sentinel.write_text("preserve me\n")
+                format_count = entry["formatCount"]
+                start_count = sum(event["event"] == "start" for event in state["events"])
+                self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+                rejected = self._apply_start()
+                self.assertEqual(rejected.returncode, 78, rejected.stdout + rejected.stderr)
+                document = json.loads(rejected.stdout)
+                self.assertEqual(document["error"]["code"], "MSW_WORKSPACE_DISK_INVALID")
+                self.assertFalse(document["error"]["retryable"])
+                after = self.env.state()
+                self.assertEqual(
+                    sum(event["event"] == "start" for event in after["events"]),
+                    start_count,
+                )
+                self.assertEqual(after["volumes"]["msw-dev-workspace"]["formatCount"], format_count)
+                self.assertEqual(sentinel.read_text(), "preserve me\n")
+
+                after["volumes"]["msw-dev-workspace"]["filesystem"] = "ext4"
+                after["volumes"]["msw-dev-workspace"]["magic"] = "53ef"
+                self.env.state_file.write_text(json.dumps(after, indent=2, sort_keys=True))
+
+    def test_disposable_raw_images_prove_ext4_state_boundary_without_writes(self) -> None:
+        state = self.env.state()
+        images: dict[str, Path] = {}
+        for role in ("workspace", "runtime"):
+            name = f"msw-dev-{role}"
+            root = self.env.home / ".microsandbox/volumes" / name
+            root.mkdir(parents=True, exist_ok=True)
+            image = root / "disk.raw"
+            images[role] = image
+            state["volumes"][name]["path"] = str(image)
+            state["volumes"][name]["filesystem"] = "ext4"
+            state["volumes"][name]["magic"] = "53ef"
+        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+        def write_image(path: Path, kind: str) -> None:
+            with path.open("wb") as handle:
+                handle.truncate(4 * 1024 * 1024)
+                if kind == "ext4":
+                    handle.seek(1080)
+                    handle.write(b"\x53\xef")
+                elif kind == "nonblank":
+                    handle.seek(4096)
+                    handle.write(b"MSW-DATA")
+                elif kind == "corrupt":
+                    handle.seek(1080)
+                    handle.write(b"\xde\xad")
+
+        for image in images.values():
+            write_image(image, "ext4")
+        before = {role: hashlib.sha256(path.read_bytes()).hexdigest() for role, path in images.items()}
+        applied = self._apply_start(extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"})
+        self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+        self.assertEqual(
+            {role: hashlib.sha256(path.read_bytes()).hexdigest() for role, path in images.items()},
+            before,
+        )
+        self.env.msw("stop", "dev")
+
+        for kind in ("blank", "nonblank", "corrupt"):
+            write_image(images["workspace"], kind)
+            digest = hashlib.sha256(images["workspace"].read_bytes()).hexdigest()
+            start_count = sum(event["event"] == "start" for event in self.env.state()["events"])
+            rejected = self._apply_start(extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"})
+            self.assertEqual(rejected.returncode, 78, (kind, rejected.stdout, rejected.stderr))
+            self.assertEqual(
+                json.loads(rejected.stdout)["error"]["code"],
+                "MSW_WORKSPACE_DISK_INVALID",
+            )
+            self.assertEqual(hashlib.sha256(images["workspace"].read_bytes()).hexdigest(), digest)
+            self.assertEqual(
+                sum(event["event"] == "start" for event in self.env.state()["events"]),
+                start_count,
+            )
+
     def test_help_version_docs_without_msb_and_complete_deep_check(self) -> None:
         env = self.env.env.copy()
         env["MSW_MSB_BIN"] = "/does/not/exist"
-        self.assertIn("msw 3.2.0", self.env.msw("version", extra_env=env).stdout)
+        self.assertIn("msw 3.2.1", self.env.msw("version", extra_env=env).stdout)
         self.assertIn("grouped MicroSandbox", self.env.msw("help", extra_env=env).stdout)
         self.assertIn("MSW", self.env.msw("docs", "cheatsheet", extra_env=env).stdout)
         proc = self.env.msw("check", "--deep", timeout=90)
@@ -3846,9 +4027,32 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertIn("disk mount failed", document["error"]["message"])
         self.assertEqual(
             document["error"]["recovery"],
-            "Resolve the runtime error shown above, then create a fresh plan and retry.",
+            "Resolve the final diagnostic, then create a fresh plan and retry.",
         )
         self.assertEqual(document["warnings"], [])
+
+    def test_mount_einval_is_typed_as_workspace_disk_failure(self) -> None:
+        plan = json.loads(self.env.msw(
+            "app", "plan", "start", "--workspace", "dev", "--format", "json"
+        ).stdout)["result"]
+        failed = self.env.msw(
+            "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
+            input_text="START dev\n", check=False,
+            extra_env={
+                "MSW_FAKE_START_FAIL": "1",
+                "MSW_FAKE_LOGS": (
+                    "agentd: init failed: disk mount: failed to mount /dev/vdc "
+                    "at /workspace as ext4: EINVAL: Invalid argument"
+                ),
+            },
+        )
+        self.assertEqual(failed.returncode, 78)
+        error = json.loads(failed.stdout)["error"]
+        self.assertEqual(error["code"], "MSW_WORKSPACE_DISK_INVALID")
+        self.assertIn("could not be mounted as ext4", error["message"])
+        self.assertIn("/dev/vdc", error["message"])
+        self.assertNotIn("repair the MSW runtime", error["recovery"].lower())
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_app_push_apply_reconciles_the_reviewed_commit(self) -> None:
         bare = self.env.init_remote()

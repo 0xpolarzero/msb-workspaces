@@ -81,6 +81,8 @@ def ensure_sandbox_dirs(state: dict[str, Any], box: str) -> dict[str, Any]:
 def volume_path(state: dict[str, Any], name: str) -> Path:
     entry = state["volumes"][name]
     p = Path(entry["path"])
+    if p.is_file() and os.environ.get("MSW_TEST_VALIDATE_RAW_DISKS") == "1":
+        p = p.parent / "guest-data"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -243,7 +245,10 @@ def parse_create(args: list[str], state: dict[str, Any]) -> int:
         if vol not in state["volumes"]:
             p = STATE_ROOT / "volumes" / vol
             p.mkdir(parents=True, exist_ok=True)
-            state["volumes"][vol] = {"path": str(p), "size": size_match.group(1) if size_match else ""}
+            state["volumes"][vol] = {
+                "path": str(p), "size": size_match.group(1) if size_match else "",
+                "kind": "disk", "filesystem": "ext4", "magic": "53ef", "formatCount": 1,
+            }
         sb["mounts"][dest] = vol
         if dest == "/workspace": sb["workspace_volume"] = vol
         if dest == "/var/lib/msw-runtime": sb["runtime_volume"] = vol
@@ -576,7 +581,17 @@ def main() -> int:
         if not rest: return 1
         sub = rest[0]
         name = rest[1] if len(rest) > 1 else ""
-        if sub == "inspect": return 0 if name in state["volumes"] else 1
+        if sub == "inspect":
+            entry = state["volumes"].get(name)
+            if entry is None:
+                return 1
+            print(f"Name:           {name}")
+            print(f"Kind:           {entry.get('kind', 'disk')}")
+            print("Format:         raw")
+            print(f"Filesystem:     {entry.get('filesystem', 'ext4')}")
+            print(f"Path:           {entry['path']}")
+            print(f"Magic:          {entry.get('magic', '53ef')}")
+            return 0
         if sub == "create":
             if not name or name in state["volumes"]:
                 return 1
@@ -585,7 +600,11 @@ def main() -> int:
                 size = rest[rest.index("--size") + 1]
             path = STATE_ROOT / "volumes" / name
             path.mkdir(parents=True, exist_ok=True)
-            state["volumes"][name] = {"path": str(path), "size": size}
+            state["volumes"][name] = {
+                "path": str(path), "size": size, "kind": "disk",
+                "filesystem": "ext4", "magic": "53ef", "formatCount": 1,
+            }
+            log_event(state, "volume-create", volume=name, size=size, filesystem="ext4")
             save(state)
             return 0
         if sub == "rm":

@@ -285,6 +285,53 @@ workspace_msb() {
 }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 
+# Disk named volumes must exist and finish their one-time ext4 initialization
+# before they are attached to a VM. MicroSandbox assigns the first named disk
+# mount (/workspace) to /dev/vdc; creating it implicitly during `run` allowed
+# agentd to race the formatter and retain a misleading EINVAL mount failure.
+# Existing volumes are only inspected. Unknown, blank, or damaged storage is
+# never formatted here.
+volume_inspect_field() {
+  local name="$1" field="$2"
+  LC_ALL=C "$MSB_BIN" volume inspect "$name" 2>/dev/null |
+    awk -F: -v field="$field" '$1 == field { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+}
+
+validate_ext4_volume() {
+  local name="$1" kind filesystem path magic expected
+  kind="$(volume_inspect_field "$name" Kind)"
+  filesystem="$(volume_inspect_field "$name" Filesystem)"
+  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 1
+  if [[ "$TEST_MODE" == 1 ]]; then
+    magic="$(volume_inspect_field "$name" Magic)"
+    [[ -z "$magic" || "$magic" == 53ef ]]
+    return
+  fi
+  path="$(volume_inspect_field "$name" Path)"
+  expected="$HOME/.microsandbox/volumes/$name/disk.raw"
+  [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 1
+  magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
+  [[ "$magic" == 53ef ]]
+}
+
+ensure_ext4_volume() {
+  local name="$1" size="$2" created=0
+  if ! volume_exists "$name"; then
+    # `volume create --kind disk` owns the only formatting transition. We call
+    # it only after an authoritative not-found result and never retry it after
+    # the name exists, so a newly allocated blank image is formatted once.
+    "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null ||
+      fatal "could not create workspace storage '$name'"
+    created=1
+  fi
+  validate_ext4_volume "$name" || {
+    if (( created == 1 )); then
+      fatal "new workspace storage '$name' did not initialize as ext4; it was retained for inspection"
+    fi
+    fatal "workspace storage '$name' is not a verified ext4 disk; inspect it and restore from backup instead of formatting it"
+  }
+}
+
 BASE_STAMP="$HOME/.config/msw/base-version"
 if [[ -f "$BASE_STAMP" && "$(cat "$BASE_STAMP")" != "$MSW_VERSION" ]]; then
   warn "base version changed; rebuilding VM roots while preserving data volumes"
@@ -317,6 +364,7 @@ if ! snapshot_exists; then
   log "Building the reusable Ubuntu development base"
   sandbox_exists "$MSW_BASE_BUILDER" && "$MSB_BIN" rm -f "$MSW_BASE_BUILDER" || true
   volume_exists msw-base-runtime-temporary && "$MSB_BIN" volume rm msw-base-runtime-temporary || true
+  ensure_ext4_volume msw-base-runtime-temporary 24G
 
   BASE_CPUS="$(cap_cpu 8)"
   BASE_MAX_CPUS="$(cap_cpu 12)"
@@ -423,6 +471,8 @@ create_workspace() {
 
   if ! sandbox_exists "$box"; then
     log "Creating workspace: $box"
+    ensure_ext4_volume "msw-${box}-workspace" "$workspace_size"
+    ensure_ext4_volume "msw-${box}-runtime" "$runtime_size"
     run_args+=(--name "$box" --from-snapshot "$MSW_BASE_SNAPSHOT")
     run_args+=(--cpus "$effective_cpus" --max-cpus "$effective_max")
     run_args+=(--memory "$memory" --max-memory "$max_memory")

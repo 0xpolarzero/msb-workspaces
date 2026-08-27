@@ -76,6 +76,7 @@ struct DetailView: View {
     @State private var logSelection: Set<LogRowID> = []
     @State private var followsLogs = true
     @State private var wrapsLogs = false
+    @State private var operationDetailsExpanded = false
 
     init(
         model: AppModel,
@@ -400,23 +401,7 @@ struct DetailView: View {
         VStack(alignment: .leading, spacing: 10) {
             if let failure = model.latestOperationFailure,
                failure.workspace.map({ !hiddenWorkspaces.contains($0) }) ?? true {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(failure.reason)
-                            .font(.caption.weight(.semibold))
-                        Text(failure.recovery)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("View system health") {
-                            navigation.tab = .overview
-                        }
-                        .accessibilityIdentifier("details.latest-operation-error.action")
-                    }
-                }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("details.latest-operation-error")
+                operationFailurePanel(failure)
             }
 
             if visibleWorkspaces.isEmpty {
@@ -526,6 +511,47 @@ struct DetailView: View {
             detailError
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func operationFailurePanel(_ failure: MSWOperationFailureNotice) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(failure.reason)
+                    .font(.caption.weight(.semibold))
+                    .accessibilityIdentifier("lifecycle.failure.summary")
+                Text(failure.recovery)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let details = failure.diagnosticDetails {
+                    Button(operationDetailsExpanded ? "Hide Details" : "Show Details") {
+                        operationDetailsExpanded.toggle()
+                    }
+                    .accessibilityIdentifier("lifecycle.failure.details.disclosure")
+                    if operationDetailsExpanded {
+                        ScrollView([.horizontal, .vertical]) {
+                            Text(details)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("lifecycle.failure.details.text")
+                        }
+                        .frame(maxHeight: 140)
+                        Button("Copy Details") {
+                            copyToPasteboard(details)
+                        }
+                        .accessibilityIdentifier("lifecycle.failure.details.copy")
+                    }
+                }
+                Button("View system health") {
+                    navigation.tab = .overview
+                }
+                .accessibilityIdentifier("details.latest-operation-error.action")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("details.latest-operation-error")
     }
 
     private func logToolbar(
@@ -1914,7 +1940,7 @@ private extension DetailView {
                 }
 
                 if !showsBackupFailureCard {
-                    detailError
+                    backupDetailError
                 }
             }
             .padding(20)
@@ -1990,6 +2016,27 @@ private extension DetailView {
         }
     }
 
+    @ViewBuilder
+    private var backupDetailError: some View {
+        if let error = model.presentedBackupError {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Backup request failed", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Text(error).font(.caption).textSelection(.enabled)
+                Button("Retry") {
+                    Task { await model.refreshBackupOperations() }
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("backup.error")
+        }
+    }
+
     private func chooseBackupDirectory() {
         let panel = BackupDestinationPicker.makePanel()
         panel.directoryURL = model.backupUITestDestinationIfAvailable()
@@ -2061,7 +2108,7 @@ private extension DetailView {
     private var showsBackupFailureCard: Bool {
         guard let operation = model.presentedBackupOperations.first,
               operation.state == .failed,
-              let error = model.presentedDetailError else { return false }
+              let error = model.presentedBackupError else { return false }
         return error == operation.message
     }
 

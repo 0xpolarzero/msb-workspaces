@@ -330,7 +330,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 title: "Start failed",
                 reason: "The runtime rejected the start request.",
                 recovery: "Run Diagnostics and Maintenance before retrying start.",
-                workspace: .dev
+                workspace: .dev,
+                diagnosticDetails: "agentd: init failed\nfailed to mount /dev/vdc at /workspace as ext4: EINVAL: Invalid argument\nMSW error code: MSW_WORKSPACE_DISK_INVALID"
             )
             : nil
         let model: AppModel
@@ -404,6 +405,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if runtimeRepairFixture {
                 model.installRuntimeRepairUITestFixture()
+            }
+            if arguments.contains("--ui-test-malformed-backup") {
+                model.installMalformedBackupUITestFixture()
             }
         }
         applicationState.model = model

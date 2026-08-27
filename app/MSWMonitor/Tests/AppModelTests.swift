@@ -385,7 +385,8 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertTrue(model.backupOperations.isEmpty)
         XCTAssertFalse(model.runtimeRepairRequired)
-        XCTAssertEqual(model.detailError, "MSW returned malformed backup data for backup-list.")
+        XCTAssertNil(model.detailError)
+        XCTAssertEqual(model.backupError, "MSW returned malformed backup data for backup-list.")
     }
 
     func testBackupListCorruptRecordDoesNotMasqueradeAsRuntimeRepair() async throws {
@@ -416,8 +417,9 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertTrue(model.backupOperations.isEmpty)
         XCTAssertFalse(model.runtimeRepairRequired)
-        XCTAssertTrue(model.detailError?.contains("durable backup operation record is corrupt") == true)
-        XCTAssertNotNil(model.presentedDetailError)
+        XCTAssertNil(model.detailError)
+        XCTAssertTrue(model.backupError?.contains("durable backup operation record is corrupt") == true)
+        XCTAssertNotNil(model.presentedBackupError)
     }
 
     func testRuntimeRepairPresentationOwnsOnlyClassifiedRuntimeErrors() {
@@ -441,6 +443,17 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(
             RuntimeRepairIssueClassifier.isRepairRelated(
                 MSWClientError.timedOut(command: "github-status")
+            )
+        )
+        XCTAssertFalse(
+            RuntimeRepairIssueClassifier.isRepairRelated(
+                MSWClientError.protocolFailure(MSWProtocolError(
+                    code: "MSW_WORKSPACE_DISK_INVALID",
+                    message: "The workspace disk could not be mounted as ext4.",
+                    recovery: "Inspect the named volume.",
+                    workspace: "dev",
+                    retryable: false
+                ))
             )
         )
 
@@ -1894,6 +1907,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(notice.workspace, .dev)
         XCTAssertEqual(notice.reason, "MSW apply exited with status 7 without returning error details.")
         XCTAssertEqual(notice.recovery, "Run Diagnostics and Maintenance before retrying start.")
+        XCTAssertNil(notice.diagnosticDetails)
         XCTAssertEqual(model.health.title, "Start failed")
         XCTAssertNil(model.lastError)
         XCTAssertTrue(model.activities.contains {
@@ -1901,6 +1915,24 @@ final class AppModelTests: XCTestCase {
                 $0.workspace == "dev" &&
                 $0.detail?.contains("MSW apply exited with status 7 without returning error details.") == true
         })
+    }
+
+    func testLifecycleFailureNoticeKeepsConciseSummaryAndBoundedFinalDiagnostics() throws {
+        let finalLine = "failed to mount /dev/vdc at /workspace as ext4: EINVAL"
+        let notice = MSWOperationFailureNotice(
+            action: "start",
+            title: "Start failed",
+            reason: "The dev workspace could not start.\nignored duplicate summary",
+            recovery: "Inspect the named workspace volume.",
+            workspace: .dev,
+            diagnosticDetails: String(repeating: "earlier diagnostics\n", count: 8_000) + finalLine
+        )
+
+        XCTAssertEqual(notice.reason, "The dev workspace could not start.")
+        let details = try XCTUnwrap(notice.diagnosticDetails)
+        XCTAssertLessThanOrEqual(Data(details.utf8).count, MSWOperationFailureNotice.diagnosticLimit)
+        XCTAssertTrue(details.hasSuffix(finalLine))
+        XCTAssertEqual(details.components(separatedBy: "The dev workspace could not start.").count, 1)
     }
 
     func testStopApplyDoesNotLoadQuarantinedGuestCredential() async throws {

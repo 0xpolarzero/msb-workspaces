@@ -228,11 +228,60 @@ struct MonitorHealth: Equatable, Sendable {
 }
 
 struct MSWOperationFailureNotice: Equatable, Sendable {
+    static let diagnosticLimit = 64 * 1024
+
     let action: String
     let title: String
     let reason: String
     let recovery: String
     let workspace: Workspace.ID?
+    let diagnosticDetails: String?
+
+    init(
+        action: String,
+        title: String,
+        reason: String,
+        recovery: String,
+        workspace: Workspace.ID?,
+        diagnosticDetails: String? = nil
+    ) {
+        self.action = action
+        self.title = title
+        self.reason = reason.components(separatedBy: .newlines)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .trimmingCharacters(in: .whitespaces) ?? reason
+        self.recovery = recovery
+        self.workspace = workspace
+        self.diagnosticDetails = Self.boundedDiagnostics(
+            diagnosticDetails,
+            removingSummary: self.reason
+        )
+    }
+
+    private static func boundedDiagnostics(
+        _ value: String?,
+        removingSummary summary: String
+    ) -> String? {
+        guard let value else { return nil }
+        let cleaned = value.replacingOccurrences(
+            of: "\u{001B}\\[[0-?]*[ -/]*[@-~]",
+            with: "",
+            options: .regularExpression
+        )
+        let lines = cleaned.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0 != summary }
+        let unique = lines.reduce(into: [String]()) { result, line in
+            if result.last != line { result.append(line) }
+        }
+        guard !unique.isEmpty else { return nil }
+        let joined = unique.joined(separator: "\n")
+        let data = Data(joined.utf8)
+        guard data.count > diagnosticLimit else { return joined }
+        let notice = "Earlier diagnostic output omitted.\n"
+        let remaining = diagnosticLimit - Data(notice.utf8).count
+        return notice + String(decoding: data.suffix(max(0, remaining)), as: UTF8.self)
+    }
 }
 @MainActor
 struct SystemApplication: Equatable, Sendable {
@@ -793,6 +842,7 @@ final class AppModel {
     private(set) var portsSnapshot: MSWPortsResponse?
     private(set) var githubSnapshot: MSWGitHubStateResponse?
     private(set) var detailError: String?
+    private(set) var backupError: String?
     private(set) var isDetailLoading = false
     private(set) var logsByWorkspace: [String: MSWLogsResponse] = [:]
     private(set) var logsUnavailableWorkspaces: Set<String> = []
@@ -951,6 +1001,7 @@ final class AppModel {
         detailRequestGeneration &+= 1
         isDetailLoading = false
         detailError = nil
+        backupError = nil
         logsUnavailableWorkspaces.removeAll()
         directoryCache.removeAll()
         let ids = configurations.compactMap { Workspace.ID(rawValue: $0.name) }
@@ -992,6 +1043,13 @@ final class AppModel {
     var presentedDetailError: String? {
         RuntimeRepairIssueClassifier.presentedMessage(
             detailError,
+            repairRequired: runtimeRepairRequired
+        )
+    }
+
+    var presentedBackupError: String? {
+        RuntimeRepairIssueClassifier.presentedMessage(
+            backupError,
             repairRequired: runtimeRepairRequired
         )
     }
@@ -2035,9 +2093,13 @@ final class AppModel {
         return backupPreviewFixtureDestination
     }
 
+    func installMalformedBackupUITestFixture() {
+        backupError = "MSW returned malformed backup data for backup-list."
+    }
+
     func prepareBackup(to directory: URL) async -> MSWBackupPreview? {
         guard !isMaintenanceOperationInFlight, !isBackupPreviewLoading else { return nil }
-        detailError = nil
+        backupError = nil
         pendingBackupPreview = nil
         if let sourceAllocatedBytes = backupPreviewFixtureSourceAllocatedBytes {
             let preview = MSWBackupPreview(
@@ -2050,7 +2112,7 @@ final class AppModel {
             return preview
         }
         guard let diagnostics else {
-            detailError = "Backups are unavailable in fixture mode."
+            backupError = "Backups are unavailable in fixture mode."
             return nil
         }
         isBackupPreviewLoading = true
@@ -2061,7 +2123,7 @@ final class AppModel {
             return preview
         } catch {
             noteRuntimeRepairFailure(error)
-            detailError = backupErrorMessage(error)
+            backupError = backupErrorMessage(error)
             return nil
         }
     }
@@ -2073,7 +2135,7 @@ final class AppModel {
     func createBackup(to directory: URL) {
         pendingBackupPreview = nil
         maintenanceMessage = nil
-        detailError = nil
+        backupError = nil
         if let scenario = backupUITestResultScenario {
             let now = Date()
             let id = UUID().uuidString.lowercased()
@@ -2130,7 +2192,7 @@ final class AppModel {
             return
         }
         guard let diagnostics else {
-            detailError = "Backups are unavailable in fixture mode."
+            backupError = "Backups are unavailable in fixture mode."
             return
         }
         isDetailLoading = true
@@ -2141,7 +2203,7 @@ final class AppModel {
                 self?.upsertBackupOperation(operation)
             } catch {
                 self?.noteRuntimeRepairFailure(error)
-                self?.detailError = self?.backupErrorMessage(error)
+                self?.backupError = self?.backupErrorMessage(error)
             }
             self?.isDetailLoading = false
         }
@@ -2157,10 +2219,10 @@ final class AppModel {
                     ? "Archive created."
                     : "Archive created. Restart required for: \(result.workspacesNeedingRestart.joined(separator: ", "))."
             }
-            if detailError?.contains("backup") == true { detailError = nil }
+            backupError = nil
         } catch {
             noteRuntimeRepairFailure(error)
-            detailError = backupErrorMessage(error)
+            backupError = backupErrorMessage(error)
         }
     }
 
@@ -2829,14 +2891,16 @@ final class AppModel {
         action: String,
         workspace: String?,
         reason: String,
-        recovery: String
+        recovery: String,
+        diagnosticDetails: String? = nil
     ) {
         latestOperationFailure = MSWOperationFailureNotice(
             action: action,
             title: "\(action.capitalized) failed",
             reason: reason,
             recovery: recovery,
-            workspace: workspace.flatMap(Workspace.ID.init(rawValue:))
+            workspace: workspace.flatMap(Workspace.ID.init(rawValue:)),
+            diagnosticDetails: diagnosticDetails
         )
     }
 
@@ -2861,7 +2925,8 @@ final class AppModel {
             action: action,
             workspace: workspace,
             reason: recovery.reason,
-            recovery: recovery.recovery ?? "Run Diagnostics and Maintenance before retrying \(action)."
+            recovery: recovery.recovery ?? "Run Diagnostics and Maintenance before retrying \(action).",
+            diagnosticDetails: operationDiagnostics(for: error, summary: recovery.reason)
         )
         finishOperation(key: key, outcome: .failed, message: error.localizedDescription)
         if var operation = operationStates[key] {
@@ -2876,6 +2941,14 @@ final class AppModel {
             recovery: recovery.recovery,
             deepLink: workspace.map { workspaceDeepLink($0, section: "activity") } ?? "msw-monitor://activity"
         )
+    }
+
+    private func operationDiagnostics(for error: Error, summary: String) -> String? {
+        if case let MSWClientError.protocolFailure(protocolError) = error {
+            return "\(protocolError.message)\nMSW error code: \(protocolError.code)"
+        }
+        let detail = error.localizedDescription
+        return detail == summary ? nil : detail
     }
 
     private func reconcileVerifyingOperations() -> [MSWOperationState] {

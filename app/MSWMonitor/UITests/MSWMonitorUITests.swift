@@ -598,7 +598,10 @@ final class MSWMonitorUITests: XCTestCase {
                 app.terminate()
             }
         }
-        app.launchArguments = ["--ui-test-open-popover", "--ui-test-operation-failure"]
+        app.launchArguments = [
+            "--ui-test-open-popover", "--ui-test-operation-failure",
+            "--ui-test-malformed-backup"
+        ]
         app.launch()
 
         assertText("Start failed", identifier: "monitor.health", in: app)
@@ -611,6 +614,32 @@ final class MSWMonitorUITests: XCTestCase {
         assertWorkspaceSection("Logs", in: app)
         let failurePanel = app.descendants(matching: .any)["details.latest-operation-error"]
         XCTAssertTrue(failurePanel.waitForExistence(timeout: 2))
+        assertText(
+            "The runtime rejected the start request.",
+            identifier: "lifecycle.failure.summary",
+            in: app
+        )
+        XCTAssertEqual(
+            app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "malformed backup data")
+            ).count,
+            0
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["lifecycle.failure.details.text"].exists)
+        let disclosure = app.buttons["lifecycle.failure.details.disclosure"]
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 2))
+        XCTAssertEqual(disclosure.label, "Show Details")
+        disclosure.click()
+        let diagnosticText = app.staticTexts["lifecycle.failure.details.text"]
+        XCTAssertTrue(diagnosticText.waitForExistence(timeout: 2))
+        XCTAssertTrue(diagnosticText.isEnabled)
+        NSPasteboard.general.clearContents()
+        let copyDetails = app.buttons["lifecycle.failure.details.copy"]
+        XCTAssertTrue(copyDetails.waitForExistence(timeout: 2))
+        copyDetails.click()
+        let copiedDetails = NSPasteboard.general.string(forType: .string) ?? ""
+        XCTAssertTrue(copiedDetails.contains("/dev/vdc"))
+        XCTAssertTrue(copiedDetails.contains("MSW_WORKSPACE_DISK_INVALID"))
         let systemHealth = app.buttons["View system health"]
         XCTAssertTrue(systemHealth.waitForExistence(timeout: 2))
         systemHealth.click()
