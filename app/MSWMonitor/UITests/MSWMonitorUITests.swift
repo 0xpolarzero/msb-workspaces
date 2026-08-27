@@ -97,10 +97,17 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertFalse(app.buttons["setup.button"].exists)
 
         app.buttons["runtime-repair.popover.action"].click()
-        let setup = app.windows["setup.window"]
-        XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        app.typeKey("w", modifierFlags: .command)
-        XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
+        let repairWindow = app.windows["runtime-repair.window"]
+        XCTAssertTrue(repairWindow.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.descendants(matching: .any)["runtime-repair.page"].exists)
+        let repairTitle = app.descendants(matching: .any)["runtime-repair.title"]
+        XCTAssertTrue(repairTitle.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["MSW installation needs repair"].exists)
+        XCTAssertTrue(app.buttons["runtime-repair.installation.action"].exists)
+        XCTAssertTrue(app.buttons["runtime-repair.close"].exists)
+        XCTAssertFalse(app.windows["setup.window"].exists)
+        app.buttons["runtime-repair.close"].click()
+        XCTAssertTrue(repairWindow.waitForNonExistence(timeout: 3))
 
         statusItem.click()
         XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
@@ -127,19 +134,40 @@ final class MSWMonitorUITests: XCTestCase {
             )
             XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 1)
             XCTAssertEqual(app.buttons["runtime-repair.window.action"].label, "Repair…")
+            let chrome = app.descendants(matching: .any)["runtime-repair.window.chrome"]
+            XCTAssertTrue(chrome.exists, "Missing repair chrome on \(tab)")
+            if ["Workspaces", "Backup", "GitHub"].contains(tab) {
+                XCTAssertFalse(app.staticTexts["Request failed"].exists, "Duplicate repair error on \(tab)")
+            }
+            if tab == "Workspaces" || tab == "Backup" {
+                XCTAssertFalse(app.descendants(matching: .any)["details.error"].exists)
+            }
+            if tab == "Backup" {
+                XCTAssertFalse(app.descendants(matching: .any)["backup.operation.card"].exists)
+            }
+            if tab == "GitHub" {
+                XCTAssertFalse(app.descendants(matching: .any)["settings.github.error"].exists)
+            }
         }
 
         app.buttons["runtime-repair.window.action"].click()
-        XCTAssertTrue(setup.waitForExistence(timeout: 3))
-        let done = app.buttons["setup.done.button"]
-        XCTAssertTrue(done.waitForExistence(timeout: 3))
-        XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
-        done.click()
-        XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(repairWindow.waitForExistence(timeout: 3))
+        XCTAssertFalse(app.windows["setup.window"].exists)
+        let repair = app.buttons["runtime-repair.installation.action"]
+        XCTAssertTrue(repair.waitForExistence(timeout: 3))
+        repair.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["runtime-repair.progress"].waitForExistence(timeout: 2)
+        )
+        let repairResult = app.descendants(matching: .any)["runtime-repair.result"]
+        XCTAssertTrue(repairResult.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Installation repaired"].exists)
         XCTAssertTrue(
             app.descendants(matching: .any)["runtime-repair.window.banner"]
                 .waitForNonExistence(timeout: 3)
         )
+        app.buttons["runtime-repair.close"].click()
+        XCTAssertTrue(repairWindow.waitForNonExistence(timeout: 3))
         XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 0)
         XCTAssertEqual(app.staticTexts.matching(identifier: "runtime-repair.window.message").count, 0)
         for tab in ["Overview", "Workspaces", "GitHub", "Notifications", "Backup", "General"] {
@@ -147,6 +175,7 @@ final class MSWMonitorUITests: XCTestCase {
             XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.window.banner"].exists)
             XCTAssertFalse(app.staticTexts["runtime-repair.window.message"].exists)
             XCTAssertFalse(app.buttons["runtime-repair.window.action"].exists)
+            XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.window.chrome"].exists)
         }
         let compatibleStatus = NSPredicate(
             format: "value == %@",

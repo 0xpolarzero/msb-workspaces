@@ -85,7 +85,7 @@ struct MonitorView: View {
                 .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverMessage)
             Spacer(minLength: 4)
             Button(RuntimeRepairPresentation.actionTitle) {
-                NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+                NSApp.sendAction(#selector(AppDelegate.openRuntimeRepair), to: nil, from: nil)
             }
             .controlSize(.small)
             .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverAction)

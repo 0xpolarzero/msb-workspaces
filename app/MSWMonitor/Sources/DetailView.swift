@@ -286,7 +286,7 @@ struct DetailView: View {
             Spacer()
             if needsInstallationRepair {
                 Button("Repair MSW installation…") {
-                    NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+                    NSApp.sendAction(#selector(AppDelegate.openRuntimeRepair), to: nil, from: nil)
                 }
                 .accessibilityIdentifier("maintenance.repair.button")
             }
@@ -1875,12 +1875,12 @@ private extension DetailView {
                     }
                 }
 
-                if !model.backupOperations.isEmpty {
+                if !model.presentedBackupOperations.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("CLI-owned backup operations")
                             .font(.headline)
                             .accessibilityAddTraits(.isHeader)
-                        ForEach(model.backupOperations) { operation in
+                        ForEach(model.presentedBackupOperations) { operation in
                             BackupOperationCard(
                                 operation: operation,
                                 refreshWorkspaceState: model.refreshBackupWorkspaceState
@@ -1959,7 +1959,8 @@ private extension DetailView {
     }
 
     private var needsInstallationRepair: Bool {
-        model.startupRecoveryBlockedReason != nil || model.systemHealthChecks.contains { check in
+        guard !model.runtimeRepairRequired else { return false }
+        return model.startupRecoveryBlockedReason != nil || model.systemHealthChecks.contains { check in
             let repairable = check.id == "host-integration" ||
                 check.id.hasPrefix("tool-")
             return repairable && check.status != .pass
@@ -1969,7 +1970,7 @@ private extension DetailView {
 
     @ViewBuilder
     private var detailError: some View {
-        if let error = model.detailError {
+        if let error = model.presentedDetailError {
             VStack(alignment: .leading, spacing: 8) {
                 Label("Request failed", systemImage: "exclamationmark.triangle.fill")
                     .font(.headline)
@@ -2058,9 +2059,9 @@ private extension DetailView {
     }
 
     private var showsBackupFailureCard: Bool {
-        guard let operation = model.backupOperations.first,
+        guard let operation = model.presentedBackupOperations.first,
               operation.state == .failed,
-              let error = model.detailError else { return false }
+              let error = model.presentedDetailError else { return false }
         return error == operation.message
     }
 

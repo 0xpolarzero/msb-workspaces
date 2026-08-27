@@ -305,7 +305,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.runtimeRepairRequired)
         XCTAssertEqual(
             model.detailError,
-            "The installed MSW runtime is older than this version of MSW Monitor. Open Setup and repair the MSW installation, then retry."
+            "The installed MSW runtime is older than this version of MSW Monitor. Use Repair… to repair the MSW installation, then retry."
         )
         model.clearDetailError()
         XCTAssertNil(model.detailError)
@@ -489,7 +489,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.runtimeRepairRequired)
         XCTAssertEqual(
             model.detailError,
-            "The installed MSW runtime returned an incompatible backup schema. Open Setup and repair the MSW installation, then retry."
+            "The installed MSW runtime returned an incompatible backup schema. Use Repair… to repair the MSW installation, then retry."
         )
     }
 
@@ -522,6 +522,37 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.backupOperations.isEmpty)
         XCTAssertTrue(model.runtimeRepairRequired)
         XCTAssertTrue(model.detailError?.contains("Open Setup and repair MSW") == true)
+        XCTAssertNil(model.presentedDetailError)
+    }
+
+    func testRuntimeRepairPresentationOwnsOnlyClassifiedRuntimeErrors() {
+        let model = AppModel(initialRuntimeRepairRequired: true)
+        model.installRuntimeRepairUITestFixture()
+
+        XCTAssertNotNil(model.detailError)
+        XCTAssertNil(model.presentedDetailError)
+        XCTAssertFalse(model.backupOperations.isEmpty)
+        XCTAssertTrue(model.presentedBackupOperations.isEmpty)
+        XCTAssertEqual(
+            RuntimeRepairIssueClassifier.presentedMessage(
+                "GitHub request timed out.",
+                repairRequired: true
+            ),
+            "GitHub request timed out."
+        )
+        XCTAssertTrue(
+            RuntimeRepairIssueClassifier.isRepairRelated(MSWClientError.incompatibleExecutable)
+        )
+        XCTAssertFalse(
+            RuntimeRepairIssueClassifier.isRepairRelated(
+                MSWClientError.timedOut(command: "github-status")
+            )
+        )
+
+        model.runtimeRepairDidSucceed()
+
+        XCTAssertFalse(model.runtimeRepairRequired)
+        XCTAssertNil(model.detailError)
     }
 
     func testRuntimeRepairStateNegotiatesCompatibleRequiredAndSetupRepairedWithoutBackupProbe() async throws {

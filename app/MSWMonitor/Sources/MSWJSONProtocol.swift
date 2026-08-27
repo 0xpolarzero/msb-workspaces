@@ -22,7 +22,7 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
         switch self {
         case .invalidExecutable: return "MSW executable is unavailable."
         case .incompatibleExecutable:
-            return "The installed MSW runtime is older than this version of MSW Monitor. Open Setup and repair the MSW installation, then retry."
+            return "The installed MSW runtime is older than this version of MSW Monitor. Use Repair… to repair the MSW installation, then retry."
         case .invalidArguments: return "The requested MSW operation has invalid arguments."
         case .timedOut(let command): return "MSW operation timed out: \(command)."
         case .cancelled: return "The MSW operation was cancelled."
@@ -32,7 +32,7 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
         case .malformedJSON(let command): return "MSW returned malformed JSON for \(command)."
         case .unsupportedSchema(let version): return "MSW returned unsupported schema version \(version)."
         case .unsupportedBackupProtocol(let version):
-            return "MSW returned unsupported backup protocol version \(version). Open Setup and repair the MSW installation before starting another backup."
+            return "MSW returned unsupported backup protocol version \(version). Use Repair… to repair the MSW installation before starting another backup."
         case .missingResult(let command): return "MSW returned no result for \(command)."
         case .protocolFailure(let error): return error.localizedDescription
         case .unavailable(let message): return message

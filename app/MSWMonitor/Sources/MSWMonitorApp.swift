@@ -380,9 +380,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     advanced: arguments.contains("--ui-test-backup-reattach-advanced")
                 )
             }
+            if runtimeRepairFixture {
+                model.installRuntimeRepairUITestFixture()
+            }
         }
         applicationState.model = model
         githubSettingsState.configure(provider: fixtureProvider ?? provider)
+        if runtimeRepairFixture {
+            githubSettingsState.installRuntimeRepairUITestFixture()
+        }
         let setupFixtureOwnsGitHubLoading = arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
             arguments.contains("--ui-test-setup-reconnect")
@@ -417,7 +423,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appNavigation: appNavigation,
             applicationPreferences: applicationPreferences,
             startupRecoveryBlockedReason: startupRecoveryBlockedReason,
-            retryStartupRecovery: retryStartupRecovery
+            retryStartupRecovery: retryStartupRecovery,
+            runtimeRepairDidSucceed: { [weak githubSettingsState = self.githubSettingsState] in
+                githubSettingsState?.runtimeRepairDidSucceed()
+            }
         )
         statusBarController = controller
         model.setPollingVisible(false)
@@ -450,8 +459,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarController?.showMain(route: AppRoute(tab: .general))
     }
 
-    @objc func openSetupRepair() {
-        statusBarController?.showSetupForFirstLaunch()
+    @objc func openRuntimeRepair() {
+        statusBarController?.showRuntimeRepair()
+    }
+
+    @objc func closeRuntimeRepair() {
+        statusBarController?.closeRuntimeRepair()
     }
 
     @objc func closeStatusPopover() {

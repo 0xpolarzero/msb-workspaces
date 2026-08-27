@@ -183,6 +183,16 @@ final class GitHubSettingsState {
         repositoriesByInstallation = [:]
     }
 
+    func installRuntimeRepairUITestFixture() {
+        error = "GitHub request failed because the installed MSW runtime is older. Use Repair… to repair the MSW installation."
+    }
+
+    func runtimeRepairDidSucceed() {
+        if let error, RuntimeRepairIssueClassifier.isRepairRelated(error) {
+            self.error = nil
+        }
+    }
+
     func setPollingVisible(_ visible: Bool) {
         pollingVisible = visible
         pollingTask?.cancel()
@@ -382,7 +392,7 @@ private struct RuntimeRepairBanner: View {
                 .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowMessage)
             Spacer()
             Button(RuntimeRepairPresentation.actionTitle) {
-                NSApp.sendAction(#selector(AppDelegate.openSetupRepair), to: nil, from: nil)
+                NSApp.sendAction(#selector(AppDelegate.openRuntimeRepair), to: nil, from: nil)
             }
             .controlSize(.small)
             .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowAction)
@@ -474,6 +484,13 @@ struct SettingsView: View {
         nonmutating set { githubState.error = newValue }
     }
 
+    private var presentedGitHubError: String? {
+        RuntimeRepairIssueClassifier.presentedMessage(
+            githubError,
+            repairRequired: applicationState.model?.runtimeRepairRequired == true
+        )
+    }
+
     private var localPolicy: GitHubPolicyFile? {
         get { githubState.localPolicy }
         nonmutating set { githubState.localPolicy = newValue }
@@ -529,6 +546,17 @@ struct SettingsView: View {
                     }
                     .accessibilityIdentifier("settings.tabs")
                 }
+                .tint(model.runtimeRepairRequired ? .orange : .accentColor)
+                .background(model.runtimeRepairRequired ? Color.orange.opacity(0.035) : Color.clear)
+                .overlay(alignment: .topLeading) {
+                    if model.runtimeRepairRequired {
+                        Color.clear
+                            .frame(width: 1, height: 1)
+                            .accessibilityElement()
+                            .accessibilityLabel("Repair-tinted unified window chrome")
+                            .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.windowChrome)
+                    }
+                }
             } else {
                 ProgressView("Loading MSW Monitor…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -550,7 +578,15 @@ struct SettingsView: View {
         }
         .frame(minWidth: 820, idealWidth: 900, minHeight: 600, idealHeight: 680)
         .toolbarBackgroundVisibility(
-            navigation.tab == .workspaces ? .hidden : .automatic,
+            applicationState.model?.runtimeRepairRequired == true
+                ? .visible
+                : (navigation.tab == .workspaces ? .hidden : .automatic),
+            for: .windowToolbar
+        )
+        .toolbarBackground(
+            applicationState.model?.runtimeRepairRequired == true
+                ? Color.orange.opacity(0.16)
+                : Color.clear,
             for: .windowToolbar
         )
         .transaction { transaction in
@@ -706,8 +742,9 @@ struct SettingsView: View {
                                 (metadata.isEmpty && connectedAccount == nil) ||
                                 isUpdatingGitHub
                         )
-                        if let githubError {
-                            recoveryMessage(githubError)
+                        if let presentedGitHubError {
+                            recoveryMessage(presentedGitHubError)
+                                .accessibilityIdentifier("settings.github.error")
                             Button("Retry GitHub status") {
                                 Task { await loadGitHubState() }
                             }
@@ -788,8 +825,9 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.github.status")
             }
             localGitHubPrimaryAction
-            if let githubError {
-                recoveryMessage(githubError)
+            if let presentedGitHubError {
+                recoveryMessage(presentedGitHubError)
+                    .accessibilityIdentifier("settings.github.error")
                 Button("Retry GitHub status") {
                     Task { await loadGitHubState() }
                 }

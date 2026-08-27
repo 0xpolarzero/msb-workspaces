@@ -348,6 +348,9 @@ protocol MSWBootstrapCoordinating: AnyObject, Sendable {
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
     ) async throws -> MSWBootstrapResult
+    /// Repairs and verifies only the app-managed runtime. This path does not
+    /// apply host integration, workspace configuration, or GitHub setup.
+    func repairRuntime() async throws
     /// True when saving these workspaces will require the one-time
     /// administrator-approved hosts update (unsigned-build fallback whose
     /// installed records differ from the desired names).
@@ -888,6 +891,24 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
     }
 
+    func repairRuntime() async throws {
+        guard !running else { throw BootstrapCoordinatorError.busy }
+        running = true
+        defer { running = false }
+        do {
+            try await installDefaultConfigurationIfNeeded()
+            try await installAvailableToolchain()
+            await runner.invalidateMSWResolution()
+            guard await runtimeIsReady() else {
+                throw BootstrapCoordinatorError.unavailable
+            }
+        } catch let error as BootstrapCoordinatorError {
+            throw error
+        } catch {
+            throw BootstrapCoordinatorError.toolchainInstallationFailed(error.localizedDescription)
+        }
+    }
+
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
     ) async throws -> MSWBootstrapResult {
@@ -1259,6 +1280,8 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
     }
 
     func openHostApprovalSettings() async {}
+
+    func repairRuntime() async {}
 
     func workspaceNamesNeedApproval(
         workspaceConfigurations: [SetupWorkspaceConfiguration]

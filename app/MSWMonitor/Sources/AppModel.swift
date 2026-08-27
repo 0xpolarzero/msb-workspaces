@@ -345,16 +345,73 @@ enum RuntimeRepairAccessibilityIdentifier {
     static let windowBanner = "runtime-repair.window.banner"
     static let windowMessage = "runtime-repair.window.message"
     static let windowAction = "runtime-repair.window.action"
+    static let windowChrome = "runtime-repair.window.chrome"
     static let statusWarning = "runtime-repair.status-item.warning"
     static let popoverRow = "runtime-repair.popover.row"
     static let popoverMessage = "runtime-repair.popover.message"
     static let popoverAction = "runtime-repair.popover.action"
+    static let repairWindow = "runtime-repair.window"
+    static let repairPage = "runtime-repair.page"
+    static let repairTitle = "runtime-repair.title"
+    static let repairMessage = "runtime-repair.message"
+    static let repairAction = "runtime-repair.installation.action"
+    static let repairProgress = "runtime-repair.progress"
+    static let repairResult = "runtime-repair.result"
+    static let repairClose = "runtime-repair.close"
 }
 
 enum RuntimeRepairPresentation {
     static let message = "MSW installation needs repair"
     static let actionTitle = "Repair…"
     static let statusValue = "MSW Monitor. Repair needed. MSW installation needs repair."
+}
+
+enum RuntimeRepairIssueClassifier {
+    static func isRepairRelated(_ error: Error) -> Bool {
+        guard let clientError = error as? MSWClientError else { return false }
+        switch clientError {
+        case .invalidExecutable, .incompatibleExecutable, .unsupportedBackupProtocol:
+            return true
+        case .malformedJSON(let command):
+            return backupCommands.contains(command)
+        case .protocolFailure(let error):
+            return error.code == "MSW_BACKUP_RECORD_INCOMPATIBLE"
+        default:
+            return false
+        }
+    }
+
+    static func isRepairRelated(_ message: String) -> Bool {
+        let normalized = message.lowercased()
+        return repairMessageMarkers.contains { normalized.contains($0) }
+    }
+
+    static func presentedMessage(_ message: String?, repairRequired: Bool) -> String? {
+        guard let message else { return nil }
+        return repairRequired && isRepairRelated(message) ? nil : message
+    }
+
+    static func isRepairRelated(_ operation: MSWBackupOperation) -> Bool {
+        isRepairRelated(operation.message) ||
+            operation.error.map {
+                $0.code == "MSW_BACKUP_RECORD_INCOMPATIBLE" ||
+                    isRepairRelated($0.message) ||
+                    isRepairRelated($0.recovery)
+            } == true
+    }
+
+    private static let backupCommands = [
+        "backup-preview", "backup-start", "backup-list", "backup-status"
+    ]
+
+    private static let repairMessageMarkers = [
+        "msw executable is unavailable",
+        "installed msw runtime is older",
+        "unsupported backup protocol",
+        "incompatible backup schema",
+        "repair the msw installation",
+        "repair msw before"
+    ]
 }
 
 @Observable
@@ -945,6 +1002,18 @@ final class AppModel {
         backupOperations.contains { $0.state == .queued || $0.state == .running }
     }
 
+    var presentedDetailError: String? {
+        RuntimeRepairIssueClassifier.presentedMessage(
+            detailError,
+            repairRequired: runtimeRepairRequired
+        )
+    }
+
+    var presentedBackupOperations: [MSWBackupOperation] {
+        guard runtimeRepairRequired else { return backupOperations }
+        return backupOperations.filter { !RuntimeRepairIssueClassifier.isRepairRelated($0) }
+    }
+
 
     var aggregateText: String {
         health.title
@@ -1064,13 +1133,19 @@ final class AppModel {
         runtimeRepairRequired = required
     }
 
-    func setupRepairDidSucceed() {
+    func runtimeRepairDidSucceed() {
         runtimeRepairFailureRefreshTask?.cancel()
         runtimeRepairFailureRefreshTask = nil
         runtimeRepairRefreshGeneration &+= 1
+        runtimeRepairRequired = false
+        if let detailError, RuntimeRepairIssueClassifier.isRepairRelated(detailError) {
+            self.detailError = nil
+        }
+        if let lastError, RuntimeRepairIssueClassifier.isRepairRelated(lastError) {
+            self.lastError = nil
+        }
         guard let client else {
             // Deterministic UI fixtures have no process-backed runtime.
-            runtimeRepairRequired = false
             return
         }
         Task { [weak self] in
@@ -1078,6 +1153,10 @@ final class AppModel {
             await self?.refreshRuntimeRepairState(forceRefresh: true)
             self?.refresh()
         }
+    }
+
+    func setupRepairDidSucceed() {
+        runtimeRepairDidSucceed()
     }
 
     func setPollingVisible(_ visible: Bool) {
@@ -1900,6 +1979,27 @@ final class AppModel {
         backupUITestResultScenario = resultScenario
     }
 
+    func installRuntimeRepairUITestFixture() {
+        detailError = "The installed MSW runtime returned an incompatible backup schema. Use Repair… to repair the MSW installation, then retry."
+        let now = Date()
+        let error = MSWBackupOperationErrorResponse(
+            code: "MSW_BACKUP_RECORD_INCOMPATIBLE",
+            message: "The installed MSW runtime returned an incompatible backup schema.",
+            recovery: "Use Repair… to repair the MSW installation.",
+            retryable: false
+        )
+        backupOperations = [MSWBackupOperation(
+            id: "runtime-repair-fixture", requestKey: "runtime-repair-fixture",
+            state: .failed, phase: .failed, message: error.message,
+            destination: URL(fileURLWithPath: "/tmp", isDirectory: true),
+            startedAt: now, updatedAt: now, completedAt: now, elapsedSeconds: 0,
+            ownerPID: nil, ownerProcessState: "fixture-exited", sourceAllocatedBytes: 1,
+            archiveEstimate: nil, processedBytes: 0, writtenBytes: 0,
+            throughputBytesPerSecond: 0, totalBytes: nil, etaSeconds: nil,
+            result: nil, error: error, warnings: []
+        )]
+    }
+
     func installConcurrentBackupReattachmentFixture(
         destination: URL,
         advanced: Bool = false
@@ -2100,24 +2200,14 @@ final class AppModel {
     }
 
     private func isRuntimeRepairFailure(_ error: Error) -> Bool {
-        guard let clientError = error as? MSWClientError else { return false }
-        switch clientError {
-        case .invalidExecutable, .incompatibleExecutable, .unsupportedBackupProtocol:
-            return true
-        case .malformedJSON(let command):
-            return ["backup-preview", "backup-start", "backup-list", "backup-status"].contains(command)
-        case .protocolFailure(let error):
-            return error.code == "MSW_BACKUP_RECORD_INCOMPATIBLE"
-        default:
-            return false
-        }
+        RuntimeRepairIssueClassifier.isRepairRelated(error)
     }
 
     private func backupErrorMessage(_ error: Error) -> String {
         if let clientError = error as? MSWClientError,
            case .malformedJSON(let command) = clientError,
            ["backup-preview", "backup-start", "backup-list", "backup-status"].contains(command) {
-            return "The installed MSW runtime returned an incompatible backup schema. Open Setup and repair the MSW installation, then retry."
+            return "The installed MSW runtime returned an incompatible backup schema. Use Repair… to repair the MSW installation, then retry."
         }
         return error.localizedDescription
     }
