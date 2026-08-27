@@ -2078,6 +2078,12 @@ final class AppModel {
 
     private func noteRuntimeRepairFailure(_ error: Error) {
         if isRuntimeRepairFailure(error) {
+            // An operation-level protocol failure is newer evidence than any
+            // compatibility probe already in flight. Supersede that probe so
+            // its stale compatible result cannot hide the repair warning.
+            runtimeRepairRefreshGeneration &+= 1
+            runtimeRepairFailureRefreshTask?.cancel()
+            runtimeRepairFailureRefreshTask = nil
             runtimeRepairRequired = true
             return
         }

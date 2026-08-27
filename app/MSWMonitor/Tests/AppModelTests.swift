@@ -639,6 +639,58 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testOperationCompatibilityFailureSupersedesOlderCompatibleProbe() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-runtime-repair-operation-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let executable = temporary.appendingPathComponent("msw")
+        let firstHandshakeStarted = temporary.appendingPathComponent("first-handshake-started")
+        let releaseFirstHandshake = temporary.appendingPathComponent("release-first-handshake")
+        let previewResponse = #"{"schemaVersion":1,"requestId":"preview","ok":true,"command":"backup-preview","observedAt":"2026-08-26T12:00:00Z","result":{"contractVersion":1,"destination":"DESTINATION","sourceAllocatedBytes":1024,"archiveEstimate":null,"runningWorkspaces":[]},"warnings":[],"error":null}"#
+            .replacingOccurrences(of: "DESTINATION", with: destination.path)
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            if (set -C; : > "\(firstHandshakeStarted.path)") 2>/dev/null; then
+                while [ ! -f "\(releaseFirstHandshake.path)" ]; do /bin/sleep 0.01; done
+            fi
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "backup-preview" ]; then
+            printf '%s\\n' '\(previewResponse)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client, diagnostics: MSWDiagnostics(client: client))
+        let staleProbe = Task { await model.refreshRuntimeRepairState(forceRefresh: true) }
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: firstHandshakeStarted.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstHandshakeStarted.path))
+
+        let preview = await model.prepareBackup(to: destination)
+        XCTAssertNil(preview)
+        XCTAssertTrue(model.runtimeRepairRequired)
+
+        try Data().write(to: releaseFirstHandshake)
+        await staleProbe.value
+
+        XCTAssertTrue(
+            model.runtimeRepairRequired,
+            "A stale compatible probe must not overwrite a newer operation-level incompatibility"
+        )
+    }
+
     func testStatusItemPublishesRepairStateWithoutChangingItsStableIdentityOrProductionBehavior() {
         let model = AppModel(initialRuntimeRepairRequired: true)
         let controller = StatusBarController(
