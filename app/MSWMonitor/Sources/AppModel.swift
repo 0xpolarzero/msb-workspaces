@@ -797,6 +797,7 @@ final class AppModel {
     private let activityStore: MSWActivityStore
     private var pollingTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var runtimeRepairFailureRefreshTask: Task<Void, Never>?
     private var runtimeRepairRefreshGeneration = 0
     private var refreshGeneration = 0
     private var consecutiveRefreshFailures = 0
@@ -1064,6 +1065,8 @@ final class AppModel {
     }
 
     func setupRepairDidSucceed() {
+        runtimeRepairFailureRefreshTask?.cancel()
+        runtimeRepairFailureRefreshTask = nil
         runtimeRepairRefreshGeneration &+= 1
         guard let client else {
             // Deterministic UI fixtures have no process-backed runtime.
@@ -2076,7 +2079,18 @@ final class AppModel {
     private func noteRuntimeRepairFailure(_ error: Error) {
         if isRuntimeRepairFailure(error) {
             runtimeRepairRequired = true
+            return
         }
+        guard !runtimeRepairRequired, !Self.isCancellation(error), client != nil else { return }
+        runtimeRepairFailureRefreshTask?.cancel()
+        runtimeRepairFailureRefreshTask = Task { [weak self] in
+            await self?.refreshRuntimeRepairState(forceRefresh: true)
+        }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? MSWClientError) == .cancelled
     }
 
     private func isRuntimeRepairFailure(_ error: Error) -> Bool {

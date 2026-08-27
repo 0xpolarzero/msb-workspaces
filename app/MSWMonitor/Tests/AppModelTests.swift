@@ -602,6 +602,43 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testFailedOperationRefreshesRuntimeRepairStateWhenCachedExecutableDisappears() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-runtime-repair-operation-failure-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(protocolCompatibleHandshake)'
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            configuredExecutable: executable
+        )))
+        let model = AppModel(client: client)
+        await model.refreshRuntimeRepairState(forceRefresh: true)
+        XCTAssertFalse(model.runtimeRepairRequired)
+
+        try FileManager.default.removeItem(at: executable)
+        await model.refreshRemote()
+        for _ in 0..<100 where !model.runtimeRepairRequired {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertTrue(
+            model.runtimeRepairRequired,
+            "An operation failure must invalidate stale compatible state and re-resolve the executable"
+        )
+    }
+
     func testStatusItemPublishesRepairStateWithoutChangingItsStableIdentityOrProductionBehavior() {
         let model = AppModel(initialRuntimeRepairRequired: true)
         let controller = StatusBarController(
