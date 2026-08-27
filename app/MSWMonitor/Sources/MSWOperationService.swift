@@ -75,7 +75,7 @@ actor MSWOperationService {
     }
 
     func lifecycle(_ action: MSWLifecycleAction, workspace: String) async throws -> MSWApplyResult {
-        try await coordinator.lifecycle(action, workspace: workspace)
+        (try await coordinator.lifecycle(action, workspace: workspace)).result
     }
  
     func pushPlan(workspace: String, repositories: [String]) async throws -> MSWPushPlan {

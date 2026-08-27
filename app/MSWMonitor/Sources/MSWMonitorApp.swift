@@ -375,6 +375,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if folderBrowserFixture {
             model.installDirectoryUITestFixture()
         }
+        if arguments.contains("--ui-test-lifecycle") {
+            model.installLifecycleUITestFixture()
+        }
         if fixtureMode {
             let backupDestination = arguments.compactMap { argument -> URL? in
                 let prefix = "--ui-test-backup-destination="

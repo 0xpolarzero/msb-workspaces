@@ -656,6 +656,23 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.workspaces.map(\.state), [.stopped, .stopped, .stopped])
     }
 
+    func testLifecycleConfirmationOwnershipAndCancellationAreSurfaceIsolated() {
+        let model = AppModel()
+        model.installLifecycleUITestFixture()
+
+        model.stop(.dev, surface: .unifiedWindow)
+        XCTAssertEqual(model.pendingLifecyclePlan(for: .unifiedWindow)?.action, "stop")
+        XCTAssertNil(model.pendingLifecyclePlan(for: .statusPopover))
+
+        model.restart(.dev, surface: .statusPopover)
+        XCTAssertEqual(model.pendingLifecyclePlan(for: .statusPopover)?.action, "restart")
+        XCTAssertEqual(model.pendingLifecyclePlan(for: .unifiedWindow)?.action, "stop")
+
+        model.cancelPendingLifecycle(surface: .unifiedWindow)
+        XCTAssertNil(model.pendingLifecyclePlan(for: .unifiedWindow))
+        XCTAssertEqual(model.pendingLifecyclePlan(for: .statusPopover)?.action, "restart")
+    }
+
     func testAppRouteMapsDeepLinksIntoUnifiedTabs() throws {
         let logs = try XCTUnwrap(AppRoute(
             deepLink: URL(string: "msw-monitor://workspace/dev?section=logs")!
@@ -1547,8 +1564,17 @@ final class AppModelTests: XCTestCase {
         let planURL = temporary.appendingPathComponent("plan.json")
         let applyURL = temporary.appendingPathComponent("apply.json")
         let observedOnce = temporary.appendingPathComponent("observed-once")
-        try encoder.encode(makeTestStateEnvelope(devLifecycle: .stopped, devQuarantine: .clear)).write(to: stoppedURL)
-        try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .clear)).write(to: runningURL)
+        let baseline = Date()
+        try encoder.encode(makeTestStateEnvelope(
+            devLifecycle: .stopped,
+            devQuarantine: .clear,
+            observedAt: baseline.addingTimeInterval(-1)
+        )).write(to: stoppedURL)
+        try encoder.encode(makeTestStateEnvelope(
+            devLifecycle: .running,
+            devQuarantine: .clear,
+            observedAt: baseline.addingTimeInterval(2)
+        )).write(to: runningURL)
         try encoder.encode(MSWEnvelope(
             schemaVersion: 1, requestId: "plan-start", ok: true, command: "plan", observedAt: Date(),
             result: MSWLifecyclePlan(
@@ -1557,7 +1583,7 @@ final class AppModelTests: XCTestCase {
             )
         )).write(to: planURL)
         try encoder.encode(MSWEnvelope(
-            schemaVersion: 1, requestId: "apply-start", ok: true, command: "apply", observedAt: Date(),
+            schemaVersion: 1, requestId: "apply-start", ok: true, command: "apply", observedAt: baseline,
             result: MSWApplyResult(workspace: "dev", action: "start", reconciled: true, outcome: "Start applied.")
         )).write(to: applyURL)
 
@@ -1616,6 +1642,111 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(finished.outcome, .succeeded)
         XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
         XCTAssertTrue(model.activities.contains { $0.title == "Start verified" })
+    }
+
+    func testRestartVerificationAcceptsGapOnlyAfterFreshRunningObservation() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(1)]
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
+    }
+
+    func testStopVerificationAcceptsFreshStoppedObservation() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .stop,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [(.stopped, baseline.addingTimeInterval(1), 0)],
+            applyObservedAt: baseline,
+            delays: []
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.stop, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .stopped)
+    }
+
+    func testLifecycleVerificationTimeoutIsTruthfulAndProvidesCopyableDiagnostics() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [(.stopped, baseline.addingTimeInterval(1), 0)],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(1)]
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .unknown)
+        XCTAssertTrue(operation.message.contains("Timed out waiting for a fresh running observation"))
+        let notice = try XCTUnwrap(model.latestOperationFailure)
+        XCTAssertEqual(notice.reason, operation.message)
+        XCTAssertTrue(notice.diagnosticDetails?.contains("Required observation after:") == true)
+        XCTAssertTrue(notice.diagnosticDetails?.contains("Latest accepted observation:") == true)
+    }
+
+    func testLifecycleVerificationRejectsStalePreOperationGeneration() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let stale = baseline.addingTimeInterval(-1)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, stale),
+            observations: [(.running, stale, 0)],
+            applyObservedAt: baseline,
+            delays: []
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        let operation = try await waitForLifecycleCompletion(in: model)
+
+        XCTAssertEqual(operation.outcome, .unknown)
+        XCTAssertTrue(operation.message.contains("Timed out"))
+    }
+
+    func testConcurrentPeriodicRefreshCannotOverwriteNewerLifecycleVerification() async throws {
+        let baseline = Date().addingTimeInterval(5)
+        let model = try makeLifecycleVerificationModel(
+            action: .restart,
+            initial: (.running, baseline.addingTimeInterval(-1)),
+            observations: [
+                (.stopped, baseline.addingTimeInterval(1), 0.25),
+                (.running, baseline.addingTimeInterval(2), 0)
+            ],
+            applyObservedAt: baseline,
+            delays: [.milliseconds(20)]
+        )
+
+        await model.refreshRemote()
+        try await beginConfirmedLifecycle(.restart, model: model)
+        try await Task.sleep(for: .milliseconds(50))
+        await model.refreshRemote()
+        let operation = try await waitForLifecycleCompletion(in: model)
+        try await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertEqual(operation.outcome, .succeeded)
+        XCTAssertEqual(model.operationStates["lifecycle:dev"]?.outcome, .succeeded)
+        XCTAssertEqual(model.workspaces.first(where: { $0.id == .dev })?.state, .running)
     }
 
     func testRepairInvalidatesResolutionAndSelectsOnlyActivatedRuntime() async throws {
@@ -3410,7 +3541,8 @@ final class AppModelTests: XCTestCase {
 
     private func makeTestStateEnvelope(
         devLifecycle: MSWLifecycle,
-        devQuarantine: MSWQuarantineSnapshot.State
+        devQuarantine: MSWQuarantineSnapshot.State,
+        observedAt: Date = Date()
     ) -> MSWEnvelope<MSWStateResponse> {
         let snapshots = Workspace.ID.fixtureDefaults.map { id in
             let quarantine = id == .dev ? devQuarantine : .clear
@@ -3458,13 +3590,141 @@ final class AppModelTests: XCTestCase {
             requestId: "state-test",
             ok: true,
             command: "state",
-            observedAt: Date(),
+            observedAt: observedAt,
             result: MSWStateResponse(
                 schemaVersion: 1,
                 mswVersion: "test",
                 workspaces: snapshots
             )
         )
+    }
+
+    private func makeLifecycleVerificationModel(
+        action: MSWLifecycleAction,
+        initial: (MSWLifecycle, Date),
+        observations: [(MSWLifecycle, Date, Double)],
+        applyObservedAt: Date,
+        delays: [Duration]
+    ) throws -> AppModel {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let responses = [initial] + observations.map { ($0.0, $0.1) }
+        for (index, response) in responses.enumerated() {
+            try encoder.encode(makeTestStateEnvelope(
+                devLifecycle: response.0,
+                devQuarantine: .clear,
+                observedAt: response.1
+            )).write(to: temporary.appendingPathComponent("state-\(index + 1).json"))
+        }
+        let plan = MSWLifecyclePlan(
+            planId: "plan-\(action.rawValue)",
+            action: action.rawValue,
+            workspace: "dev",
+            expiresAt: Date().addingTimeInterval(300),
+            confirmationPhrase: "\(action.rawValue.uppercased()) dev",
+            effects: "Testing \(action.rawValue)."
+        )
+        try encoder.encode(MSWEnvelope(
+            schemaVersion: 1,
+            requestId: "plan-\(action.rawValue)",
+            ok: true,
+            command: "plan",
+            observedAt: applyObservedAt,
+            result: plan
+        )).write(to: temporary.appendingPathComponent("plan.json"))
+        try encoder.encode(MSWEnvelope(
+            schemaVersion: 1,
+            requestId: "apply-\(action.rawValue)",
+            ok: true,
+            command: "apply",
+            observedAt: applyObservedAt,
+            result: MSWApplyResult(
+                workspace: "dev",
+                action: action.rawValue,
+                reconciled: true,
+                outcome: "\(action.rawValue.capitalized) applied."
+            )
+        )).write(to: temporary.appendingPathComponent("apply.json"))
+        try Data("0\n".utf8).write(to: temporary.appendingPathComponent("state-count"))
+
+        let lastResponse = responses.count
+        let delayCases = observations.enumerated().compactMap { index, observation -> String? in
+            guard observation.2 > 0 else { return nil }
+            return "\(index + 2)) /bin/sleep \(observation.2) ;;"
+        }.joined(separator: "\n")
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            while ! /bin/mkdir "\(temporary.path)/state-lock" 2>/dev/null; do /bin/sleep 0.01; done
+            count=$(/bin/cat "\(temporary.path)/state-count")
+            count=$((count + 1))
+            printf '%s\n' "$count" > "\(temporary.path)/state-count"
+            /bin/rmdir "\(temporary.path)/state-lock"
+            selected="$count"
+            if [ "$selected" -gt "\(lastResponse)" ]; then selected="\(lastResponse)"; fi
+            case "$count" in
+        \(delayCases)
+            esac
+            /bin/cat "\(temporary.path)/state-$selected.json"
+        elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then
+            /bin/cat "\(temporary.path)/plan.json"
+        elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
+            /bin/cat "\(temporary.path)/apply.json"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            testMSWExecutable: executable
+        )))
+        return AppModel(
+            client: client,
+            operationCoordinator: MSWOperationCoordinator(client: client),
+            lifecycleVerificationDelays: delays
+        )
+    }
+
+    private func beginConfirmedLifecycle(
+        _ action: MSWLifecycleAction,
+        model: AppModel
+    ) async throws {
+        switch action {
+        case .start:
+            model.start(.dev, surface: .unifiedWindow)
+        case .stop:
+            model.stop(.dev, surface: .unifiedWindow)
+        case .restart:
+            model.restart(.dev, surface: .unifiedWindow)
+        }
+        guard action != .start else { return }
+        for _ in 0..<80 {
+            if model.pendingLifecyclePlan(for: .unifiedWindow) != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(model.pendingLifecyclePlan(for: .unifiedWindow))
+        model.confirmPendingLifecycle(surface: .unifiedWindow)
+    }
+
+    private func waitForLifecycleCompletion(in model: AppModel) async throws -> MSWOperationState {
+        for _ in 0..<160 {
+            if model.operationStates["lifecycle:dev"]?.phase == .finished { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let operation = try XCTUnwrap(model.operationStates["lifecycle:dev"])
+        XCTAssertEqual(operation.phase, .finished)
+        return operation
     }
 
     func testMSWConnectRejectsUnknownExpiredAndReplayedCallbacks() async throws {

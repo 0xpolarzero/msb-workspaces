@@ -65,6 +65,7 @@ struct MonitorView: View {
                 Button("Cancel", role: .cancel) {
                     model.cancelPendingLifecycle()
                 }
+                .accessibilityIdentifier("lifecycle.cancel.button")
             }
         } message: {
             if let plan = model.pendingLifecyclePlan {
@@ -207,6 +208,56 @@ struct MonitorView: View {
         case .neutral: return .secondary
         case .attention: return .orange
         case .critical: return .red
+        }
+    }
+}
+
+struct LifecycleConfirmationView: View {
+    let plan: MSWLifecyclePlan
+    let cancel: () -> Void
+    let confirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("\(plan.action.capitalized) \(plan.workspace)?")
+                .font(.headline)
+                .accessibilityIdentifier("lifecycle.window-confirmation.title")
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("lifecycle.window-confirmation.message")
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("lifecycle.window-confirmation.cancel")
+                Button(plan.action.capitalized, role: confirmationRole, action: confirm)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("lifecycle.window-confirmation.confirm")
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("lifecycle.window-confirmation.sheet")
+    }
+
+    private var message: String {
+        switch MSWLifecycleAction(rawValue: plan.action) {
+        case .start:
+            return "The \(plan.workspace) workspace will start."
+        case .stop:
+            return "The \(plan.workspace) workspace will stop. You can start it again later."
+        case .restart:
+            return "The \(plan.workspace) workspace will restart. Running processes may be interrupted."
+        case nil:
+            return plan.effects
+        }
+    }
+
+    private var confirmationRole: ButtonRole? {
+        switch MSWLifecycleAction(rawValue: plan.action) {
+        case .stop, .restart: return .destructive
+        case .start, nil: return nil
         }
     }
 }

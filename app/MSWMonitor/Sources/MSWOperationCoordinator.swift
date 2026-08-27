@@ -1,5 +1,10 @@
 import Foundation
 
+struct MSWLifecycleApplyReceipt: Sendable {
+    let result: MSWApplyResult
+    let observedAt: Date?
+}
+
 /// Serializes mutations per workspace and refuses to present an operation as
 /// complete until the MSW plan/apply response reports reconciliation.
 actor MSWOperationCoordinator {
@@ -33,7 +38,7 @@ actor MSWOperationCoordinator {
         workspace: String,
         confirmation: String? = nil,
         reviewedPlan: MSWLifecyclePlan? = nil
-    ) async throws -> MSWApplyResult {
+    ) async throws -> MSWLifecycleApplyReceipt {
         guard WorkspaceID.isValid(workspace) else { throw CoordinatorError.invalidWorkspace }
         guard activeWorkspaces.insert(workspace).inserted else {
             throw CoordinatorError.busy(workspace: workspace)
@@ -56,12 +61,12 @@ actor MSWOperationCoordinator {
             throw CoordinatorError.confirmationRequired(plan)
         }
         let phrase = confirmation ?? plan.confirmationPhrase
-        let result = try await client.applyLifecyclePlan(plan, confirmation: phrase).result
-        guard let result else { throw MSWClientError.missingResult(command: "apply") }
+        let response = try await client.applyLifecyclePlan(plan, confirmation: phrase)
+        guard let result = response.result else { throw MSWClientError.missingResult(command: "apply") }
         guard result.reconciled else {
             throw CoordinatorError.unreconciled(workspace: workspace, action: action.rawValue)
         }
-        return result
+        return MSWLifecycleApplyReceipt(result: result, observedAt: response.observedAt)
     }
 
     func isBusy(workspace: String) -> Bool {

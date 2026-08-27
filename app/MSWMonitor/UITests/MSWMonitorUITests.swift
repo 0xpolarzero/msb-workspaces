@@ -891,6 +891,70 @@ final class MSWMonitorUITests: XCTestCase {
         app.buttons["quit.button"].click()
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
+
+    func testUnifiedWindowOwnsLifecycleConfirmationAndVerifiesRestartGap() {
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-lifecycle"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["monitor.popover"]
+                .waitForNonExistence(timeout: 2)
+        )
+
+        let stop = app.buttons["workspace.dev.window-stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 2))
+        stop.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["lifecycle.window-confirmation.sheet"]
+                .waitForExistence(timeout: 2)
+        )
+        let confirmation = app.descendants(matching: .any)["lifecycle.window-confirmation.confirm"]
+        let cancel = app.descendants(matching: .any)["lifecycle.window-confirmation.cancel"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
+        XCTAssertEqual(confirmation.label, "Stop")
+        XCTAssertFalse(app.descendants(matching: .any)["monitor.popover"].exists)
+        cancel.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["lifecycle.window-confirmation.sheet"]
+                .waitForNonExistence(timeout: 2)
+        )
+        assertText("Running", identifier: "workspace.dev.summary-state", in: app)
+
+        let restart = app.buttons["workspace.dev.window-restart"]
+        XCTAssertTrue(restart.waitForExistence(timeout: 2))
+        restart.click()
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
+        XCTAssertEqual(confirmation.label, "Restart")
+        XCTAssertFalse(app.descendants(matching: .any)["monitor.popover"].exists)
+        confirmation.click()
+        let state = app.staticTexts["workspace.dev.summary-state"]
+        XCTAssertEqual(
+            XCTWaiter.wait(
+                for: [XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "value == %@", "Stopped"),
+                    object: state
+                )],
+                timeout: 2
+            ),
+            .completed
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(
+                for: [XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "value == %@", "Running"),
+                    object: state
+                )],
+                timeout: 4
+            ),
+            .completed
+        )
+    }
     func testNetworkShowsActivePortsFirst() {
         let app = launchFixture(["--ui-test-open-popover", "--ui-test-folder-browser"])
         defer { terminateIfNeeded(app) }

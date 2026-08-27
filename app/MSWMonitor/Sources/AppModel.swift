@@ -823,6 +823,21 @@ struct SourceEditorLauncher {
 @Observable
 @MainActor
 final class AppModel {
+    enum LifecycleConfirmationSurface: Hashable, Sendable {
+        case statusPopover
+        case unifiedWindow
+    }
+
+    private struct PendingLifecycleRequest {
+        let plan: MSWLifecyclePlan
+        let action: MSWLifecycleAction
+        let workspace: Workspace.ID
+    }
+
+    private struct LifecycleVerification {
+        let action: MSWLifecycleAction
+        let minimumObservedAt: Date
+    }
     enum BackupUITestResultScenario: Equatable {
         case running
         case success
@@ -860,9 +875,7 @@ final class AppModel {
     private(set) var runtimeRepairRequired: Bool
     private(set) var maintenanceMessage: String?
     var selectedWorkspace: Workspace.ID?
-    private(set) var pendingLifecyclePlan: MSWLifecyclePlan?
-    private(set) var pendingLifecycleAction: MSWLifecycleAction?
-    private(set) var pendingLifecycleWorkspace: Workspace.ID?
+    private var pendingLifecycleRequests: [LifecycleConfirmationSurface: PendingLifecycleRequest] = [:]
     private(set) var pendingPushPlan: MSWPushPlan?
     private enum SafetyAction {
         case lifecycle(MSWLifecycleAction)
@@ -898,6 +911,11 @@ final class AppModel {
     private var runtimeRepairFailureRefreshTask: Task<Void, Never>?
     private var runtimeRepairRefreshGeneration = 0
     private var refreshGeneration = 0
+    private var stateRefreshSequence = 0
+    private var lastAppliedStateRefreshSequence = 0
+    private var lifecycleVerifications: [String: LifecycleVerification] = [:]
+    private let lifecycleVerificationDelays: [Duration]
+    private let lifecycleNow: @Sendable () -> Date
     private var consecutiveRefreshFailures = 0
     private var sustainedUnavailableNotified = false
     private var notificationGeneration = 0
@@ -908,6 +926,7 @@ final class AppModel {
     private var backupPreviewFixtureArchiveEstimate: MSWBackupEstimate?
     private var backupPreviewFixtureDestination: URL?
     private var backupUITestResultScenario: BackupUITestResultScenario?
+    private var lifecycleUITestFixtureEnabled = false
     private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
@@ -932,7 +951,12 @@ final class AppModel {
         initialOperationFailure: MSWOperationFailureNotice? = nil,
         applicationPreferences: ApplicationPreferenceStore? = nil,
         applicationDefaults: SystemApplicationDefaults? = nil,
-        initialRuntimeRepairRequired: Bool = false
+        initialRuntimeRepairRequired: Bool = false,
+        lifecycleVerificationDelays: [Duration] = [
+            .milliseconds(100), .milliseconds(200), .milliseconds(400),
+            .milliseconds(800), .milliseconds(1_600)
+        ],
+        lifecycleNow: @escaping @Sendable () -> Date = Date.init
     ) {
         self.client = client
         self.operationCoordinator = operationCoordinator
@@ -945,6 +969,8 @@ final class AppModel {
         self.startupRecoveryRetry = startupRecoveryRetry
         self.latestOperationFailure = initialOperationFailure
         self.runtimeRepairRequired = initialRuntimeRepairRequired
+        self.lifecycleVerificationDelays = lifecycleVerificationDelays
+        self.lifecycleNow = lifecycleNow
         self.applicationPreferences = applicationPreferences ?? ApplicationPreferenceStore(
             catalogProvider: {
                 let defaults = applicationDefaults ?? .discover()
@@ -1028,7 +1054,7 @@ final class AppModel {
             )
         }
         githubSnapshot = nil
-        pendingLifecyclePlan = nil
+        pendingLifecycleRequests.removeAll()
         pendingPushPlan = nil
     }
 
@@ -1158,7 +1184,6 @@ final class AppModel {
         if client == nil {
             return
         }
-        refreshGeneration += 1
         let generation = refreshGeneration
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
@@ -1569,6 +1594,15 @@ final class AppModel {
         ]
     }
 
+    func installLifecycleUITestFixture() {
+        installDirectoryUITestFixture()
+        lifecycleUITestFixtureEnabled = true
+        guard let index = workspaces.firstIndex(where: { $0.id == .dev }) else { return }
+        workspaces[index].canStart = false
+        workspaces[index].canStop = true
+        workspaces[index].canRestart = true
+    }
+
     func nextActionTitle(for workspace: Workspace) -> String {
         workspace.nextAction == "Open Terminal" ? terminalActionTitle : workspace.nextAction
     }
@@ -1616,18 +1650,27 @@ final class AppModel {
 
     private func refreshRemoteResult() async -> RefreshResult {
         guard client != nil else { return .failed }
-        refreshGeneration += 1
         return await refreshRemote(generation: refreshGeneration)
     }
 
     private func refreshRemote(generation: Int) async -> RefreshResult {
         guard let client else { return .failed }
+        stateRefreshSequence &+= 1
+        let requestSequence = stateRefreshSequence
         do {
             let response = try await client.state()
             guard generation == refreshGeneration else { return .superseded }
             guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
+            if let observedAt = response.observedAt,
+               let lastObservedAt,
+               observedAt <= lastObservedAt {
+                if observedAt < lastObservedAt || requestSequence <= lastAppliedStateRefreshSequence {
+                    return .superseded
+                }
+            }
             let previousWorkspaces = workspaces
             let reconciledOperations = apply(state: state, observedAt: response.observedAt)
+            lastAppliedStateRefreshSequence = requestSequence
             let stateChanged = workspaces != previousWorkspaces
             if lastError != nil {
                 lastError = nil
@@ -1681,42 +1724,53 @@ final class AppModel {
         }
     }
 
-    func start(_ id: Workspace.ID) {
-        runLifecycle(.start, id: id)
+    var pendingLifecyclePlan: MSWLifecyclePlan? {
+        pendingLifecyclePlan(for: .statusPopover)
     }
 
-    func stop(_ id: Workspace.ID) {
-        runLifecycle(.stop, id: id)
+    func pendingLifecyclePlan(for surface: LifecycleConfirmationSurface) -> MSWLifecyclePlan? {
+        pendingLifecycleRequests[surface]?.plan
     }
 
-    func restart(_ id: Workspace.ID) {
-        runLifecycle(.restart, id: id)
+    func start(_ id: Workspace.ID, surface: LifecycleConfirmationSurface = .statusPopover) {
+        runLifecycle(.start, id: id, surface: surface)
     }
 
-    func confirmPendingLifecycle() {
-        guard let action = pendingLifecycleAction,
-              let workspace = pendingLifecycleWorkspace,
-              let plan = pendingLifecyclePlan else { return }
+    func stop(_ id: Workspace.ID, surface: LifecycleConfirmationSurface = .statusPopover) {
+        runLifecycle(.stop, id: id, surface: surface)
+    }
+
+    func restart(_ id: Workspace.ID, surface: LifecycleConfirmationSurface = .statusPopover) {
+        runLifecycle(.restart, id: id, surface: surface)
+    }
+
+    func confirmPendingLifecycle(surface: LifecycleConfirmationSurface = .statusPopover) {
+        guard let request = pendingLifecycleRequests[surface] else { return }
+        let action = request.action
+        let workspace = request.workspace
+        let plan = request.plan
         guard plan.workspace == workspace.rawValue,
               plan.action == action.rawValue,
               requireActionSafety(for: workspace, action: .lifecycle(action), operation: action.rawValue.capitalized) else {
-            cancelPendingLifecycle()
+            cancelPendingLifecycle(surface: surface)
             return
         }
-        pendingLifecycleAction = nil
-        pendingLifecycleWorkspace = nil
-        pendingLifecyclePlan = nil
-        runLifecycle(action, id: workspace, confirmation: plan.confirmationPhrase, reviewedPlan: plan)
+        pendingLifecycleRequests[surface] = nil
+        runLifecycle(
+            action,
+            id: workspace,
+            surface: surface,
+            confirmation: plan.confirmationPhrase,
+            reviewedPlan: plan
+        )
     }
 
-    func cancelPendingLifecycle() {
-        clearPendingLifecyclePlan()
+    func cancelPendingLifecycle(surface: LifecycleConfirmationSurface = .statusPopover) {
+        pendingLifecycleRequests[surface] = nil
     }
 
-    private func clearPendingLifecyclePlan() {
-        pendingLifecycleAction = nil
-        pendingLifecycleWorkspace = nil
-        pendingLifecyclePlan = nil
+    private func clearPendingLifecyclePlan(surface: LifecycleConfirmationSurface) {
+        pendingLifecycleRequests[surface] = nil
     }
 
     private func beginDetailRequest(clearsError: Bool = true) -> Int {
@@ -2444,15 +2498,14 @@ final class AppModel {
     }
 
     private func invalidatePendingPlansIfUnsafe() {
-        if let workspace = pendingLifecycleWorkspace {
-            let lifecycleIsSafe = pendingLifecycleAction.map {
-                isActionSafe(for: workspace, action: .lifecycle($0))
-            } ?? false
-            if !lifecycleIsSafe {
-                let action = pendingLifecycleAction?.rawValue.capitalized ?? "Lifecycle"
-                clearPendingLifecyclePlan()
-                lastError = "Pending \(action.lowercased()) confirmation was cancelled because \(workspace.rawValue) is no longer fresh and quarantine-clear."
-            }
+        let unsafeRequests = pendingLifecycleRequests.filter { _, request in
+            !isActionSafe(for: request.workspace, action: .lifecycle(request.action))
+        }
+        for (surface, request) in unsafeRequests {
+            let workspace = request.workspace
+            let action = request.action.rawValue.capitalized
+            clearPendingLifecyclePlan(surface: surface)
+            lastError = "Pending \(action.lowercased()) confirmation was cancelled because \(workspace.rawValue) is no longer fresh and quarantine-clear."
         }
 
         if let plan = pendingPushPlan {
@@ -2493,13 +2546,10 @@ final class AppModel {
     private func runLifecycle(
         _ action: MSWLifecycleAction,
         id: Workspace.ID,
+        surface: LifecycleConfirmationSurface,
         confirmation: String? = nil,
         reviewedPlan: MSWLifecyclePlan? = nil
     ) {
-        guard let operationCoordinator else {
-            lastError = "MSW operations are unavailable in fixture mode."
-            return
-        }
         guard requireActionSafety(
             for: id,
             action: .lifecycle(action),
@@ -2508,7 +2558,23 @@ final class AppModel {
             return
         }
 
+        if lifecycleUITestFixtureEnabled {
+            runLifecycleFixture(
+                action,
+                id: id,
+                surface: surface,
+                confirmation: confirmation,
+                reviewedPlan: reviewedPlan
+            )
+            return
+        }
+        guard let operationCoordinator else {
+            lastError = "MSW operations are unavailable in fixture mode."
+            return
+        }
+
         let isPlanning = action != .start && confirmation == nil
+        let operationStartedAt = lifecycleNow()
         if !isPlanning {
             beginOperation(
                 kind: .lifecycle,
@@ -2535,10 +2601,15 @@ final class AppModel {
                     self.markOperationVerifying(
                         kind: .lifecycle,
                         workspace: id.rawValue,
-                        message: "\(result.outcome) Verifying with a fresh state observation."
+                        message: "\(result.result.outcome) Verifying with a fresh state observation."
+                    )
+                    let minimumObservedAt = max(operationStartedAt, result.observedAt ?? operationStartedAt)
+                    self.lifecycleVerifications[id.rawValue] = LifecycleVerification(
+                        action: action,
+                        minimumObservedAt: minimumObservedAt
                     )
                 }
-                await self?.refreshRemote()
+                await self?.verifyLifecycle(action, workspace: id)
             } catch let error as MSWOperationCoordinator.CoordinatorError {
                 if case let .confirmationRequired(plan) = error {
                     await MainActor.run {
@@ -2548,12 +2619,14 @@ final class AppModel {
                             action: .lifecycle(action),
                             operation: action.rawValue.capitalized
                         ) else {
-                            self.clearPendingLifecyclePlan()
+                            self.clearPendingLifecyclePlan(surface: surface)
                             return
                         }
-                        self.pendingLifecyclePlan = plan
-                        self.pendingLifecycleAction = action
-                        self.pendingLifecycleWorkspace = id
+                        self.pendingLifecycleRequests[surface] = PendingLifecycleRequest(
+                            plan: plan,
+                            action: action,
+                            workspace: id
+                        )
                         self.lastError = nil
                     }
                     return
@@ -2617,6 +2690,82 @@ final class AppModel {
                 await self?.refreshRemote()
             }
         }
+    }
+
+    private func runLifecycleFixture(
+        _ action: MSWLifecycleAction,
+        id: Workspace.ID,
+        surface: LifecycleConfirmationSurface,
+        confirmation: String?,
+        reviewedPlan: MSWLifecyclePlan?
+    ) {
+        if action != .start && confirmation == nil {
+            pendingLifecycleRequests[surface] = PendingLifecycleRequest(
+                plan: MSWLifecyclePlan(
+                    planId: "ui-test-\(action.rawValue)-\(id.rawValue)",
+                    action: action.rawValue,
+                    workspace: id.rawValue,
+                    expiresAt: Date().addingTimeInterval(300),
+                    confirmationPhrase: "\(action.rawValue.uppercased()) \(id.rawValue)",
+                    effects: "Deterministic lifecycle fixture."
+                ),
+                action: action,
+                workspace: id
+            )
+            return
+        }
+        guard action == .start || reviewedPlan?.confirmationPhrase == confirmation else {
+            lastError = "The lifecycle fixture confirmation was invalid."
+            return
+        }
+        beginOperation(
+            kind: .lifecycle,
+            workspace: id.rawValue,
+            action: action.rawValue,
+            message: "Applying the reviewed operation."
+        )
+        updateState(id, to: action == .start ? .starting : action == .stop ? .stopping : .restarting)
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard let self else { return }
+            if action == .restart {
+                self.updateState(id, to: .stopped)
+                try? await Task.sleep(for: .milliseconds(2_400))
+            }
+            self.updateState(id, to: action == .stop ? .stopped : .running)
+            self.finishOperation(
+                key: self.operationKey(kind: .lifecycle, workspace: id.rawValue),
+                outcome: .succeeded,
+                message: "A fresh fixture observation verified the \(action.rawValue) outcome."
+            )
+        }
+    }
+
+    private func verifyLifecycle(_ action: MSWLifecycleAction, workspace id: Workspace.ID) async {
+        let attempts = action == .start ? 1 : lifecycleVerificationDelays.count + 1
+        for attempt in 0..<attempts {
+            guard operationStates[operationKey(kind: .lifecycle, workspace: id.rawValue)]?.phase == .verifying else {
+                return
+            }
+            _ = await refreshRemoteResult()
+            guard operationStates[operationKey(kind: .lifecycle, workspace: id.rawValue)]?.phase == .verifying else {
+                return
+            }
+            if attempt < attempts - 1 {
+                do {
+                    try await Task.sleep(for: lifecycleVerificationDelays[attempt])
+                } catch {
+                    return
+                }
+            }
+        }
+        guard lifecycleVerifications[id.rawValue] != nil else { return }
+        let reason = "Timed out waiting for a fresh \(expectedLifecycleDescription(action)) observation after \(action.rawValue)."
+        markOperationUnknown(key: operationKey(kind: .lifecycle, workspace: id.rawValue), reason: reason)
+    }
+
+    private func expectedLifecycleDescription(_ action: MSWLifecycleAction) -> String {
+        action == .stop ? "stopped" : "running"
     }
 
     @discardableResult
@@ -2740,7 +2889,7 @@ final class AppModel {
             }
         }
         invalidatePendingPlansIfUnsafe()
-        return reconcileVerifyingOperations()
+        return reconcileVerifyingOperations(observedAt: observedAt)
     }
 
     private func updateState(_ id: Workspace.ID, to state: Workspace.State) {
@@ -2970,54 +3119,33 @@ final class AppModel {
         return detail == summaryLine && !hasAdditionalLine ? nil : detail
     }
 
-    private func reconcileVerifyingOperations() -> [MSWOperationState] {
+    private func reconcileVerifyingOperations(observedAt: Date?) -> [MSWOperationState] {
         var reconciled: [MSWOperationState] = []
         for (key, current) in operationStates where current.phase == .verifying && current.kind == .lifecycle {
             guard let workspaceID = current.workspace,
                   let workspace = workspaces.first(where: { $0.id.rawValue == workspaceID }) else {
                 continue
             }
-            let matches: Bool
-            switch current.action {
-            case MSWLifecycleAction.start.rawValue, MSWLifecycleAction.restart.rawValue:
-                matches = workspace.state == .running
-            case MSWLifecycleAction.stop.rawValue:
-                matches = workspace.state == .stopped || workspace.state == .exited
-            default:
-                matches = false
-            }
-            guard workspace.freshness == .fresh else {
-                finishOperation(
-                    key: key,
-                    outcome: .unknown,
-                    message: "The operation returned, but no fresh workspace state was available to verify it."
-                )
-                if let operation = operationStates[key] { reconciled.append(operation) }
+            guard let verification = lifecycleVerifications[workspaceID],
+                  let observedAt,
+                  observedAt > verification.minimumObservedAt else {
                 continue
             }
+            let matches: Bool
+            switch verification.action {
+            case .start, .restart:
+                matches = workspace.state == .running
+            case .stop:
+                matches = workspace.state == .stopped
+            }
+            guard workspace.freshness == .fresh else { continue }
+            guard matches else { continue }
+            lifecycleVerifications[workspaceID] = nil
             finishOperation(
                 key: key,
-                outcome: matches ? .succeeded : .unknown,
-                message: matches
-                    ? "A fresh observation verified the \(current.action) outcome."
-                    : "A fresh observation did not match the expected \(current.action) outcome."
+                outcome: .succeeded,
+                message: "A fresh observation verified the \(current.action) outcome."
             )
-            if !matches {
-                recordOperationFailure(
-                    action: current.action,
-                    workspace: workspaceID,
-                    reason: "The workspace returned \(workspace.state.rawValue.lowercased()) after \(current.action), so the requested change did not take effect.",
-                    recovery: "Run Diagnostics and Maintenance, then retry \(current.action) only if the checks pass."
-                )
-                emitNotification(
-                    kind: .operationFailure,
-                    workspace: workspaceID,
-                    title: "\(current.action.capitalized) outcome unknown",
-                    message: "The latest state did not match the expected operation outcome.",
-                    recovery: "Review the workspace state before taking another action.",
-                    deepLink: workspaceDeepLink(workspaceID, section: "activity")
-                )
-            }
             if let operation = operationStates[key] { reconciled.append(operation) }
         }
         return reconciled
@@ -3025,12 +3153,19 @@ final class AppModel {
 
     private func markOperationUnknown(key: String, reason: String) {
         guard let operation = operationStates[key], operation.phase == .verifying else { return }
+        let verification = operation.workspace.flatMap { lifecycleVerifications.removeValue(forKey: $0) }
+        let diagnostics: String? = verification.map { verification in
+            let formatter = ISO8601DateFormatter()
+            let latest = lastObservedAt.map(formatter.string(from:)) ?? "No accepted observation"
+            return "Action: \(operation.action)\nWorkspace: \(operation.workspace ?? "unknown")\nRequired observation after: \(formatter.string(from: verification.minimumObservedAt))\nLatest accepted observation: \(latest)"
+        }
         finishOperation(key: key, outcome: .unknown, message: reason)
         recordOperationFailure(
             action: operation.action,
             workspace: operation.workspace,
             reason: reason,
-            recovery: "Run Diagnostics and Maintenance before retrying \(operation.action)."
+            recovery: "Run Diagnostics and Maintenance before retrying \(operation.action).",
+            diagnosticDetails: diagnostics
         )
         emitNotification(
             kind: .operationFailure,
@@ -3043,8 +3178,14 @@ final class AppModel {
     }
 
     private func markVerifyingOperationsUnknown(reason: String) {
-        let keys = operationStates.compactMap { key, operation in
-            operation.phase == .verifying ? key : nil
+        let keys: [String] = operationStates.compactMap { key, operation in
+            guard operation.phase == .verifying else { return nil }
+            if operation.kind == .lifecycle,
+               let workspace = operation.workspace,
+               lifecycleVerifications[workspace] != nil {
+                return nil
+            }
+            return key
         }
         for key in keys {
             markOperationUnknown(key: key, reason: reason)
