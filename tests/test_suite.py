@@ -721,7 +721,7 @@ class InstallerAndDailyTests(MSWTestCase):
         (self.env.home / ".config/msw/base-version").write_text("0.0.0\n")
         self.env.setup()
         self._assert_volume_sentinels()
-        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.2.1")
+        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.2.2")
 
     def test_reset_config_and_rebuild_base(self) -> None:
         config = self.env.home / ".config/msw/config.sh"
@@ -2703,15 +2703,27 @@ class BackupRestoreTests(MSWTestCase):
         operation_root.mkdir(parents=True)
         stale = operation_root / "stale-operation-0001.json"
         stale.write_text(json.dumps({
-            "kind": "backup", "operationId": "stale-operation-0001",
+            "schemaVersion": 1, "kind": "backup", "operationId": "stale-operation-0001",
             "state": "completed", "legacyResult": {"archive": "/tmp/old.tar.zst"},
         }))
         stale.chmod(0o600)
+        stale_log = operation_root / "stale-operation-0001.log"
+        stale_stdout = operation_root / "stale-operation-0001.stdout"
+        stale_log.write_text("first legacy log\n")
+        stale_stdout.write_text("first legacy stdout\n")
 
         first = self.env.msw("app", "backup-list", "--format", "json")
         self.assertEqual(json.loads(first.stdout)["result"], [])
         quarantined = operation_root / ".incompatible-v2/stale-operation-0001.json"
         self.assertTrue(quarantined.is_file())
+        self.assertEqual(
+            (operation_root / ".incompatible-v2/stale-operation-0001.log").read_text(),
+            "first legacy log\n",
+        )
+        self.assertEqual(
+            (operation_root / ".incompatible-v2/stale-operation-0001.stdout").read_text(),
+            "first legacy stdout\n",
+        )
         self.assertFalse(stale.exists())
         marker = operation_root / ".schema-v2-activated"
         self.assertEqual(marker.read_text(), "schemaVersion=2\n")
@@ -2719,6 +2731,44 @@ class BackupRestoreTests(MSWTestCase):
         second = self.env.msw("app", "backup-list", "--format", "json")
         self.assertEqual(json.loads(second.stdout)["result"], [])
         self.assertTrue(quarantined.is_file())
+
+        late_stale = operation_root / "late-stale-operation-0002.json"
+        late_stale.write_text(json.dumps({
+            "schemaVersion": 1, "kind": "backup",
+            "operationId": "late-stale-operation-0002", "state": "completed",
+        }))
+        late_stale.chmod(0o600)
+        after_activation = self.env.msw("app", "backup-list", "--format", "json")
+        self.assertEqual(json.loads(after_activation.stdout)["result"], [])
+        self.assertFalse(late_stale.exists())
+        self.assertTrue(
+            (operation_root / ".incompatible-v2/late-stale-operation-0002.json").is_file()
+        )
+
+        stale.write_text(json.dumps({
+            "schemaVersion": 1, "kind": "backup",
+            "operationId": "stale-operation-0001", "state": "completed",
+        }))
+        stale_log.write_text("second legacy log\n")
+        stale_stdout.write_text("second legacy stdout\n")
+        collision = self.env.msw("app", "backup-list", "--format", "json")
+        self.assertEqual(json.loads(collision.stdout)["result"], [])
+        collision_records = list(
+            (operation_root / ".incompatible-v2").glob(
+                "stale-operation-0001.quarantine-*.json"
+            )
+        )
+        self.assertEqual(len(collision_records), 1)
+        collision_stem = Path(str(collision_records[0])[:-len(".json")])
+        self.assertEqual(Path(f"{collision_stem}.log").read_text(), "second legacy log\n")
+        self.assertEqual(
+            Path(f"{collision_stem}.stdout").read_text(),
+            "second legacy stdout\n",
+        )
+        self.assertEqual(
+            (operation_root / ".incompatible-v2/stale-operation-0001.log").read_text(),
+            "first legacy log\n",
+        )
 
         current_corrupt = operation_root / "current-corrupt-0002.json"
         current_corrupt.write_text(json.dumps({
@@ -2735,6 +2785,20 @@ class BackupRestoreTests(MSWTestCase):
             "MSW_BACKUP_RECORD_INVALID",
         )
         self.assertTrue(current_corrupt.exists())
+
+        current_corrupt.unlink()
+        malformed_current = operation_root / "current-malformed-0003.json"
+        malformed_current.write_text('{"schemaVersion":2,"kind":"backup"')
+        malformed_current.chmod(0o600)
+        malformed_rejected = self.env.msw(
+            "app", "backup-list", "--format", "json", check=False,
+        )
+        self.assertEqual(malformed_rejected.returncode, 78)
+        self.assertEqual(
+            json.loads(malformed_rejected.stdout)["error"]["code"],
+            "MSW_BACKUP_RECORD_INVALID",
+        )
+        self.assertTrue(malformed_current.exists())
 
     def test_backup_restores_only_previous_running_set_and_excludes_keychain(self) -> None:
         self.env.msw("start", "dev")
@@ -3082,7 +3146,12 @@ class PackagedBehaviorTests(MSWTestCase):
         def write_image(path: Path, kind: str) -> None:
             with path.open("wb") as handle:
                 handle.truncate(4 * 1024 * 1024)
-                if kind == "ext4":
+                if kind in {"ext4", "truncated"}:
+                    declared_blocks = 1024 if kind == "ext4" else 1280
+                    handle.seek(1028)
+                    handle.write(declared_blocks.to_bytes(4, "little"))
+                    handle.seek(1048)
+                    handle.write((2).to_bytes(4, "little"))
                     handle.seek(1080)
                     handle.write(b"\x53\xef")
                 elif kind == "nonblank":
@@ -3103,7 +3172,7 @@ class PackagedBehaviorTests(MSWTestCase):
         )
         self.env.msw("stop", "dev")
 
-        for kind in ("blank", "nonblank", "corrupt"):
+        for kind in ("blank", "nonblank", "corrupt", "truncated"):
             write_image(images["workspace"], kind)
             digest = hashlib.sha256(images["workspace"].read_bytes()).hexdigest()
             start_count = sum(event["event"] == "start" for event in self.env.state()["events"])
@@ -3122,7 +3191,7 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_help_version_docs_without_msb_and_complete_deep_check(self) -> None:
         env = self.env.env.copy()
         env["MSW_MSB_BIN"] = "/does/not/exist"
-        self.assertIn("msw 3.2.1", self.env.msw("version", extra_env=env).stdout)
+        self.assertIn("msw 3.2.2", self.env.msw("version", extra_env=env).stdout)
         self.assertIn("grouped MicroSandbox", self.env.msw("help", extra_env=env).stdout)
         self.assertIn("MSW", self.env.msw("docs", "cheatsheet", extra_env=env).stdout)
         proc = self.env.msw("check", "--deep", timeout=90)

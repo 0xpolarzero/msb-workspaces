@@ -510,6 +510,9 @@ struct DetailView: View {
             }
             detailError
         }
+        .onChange(of: model.latestOperationFailure) { _, _ in
+            operationDetailsExpanded = false
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-MSW_CLI_VERSION="3.2.1"
+MSW_CLI_VERSION="3.2.2"
 readonly MSW_CLI_VERSION
 
 CONFIG_FILE="${MSW_CONFIG_FILE:-$HOME/.config/msw/config.sh}"
@@ -1263,6 +1263,7 @@ volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 WORKSPACE_STORAGE_ERROR=""
 WORKSPACE_STORAGE_FAILURE_KIND=""
 VOLUME_INSPECT_OUTPUT=""
+VOLUME_EXT4_DETAIL=""
 
 volume_probe() {
   local name="$1" output
@@ -1283,8 +1284,55 @@ volume_inspect_field() {
     /usr/bin/awk -F: -v field="$field" '$1 == field { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
 }
 
+file_size_bytes() {
+  local path="$1" size=""
+  size="$(/usr/bin/stat -f %z "$path" 2>/dev/null || true)"
+  if [[ "$size" =~ ^[0-9]+$ ]]; then printf '%s\n' "$size"; return 0; fi
+  size="$(/usr/bin/stat -c %s "$path" 2>/dev/null || true)"
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$size"
+}
+
+ext4_u32_le() {
+  local path="$1" offset="$2" raw b0 b1 b2 b3 extra=""
+  raw="$(/bin/dd if="$path" bs=1 skip="$offset" count=4 2>/dev/null |
+    /usr/bin/od -An -v -tx1)"
+  read -r b0 b1 b2 b3 extra <<<"$raw"
+  [[ "$b0" =~ ^[0-9a-fA-F]{2}$ && "$b1" =~ ^[0-9a-fA-F]{2}$ &&
+     "$b2" =~ ^[0-9a-fA-F]{2}$ && "$b3" =~ ^[0-9a-fA-F]{2}$ && -z "$extra" ]] || return 1
+  printf '%u\n' "$((16#$b0 + (16#$b1 << 8) + (16#$b2 << 16) + (16#$b3 << 24)))"
+}
+
+ext4_geometry_is_valid() {
+  local path="$1" file_bytes blocks_lo blocks_hi log_block_size block_size max_blocks
+  VOLUME_EXT4_DETAIL=""
+  file_bytes="$(file_size_bytes "$path")" || {
+    VOLUME_EXT4_DETAIL="The backing image size could not be read safely."
+    return 1
+  }
+  blocks_lo="$(ext4_u32_le "$path" 1028)" || return 1
+  log_block_size="$(ext4_u32_le "$path" 1048)" || return 1
+  blocks_hi="$(ext4_u32_le "$path" 1360)" || return 1
+  if (( log_block_size > 6 )); then
+    VOLUME_EXT4_DETAIL="The ext4 superblock declares an invalid block size."
+    return 1
+  fi
+  block_size=$((1024 << log_block_size))
+  max_blocks=$((file_bytes / block_size))
+  if (( blocks_hi > max_blocks / 4294967296 )); then
+    VOLUME_EXT4_DETAIL="The backing image is shorter than the filesystem declared by its ext4 superblock."
+    return 1
+  fi
+  max_blocks=$((max_blocks - blocks_hi * 4294967296))
+  if (( blocks_lo == 0 || blocks_lo > max_blocks )); then
+    VOLUME_EXT4_DETAIL="The backing image is shorter than the filesystem declared by its ext4 superblock."
+    return 1
+  fi
+}
+
 volume_ext4_status() {
   local name="$1" kind filesystem path magic expected probe_status
+  VOLUME_EXT4_DETAIL=""
   if volume_probe "$name"; then
     :
   else
@@ -1304,6 +1352,7 @@ volume_ext4_status() {
   [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 3
   magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
   [[ "$magic" == 53ef ]] || return 3
+  ext4_geometry_is_valid "$path" || return 3
 }
 
 workspace_storage_check() {
@@ -1324,7 +1373,7 @@ workspace_storage_check() {
         ;;
       *)
         WORKSPACE_STORAGE_FAILURE_KIND=invalid
-        WORKSPACE_STORAGE_ERROR="The $role disk '$name' is not a verified ext4 filesystem. Restore or inspect it; MSW will not format existing storage."
+        WORKSPACE_STORAGE_ERROR="The $role disk '$name' is not a verified ext4 filesystem.${VOLUME_EXT4_DETAIL:+ $VOLUME_EXT4_DETAIL} Restore a known-good backup or complete an offline filesystem assessment; MSW will not format or extend existing storage."
         ;;
     esac
     return "$status"
@@ -4458,35 +4507,47 @@ readonly BACKUP_RECORD_SCHEMA_VERSION=2
 readonly BACKUP_SCHEMA_MARKER="$BACKUP_OPERATION_ROOT/.schema-v2-activated"
 readonly BACKUP_INCOMPATIBLE_ROOT="$BACKUP_OPERATION_ROOT/.incompatible-v2"
 
-backup_quarantine_incompatible_records_once() {
-  local lock="$BACKUP_OPERATION_ROOT/.schema-v2-lock" path base sidecar attempts=0
-  [[ -f "$BACKUP_SCHEMA_MARKER" && ! -L "$BACKUP_SCHEMA_MARKER" ]] && return 0
+backup_quarantine_incompatible_records() {
+  local lock="$BACKUP_OPERATION_ROOT/.schema-v2-lock" path base destination sidecar schema suffix candidate attempts=0 collision=0
   until mkdir "$lock" 2>/dev/null; do
     attempts=$((attempts + 1))
     (( attempts < 100 )) || return 1
     sleep 0.02
-    [[ -f "$BACKUP_SCHEMA_MARKER" && ! -L "$BACKUP_SCHEMA_MARKER" ]] && return 0
   done
   mkdir -p "$BACKUP_INCOMPATIBLE_ROOT" || { rmdir "$lock"; return 1; }
   chmod 700 "$BACKUP_INCOMPATIBLE_ROOT"
   while IFS= read -r path; do
     [[ -f "$path" && ! -L "$path" ]] || continue
-    # No compatibility adapter: only records that declare the current schema
-    # remain visible. Pre-cutover shapes are quarantined byte-for-byte once;
-    # malformed schema-v2 records remain in place and fail Backup reads.
-    if "$JQ_BIN" -e --argjson version "$BACKUP_RECORD_SCHEMA_VERSION" \
-      '.schemaVersion == $version' "$path" >/dev/null 2>&1; then
-      continue
-    fi
+    # No compatibility adapter: quarantine only records that positively
+    # declare an older schema. Unknown, malformed, current, and future records
+    # remain visible so strict Backup validation reports them to the owner.
+    schema="$("$JQ_BIN" -er '.schemaVersion | select(type == "number" and floor == .)' "$path" 2>/dev/null || true)"
+    [[ "$schema" =~ ^[0-9]+$ ]] || continue
+    (( schema < BACKUP_RECORD_SCHEMA_VERSION )) || continue
     base="$(basename "$path" .json)"
-    mv "$path" "$BACKUP_INCOMPATIBLE_ROOT/$base.json" || { rmdir "$lock"; return 1; }
+    suffix=""
+    while :; do
+      candidate="$BACKUP_INCOMPATIBLE_ROOT/$base$suffix"
+      if [[ ! -e "$candidate.json" && ! -L "$candidate.json" &&
+            ! -e "$candidate.log" && ! -L "$candidate.log" &&
+            ! -e "$candidate.stdout" && ! -L "$candidate.stdout" ]]; then
+        break
+      fi
+      collision=$((collision + 1))
+      suffix=".quarantine-$collision-$$"
+    done
+    destination="$candidate.json"
+    mv "$path" "$destination" || { rmdir "$lock"; return 1; }
     for sidecar in "$BACKUP_OPERATION_ROOT/$base.log" "$BACKUP_OPERATION_ROOT/$base.stdout"; do
-      [[ -f "$sidecar" && ! -L "$sidecar" ]] && mv "$sidecar" "$BACKUP_INCOMPATIBLE_ROOT/$(basename "$sidecar")"
+      [[ -f "$sidecar" && ! -L "$sidecar" ]] && mv "$sidecar" "$candidate.${sidecar##*.}"
     done
   done < <(/usr/bin/find "$BACKUP_OPERATION_ROOT" -maxdepth 1 -type f -name '[a-z0-9]*.json' -print)
-  printf 'schemaVersion=%s\n' "$BACKUP_RECORD_SCHEMA_VERSION" >"$BACKUP_SCHEMA_MARKER.tmp"
-  chmod 600 "$BACKUP_SCHEMA_MARKER.tmp"
-  mv "$BACKUP_SCHEMA_MARKER.tmp" "$BACKUP_SCHEMA_MARKER"
+  if [[ ! -f "$BACKUP_SCHEMA_MARKER" || -L "$BACKUP_SCHEMA_MARKER" ]]; then
+    [[ ! -L "$BACKUP_SCHEMA_MARKER" ]] || { rmdir "$lock"; return 1; }
+    printf 'schemaVersion=%s\n' "$BACKUP_RECORD_SCHEMA_VERSION" >"$BACKUP_SCHEMA_MARKER.tmp"
+    chmod 600 "$BACKUP_SCHEMA_MARKER.tmp"
+    mv "$BACKUP_SCHEMA_MARKER.tmp" "$BACKUP_SCHEMA_MARKER"
+  fi
   rmdir "$lock"
 }
 
@@ -4494,7 +4555,7 @@ backup_state_prepare() {
   umask 077
   mkdir -p "$BACKUP_OPERATION_ROOT"
   chmod 700 "$HOME/.local/state" "$HOME/.local/state/msw" "$BACKUP_OPERATION_ROOT" 2>/dev/null || true
-  backup_quarantine_incompatible_records_once
+  backup_quarantine_incompatible_records
 }
 
 backup_record_path() { printf '%s/%s.json\n' "$BACKUP_OPERATION_ROOT" "$1"; }
@@ -8499,7 +8560,7 @@ app_reconcile_named_volume_capacity() {
     return 1
   fi
   "$MSB_BIN" volume create "$temp" --kind disk --size "${size}G" -q >/dev/null || return 1
-  volume_ext4_is_valid "$temp" || return 1
+  volume_ext4_status "$temp" || return 1
   if ! app_copy_named_volume "$volume" "$temp" "$helper"; then
     "$MSB_BIN" volume rm "$temp" >/dev/null 2>&1 || true
     return 1
@@ -8509,7 +8570,7 @@ app_reconcile_named_volume_capacity() {
     warn "workspace data remains recoverable in '$temp'"
     return 1
   fi
-  if ! volume_ext4_is_valid "$volume"; then
+  if ! volume_ext4_status "$volume"; then
     warn "workspace data remains recoverable in '$temp'; replacement storage is not verified ext4"
     return 1
   fi

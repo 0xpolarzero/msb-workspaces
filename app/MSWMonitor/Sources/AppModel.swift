@@ -280,7 +280,11 @@ struct MSWOperationFailureNotice: Equatable, Sendable {
         guard data.count > diagnosticLimit else { return joined }
         let notice = "Earlier diagnostic output omitted.\n"
         let remaining = diagnosticLimit - Data(notice.utf8).count
-        return notice + String(decoding: data.suffix(max(0, remaining)), as: UTF8.self)
+        var suffix = Data(data.suffix(max(0, remaining)))
+        while let first = suffix.first, first & 0b1100_0000 == 0b1000_0000 {
+            suffix.removeFirst()
+        }
+        return notice + String(decoding: suffix, as: UTF8.self)
     }
 }
 @MainActor
@@ -2832,6 +2836,10 @@ final class AppModel {
         action: String,
         message: String
     ) {
+        if kind == .lifecycle,
+           latestOperationFailure?.workspace?.rawValue == workspace {
+            latestOperationFailure = nil
+        }
         let key = operationKey(kind: kind, workspace: workspace)
         let now = Date()
         if var existing = operationStates[key], existing.outcome == .pending {

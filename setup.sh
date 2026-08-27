@@ -287,11 +287,12 @@ volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 
 # Disk named volumes must exist and finish their one-time ext4 initialization
 # before they are attached to a VM. MicroSandbox assigns the first named disk
-# mount (/workspace) to /dev/vdc; creating it implicitly during `run` allowed
-# agentd to race the formatter and retain a misleading EINVAL mount failure.
-# Existing volumes are only inspected. Unknown, blank, or damaged storage is
-# never formatted here.
+# mount (/workspace) to /dev/vdc. Explicit creation makes MicroSandbox's atomic
+# format-before-publish contract visible here, and the geometry check catches a
+# truncated sparse image before agentd reports mount EINVAL. Existing volumes
+# are only inspected. Unknown, blank, or damaged storage is never formatted.
 VOLUME_INSPECT_OUTPUT=""
+VOLUME_EXT4_DETAIL=""
 
 volume_probe() {
   local name="$1" output
@@ -310,13 +311,60 @@ volume_inspect_field() {
     awk -F: -v field="$field" '$1 == field { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
 }
 
+file_size_bytes() {
+  local path="$1" size=""
+  size="$(/usr/bin/stat -f %z "$path" 2>/dev/null || true)"
+  if [[ "$size" =~ ^[0-9]+$ ]]; then printf '%s\n' "$size"; return 0; fi
+  size="$(/usr/bin/stat -c %s "$path" 2>/dev/null || true)"
+  [[ "$size" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$size"
+}
+
+ext4_u32_le() {
+  local path="$1" offset="$2" raw b0 b1 b2 b3 extra=""
+  raw="$(/bin/dd if="$path" bs=1 skip="$offset" count=4 2>/dev/null |
+    /usr/bin/od -An -v -tx1)"
+  read -r b0 b1 b2 b3 extra <<<"$raw"
+  [[ "$b0" =~ ^[0-9a-fA-F]{2}$ && "$b1" =~ ^[0-9a-fA-F]{2}$ &&
+     "$b2" =~ ^[0-9a-fA-F]{2}$ && "$b3" =~ ^[0-9a-fA-F]{2}$ && -z "$extra" ]] || return 1
+  printf '%u\n' "$((16#$b0 + (16#$b1 << 8) + (16#$b2 << 16) + (16#$b3 << 24)))"
+}
+
+ext4_geometry_is_valid() {
+  local path="$1" file_bytes blocks_lo blocks_hi log_block_size block_size max_blocks
+  VOLUME_EXT4_DETAIL=""
+  file_bytes="$(file_size_bytes "$path")" || {
+    VOLUME_EXT4_DETAIL="The backing image size could not be read safely."
+    return 1
+  }
+  blocks_lo="$(ext4_u32_le "$path" 1028)" || return 1
+  log_block_size="$(ext4_u32_le "$path" 1048)" || return 1
+  blocks_hi="$(ext4_u32_le "$path" 1360)" || return 1
+  if (( log_block_size > 6 )); then
+    VOLUME_EXT4_DETAIL="The ext4 superblock declares an invalid block size."
+    return 1
+  fi
+  block_size=$((1024 << log_block_size))
+  max_blocks=$((file_bytes / block_size))
+  if (( blocks_hi > max_blocks / 4294967296 )); then
+    VOLUME_EXT4_DETAIL="The backing image is shorter than the filesystem declared by its ext4 superblock."
+    return 1
+  fi
+  max_blocks=$((max_blocks - blocks_hi * 4294967296))
+  if (( blocks_lo == 0 || blocks_lo > max_blocks )); then
+    VOLUME_EXT4_DETAIL="The backing image is shorter than the filesystem declared by its ext4 superblock."
+    return 1
+  fi
+}
+
 ext4_volume_status() {
   local name="$1" kind filesystem path magic expected probe_status
+  VOLUME_EXT4_DETAIL=""
   if volume_probe "$name"; then :; else probe_status=$?; return "$probe_status"; fi
   kind="$(volume_inspect_field Kind)"
   filesystem="$(volume_inspect_field Filesystem)"
   [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 3
-  if [[ "$TEST_MODE" == 1 ]]; then
+  if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
     magic="$(volume_inspect_field Magic)"
     [[ -z "$magic" || "$magic" == 53ef ]] || return 3
     return 0
@@ -326,13 +374,14 @@ ext4_volume_status() {
   [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 3
   magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
   [[ "$magic" == 53ef ]] || return 3
+  ext4_geometry_is_valid "$path" || return 3
 }
 
 ensure_ext4_volume() {
   local name="$1" size="$2" status
   if ext4_volume_status "$name"; then return; else status=$?; fi
   (( status != 2 )) || fatal "could not determine whether workspace storage '$name' exists; no disk was created"
-  (( status != 3 )) || fatal "workspace storage '$name' is not a verified ext4 disk; inspect it and restore from backup instead of formatting it"
+  (( status != 3 )) || fatal "workspace storage '$name' is not a verified ext4 disk.${VOLUME_EXT4_DETAIL:+ $VOLUME_EXT4_DETAIL} Restore a known-good backup or complete an offline filesystem assessment; existing storage was not changed"
   # `volume create --kind disk` owns the only formatting transition. We call
   # it only after an authoritative not-found result and never retry it after
   # the name exists, so a newly allocated blank image is formatted once.

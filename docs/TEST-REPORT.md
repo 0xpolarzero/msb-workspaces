@@ -190,31 +190,39 @@ Optional, not required for normal installation:
 The suite uses temporary directories, simulated MicroSandbox state, and local Git remotes. It does not use your production VMs or GitHub credentials.
 ## 2026-08-27 startup disk diagnosis
 
-The reported `agentd` line is consistent with the implicit first-attach race;
-it does not by itself establish that the current `dev` data volume is corrupt.
 Read-only inspection showed that the sandbox's
 first named disk mount is `msw-dev-workspace` at `/workspace`; agentd identifies
 that attachment as `/dev/vdc`. `msb volume inspect` reports a raw 120 GiB ext4
 disk, `file` identifies an ext4 revision-1 filesystem, and the on-disk
-superblock contains the ext magic `53 ef` at byte 1080. The separate 100 GiB
-runtime disk has the same valid ext4 identity. Those independent observations
-rule out a currently blank, unformatted, wrong-format, or stale-schema disk at
-the state boundary checked by MSW. They do not replace an offline full-filesystem
-check, so deeper corruption remains a mount-time failure and is never a reason
-to format existing storage. The retained system log contains the reported
-`/dev/vdc` mount `EINVAL`. No workspace was started and no real disk was modified
-during diagnosis.
+superblock contains the ext magic `53 ef` at byte 1080. That metadata alone was
+misleading: the image is 132,112,384 bytes shorter than the filesystem byte
+count declared by its ext4 superblock. The separate runtime disk has the same
+exact truncation. This invalid block-device geometry explains the retained
+`/dev/vdc` mount `EINVAL`; the current disk is neither blank nor eligible for
+formatting. No workspace was started and no real disk was modified during
+diagnosis. Recovery requires a known-good backup or an offline filesystem
+assessment before any controlled image repair.
 
 The source contract now creates each missing disk volume explicitly and waits
-for MicroSandbox's one-time ext4 creation to finish before attaching it. Every
-later start validates the named-volume kind, filesystem declaration, canonical
-path, and ext superblock magic. Existing blank, unknown, non-ext4, or damaged
-volumes fail closed with `MSW_WORKSPACE_DISK_INVALID`; MSW never formats an
-existing volume. A mount-time `/dev/vdc` EINVAL receives the same workspace-disk
-classification and is not an installation-repair signal.
+for MicroSandbox's atomic one-time ext4 creation to finish before attaching it.
+Every later start validates the named-volume kind, filesystem declaration,
+canonical path, ext superblock magic, block size, and declared block count
+against the raw image length. Existing blank, truncated, unknown, non-ext4, or
+damaged volumes fail closed with `MSW_WORKSPACE_DISK_INVALID`; MSW never formats
+or extends an existing volume. A mount-time `/dev/vdc` EINVAL receives the same
+workspace-disk classification and is not an installation-repair signal.
 
 This ownership boundary matches MicroSandbox's primary volume contract: disk
 named volumes are managed raw ext4 images mounted through virtio-blk, and an
 explicit `msb volume create NAME --kind disk --size SIZE` creates that managed
 filesystem before it is attached. See
 <https://github.com/superradcompany/microsandbox/blob/main/docs/sandboxes/volumes.mdx>.
+The installed 0.6.8 implementation provisions the ext4 image in a temporary
+sibling directory, sets its complete logical length, and only then atomically
+renames the volume into place; it does not expose a format/attach race. See
+<https://github.com/superradcompany/microsandbox/blob/v0.6.8/sdk/rust/lib/volume/mod.rs#L681-L735>.
+An isolated 256 MiB disk created by that installed formatter had the ext4 magic
+and a declared block count within the raw image length. The fixture lived under
+a disposable temporary home and was removed after inspection. This proves the
+host-side format and geometry boundary without starting a VM; guest mounting was
+not rerun because the retained failure and damaged real images were ground truth.

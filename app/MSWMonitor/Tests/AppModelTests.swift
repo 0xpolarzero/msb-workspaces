@@ -1922,6 +1922,20 @@ final class AppModelTests: XCTestCase {
                 $0.workspace == "dev" &&
                 $0.detail?.contains("The dev workspace could not start.") == true
         })
+
+        model.start(.dev)
+        XCTAssertNil(
+            model.latestOperationFailure,
+            "A retry must hide the previous details before an identical failure arrives."
+        )
+        for _ in 0..<80 {
+            if model.latestOperationFailure != nil,
+               model.workspaces.first(where: { $0.id == .dev })?.state == .stopped {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(model.latestOperationFailure, notice)
     }
 
     func testLifecycleFailureNoticeKeepsConciseSummaryAndBoundedFinalDiagnostics() throws {
@@ -1940,6 +1954,21 @@ final class AppModelTests: XCTestCase {
         XCTAssertLessThanOrEqual(Data(details.utf8).count, MSWOperationFailureNotice.diagnosticLimit)
         XCTAssertTrue(details.hasSuffix(finalLine))
         XCTAssertEqual(details.components(separatedBy: "The dev workspace could not start.").count, 1)
+
+        let unicodeNotice = MSWOperationFailureNotice(
+            action: "start",
+            title: "Start failed",
+            reason: "Short summary.",
+            recovery: "Inspect storage.",
+            workspace: .dev,
+            diagnosticDetails: String(repeating: "🧱", count: MSWOperationFailureNotice.diagnosticLimit)
+        )
+        let unicodeDetails = try XCTUnwrap(unicodeNotice.diagnosticDetails)
+        XCTAssertLessThanOrEqual(
+            Data(unicodeDetails.utf8).count,
+            MSWOperationFailureNotice.diagnosticLimit
+        )
+        XCTAssertFalse(unicodeDetails.contains("�"))
     }
 
     func testStopApplyDoesNotLoadQuarantinedGuestCredential() async throws {
