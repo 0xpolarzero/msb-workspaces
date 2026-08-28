@@ -63,7 +63,7 @@ The scripts use `/bin/zsh`; invoke them as executable scripts rather than with
 app/MSWMonitor/Scripts/build.sh
 ```
 
-This produces an unsigned arm64 Debug bundle at
+This produces a locally ad-hoc signed arm64 Debug bundle at
 `app/MSWMonitor/build/MSWMonitor.app` and writes
 `app/MSWMonitor/build/logs/build.log`.
 

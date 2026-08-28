@@ -12,21 +12,23 @@ if [[ -d "$BUILD_DIR/MSWMonitor.app" ]]; then
   /bin/rm -rf -- "$BUILD_DIR/MSWMonitor.app"
 fi
 
-# Local verification stays unsigned by default. A release-capable build can opt
-# into an installed Apple team signing identity without changing the script.
+# Local verification uses a complete ad-hoc signature by default. A
+# release-capable build can opt into an installed Apple team signing identity.
 typeset -a signingSettings
+typeset localAdHocSigning=NO
+if (( ! ${+CODE_SIGNING_ALLOWED} && ! ${+CODE_SIGN_IDENTITY} && ! ${+DEVELOPMENT_TEAM} )); then
+  localAdHocSigning=YES
+fi
 # An explicit CODE_SIGNING_ALLOWED value always wins.
 typeset signingAllowed="${CODE_SIGNING_ALLOWED:-}"
 if [[ -z "$signingAllowed" ]]; then
-  if [[ -n "${CODE_SIGN_IDENTITY:-}" || -n "${DEVELOPMENT_TEAM:-}" ]]; then
-    signingAllowed=YES
-  else
-    signingAllowed=NO
-  fi
+  signingAllowed=YES
 fi
 signingSettings=("CODE_SIGNING_ALLOWED=$signingAllowed")
 if [[ -n "${CODE_SIGN_IDENTITY:-}" ]]; then
   signingSettings+=("CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY}")
+elif [[ "$localAdHocSigning" == YES ]]; then
+  signingSettings+=("CODE_SIGN_IDENTITY=-")
 fi
 if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
   signingSettings+=("DEVELOPMENT_TEAM=${DEVELOPMENT_TEAM}")
