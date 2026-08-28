@@ -1528,12 +1528,18 @@ final class AppModel {
                     MSWLogEntry(
                         workspace: "dev",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_400),
-                        message: "Development service ready",
+                        source: "stdout",
+                        sessionID: 1,
+                        encoding: nil,
+                        message: "HHHHHHHHHHHHHHHHDevelopment service ready",
                         safeForDisplay: true
                     ),
                     MSWLogEntry(
                         workspace: "dev",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_403),
+                        source: "stdout",
+                        sessionID: 1,
+                        encoding: nil,
                         message: #"{"event":"build","level":"info","ok":true}"#,
                         safeForDisplay: true
                     )
@@ -1549,6 +1555,9 @@ final class AppModel {
                     MSWLogEntry(
                         workspace: "playgrounds",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_401),
+                        source: "stdout",
+                        sessionID: 1,
+                        encoding: nil,
                         message: "Playground task completed",
                         safeForDisplay: true
                     )
@@ -1564,6 +1573,9 @@ final class AppModel {
                     MSWLogEntry(
                         workspace: "personal",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_402),
+                        source: "stdout",
+                        sessionID: 1,
+                        encoding: nil,
                         message: "Personal task completed",
                         safeForDisplay: true
                     )

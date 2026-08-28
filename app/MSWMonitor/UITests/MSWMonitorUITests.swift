@@ -792,8 +792,10 @@ final class MSWMonitorUITests: XCTestCase {
         app.descendants(matching: .any)["workspace.filter.dev"].click()
         let devLog = app.descendants(matching: .any)["logs.row.dev.0.message"]
         XCTAssertTrue(devLog.waitForExistence(timeout: 2))
-        XCTAssertEqual(devLog.value as? String, "Development service ready")
-        XCTAssertFalse((devLog.value as? String ?? "").contains("HHHHHHHH"))
+        XCTAssertEqual(
+            devLog.value as? String,
+            "HHHHHHHHHHHHHHHHDevelopment service ready"
+        )
         XCTAssertFalse(app.descendants(matching: .any)["logs.select.dev.0"].exists)
 
         let structuredLog = app.descendants(matching: .any)["logs.row.dev.1.message"]

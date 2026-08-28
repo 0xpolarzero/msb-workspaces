@@ -170,6 +170,7 @@ actor MSWClient {
             switch record.type {
             case "log":
                 guard let observedAt = record.observedAt,
+                      let source = record.source,
                       let message = record.message else {
                     throw MSWClientError.unavailable("MSW returned a malformed log entry.")
                 }
@@ -177,6 +178,9 @@ actor MSWClient {
                     MSWLogEntry(
                         workspace: workspace,
                         observedAt: observedAt,
+                        source: source,
+                        sessionID: record.sessionID,
+                        encoding: record.encoding,
                         message: message,
                         safeForDisplay: true
                     )
@@ -1103,8 +1107,18 @@ actor MSWClient {
         let lifecycle: MSWLifecycle?
         let freshness: MSWFreshness?
         let reason: String?
+        let source: String?
+        let sessionID: Int?
+        let encoding: String?
         let message: String?
         let safeForDisplay: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion, type, protocolVersion, stream, requestId, workspace
+            case observedAt, available, lifecycle, freshness, reason, source, encoding
+            case message, safeForDisplay
+            case sessionID = "sessionId"
+        }
     }
 }
 

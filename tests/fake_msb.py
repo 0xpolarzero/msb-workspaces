@@ -695,7 +695,10 @@ def main() -> int:
             print(payload)
         return 0
     if cmd == "logs":
-        if os.environ.get("MSW_FAKE_LOGS_JSONL_FAIL") == "1" and "--format" in rest:
+        box = rest[0] if rest else ""
+        log_event(state, "logs", box=box, args=rest[1:])
+        save(state)
+        if os.environ.get("MSW_FAKE_LOGS_JSON_FAIL") == "1" and "--json" in rest:
             return 64
         payload = os.environ.get("MSW_FAKE_LOGS", "")
         if payload:

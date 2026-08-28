@@ -636,8 +636,16 @@ struct MSWLogsResponse: Codable, Sendable {
 struct MSWLogEntry: Codable, Sendable {
     let workspace: String
     let observedAt: Date
+    let source: String
+    let sessionID: Int?
+    let encoding: String?
     let message: String
     let safeForDisplay: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case workspace, observedAt, source, encoding, message, safeForDisplay
+        case sessionID = "sessionId"
+    }
 }
 
 struct MSWRepositoriesResponse: Codable, Sendable {

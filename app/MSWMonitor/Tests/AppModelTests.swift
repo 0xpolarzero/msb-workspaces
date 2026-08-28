@@ -865,8 +865,8 @@ final class AppModelTests: XCTestCase {
 
         let stream = """
         {"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:00Z","available":true,"lifecycle":"Running","freshness":"fresh","reason":null,"safeForDisplay":true}
-        {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","message":"repeated message","safeForDisplay":true}
-        {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","message":"repeated message","safeForDisplay":true}
+        {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","source":"stdout","sessionId":17,"encoding":null,"message":"repeated message","safeForDisplay":true}
+        {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","source":"stderr","sessionId":18,"encoding":"utf-8","message":"repeated message","safeForDisplay":true}
         {"schemaVersion":1,"type":"stream-end","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:02Z","safeForDisplay":true}
         """
         let executable = temporary.appendingPathComponent("msw")
@@ -893,6 +893,9 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(response.lines.count, 2)
         XCTAssertEqual(response.lines.map(\.message), ["repeated message", "repeated message"])
+        XCTAssertEqual(response.lines.map(\.source), ["stdout", "stderr"])
+        XCTAssertEqual(response.lines.map(\.sessionID), [17, 18])
+        XCTAssertEqual(response.lines.map(\.encoding), [nil, "utf-8"])
         XCTAssertEqual(
             response.lines.map(\.observedAt),
             [

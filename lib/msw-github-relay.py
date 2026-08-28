@@ -17,7 +17,10 @@ zombie holding the guest port; the host shuttle respawns a fresh relay.
 Heartbeat: every MSW_GITHUB_HEARTBEAT_SECS (default 10) this relay sends a
 control frame b"H" so the shuttle can tell a healthy idle tunnel apart from a
 wedged one (msb exec can hang without exiting when the sandbox stops
-mid-stream; the shuttle kills and respawns us when heartbeats stop).
+mid-stream; the shuttle kills and respawns us when heartbeats stop). The exact
+framed heartbeat bytes also reserve this structured MicroSandbox log session
+for internal transport. The MSW log adapter excludes every record with the
+same session id, never records selected by their display text.
 
 Security: binds ONLY guest loopback 127.0.0.1:18446. It never listens on any
 other interface and carries no credentials — the capability gate lives in the
@@ -41,6 +44,9 @@ OP_OPEN = b"O"
 OP_CLOSE = b"C"
 OP_HEARTBEAT = b"H"
 HEADER = 5  # 1-byte conn-id + 4-byte length
+INTERNAL_LOG_SESSION_SIGNATURE = (
+    bytes([CONTROL]) + len(OP_HEARTBEAT).to_bytes(4, "big") + OP_HEARTBEAT
+)
 # Hostile-interface hardening (mirror of the shuttle's cap): frames are
 # produced by chunking socket reads of at most 65536 bytes, so no legitimate
 # frame is ever larger. A declared length above this cap is a protocol
@@ -195,7 +201,9 @@ class Relay:
         # wedged ones (msb exec can hang when the sandbox stops mid-stream).
         while True:
             try:
-                self.send_control(OP_HEARTBEAT)
+                # Keep this byte-exact signature synchronized with the host
+                # shuttle and the structured MSW logs adapter.
+                self.write_stream(INTERNAL_LOG_SESSION_SIGNATURE)
             except OSError:
                 os._exit(0)
             time.sleep(HEARTBEAT_SECS)

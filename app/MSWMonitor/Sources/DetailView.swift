@@ -670,7 +670,7 @@ struct DetailView: View {
             }
             let startIndex = max(0, response.lines.count - 100)
             for (offset, line) in response.lines.suffix(100).enumerated() where line.safeForDisplay {
-                let message = Self.cleanedLogMessage(line.message)
+                let message = line.message.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !message.isEmpty else { continue }
                 result.append(
                     TaggedLogLine(
@@ -740,11 +740,6 @@ struct DetailView: View {
         .joined(separator: "\n")
     }
 
-    private static func cleanedLogMessage(_ message: String) -> String {
-        strippingRepeatedPrefix(from: message)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private static func prettyJSON(from message: String) -> String? {
         guard let data = message.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data),
@@ -757,21 +752,6 @@ struct DetailView: View {
         }
         return String(data: prettyData, encoding: .utf8)
     }
-
-    private static func strippingRepeatedPrefix(from message: String) -> String {
-        guard let first = message.first else { return message }
-        var cursor = message.startIndex
-        var repeated = 0
-        while cursor < message.endIndex, message[cursor] == first {
-            repeated += 1
-            cursor = message.index(after: cursor)
-        }
-        guard repeated >= 8 else { return message }
-        return cursor < message.endIndex ? String(message[cursor...]) : ""
-    }
-
-
-
 
     private var visibleWorkspaces: [Workspace] {
         model.workspaces.filter { !hiddenWorkspaces.contains($0.id) }

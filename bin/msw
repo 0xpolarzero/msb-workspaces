@@ -8073,36 +8073,17 @@ app_cmd_repositories() {
 app_redact() {
   local value="${1-}"
   printf '%s\n' "$value" | /usr/bin/sed -E \
-    -e 's/^H+(\{|\[)/\1/' \
     -e 's#([Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+)[A-Za-z0-9._~+/-]+=*#\1[REDACTED]#g' \
     -e 's#([Bb][Aa][Ss][Ii][Cc][[:space:]]+)[A-Za-z0-9+/=]+#\1[REDACTED]#g' \
     -e 's#(gh[osuphr]_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
     -e 's#(github_pat_)[A-Za-z0-9_-]+#\1[REDACTED]#g' \
-    -e 's#((MSW_GITHUB_READ_TOKEN(_[A-Za-z0-9_]+)?|MSW_GITHUB_WRITE_TOKEN(_[A-Za-z0-9_]+)?|MSW_HOST_TOKEN(_[A-Za-z0-9_]+)?|MSW_HOST_OAUTH_TOKEN(_[A-Za-z0-9_]+)?|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN)=)[^[:space:]]+#\1[REDACTED]#g' \
+    -e 's#((MSW_GITHUB_READ_TOKEN(_[A-Za-z0-9_]+)?|MSW_GITHUB_WRITE_TOKEN(_[A-Za-z0-9_]+)?|MSW_HOST_TOKEN(_[A-Za-z0-9_]+)?|MSW_HOST_OAUTH_TOKEN(_[A-Za-z0-9_]+)?|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN)=)[A-Za-z0-9._~+/-]+=*#\1[REDACTED]#g' \
     -e 's#(X-MSW-Capability:[[:space:]]*)[^[:space:]]+#\1[REDACTED]#g' \
     -e 's#(https?://)[^[:space:]@/:]+:[^[:space:]@]+@#\1[REDACTED]@#g'
 }
 
-app_log_line_is_internal_snapshot() {
-  local value="${1-}"
-  [[ -z "$value" || "$value" =~ ^H+$ ]] && return 0
-  case "$value" in
-    "["|"]"|"{"|"}"|"[]"|"{}") return 0 ;;
-  esac
-  local monitored_port
-  for monitored_port in "${internal_log_ports[@]}"; do
-    [[ "$value" == "$monitored_port" ]] && return 0
-  done
-  [[ "$value" == *'"path":'* && "$value" == *'"query":'* &&
-    "$value" == *'"entries":'* && "$value" == *'"truncated":'* ]] && return 0
-  [[ "$value" == *'"worktreeState":'* && "$value" == *'"destinationState":'* &&
-    "$value" == *'"pushability":'* && "$value" == *'"localCommit":'* ]] && return 0
-  return 1
-}
-
 app_cmd_logs() {
-  local box="" status raw line safe reason_json="null" configured_port
-  local -a internal_log_ports=()
+  local box="" status raw records_json line safe reason_json="null"
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error logs "missing value for --workspace"; box="$2"; shift 2 ;;
@@ -8114,41 +8095,73 @@ app_cmd_logs() {
   is_workspace "$box" || app_usage_error logs "workspace must be one of the configured workspaces"
   app_require_config logs
   app_require_runtime logs
-  while IFS= read -r configured_port; do
-    [[ -n "$configured_port" ]] && internal_log_ports+=("$configured_port")
-  done < <(expand_ports)
   if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
     app_emit_error logs "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
   fi
   if [[ "$status" == Running ]]; then
-    if ! raw="$(workspace_msb "$box" logs "$box" --format jsonl --tail 200 2>/dev/null)"; then
-      if ! raw="$(workspace_msb "$box" logs "$box" --tail 200 2>/dev/null)"; then
-        app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide bounded logs." "Retry after repairing the workspace runtime." "$box" true 69
-      fi
+    if ! raw="$(workspace_msb "$box" logs "$box" --json --tail 200 2>/dev/null)"; then
+      app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide structured bounded logs." "Install a MicroSandbox version that supports structured logs, then retry." "$box" true 69
     fi
   else
     reason_json="$(app_json_string "Showing system logs for a workspace that is $status.")"
-    if ! raw="$(workspace_msb "$box" logs "$box" --source system --format jsonl --tail 200 2>/dev/null)"; then
-      if ! raw="$(workspace_msb "$box" logs "$box" --source system --tail 200 2>/dev/null)"; then
-        app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide stopped-workspace system logs." "Inspect the named volume and sandbox runtime." "$box" true 69
-      fi
+    if ! raw="$(workspace_msb "$box" logs "$box" --source system --json --tail 200 2>/dev/null)"; then
+      app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide structured stopped-workspace system logs." "Install a MicroSandbox version that supports structured logs, then inspect the named volume and sandbox runtime." "$box" true 69
     fi
   fi
+
+  # MicroSandbox 0.6.8 records one compact JSON object per captured write:
+  # timestamp (t), source (s), session id (id), encoding (e), and data (d).
+  # The GitHub relay's reserved framed heartbeat identifies its exec session;
+  # every record for that structured session is internal transport and must be
+  # removed together, including stderr, open/close, and arbitrary data frames.
+  if ! records_json="$(printf '%s\n' "$raw" | "$JQ_BIN" -cs '
+    def valid_timestamp:
+      type == "string" and
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$");
+    def valid_session_id:
+      . == null or (type == "number" and floor == . and . >= 0);
+    def valid_record:
+      type == "object" and
+      (keys | sort) == ["d", "e", "id", "s", "t"] and
+      (.t | valid_timestamp) and
+      (.s == "stdout" or .s == "stderr" or .s == "output" or .s == "system") and
+      (.id | valid_session_id) and
+      (.e == null or (.e | type == "string" and length > 0)) and
+      (.d | type == "string" and length <= 262144);
+    if all(.[]; valid_record) then . else error("invalid MicroSandbox log record") end |
+    . as $records |
+    ([$records[] |
+      select(.s == "stdout" and .e == null and (.id | type) == "number" and
+        .d == "\u0000\u0000\u0000\u0000\u0001H") |
+      .id] | unique) as $internal_sessions |
+    [$records[] | select((.id as $id | $internal_sessions | index($id)) == null)]
+  ' 2>/dev/null)"; then
+    app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime returned malformed structured logs." "Update or repair the MicroSandbox logs adapter, then retry." "$box" true 69
+  fi
+
   MSW_APP_RESPONSE_EMITTED=1
   printf '{"schemaVersion":1,"type":"stream-start","protocolVersion":1,"stream":"logs","requestId":%s,"workspace":%s,"observedAt":%s,"available":true,"lifecycle":%s,"freshness":"fresh","reason":%s,"safeForDisplay":true}\n' \
     "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" \
     "$(app_json_string "$(app_now)")" "$(app_json_string "$status")" "$reason_json"
   while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    if (( ${#line} > 262144 )); then line="${line:0:262144}"; fi
     safe="$(app_redact "$line")"
-    [[ -n "$safe" ]] || continue
-    app_log_line_is_internal_snapshot "$safe" && continue
     MSW_APP_RESPONSE_EMITTED=1
-    printf '{"schemaVersion":1,"type":"log","requestId":%s,"workspace":%s,"observedAt":%s,"message":%s,"safeForDisplay":true}\n' \
-      "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" \
-      "$(app_json_string "$(app_now)")" "$(app_json_string "$safe")"
-  done <<<"$raw"
+    printf '%s\n' "$safe"
+  done < <(printf '%s\n' "$records_json" | "$JQ_BIN" -c \
+    --arg requestId "$MSW_APP_REQUEST_ID" --arg workspace "$box" '
+      .[] | {
+        schemaVersion: 1,
+        type: "log",
+        requestId: $requestId,
+        workspace: $workspace,
+        observedAt: .t,
+        source: .s,
+        sessionId: .id,
+        encoding: .e,
+        message: .d,
+        safeForDisplay: true
+      }
+    ')
   printf '{"schemaVersion":1,"type":"stream-end","requestId":%s,"workspace":%s,"observedAt":%s,"safeForDisplay":true}\n' \
     "$(app_json_string "$MSW_APP_REQUEST_ID")" "$(app_json_string "$box")" "$(app_json_string "$(app_now)")"
 }

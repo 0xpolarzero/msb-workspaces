@@ -44,6 +44,9 @@ OP_OPEN = b"O"
 OP_CLOSE = b"C"
 OP_HEARTBEAT = b"H"
 HEADER = 5  # 1-byte conn-id + 4-byte length
+INTERNAL_LOG_SESSION_SIGNATURE = (
+    bytes([CONTROL]) + len(OP_HEARTBEAT).to_bytes(4, "big") + OP_HEARTBEAT
+)
 
 PROXY_HOST = os.environ.get("MSW_GITHUB_PROXY_HOST", "127.0.0.1")
 PROXY_PORT = int(os.environ.get("MSW_GITHUB_PROXY_PORT", "18446"))
@@ -269,7 +272,7 @@ class Shuttle:
             if len(payload) == 2 and payload[:1] == OP_CLOSE:
                 self.close_upstream(payload[1], send_close=False)
                 return
-            if payload == OP_HEARTBEAT:
+            if payload == INTERNAL_LOG_SESSION_SIGNATURE[HEADER:]:
                 return
             raise ProtocolViolation("malformed control frame on conn-id 0")
         if not payload:

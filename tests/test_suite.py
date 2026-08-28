@@ -4022,9 +4022,11 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_app_logs_normalizes_and_redacts_jsonl(self) -> None:
         self.env.msw("start", "dev")
         payload = json.dumps({
-            "message": "Authorization: Bearer ghp_secret",
-            "detail": "runtime",
-            "secret": "MSW_GITHUB_READ_TOKEN_DEV=opaque_secret",
+            "t": "2026-08-25T18:10:01.125Z",
+            "s": "stderr",
+            "id": 17,
+            "e": None,
+            "d": "Authorization: Bearer ghp_secret MSW_GITHUB_READ_TOKEN_DEV=opaque_secret",
         })
         document = self.env.msw(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
@@ -4038,15 +4040,29 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(all(line["workspace"] == "dev" for line in lines))
         self.assertTrue(all(line["safeForDisplay"] for line in lines))
         self.assertTrue(all("observedAt" in line for line in lines))
+        self.assertEqual(lines[1]["observedAt"], "2026-08-25T18:10:01.125Z")
+        self.assertEqual(lines[1]["source"], "stderr")
+        self.assertEqual(lines[1]["sessionId"], 17)
+        self.assertIsNone(lines[1]["encoding"])
         self.assertIn("[REDACTED]", lines[1]["message"])
         self.assertNotIn("ghp_secret", lines[1]["message"])
         self.assertNotIn("opaque_secret", lines[1]["message"])
+
+        log_events = [
+            event for event in self.env.state()["events"]
+            if event.get("event") == "logs" and event.get("box") == "dev"
+        ]
+        self.assertEqual(log_events[-1]["args"], ["--json", "--tail", "200"])
 
         self.env.msw("stop", "dev")
         stopped = self.env.msw(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
             extra_env={"MSW_FAKE_LOGS": json.dumps({
-                "message": "agentd: disk mount failed for /workspace",
+                "t": "2026-08-25T18:11:01Z",
+                "s": "system",
+                "id": None,
+                "e": None,
+                "d": "agentd: disk mount failed for /workspace",
             })},
         )
         stopped_lines = [json.loads(line) for line in stopped.stdout.splitlines() if line.strip()]
@@ -4054,34 +4070,63 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(stopped_lines[0]["lifecycle"], "Stopped")
         self.assertIn("stopped", stopped_lines[0]["reason"].lower())
         self.assertIn("disk mount failed", stopped_lines[1]["message"])
+        log_events = [
+            event for event in self.env.state()["events"]
+            if event.get("event") == "logs" and event.get("box") == "dev"
+        ]
+        self.assertEqual(
+            log_events[-1]["args"],
+            ["--source", "system", "--json", "--tail", "200"],
+        )
 
-    def test_app_logs_falls_back_to_bounded_plain_output(self) -> None:
+    def test_app_logs_filters_the_complete_relay_session_by_structured_protocol(self) -> None:
         self.env.msw("start", "dev")
+        heartbeat = "\x00\x00\x00\x00\x01H"
+        relay_open = "\x00\x00\x00\x00\x02O\x01"
+        relay_data = "\x01\x00\x00\x00\x12GET /internal HTTP"
+        relay_close = "\x00\x00\x00\x00\x02C\x01"
+        records = [
+            {"t": "2026-08-25T18:10:00Z", "s": "stdout", "id": 440, "e": None, "d": heartbeat},
+            {"t": "2026-08-25T18:10:01Z", "s": "stdout", "id": 440, "e": None, "d": relay_open},
+            {"t": "2026-08-25T18:10:02Z", "s": "stdout", "id": 440, "e": None, "d": relay_data},
+            {"t": "2026-08-25T18:10:03Z", "s": "stdout", "id": 440, "e": None, "d": relay_close},
+            {"t": "2026-08-25T18:10:04Z", "s": "stderr", "id": 440, "e": None, "d": "relay: listening"},
+        ]
+        legitimate = ["H", "HH", "[]", "{}", "3000", "Z" * 40 + "legitimate"]
+        records.extend(
+            {"t": f"2026-08-25T18:11:{index:02d}Z", "s": "stdout", "id": 441, "e": None, "d": message}
+            for index, message in enumerate(legitimate)
+        )
         document = self.env.msw(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={
-                "MSW_FAKE_LOGS_JSONL_FAIL": "1",
-                "MSW_FAKE_LOGS": "\n".join([
-                    "H" * 32,
-                    "H[]",
-                    "]",
-                    "3000",
-                    ("H" * 32) + '{"path":".","query":null,"entries":[],"truncated":false}',
-                    ("H" * 32) + '{"event":"service-ready"}',
-                    "demo service listening on port 3000",
-                ]),
-            },
+            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
-        self.assertEqual(
-            [line["type"] for line in lines],
-            ["stream-start", "log", "log", "stream-end"],
+        log_lines = [line for line in lines if line["type"] == "log"]
+        self.assertEqual([line["message"] for line in log_lines], legitimate)
+        self.assertEqual({line["sessionId"] for line in log_lines}, {441})
+        self.assertFalse(any(line.get("sessionId") == 440 for line in lines))
+        self.assertNotIn("GET /internal", document.stdout)
+
+    def test_app_logs_fail_closed_for_malformed_or_unsupported_json(self) -> None:
+        self.env.msw("start", "dev")
+        malformed = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS": '{"t":"not-a-timestamp"}'},
+            check=False,
         )
-        self.assertEqual(lines[1]["message"], '{"event":"service-ready"}')
-        self.assertEqual(lines[2]["message"], "demo service listening on port 3000")
-        self.assertTrue(lines[1]["safeForDisplay"])
-        self.assertNotIn('"entries"', document.stdout)
-        self.assertNotIn("HHHH", document.stdout)
+        self.assertEqual(malformed.returncode, 69)
+        self.assertEqual(json.loads(malformed.stdout)["error"]["code"], "MSW_LOGS_UNAVAILABLE")
+        self.assertNotIn('"type":"stream-start"', malformed.stdout)
+
+        unsupported = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS_JSON_FAIL": "1"},
+            check=False,
+        )
+        self.assertEqual(unsupported.returncode, 69)
+        self.assertEqual(json.loads(unsupported.stdout)["error"]["code"], "MSW_LOGS_UNAVAILABLE")
+        self.assertNotIn('"type":"stream-start"', unsupported.stdout)
 
 
     def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
