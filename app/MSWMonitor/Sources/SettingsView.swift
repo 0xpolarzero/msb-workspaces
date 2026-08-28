@@ -1397,10 +1397,7 @@ struct SettingsView: View {
             }
         }
         .padding(12)
-        .background(
-            Color(nsColor: .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 8)
-        )
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func recoveryMessage(_ message: String) -> some View {

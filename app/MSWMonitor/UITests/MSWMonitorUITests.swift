@@ -421,13 +421,10 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.buttons["secrets.editor.submit"].isEnabled)
         app.buttons["secrets.editor.submit"].click()
 
-        let review = app.descendants(matching: .any)["secrets.review.sheet"]
-        XCTAssertTrue(review.waitForExistence(timeout: 2))
-        let phrase = app.textFields["secrets.review.phrase"]
-        phrase.click()
-        phrase.typeText("ADD CI_TOKEN")
-        XCTAssertTrue(app.buttons["secrets.review.apply"].isEnabled)
-        app.buttons["secrets.review.apply"].click()
+        XCTAssertFalse(
+            app.descendants(matching: .any)["secrets.review.sheet"].exists,
+            "Adding a secret should apply without a second confirmation screen"
+        )
         XCTAssertTrue(
             app.descendants(matching: .any)["secrets.entry.CI_TOKEN.row"]
                 .waitForExistence(timeout: 3)

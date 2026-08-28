@@ -210,13 +210,10 @@ struct SecretsView: View {
                 .font(.headline)
                 .accessibilityIdentifier("secrets.title")
             Spacer()
-            Button {
+            Button("Add Secret…") {
                 editorTarget = .add
-            } label: {
-                Label("Add Secret…", systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.small)
             .disabled(model.secretsMutationsBlocked)
             .accessibilityIdentifier("secrets.add.button")
         }
@@ -266,11 +263,15 @@ struct SecretsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityIdentifier("secrets.loading")
         } else if model.secretEntries.isEmpty {
-            ContentUnavailableView(
-                "No secrets",
-                systemImage: "key",
-                description: Text("Add a secret to make it available to workspaces.")
-            )
+            VStack(alignment: .leading, spacing: 4) {
+                Text("No secrets")
+                    .font(.body.weight(.semibold))
+                Text("MSW gives the VM a placeholder and replaces it with the real value only inside the proxy for allowed requests.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
             .accessibilityIdentifier("secrets.empty")
         } else {
             LazyVStack(alignment: .leading, spacing: 0) {
@@ -351,8 +352,15 @@ struct SecretsView: View {
             allowedDomains: allowedDomains
         )
         if staged {
-            reviewValue = value
-            reviewConfirmation = ""
+            if operation == .add, let plan = model.pendingSecretPlan {
+                await model.confirmSecretPlan(
+                    confirmation: plan.confirmationPhrase,
+                    value: value
+                )
+            } else {
+                reviewValue = value
+                reviewConfirmation = ""
+            }
             editorTarget = nil
         }
         return staged
@@ -596,7 +604,7 @@ private struct SecretEditorSheet: View {
                     .keyboardShortcut(.cancelAction)
                     .focused($cancelFocused)
                     .accessibilityIdentifier("secrets.editor.cancel")
-                Button(isEditing ? "Stage Edit" : "Stage Add") {
+                Button(isEditing ? "Stage Edit" : "Add") {
                     Task { await submit() }
                 }
                 .buttonStyle(.borderedProminent)

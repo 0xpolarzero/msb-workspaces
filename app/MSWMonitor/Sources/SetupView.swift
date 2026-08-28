@@ -3869,13 +3869,8 @@ struct RepositoryWorkspacePolicyEditor: View {
                 .frame(maxHeight: 120)
             }
         }
-        .padding(8)
-        .background(
-            highlightsEdits && editedWorkspaces.contains(workspace)
-                ? Color.accentColor.opacity(0.10)
-                : Color(nsColor: usesContainerBackground ? .windowBackgroundColor : .controlBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 6)
-        )
+        .padding(12)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 9))
     }
 
     @ViewBuilder
