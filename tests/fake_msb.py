@@ -634,14 +634,21 @@ def main() -> int:
                 return 1
             if "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
                 tls_enabled = "--tls-intercept" in state["sandboxes"][box].get("args", [])
-                # Secrets are exposed so the §11 migration can PROVE a legacy
-                # GH_TOKEN@... binding was removed via inspect.
+                secrets = []
+                for name, spec in sorted(state["sandboxes"][box].get("secrets", {}).items()):
+                    hosts = spec.split("@", 1)[1].split(",") if "@" in spec else []
+                    secrets.append({
+                        "env_var": name,
+                        "allowed_hosts": ["any" if host == "*" else host for host in hosts],
+                        "source": {"kind": "env", "var": name},
+                    })
+                network = {
+                    "tls": {"enabled": tls_enabled},
+                    "secrets": {"secrets": secrets},
+                }
                 print(json.dumps({
-                    "active_config": {"network": {"tls": {"enabled": tls_enabled}}},
-                    "config": {
-                        "network": {"tls": {"enabled": tls_enabled}},
-                        "secrets": state["sandboxes"][box].get("secrets", {}),
-                    },
+                    "active_config": {"network": network},
+                    "config": {"network": network},
                 }))
             return 0
         return fail(f"error: sandbox not found: {box}")

@@ -9659,6 +9659,45 @@ secret_bindings_clear() {
   MSW_SECRET_BINDINGS=""
 }
 
+# The current MicroSandbox inspect schema stores proxy-bound secrets as an
+# array under active_config.network.secrets.secrets. Values may be present in
+# the inspect payload, so these helpers emit nothing and compare only names,
+# host policy, and host-environment source metadata.
+secret_inspect_valid() {
+  "$JQ_BIN" -e '(.active_config.network.secrets.secrets | type) == "array"' >/dev/null 2>&1
+}
+
+secret_inspect_contains() {
+  local name="$1"
+  "$JQ_BIN" -e --arg name "$name" \
+    'any(.active_config.network.secrets.secrets[]?; .env_var == $name)' >/dev/null 2>&1
+}
+
+secret_inspect_absent() {
+  local name="$1"
+  "$JQ_BIN" -e --arg name "$name" \
+    'all(.active_config.network.secrets.secrets[]?; .env_var != $name)' >/dev/null 2>&1
+}
+
+secret_inspect_binding_matches() {
+  local name="$1" hosts="$2" expected_hosts
+  expected_hosts="$(printf '%s' "$hosts" | "$JQ_BIN" -Rsc '
+    split(",")
+    | map(select(length > 0) | if . == "*" then "any" else . end)
+    | sort
+    | unique
+  ')" || return 1
+  "$JQ_BIN" -e --arg name "$name" --argjson expected_hosts "$expected_hosts" '
+    any(
+      .active_config.network.secrets.secrets[]?;
+      .env_var == $name
+      and .source.kind == "env"
+      and .source.var == $name
+      and ((.allowed_hosts // []) | sort | unique) == $expected_hosts
+    )
+  ' >/dev/null 2>&1
+}
+
 # Run the DIRECT msb child for the lifecycle boundary. Every value in
 # MSW_SECRET_BINDINGS (plus the connect-mode read token) is exported inside a
 # subshell that is exec'd into msb, so the values exist ONLY in the child
@@ -9796,7 +9835,7 @@ secret_prepare_start() {
 # pending so the next start retries. Verification failures record a safe
 # error and keep the pending state for the next start.
 secret_finalize_start() {
-  local box="$1" file name op hosts action expected_spec present_spec inspect_json="" sandbox_missing=0 inspect_valid=0 inspect_rc=0
+  local box="$1" file name op hosts action inspect_json="" sandbox_missing=0 inspect_valid=0 inspect_rc=0
   local ops="[]" op_json="" pending_boxes="" last=0 keychain_ok=0 verified=0 updated=""
   file="$(secrets_meta_file)"
   if [[ ! -f "$file" || -L "$file" ]]; then secrets_lock_release; return 0; fi
@@ -9805,9 +9844,9 @@ secret_finalize_start() {
   if ! secrets_meta_valid "$file"; then secrets_lock_release; return 0; fi
   if sandbox_inspect_state "$box"; then
     inspect_json="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null || true)"
-    # A malformed or shape-changed inspect response is NEVER authoritative:
-    # only a successful parse with a .config.secrets object counts.
-    if printf '%s' "$inspect_json" | "$JQ_BIN" -e '.config.secrets | type == "object"' >/dev/null 2>&1; then
+    # Only the active runtime configuration proves that the restarted VM is
+    # enforcing the requested proxy binding.
+    if printf '%s' "$inspect_json" | secret_inspect_valid; then
       inspect_valid=1
     fi
   else
@@ -9816,17 +9855,17 @@ secret_finalize_start() {
   fi
   while IFS=$'\t' read -r name op hosts action; do
     [[ -n "$name" ]] || continue
-    expected_spec="${name}@${hosts}"
     verified=0
     if (( sandbox_missing )); then
       # The sandbox is gone: absence is trivially true for removals; a bind
       # can never be verified on a nonexistent sandbox.
       [[ "$action" == remove ]] && verified=1
     elif (( inspect_valid )); then
-      present_spec="$(printf '%s' "$inspect_json" | "$JQ_BIN" -r --arg name "$name" '.config.secrets[$name] // empty' 2>/dev/null || true)"
       if [[ "$action" == remove ]]; then
-        [[ -z "$present_spec" ]] && verified=1
-      elif [[ "$present_spec" == "$expected_spec" ]]; then
+        if printf '%s' "$inspect_json" | secret_inspect_absent "$name"; then
+          verified=1
+        fi
+      elif printf '%s' "$inspect_json" | secret_inspect_binding_matches "$name" "$hosts"; then
         verified=1
       fi
     fi
@@ -10196,19 +10235,18 @@ app_cmd_secret_apply() {
       inspect_rc=0
       if sandbox_inspect_state "$box"; then
         inspect_json="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null || true)"
-        if ! printf '%s' "$inspect_json" | "$JQ_BIN" -e '.config.secrets | type == "object"' >/dev/null 2>&1; then
+        if ! printf '%s' "$inspect_json" | secret_inspect_valid; then
           unbind_failed=1
           continue
         fi
-        present="$(printf '%s' "$inspect_json" | "$JQ_BIN" -r --arg name "$name" '.config.secrets[$name] // empty')"
-        if [[ -n "$present" ]]; then
+        if printf '%s' "$inspect_json" | secret_inspect_contains "$name"; then
           if ! workspace_msb_with_secret_env "$box" modify "$box" --secret-rm "$name" 9>&-; then
             unbind_failed=1
             continue
           fi
           inspect_json="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null || true)"
-          if ! printf '%s' "$inspect_json" | "$JQ_BIN" -e --arg name "$name" \
-            '(.config.secrets | type == "object") and (.config.secrets[$name] == null)' >/dev/null 2>&1; then
+          if ! printf '%s' "$inspect_json" | secret_inspect_valid ||
+             ! printf '%s' "$inspect_json" | secret_inspect_absent "$name"; then
             unbind_failed=1
           fi
         fi
