@@ -1295,6 +1295,8 @@ struct SettingsView: View {
                             )
                         )
                         .disabled(updatingNotificationCategories.contains(category))
+                        .accessibilityIdentifier("notifications.category.\(category.rawValue)")
+                        .accessibilityLabel(category.title)
                         Text(category.detail)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1311,11 +1313,6 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Privacy and routing") {
-                Text("Alerts identify only the affected workspace and recovery destination. Repository content, account names, tokens, and command output are excluded.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
         .task { await loadNotificationState() }

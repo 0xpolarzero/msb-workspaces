@@ -3,36 +3,32 @@ import Observation
 import UserNotifications
 
 enum MSWNotificationCategory: String, CaseIterable, Identifiable {
-    case availability
-    case safety
-    case operations
-    case backups
-    case credentials
+    case workspaceHealth
+    case actionFailures
+    case backupFailures
+    case credentialReminders
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .availability: return "Sustained unavailability"
-        case .safety: return "Quarantine and lifecycle loss"
-        case .operations: return "Operation failures"
-        case .backups: return "Backup failures"
-        case .credentials: return "Credential deadlines"
+        case .workspaceHealth: return "Workspace health"
+        case .actionFailures: return "Action failures"
+        case .backupFailures: return "Backup failures"
+        case .credentialReminders: return "Credential reminders"
         }
     }
 
     var detail: String {
         switch self {
-        case .availability:
-            return "Alert only after repeated state observations fail."
-        case .safety:
-            return "Alert when a workspace is quarantined or unexpectedly loses its lifecycle."
-        case .operations:
-            return "Alert when a reviewed workspace operation fails."
-        case .backups:
-            return "Alert when a requested backup cannot be completed."
-        case .credentials:
-            return "Alert before workspace credentials require reauthorization."
+        case .workspaceHealth:
+            return "Alerts when a workspace remains unavailable, stops unexpectedly, or is quarantined."
+        case .actionFailures:
+            return "Alerts when a workspace action fails."
+        case .backupFailures:
+            return "Alerts when a requested backup does not complete."
+        case .credentialReminders:
+            return "Reminders when workspace credentials need attention."
         }
     }
 
@@ -40,22 +36,17 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
         "notifications.category.\(rawValue).enabled"
     }
 
-    fileprivate func contains(_ kind: MSWNotificationEvent.Kind) -> Bool {
-        switch (self, kind) {
-        case (.availability, .sustainedUnavailability),
-             (.safety, .quarantine),
-             (.safety, .lifecycleLoss),
-             (.operations, .operationFailure),
-             (.backups, .backupFailure),
-             (.credentials, .credentialDeadline):
-            return true
-        default:
-            return false
+    static func category(for kind: MSWNotificationEvent.Kind) -> Self {
+        switch kind {
+        case .sustainedUnavailability, .quarantine, .lifecycleLoss:
+            return .workspaceHealth
+        case .operationFailure:
+            return .actionFailures
+        case .backupFailure:
+            return .backupFailures
+        case .credentialDeadline:
+            return .credentialReminders
         }
-    }
-
-    fileprivate static func category(for kind: MSWNotificationEvent.Kind) -> Self? {
-        allCases.first { $0.contains(kind) }
     }
 }
 
@@ -267,8 +258,8 @@ final class NotificationCoordinator {
     }
 
     private func deliverEvent(_ event: MSWNotificationEvent) async -> DeliveryResult {
+        let category = MSWNotificationCategory.category(for: event.kind)
         guard notificationsEnabled(),
-              let category = MSWNotificationCategory.category(for: event.kind),
               defaults.bool(forKey: category.preferenceKey),
               (await self.authorizationStatus()).allowsDelivery,
               let payload = Self.deepLinkPayload(for: event) else {

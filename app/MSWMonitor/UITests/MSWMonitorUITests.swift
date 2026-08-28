@@ -1048,6 +1048,22 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(app.windows["GitHub"].waitForExistence(timeout: 2))
         assertConstrainedContent("settings.github.content", windowTitle: "GitHub", in: app)
 
+        let notificationsTab = app.toolbars.buttons["Notifications"]
+        XCTAssertTrue(notificationsTab.waitForExistence(timeout: 2))
+        notificationsTab.click()
+        XCTAssertTrue(app.windows["Notifications"].waitForExistence(timeout: 2))
+        for (identifier, title) in [
+            ("workspaceHealth", "Workspace health"),
+            ("actionFailures", "Action failures"),
+            ("backupFailures", "Backup failures"),
+            ("credentialReminders", "Credential reminders"),
+        ] {
+            let category = app.descendants(matching: .any)["notifications.category.\(identifier)"]
+            XCTAssertTrue(category.waitForExistence(timeout: 2))
+            XCTAssertEqual(category.label, title)
+        }
+        XCTAssertFalse(app.staticTexts["Privacy and routing"].exists)
+
         let generalTab = app.toolbars.buttons["General"]
         XCTAssertTrue(generalTab.waitForExistence(timeout: 2))
         generalTab.click()

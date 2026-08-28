@@ -1482,7 +1482,7 @@ final class AppModelTests: XCTestCase {
     func testNotificationDeliveryCapsPersistentFailures() async {
         let defaults = UserDefaults(suiteName: "notification-retry-\(UUID().uuidString)")!
         defaults.set(true, forKey: "notifications.enabled")
-        defaults.set(true, forKey: "notifications.category.operations.enabled")
+        defaults.set(true, forKey: "notifications.category.actionFailures.enabled")
         let center = ControllableNotificationCenter(shouldFailDelivery: true)
         let coordinator = NotificationCoordinator(
             defaults: defaults,
@@ -1525,10 +1525,10 @@ final class AppModelTests: XCTestCase {
         let center = ControllableNotificationCenter(status: .notDetermined)
         let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
 
-        let enabled = await coordinator.setEnabled(true, for: .operations)
+        let enabled = await coordinator.setEnabled(true, for: .actionFailures)
         XCTAssertTrue(enabled)
         XCTAssertTrue(coordinator.notificationsEnabled())
-        XCTAssertEqual(coordinator.enabledCategories(), [.operations])
+        XCTAssertEqual(coordinator.enabledCategories(), [.actionFailures])
         XCTAssertEqual(center.requestedOptions.count, 1)
     }
 
@@ -1549,13 +1549,13 @@ final class AppModelTests: XCTestCase {
             (.denied, .success(true)),
         ] {
             let defaults = UserDefaults(suiteName: "notification-preserve-\(UUID().uuidString)")!
-            defaults.set(true, forKey: "notifications.category.operations.enabled")
+            defaults.set(true, forKey: "notifications.category.actionFailures.enabled")
             let center = ControllableNotificationCenter(status: status, authorizationResult: result)
             let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
 
-            let enabled = await coordinator.setEnabled(true, for: .operations)
+            let enabled = await coordinator.setEnabled(true, for: .actionFailures)
             XCTAssertFalse(enabled)
-            XCTAssertEqual(coordinator.enabledCategories(), [.operations])
+            XCTAssertEqual(coordinator.enabledCategories(), [.actionFailures])
             XCTAssertFalse(coordinator.notificationsEnabled())
         }
     }
@@ -1563,7 +1563,7 @@ final class AppModelTests: XCTestCase {
     func testGlobalNotificationDisableSuppressesDeliveryAndPreservesCategories() async {
         let defaults = UserDefaults(suiteName: "notification-suppression-\(UUID().uuidString)")!
         defaults.set(true, forKey: "notifications.enabled")
-        defaults.set(true, forKey: "notifications.category.operations.enabled")
+        defaults.set(true, forKey: "notifications.category.actionFailures.enabled")
         let center = ControllableNotificationCenter()
         let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
 
@@ -1572,7 +1572,29 @@ final class AppModelTests: XCTestCase {
         await coordinator.deliver(makeNotificationEvent())
 
         XCTAssertEqual(center.addInvocationCount, 0)
-        XCTAssertEqual(coordinator.enabledCategories(), [.operations])
+        XCTAssertEqual(coordinator.enabledCategories(), [.actionFailures])
+    }
+
+    func testNotificationCategoriesUseApprovedLabelsAndMapEveryEventOnce() {
+        XCTAssertEqual(
+            MSWNotificationCategory.allCases.map(\.title),
+            ["Workspace health", "Action failures", "Backup failures", "Credential reminders"]
+        )
+        XCTAssertEqual(
+            MSWNotificationCategory.allCases.map(\.detail),
+            [
+                "Alerts when a workspace remains unavailable, stops unexpectedly, or is quarantined.",
+                "Alerts when a workspace action fails.",
+                "Alerts when a requested backup does not complete.",
+                "Reminders when workspace credentials need attention.",
+            ]
+        )
+        XCTAssertEqual(MSWNotificationCategory.category(for: .sustainedUnavailability), .workspaceHealth)
+        XCTAssertEqual(MSWNotificationCategory.category(for: .quarantine), .workspaceHealth)
+        XCTAssertEqual(MSWNotificationCategory.category(for: .lifecycleLoss), .workspaceHealth)
+        XCTAssertEqual(MSWNotificationCategory.category(for: .operationFailure), .actionFailures)
+        XCTAssertEqual(MSWNotificationCategory.category(for: .backupFailure), .backupFailures)
+        XCTAssertEqual(MSWNotificationCategory.category(for: .credentialDeadline), .credentialReminders)
     }
 
     func testClientBackedColdLaunchAndFailedObservationsRemainTruthful() async throws {
