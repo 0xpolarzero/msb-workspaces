@@ -733,8 +733,26 @@ def main() -> int:
                 size = rest[rest.index("--size") + 1]
             path = STATE_ROOT / "volumes" / name
             path.mkdir(parents=True, exist_ok=True)
+            volume_path = path
+            if os.environ.get("MSW_FAKE_TRUNCATED_EXT4_CREATE") == "1":
+                size_match = re.fullmatch(r"([0-9]+)G", size)
+                if not size_match:
+                    return fail("truncated ext4 fixture requires a GiB size")
+                declared_bytes = int(size_match.group(1)) * 1024 * 1024 * 1024
+                volume_path = (
+                    Path(os.environ["HOME"]) / ".microsandbox" /
+                    "volumes" / name / "disk.raw"
+                )
+                with volume_path.open("wb") as handle:
+                    handle.truncate(declared_bytes - 132_112_384)
+                    handle.seek(1028)
+                    handle.write((declared_bytes // 4096).to_bytes(4, "little"))
+                    handle.seek(1048)
+                    handle.write((2).to_bytes(4, "little"))
+                    handle.seek(1080)
+                    handle.write(b"\x53\xef")
             state["volumes"][name] = {
-                "path": str(path), "size": size, "kind": "disk",
+                "path": str(volume_path), "size": size, "kind": "disk",
                 "filesystem": "ext4", "magic": "53ef", "formatCount": 1,
             }
             log_event(state, "volume-create", volume=name, size=size, filesystem="ext4")
@@ -742,7 +760,9 @@ def main() -> int:
             return 0
         if sub == "rm":
             entry = state["volumes"].pop(name, None)
-            if entry: shutil.rmtree(entry["path"], ignore_errors=True)
+            if entry:
+                path = Path(entry["path"])
+                shutil.rmtree(path.parent if path.is_file() else path, ignore_errors=True)
             save(state); return 0
         if sub in {"ls", "list"}:
             print("\n".join(sorted(state["volumes"])))

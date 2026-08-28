@@ -3012,6 +3012,26 @@ class PackagedBehaviorTests(MSWTestCase):
         )
 
     def test_new_blank_workspace_disks_initialize_ext4_once_before_attach(self) -> None:
+        state = self.env.state()
+        for name, entry in state["volumes"].items():
+            root = self.env.home / ".microsandbox" / "volumes" / name
+            guest_data = root / "guest-data"
+            guest_data.mkdir()
+            for child in list(root.iterdir()):
+                if child != guest_data:
+                    shutil.move(str(child), guest_data / child.name)
+            image = root / "disk.raw"
+            with image.open("wb") as handle:
+                handle.truncate(4 * 1024 * 1024)
+                handle.seek(1028)
+                handle.write((1024).to_bytes(4, "little"))
+                handle.seek(1048)
+                handle.write((2).to_bytes(4, "little"))
+                handle.seek(1080)
+                handle.write(b"\x53\xef")
+            entry["path"] = str(image)
+        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+
         desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
         desired["workspaces"].append({
             "name": "lab", "cpu": 4, "cpuCeiling": 8,
@@ -3022,8 +3042,12 @@ class PackagedBehaviorTests(MSWTestCase):
         first = self.env.msw(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
+            extra_env={
+                "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
+                "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+            },
         )
-        self.assertTrue(json.loads(first.stdout)["ok"])
+        self.assertTrue(json.loads(first.stdout)["ok"], first.stdout + first.stderr)
         state = self.env.state()
         for volume in ("msw-lab-workspace", "msw-lab-runtime"):
             self.assertEqual(state["volumes"][volume]["filesystem"], "ext4")
@@ -3034,6 +3058,41 @@ class PackagedBehaviorTests(MSWTestCase):
                 if event.get("event") == "volume-create" and event.get("volume") == volume
             ]
             self.assertEqual(len(creates), 1)
+            image = Path(state["volumes"][volume]["path"])
+            with image.open("rb") as handle:
+                handle.seek(1028)
+                block_count = int.from_bytes(handle.read(4), "little")
+                handle.seek(1048)
+                log_block_size = int.from_bytes(handle.read(4), "little")
+            declared_bytes = block_count * (1024 << log_block_size)
+            self.assertEqual(image.stat().st_size, declared_bytes)
+
+        failed = json.loads(json.dumps(desired))
+        failed["workspaces"].append({
+            "name": "broken", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        failing_truncate = self.env.root / "tools" / "failing-truncate"
+        failing_truncate.write_text("#!/bin/sh\nexit 1\n")
+        failing_truncate.chmod(0o755)
+        rejected = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=json.dumps(failed), check=False, timeout=90,
+            extra_env={
+                "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
+                "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+                "MSW_TRUNCATE_BIN": str(failing_truncate),
+            },
+        )
+        self.assertEqual(rejected.returncode, 69, rejected.stdout + rejected.stderr)
+        error = json.loads(rejected.stdout)["error"]
+        self.assertEqual(error["code"], "MSW_RUNTIME_UNAVAILABLE")
+        self.assertTrue(error["retryable"])
+        failed_state = self.env.state()
+        self.assertNotIn("msw-broken-workspace", failed_state["volumes"])
+        self.assertNotIn("msw-broken-runtime", failed_state["volumes"])
+        self.assertNotIn("broken", failed_state["sandboxes"])
 
     def test_app_bootstrap_waits_for_delayed_guest_systemd_readiness(self) -> None:
         desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
