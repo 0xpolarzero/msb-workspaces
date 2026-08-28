@@ -286,6 +286,12 @@ private struct WorkspaceRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("workspace.\(workspace.id.rawValue).state")
+                if let indicator = workspace.secrets.indicatorText {
+                    Text(indicator)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).secrets-indicator")
+                }
             }
 
             Spacer(minLength: 8)

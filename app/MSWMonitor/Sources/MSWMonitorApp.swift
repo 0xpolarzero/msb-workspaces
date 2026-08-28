@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let policyStore: GitHubPolicyStore?
     let provider: (any GitHubProviding)?
     let githubSettingsState: GitHubSettingsState
+    private var pendingAppRoute: AppRoute?
 
     /// Test seam: local-mode init must never build or pass any Connect
     /// dependency (broker, client, refresher, coordinator).
@@ -213,13 +214,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             requiresScopeAttestation: !(configuredAttestation?.isEmpty ?? true)
         )
     }
-    /// Routes `msw://` callback URLs from the default browser to the pending
-    /// authorization session (the same route as `NSApplicationDelegate`
-    /// URL-event delivery). Local mode has no Connect session to route.
+    /// Routes OAuth callbacks and user-facing `msw-monitor://` deep links.
+    /// A cold-launch route is retained until the status controller exists.
     func application(_ application: NSApplication, open urls: [URL]) {
-        guard accessMode == .connect else { return }
-        for url in urls where MSWConnectBrowser.shared.handleCallback(url) {
-            return
+        for url in urls {
+            if url.scheme == "msw", accessMode == .connect,
+               MSWConnectBrowser.shared.handleCallback(url) {
+                continue
+            }
+            guard let route = AppRoute(deepLink: url) else { continue }
+            if let statusBarController {
+                statusBarController.showMain(route: route)
+            } else {
+                pendingAppRoute = route
+            }
         }
     }
 
@@ -238,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             arguments.contains("--ui-test-setup-reconnect") ||
             arguments.contains("--ui-test-folder-browser") ||
             arguments.contains("--ui-test-app-preferences") ||
+            arguments.contains("--ui-test-secrets") ||
             arguments.contains(where: { $0.hasPrefix("--ui-test-github-") }) ||
             isTestHost
         if fixtureMode {
@@ -378,6 +387,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--ui-test-lifecycle") {
             model.installLifecycleUITestFixture()
         }
+        if arguments.contains("--ui-test-secrets") {
+            model.installSecretsUITestFixture()
+        }
         if fixtureMode {
             let backupDestination = arguments.compactMap { argument -> URL? in
                 let prefix = "--ui-test-backup-destination="
@@ -458,6 +470,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         statusBarController = controller
+        if let pendingAppRoute {
+            self.pendingAppRoute = nil
+            controller.showMain(route: pendingAppRoute)
+        }
         model.setPollingVisible(false)
         UNUserNotificationCenter.current().delegate = self
         observeNotificationEvents(from: model)

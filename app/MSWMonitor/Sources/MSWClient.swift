@@ -282,6 +282,159 @@ actor MSWClient {
         return try await execute(arguments: arguments, as: MSWGitHubStateResponse.self, command: "github-state")
     }
 
+    // MARK: - Host-held secrets
+
+    /// `msw app secrets-list --format json`: nonsecret secret metadata. Real
+    /// values live only in the Mac Keychain and never appear in this response.
+    func secretsList() async throws -> MSWSecretsListResponse {
+        let envelope = try await execute(
+            arguments: ["app", "secrets-list", "--format", "json"],
+            as: MSWSecretsListResponse.self,
+            command: "secrets-list",
+            timeout: .seconds(30)
+        )
+        guard let result = envelope.result else {
+            throw MSWClientError.missingResult(command: "secrets-list")
+        }
+        let entryNames = result.entries.map(\.name)
+        let summaryNames = result.workspaces.map(\.workspace)
+        guard Set(entryNames).count == entryNames.count,
+              Set(summaryNames).count == summaryNames.count,
+              result.entries.allSatisfy({ entry in
+                  let statusIsConsistent: Bool
+                  switch entry.status {
+                  case .active:
+                      statusIsConsistent = entry.pendingOperation == nil && entry.error == nil
+                  case .error:
+                      statusIsConsistent = entry.error?.isEmpty == false
+                  case .restartRequired, .removalPendingRestart, .appliesOnNextStart:
+                      statusIsConsistent = entry.pendingOperation != nil
+                  }
+                  return SecretNameRule.isValid(entry.name) &&
+                      entry.generation >= 1 &&
+                      !entry.workspaces.isEmpty &&
+                      Set(entry.workspaces).count == entry.workspaces.count &&
+                      entry.workspaces.allSatisfy(WorkspaceID.isValid) &&
+                      !entry.allowedDomains.isEmpty &&
+                      Set(entry.allowedDomains).count == entry.allowedDomains.count &&
+                      entry.allowedDomains.allSatisfy(SecretDomainRule.isAllowed) &&
+                      entry.pendingOperation.map {
+                          SecretOperation(rawValue: $0.type) != nil
+                      } ?? true &&
+                      statusIsConsistent
+              }),
+              result.workspaces.allSatisfy({
+                  WorkspaceID.isValid($0.workspace) &&
+                      $0.pendingCount >= 0 &&
+                      (!$0.restartRequired || $0.pendingCount > 0)
+              }) else {
+            throw MSWClientError.malformedJSON(command: "secrets-list")
+        }
+        return result
+    }
+
+    /// `msw app secret-plan --input-fd 0 --format json`: stages a host-held
+    /// secret change. Only nonsecret metadata travels on stdin; the value is
+    /// requested at apply time.
+    func prepareSecretPlan(_ request: MSWSecretPlanRequest) async throws -> MSWSecretPlanResult {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let input: Data
+        do {
+            input = try encoder.encode(request)
+        } catch {
+            throw MSWClientError.invalidArguments
+        }
+        let envelope = try await execute(
+            arguments: ["app", "secret-plan", "--input-fd", "0", "--format", "json"],
+            as: MSWSecretPlanResult.self,
+            command: "secret-plan",
+            stdin: input,
+            timeout: .seconds(60)
+        )
+        guard let result = envelope.result else {
+            throw MSWClientError.missingResult(command: "secret-plan")
+        }
+        // The staged plan must match the reviewed request exactly; a
+        // mismatched plan could pair the entered value with a different
+        // target secret or workspace scope.
+        guard !result.planId.isEmpty,
+              !result.name.isEmpty,
+              !result.confirmationPhrase.isEmpty,
+              !result.effects.isEmpty,
+              result.operation == request.operation,
+              result.name == request.name,
+              Set(result.affectedWorkspaces) == Set(request.workspaces),
+              result.requiresSecret == (request.operation != "remove"),
+              result.expiresAt > Date(),
+              result.affectedWorkspaces.allSatisfy(WorkspaceID.isValid) else {
+            throw MSWClientError.malformedJSON(command: "secret-plan")
+        }
+        return result
+    }
+
+    /// `msw app secret-apply PLAN_ID --input-fd 0 --format json`: commits a
+    /// staged secret change. The confirmation phrase and the (optional) value
+    /// travel exclusively on stdin; the value is never placed in argv, the
+    /// environment, or any persisted app state.
+    func applySecretPlan(
+        _ plan: MSWSecretPlanResult,
+        confirmation: String,
+        value: String?
+    ) async throws -> MSWSecretApplyResult {
+        guard !plan.planId.isEmpty,
+              confirmation == plan.confirmationPhrase else {
+            throw MSWClientError.invalidArguments
+        }
+        // The value is mandatory for additions; edits may keep the current
+        // Keychain value (nil), and removals never carry one.
+        switch plan.operation {
+        case "add":
+            guard let value, !value.isEmpty else {
+                throw MSWClientError.invalidArguments
+            }
+        case "edit":
+            guard value.map({ !$0.isEmpty }) ?? true else {
+                throw MSWClientError.invalidArguments
+            }
+        default:
+            guard value == nil else {
+                throw MSWClientError.invalidArguments
+            }
+        }
+        let request = MSWSecretApplyRequest(confirmation: confirmation, value: value)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let input: Data
+        do {
+            input = try encoder.encode(request)
+        } catch {
+            throw MSWClientError.invalidArguments
+        }
+        let envelope = try await execute(
+            arguments: ["app", "secret-apply", plan.planId, "--input-fd", "0", "--format", "json"],
+            as: MSWSecretApplyResult.self,
+            command: "secret-apply",
+            stdin: input,
+            timeout: .seconds(120)
+        )
+        guard let result = envelope.result else {
+            throw MSWClientError.missingResult(command: "secret-apply")
+        }
+        // The success document must be complete and consistent with the
+        // reviewed plan; an empty or mismatched document is malformed.
+        guard result.applied,
+              result.operation == plan.operation,
+              result.name == plan.name,
+              Set(result.workspaces) == Set(plan.affectedWorkspaces),
+              result.valueStored == (value != nil),
+              !result.outcome.isEmpty,
+              result.pending.allSatisfy({ WorkspaceID.isValid($0.workspace) }) else {
+            throw MSWClientError.malformedJSON(command: "secret-apply")
+        }
+        return result
+    }
+
     // MARK: - Path C local mode
 
     /// `msw github status --format json` (raw, non-envelope CLI output).

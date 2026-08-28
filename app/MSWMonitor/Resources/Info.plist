@@ -12,6 +12,14 @@
                 <string>msw</string>
             </array>
         </dict>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>org.microsandbox.MSWMonitor.navigation</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>msw-monitor</string>
+            </array>
+        </dict>
     </array>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>

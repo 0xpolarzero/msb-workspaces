@@ -416,6 +416,9 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
     let activityObservedAt: Date?
     let quarantine: MSWQuarantineSnapshot
     let credential: MSWCredentialSnapshot
+    /// Per-workspace host-secret configuration state. Absent in older CLI
+    /// output, which the app reads as "no pending secret configuration".
+    let secrets: MSWSecretsSnapshot?
     let resources: MSWResourceSnapshot
     let network: MSWNetworkSnapshot
     let actionCapabilities: MSWActionCapabilities
@@ -432,6 +435,7 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         freshness: MSWFreshness,
         quarantine: MSWQuarantineSnapshot,
         credential: MSWCredentialSnapshot,
+        secrets: MSWSecretsSnapshot? = nil,
         resources: MSWResourceSnapshot,
         network: MSWNetworkSnapshot,
         actionCapabilities: MSWActionCapabilities,
@@ -452,6 +456,7 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         self.activityObservedAt = activityObservedAt
         self.quarantine = quarantine
         self.credential = credential
+        self.secrets = secrets
         self.resources = resources
         self.network = network
         self.actionCapabilities = actionCapabilities
@@ -471,6 +476,7 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         activityObservedAt = try container.decodeIfPresent(Date.self, forKey: .activityObservedAt)
         quarantine = try container.decode(MSWQuarantineSnapshot.self, forKey: .quarantine)
         credential = try container.decode(MSWCredentialSnapshot.self, forKey: .credential)
+        secrets = try container.decodeIfPresent(MSWSecretsSnapshot.self, forKey: .secrets)
         resources = try container.decode(MSWResourceSnapshot.self, forKey: .resources)
         network = try container.decode(MSWNetworkSnapshot.self, forKey: .network)
         actionCapabilities = try container.decode(MSWActionCapabilities.self, forKey: .actionCapabilities)
@@ -481,7 +487,7 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, purpose, lifecycle, freshness, statusObservedAt, metricsObservedAt
         case githubObservedAt, activityObservedAt, quarantine, credential, resources, network, actionCapabilities
-        case skippedPorts, portWarning
+        case secrets, skippedPorts, portWarning
     }
 
     var identity: String { id }
@@ -782,6 +788,114 @@ struct MSWRepositorySnapshot: Codable, Identifiable, Sendable {
 
 struct MSWGitHubStateResponse: Codable, Sendable {
     let workspaces: [MSWGitHubWorkspaceState]
+}
+
+/// Per-workspace host-secret configuration state from the app state protocol.
+/// Deliberately separate from `MSWCredentialSnapshot`; secret restart
+/// requirements must never ride the GitHub credential state.
+struct MSWSecretsSnapshot: Codable, Sendable, Equatable {
+    let state: State
+    let pendingCount: Int
+    let reason: String?
+
+    enum State: String, Codable, Sendable {
+        case active
+        case restartRequired = "restart-required"
+        case appliesOnNextStart = "applies-on-next-start"
+        case error
+    }
+}
+
+/// Nonsecret host-secret metadata from `msw app secrets-list --format json`.
+/// Never contains secret values.
+struct MSWSecretsListResponse: Codable, Sendable {
+    let entries: [Entry]
+    let workspaces: [WorkspaceSummary]
+
+    struct Entry: Codable, Identifiable, Sendable {
+        let name: String
+        let workspaces: [String]
+        let allowedDomains: [String]
+        let status: Status
+        let pendingOperation: MSWSecretPendingOperation?
+        let generation: Int
+        /// Safe, nonsecret failure detail; `null` when there is none.
+        let error: String?
+
+        enum Status: String, Codable, Sendable {
+            case active
+            case restartRequired = "restart-required"
+            case removalPendingRestart = "removal-pending-restart"
+            case appliesOnNextStart = "applies-on-next-start"
+            case error
+        }
+
+        /// Pending mutation attached to the entry, or `null` when the entry
+        /// has no staged change.
+        struct MSWSecretPendingOperation: Codable, Sendable, Equatable {
+            let type: String
+            let createdAt: Date
+        }
+
+        var id: String { name }
+    }
+
+    struct WorkspaceSummary: Codable, Identifiable, Sendable {
+        let workspace: String
+        let restartRequired: Bool
+        let pendingCount: Int
+
+        var id: String { workspace }
+    }
+}
+
+/// `msw app secret-plan --input-fd 0` request: operation plus nonsecret
+/// metadata, carried on stdin. The value is never part of planning.
+struct MSWSecretPlanRequest: Codable, Sendable, Equatable {
+    let operation: String
+    let name: String
+    let workspaces: [String]
+    let allowedDomains: [String]
+}
+
+/// `msw app secret-plan --input-fd 0` result. Nonsecret; the real value is
+/// requested only at apply time and travels exclusively on stdin.
+struct MSWSecretPlanResult: Codable, Sendable, Equatable {
+    let planId: String
+    let operation: String
+    let name: String
+    let affectedWorkspaces: [String]
+    let requiresSecret: Bool
+    let confirmationPhrase: String
+    let effects: String
+    let expiresAt: Date
+}
+
+/// `msw app secret-apply PLAN_ID --input-fd 0` request. `value` is required
+/// only when the plan reports `requiresSecret`, and it must never appear in
+/// argv, the environment, output, logs, or persisted metadata.
+struct MSWSecretApplyRequest: Codable, Sendable, Equatable {
+    let confirmation: String
+    let value: String?
+}
+
+/// `msw app secret-apply` success result. Never contains the value. The app
+/// treats the operation as applied only when the envelope reports success,
+/// the result matches the reviewed plan, and `applied` is true; statuses are
+/// re-read from `secrets-list` afterwards.
+struct MSWSecretApplyResult: Codable, Sendable, Equatable {
+    let applied: Bool
+    let operation: String
+    let name: String
+    let workspaces: [String]
+    let pending: [PendingWorkspace]
+    let valueStored: Bool
+    let outcome: String
+
+    struct PendingWorkspace: Codable, Sendable, Equatable {
+        let workspace: String
+        let state: String
+    }
 }
 
 struct MSWGitHubBindResult: Codable, Sendable {

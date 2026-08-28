@@ -31,6 +31,13 @@ readonly READ_KEYCHAIN_SERVICE="msw.github.read"
 readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/msw/github"
 readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/MSW Monitor/credentials.json"
+readonly MSW_SECRETS_FILE="${MSW_SECRETS_FILE:-$HOME/.config/msw/secrets.json}"
+# Generic host-held secrets lifecycle state: MSW_SECRET_BINDINGS carries
+# "name=value ..." pairs (values are validated graph-only, so space-delimited
+# splitting is safe) that are exported ONLY inside the direct msb child's
+# environment. It is never printed, logged, or persisted.
+MSW_SECRET_BINDINGS=""
+SECRET_PREPARE_ERROR=""
 SETUP_TRANSACTION_ACTIVE=0
 SETUP_TRANSACTION_BOX=""
 MIGRATION_PREEXISTING_QUARANTINE=0
@@ -1623,18 +1630,62 @@ read_token_for_workspace() {
 }
 
 
+workspace_msb_unset_args() {
+  # Non-lifecycle msb children must never see a configured secret name, even
+  # when the caller's shell happens to export one: strip every configured
+  # name from the child environment. Lifecycle children use
+  # workspace_msb_with_secret_env and re-inject the Keychain values.
+  local file name
+  file="$(secrets_meta_file)"
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    printf '%s\n' "$name"
+  done < <("$JQ_BIN" -r '.secrets | keys[]' "$file" 2>/dev/null || true)
+}
+
 workspace_msb() {
   local box="$1"
   shift
-  "$MSB_BIN" "$@" 9>&-
+  local -a unset_args=() name
+  local secrets_file
+  secrets_file="$(secrets_meta_file)"
+  if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
+    secrets_meta_valid "$secrets_file" || return 1
+  fi
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    unset_args+=("-u" "$name")
+  done < <(workspace_msb_unset_args)
+  if (( ${#unset_args[@]} > 0 )); then
+    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&-
+  else
+    "$MSB_BIN" "$@" 9>&-
+  fi
 }
 
 workspace_msb_with_read_token() {
   local box="$1" token="" status
   shift
+  local -a unset_args=() name
+  local secrets_file
+  secrets_file="$(secrets_meta_file)"
+  if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
+    secrets_meta_valid "$secrets_file" || return 1
+  fi
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    unset_args+=("-u" "$name")
+  done < <(workspace_msb_unset_args)
   # Path C §1: local mode never reads Connect grants or keychain tokens.
   if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
-    if GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+    if (( ${#unset_args[@]} > 0 )); then
+      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+        status=0
+      else
+        status=$?
+      fi
+    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
       status=0
     else
       status=$?
@@ -1642,13 +1693,33 @@ workspace_msb_with_read_token() {
     unset token
     return "$status"
   fi
-  "$MSB_BIN" "$@" 9>&-
+  if (( ${#unset_args[@]} > 0 )); then
+    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&-
+  else
+    "$MSB_BIN" "$@" 9>&-
+  fi
 }
 workspace_msb_with_read_token_for_cleanup() {
   local box="$1" token="" status
   shift
+  local -a unset_args=() name
+  local secrets_file
+  secrets_file="$(secrets_meta_file)"
+  if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
+    secrets_meta_valid "$secrets_file" || return 1
+  fi
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    unset_args+=("-u" "$name")
+  done < <(workspace_msb_unset_args)
   if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(app_credential_value_for_cleanup "$box" guest 2>/dev/null)"; then
-    if GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+    if (( ${#unset_args[@]} > 0 )); then
+      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+        status=0
+      else
+        status=$?
+      fi
+    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
       status=0
     else
       status=$?
@@ -1656,9 +1727,12 @@ workspace_msb_with_read_token_for_cleanup() {
     unset token
     return "$status"
   fi
-  "$MSB_BIN" "$@" 9>&-
+  if (( ${#unset_args[@]} > 0 )); then
+    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&-
+  else
+    "$MSB_BIN" "$@" 9>&-
+  fi
 }
-
 
 start_sandbox() {
   local box="$1"
@@ -1671,9 +1745,21 @@ start_sandbox() {
     { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
     fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
   fi
-  workspace_msb_with_read_token "$box" start -q "$box"
+  # Generic host-held secrets: reconcile pending add/edit/remove operations
+  # and resolve every bound value ONLY inside the direct msb child's
+  # environment — never in the CLI's own environment, argv, files, or logs.
+  if ! secret_prepare_start "$box"; then
+    printf 'msw: %s\n' "${SECRET_PREPARE_ERROR:-the pending secret state could not be prepared}" >&2
+    return 1
+  fi
+  if ! workspace_msb_with_secret_env "$box" start -q "$box"; then
+    secret_bindings_clear
+    secrets_lock_release
+    return 1
+  fi
+  secret_bindings_clear
+  secret_finalize_start "$box"
 }
-
 
 wait_for_guest_systemd() {
   local box="$1" attempt=0
@@ -2126,7 +2212,19 @@ cmd_restart() {
       { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
       fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
     fi
-    workspace_msb_with_read_token "$box" restart -q -t 60 "$box"
+    # Generic host-held secrets: reconcile pending operations and resolve
+    # bound values ONLY inside the direct msb child's environment.
+    if ! secret_prepare_start "$box"; then
+      secrets_lock_release
+      fatal "${SECRET_PREPARE_ERROR:-the pending secret state could not be prepared}"
+    fi
+    if ! workspace_msb_with_secret_env "$box" restart -q -t 60 "$box"; then
+      secret_bindings_clear
+      secrets_lock_release
+      fatal "workspace '$box' could not restart"
+    fi
+    secret_bindings_clear
+    secret_finalize_start "$box"
     port_forwarder_kick "$box" || true
   done < <(for_targets "$target")
 }
@@ -5859,6 +5957,7 @@ Backup / reference
 Machine-readable app integration
   msw app handshake|state|metrics|logs|repositories|directory-list|directory-search|editor-target|ports|github-state
   msw app github-policy-get|github-policy-set|github-policy-apply
+  msw app secrets-list|secret-plan|secret-apply
   msw app url|clone|pull|identity|disk|resize|clean|upgrade|update
   msw app check|backup-preview|backup-start|backup-list|backup-status|restore|push-plan|plan|apply|bootstrap|help
 HELP
@@ -6165,7 +6264,7 @@ app_workspace_json() {
   local metrics_observed_at="" github_observed_at="" activity_observed_at=""
   local credential purpose host ip cpus max_cpus memory max_memory root_disk verification_repo access
   local account_login installation_id access_expires refresh_expires needs_restart host_needs_restart quarantine_reason role
-  local skipped_ports_json port_warning
+  local skipped_ports_json port_warning secrets_snapshot
   if app_workspace_quarantined "$box"; then
     quarantine="quarantined"
     if [[ -f "$(quarantine_file "$box")" && ! -L "$(quarantine_file "$box")" ]]; then
@@ -6221,7 +6320,8 @@ app_workspace_json() {
   [[ -n "$needs_restart" ]] || needs_restart=false
   skipped_ports_json="$(workspace_state_skipped_json "$box")"
   port_warning="$(workspace_port_warning "$box")"
-  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s}}' \
+  secrets_snapshot="$(app_workspace_secrets_snapshot "$box" "$lifecycle")"
+  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s}}' \
     "$(app_json_string "$box")" \
     "$(app_json_string "$purpose")" \
     "$(app_json_string "$lifecycle")" \
@@ -6249,6 +6349,7 @@ app_workspace_json() {
     "$(app_json_string "$ip")" \
     "$skipped_ports_json" \
     "$(app_json_string "$port_warning")" \
+    "$secrets_snapshot" \
     "$([[ "$quarantine" == clear && ( "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] && printf true || printf false)" \
     "$([[ "$lifecycle" == Running ]] && printf true || printf false)" \
     "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
@@ -9236,6 +9337,1009 @@ app_cmd_bootstrap() {
   app_emit_success bootstrap '{"resumed":true,"phase":"complete","requiresApproval":false,"vmsStarted":true,"message":"Workspace bootstrap and deep verification completed; the previous running set was restored."}'
 }
 
+# ---------------------------------------------------------------------------
+# Generic host-held secrets. Values live ONLY in the macOS Keychain at the
+# versioned service org.microsandbox.MSWMonitor.secret.v1 (account = the
+# validated secret name) and travel over real pipes only — never argv, env
+# (except transiently inside the direct msb lifecycle child), tempfiles,
+# metadata, logs, or backups. The metadata file below is NONsecret and
+# schema-versioned; it records names, workspaces, allowedDomains, generation,
+# pending operations, and safe error strings — never values.
+#
+# Pending model: every add/edit/remove records a pending operation with a
+# per-workspace state observed at apply time (running workspaces owe a
+# restart; stopped ones apply on their next start). Edit/remove disable the
+# OLD live binding immediately and fail closed. On the next start/restart the
+# lifecycle boundary (start_sandbox / cmd_restart) applies pending
+# operations, resolves every bound value only inside the direct msb child,
+# then verifies the bindings and finalizes; a removal deletes the Keychain
+# item only after the binding is verified absent.
+# ---------------------------------------------------------------------------
+secrets_meta_file() { printf '%s' "$MSW_SECRETS_FILE"; }
+secret_keychain_service() { printf '%s' "${MSW_SECRET_KEYCHAIN_SERVICE:-org.microsandbox.MSWMonitor.secret.v1}"; }
+app_secret_plan_file() { printf '%s/secret-plans/%s.plan\n' "$GITHUB_META_DIR" "$1"; }
+
+# Domain grammar: exact DNS host, *.example.com (two or more labels after the
+# wildcard, so broad suffixes such as *.com are rejected), or the special
+# "*". Schemes, paths, ports, whitespace, userinfo, and malformed labels are
+# rejected.
+secret_domain_valid() {
+  local domain="${1-}"
+  [[ -n "$domain" ]] || return 1
+  [[ "$domain" == "*" ]] && return 0
+  [[ "$domain" != *[[:space:]]* ]] || return 1
+  case "$domain" in
+    *"://"*|*/*|*:*|*"@"*) return 1 ;;
+  esac
+  if [[ "$domain" == "*."* ]]; then
+    domain="${domain#*.}"
+    [[ "$domain" == *.* ]] || return 1
+    [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
+  else
+    [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]]
+  fi
+}
+
+# Secret names double as the msb env-var names (`--secret NAME@HOSTS` resolves
+# NAME from the child environment), so they must be env-var grammar. The MSW
+# toolchain's own variables are reserved.
+secret_name_reserved() {
+  local name="$1"
+  # Reserved: the MSW toolchain's own variables, the legacy GitHub binding,
+  # and environment names whose values would alter or hijack the direct msb
+  # child (PATH, loaders, proxies, TLS roots, shell startup) rather than
+  # merely serve as a secret source.
+  case "$name" in
+    GH_TOKEN|GITHUB_TOKEN|PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TMP|TEMP|\
+    BASH_ENV|ENV|SHELLOPTS|BASHOPTS|IFS|CDPATH|GLOBIGNORE|HOSTNAME|HOSTALIASES|\
+    SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|GIT_SSL_CAINFO|GIT_CONFIG_NOSYSTEM|\
+    HTTP_PROXY|HTTPS_PROXY|NO_PROXY|ALL_PROXY|http_proxy|https_proxy|no_proxy|all_proxy|\
+    MSW_*|DYLD_*|LD_*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+secret_value_valid() {
+  local value="$1"
+  [[ -n "$value" && "${#value}" -le 4096 ]] || return 1
+  [[ "$value" =~ ^[[:graph:]]+$ ]]
+}
+
+# One strict structural validator for the nonsecret metadata file. A missing
+# file is the "no secrets configured" state; an unreadable one is a typed
+# error everywhere it is read.
+secrets_meta_valid() {
+  local file="$1" configured
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  configured="$(printf '%s\n' "${WORKSPACES[@]}" | "$JQ_BIN" -Rsc 'split("\n")[:-1]')" || return 1
+  "$JQ_BIN" -e --argjson configured "$configured" '
+    def domain_valid:
+      . == "*" or
+      test("^\\*\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$") or
+      test("^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$");
+    def reserved_name:
+      . == "GH_TOKEN" or . == "GITHUB_TOKEN" or
+      . == "PATH" or . == "HOME" or . == "USER" or . == "LOGNAME" or . == "SHELL" or
+      . == "TMPDIR" or . == "TMP" or . == "TEMP" or . == "BASH_ENV" or . == "ENV" or
+      . == "SHELLOPTS" or . == "BASHOPTS" or . == "IFS" or . == "CDPATH" or . == "GLOBIGNORE" or
+      . == "HOSTNAME" or . == "HOSTALIASES" or . == "SSL_CERT_FILE" or . == "SSL_CERT_DIR" or
+      . == "CURL_CA_BUNDLE" or . == "GIT_SSL_CAINFO" or . == "GIT_CONFIG_NOSYSTEM" or
+      . == "HTTP_PROXY" or . == "HTTPS_PROXY" or . == "NO_PROXY" or . == "ALL_PROXY" or
+      . == "http_proxy" or . == "https_proxy" or . == "no_proxy" or . == "all_proxy" or
+      startswith("MSW_") or startswith("DYLD_") or startswith("LD_");
+    def iso_ts:
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+    type == "object" and
+    (keys | sort) == ["schemaVersion","secrets"] and
+    .schemaVersion == 1 and
+    (.secrets | type == "object") and
+    ([.secrets | to_entries[] |
+      (.key | test("^[A-Za-z_][A-Za-z0-9_]{0,127}$")) and
+      (.key | reserved_name | not) and
+      (.value | type == "object") and
+      (.value.name == .key) and
+      (.value.workspaces | type == "array" and length >= 1) and
+      ([.value.workspaces[] | type == "string" and test("^[a-z][a-z0-9-]{0,31}$")] | all) and
+      ((.value.workspaces | unique | length) == (.value.workspaces | length)) and
+      (.value.allowedDomains | type == "array" and length >= 1) and
+      ([.value.allowedDomains[] | (type == "string") and domain_valid] | all) and
+      ((.value.allowedDomains | unique | length) == (.value.allowedDomains | length)) and
+      (.value.generation | type == "number" and . >= 1 and floor == .) and
+      (.value.error == null or (.value.error | type == "string" and length > 0 and length <= 512)) and
+      (.value.pending == null or
+        (.value.pending | type == "object" and
+          (.type == "add" or .type == "edit" or .type == "remove") and
+          (.createdAt | type == "string" and iso_ts) and
+          (.workspaces | type == "object") and
+          ((.workspaces | keys | length) >= 1) and
+          (([.workspaces | keys[]] - $configured) | length == 0) and
+          ([.workspaces | to_entries[] |
+            (.key | test("^[a-z][a-z0-9-]{0,31}$")) and
+            (.value | type == "object") and
+            (.value.state == "restart-required" or .value.state == "removal-pending-restart" or .value.state == "applies-on-next-start") and
+            (.value.action == "bind" or .value.action == "remove") and
+            ((.value.action == "bind" and (.value.state == "restart-required" or .value.state == "applies-on-next-start")) or
+             (.value.action == "remove" and (.value.state == "removal-pending-restart" or .value.state == "applies-on-next-start")))] | all) and
+          (if .type == "add" then ([.workspaces[].action] | all(. == "bind"))
+           elif .type == "remove" then ([.workspaces[].action] | all(. == "remove"))
+           else true end)))
+    ] | all)
+  ' "$file" >/dev/null 2>&1
+}
+
+# A missing metadata file is the "no secrets configured" state; an EXISTING
+# but unreadable one is a typed fail-closed error everywhere it is read
+# (planning, applying, listing, and the lifecycle boundary).
+secrets_meta_require_valid() {
+  local file
+  file="$(secrets_meta_file)"
+  [[ ! -e "$file" && ! -L "$file" ]] && return 0
+  secrets_meta_valid "$file"
+}
+
+secrets_meta_entry() {
+  local name="$1" file
+  file="$(secrets_meta_file)"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  secrets_meta_valid "$file" || return 1
+  "$JQ_BIN" -c --arg name "$name" '.secrets[$name] // empty' "$file" 2>/dev/null
+}
+
+# Global secrets lock: serializes apply and lifecycle reconciliation. It uses
+# fd 6, distinct from backup fd 7, host-credential fd 8, and GitHub fd 9.
+# Process exit closes the descriptor automatically; never replace caller traps.
+SECRETS_LOCK_HELD=0
+secrets_lock_file() { printf '%s/secrets.lock\n' "$GITHUB_META_DIR"; }
+secrets_lock_acquire() {
+  local lock
+  (( SECRETS_LOCK_HELD == 0 )) || return 0
+  require_command_path lockf "$LOCKF_BIN"
+  mkdir -p "$GITHUB_META_DIR" || return 1
+  chmod 700 "$GITHUB_META_DIR" 2>/dev/null || true
+  lock="$(secrets_lock_file)"
+  if ! exec 6>>"$lock"; then return 1; fi
+  if ! "$LOCKF_BIN" -s -t 30 6; then
+    exec 6>&-
+    return 1
+  fi
+  printf '%s\n' "$$" >"$lock"
+  SECRETS_LOCK_HELD=1
+  return 0
+}
+secrets_lock_release() {
+  if (( SECRETS_LOCK_HELD )); then
+    exec 6>&-
+    SECRETS_LOCK_HELD=0
+  fi
+}
+
+# Fail-closed secrets lockdown: written when an edit/remove cannot prove its
+# old bindings were disabled. The marker is OWNED by the secrets feature (the
+# GitHub quarantine marker is never touched, so credential state stays
+# separate), stops every possibly-bound workspace, and refuses later
+# starts/restarts until a retried apply proves the unbind and clears it.
+secrets_lockdown_file() { printf '%s/%s.secret-lockdown\n' "$GITHUB_META_DIR" "$1"; }
+
+secrets_lockdown_workspace() {
+  local box="$1" reason="$2" file attempt=0 running_rc inspect_rc=0
+  file="$(secrets_lockdown_file "$box")"
+  mkdir -p "$GITHUB_META_DIR" || return 1
+  chmod 700 "$GITHUB_META_DIR" 2>/dev/null || true
+  umask 077 || return 1
+  printf '%s\n' "$reason" >"$file" || return 1
+  if sandbox_inspect_state "$box"; then
+    if ! workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1; then
+      return 1
+    fi
+    while (( attempt < 5 )); do
+      if sandbox_running "$box"; then
+        :
+      else
+        running_rc=$?
+        if (( running_rc == 1 )); then return 0; fi
+      fi
+      attempt=$((attempt + 1))
+      if (( attempt < 5 )); then sleep 1; fi
+    done
+    return 1
+  else
+    inspect_rc=$?
+    (( inspect_rc == 1 )) && return 0
+    return 1
+  fi
+  return 0
+}
+
+secrets_lockdown_clear() {
+  local box reason file
+  for box in $1; do
+    file="$(secrets_lockdown_file "$box")"
+    rm -f "$file"
+    [[ ! -e "$file" && ! -L "$file" ]] || return 1
+  done
+  return 0
+}
+
+# Atomic tmp + fsync + rename metadata writes (directory 0700, file 0600).
+secrets_meta_ensure() {
+  local file dir tmp
+  file="$(secrets_meta_file)"
+  if [[ -f "$file" && ! -L "$file" ]]; then
+    # An existing file must be canonical, never silently replaced.
+    secrets_meta_valid "$file"
+    return
+  fi
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp="$file.tmp.$$"
+  umask 077
+  printf '{"schemaVersion":1,"secrets":{}}\n' >"$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! secrets_meta_valid "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! fsync_path "$tmp" file; then rm -f "$tmp"; return 1; fi
+  if ! mv "$tmp" "$file"; then rm -f "$tmp"; return 1; fi
+  fsync_path "$dir" dir || true
+  return 0
+}
+
+secrets_meta_write_payload() {
+  local payload="$1" file dir tmp
+  file="$(secrets_meta_file)"
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp="$file.tmp.$$"
+  umask 077
+  printf '%s\n' "$payload" >"$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! secrets_meta_valid "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! fsync_path "$tmp" file; then rm -f "$tmp"; return 1; fi
+  if ! mv "$tmp" "$file"; then rm -f "$tmp"; return 1; fi
+  fsync_path "$dir" dir || true
+  return 0
+}
+
+# Keychain access through the existing bridge: values reach Security.framework
+# over a real pipe (never argv, env, or tempfiles); the test seam uses the
+# dedicated MSW_TEST_KEYCHAIN_DIR file store.
+secret_keychain_get() {
+  local name="$1" service
+  service="$(secret_keychain_service)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    keychain_get "$service" "$name"
+  else
+    host_keychain_py get "$service" "$name"
+  fi
+}
+
+secret_keychain_put() {
+  local name="$1" service file tmp value
+  service="$(secret_keychain_service)"
+  value="$(cat 2>/dev/null || true)"
+  [[ -n "$value" ]] || return 1
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    mkdir -p "$MSW_TEST_KEYCHAIN_DIR" || return 1
+    chmod 700 "$MSW_TEST_KEYCHAIN_DIR" 2>/dev/null || true
+    file="$(keychain_test_file "$service" "$name")"
+    umask 077
+    printf '%s' "$value" >"$file.tmp.$$" || { rm -f "$file.tmp.$$"; return 1; }
+    chmod 600 "$file.tmp.$$" 2>/dev/null || true
+    if ! mv "$file.tmp.$$" "$file"; then rm -f "$file.tmp.$$"; return 1; fi
+  else
+    if ! printf '%s' "$value" | host_keychain_py put "$service" "$name"; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+secret_keychain_delete() {
+  local name="$1" service file
+  if [[ "${MSW_FAKE_KC_DELETE_FAIL:-0}" == 1 ]]; then
+    printf 'msw: Keychain delete failure injected\n' >&2
+    return 1
+  fi
+  service="$(secret_keychain_service)"
+  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
+    file="$(keychain_test_file "$service" "$name")"
+    rm -f "$file"
+    [[ ! -e "$file" && ! -L "$file" ]] || {
+      printf 'msw: could not verify Keychain item removal %s/%s\n' "$service" "$name" >&2
+      return 1
+    }
+  else
+    # the bridge itself proves removal (SecItemDelete + read-back probe)
+    host_keychain_py delete "$service" "$name" || return 1
+  fi
+}
+
+secret_bindings_clear() {
+  MSW_SECRET_BINDINGS=""
+}
+
+# Run the DIRECT msb child for the lifecycle boundary. Every value in
+# MSW_SECRET_BINDINGS (plus the connect-mode read token) is exported inside a
+# subshell that is exec'd into msb, so the values exist ONLY in the child
+# process environment — never in the CLI's own environment or in argv. The
+# nonsecret name list is mirrored via MSW_SECRET_EXPORTED for observability.
+workspace_msb_with_secret_env() {
+  local box="$1"; shift
+  (
+    pair=""; name=""; value=""; token=""; exported=""
+    while IFS= read -r name; do
+      [[ -n "$name" ]] && unset "$name"
+    done < <(workspace_msb_unset_args)
+    # Values are graph-valid and may contain glob metacharacters (*, ?, [);
+    # disable pathname expansion before word-splitting the binding pairs.
+    set -f
+    if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
+      export GH_TOKEN="$token"
+    fi
+    for pair in ${MSW_SECRET_BINDINGS:-}; do
+      name="${pair%%=*}"
+      value="${pair#*=}"
+      [[ -n "$name" && -n "$value" ]] || exit 96
+      export "$name=$value"
+      [[ -n "$exported" ]] && exported+=","
+      exported+="$name"
+    done
+    [[ -n "$exported" ]] && export MSW_SECRET_EXPORTED="$exported"
+    # fd 6 (the secrets lock) must not be inherited by the lifecycle child.
+    exec "$MSB_BIN" "$@" 9>&- 6>&-
+  )
+}
+# Lifecycle boundary preparation (start_sandbox / cmd_restart): apply every
+# pending add/edit/remove owed by this workspace, then resolve the value of
+# every secret the sandbox config will require at start — exporting each one
+# ONLY inside the direct msb child. Any missing value or failed mutation
+# aborts the start fail-closed with SECRET_PREPARE_ERROR set.
+secret_prepare_start() {
+  local box="$1" file name op hosts action value bindings names pair
+  SECRET_PREPARE_ERROR=""
+  secret_bindings_clear
+  file="$(secrets_meta_file)"
+  [[ -f "$file" && ! -L "$file" ]] || return 0
+  secrets_meta_valid "$file" || {
+    SECRET_PREPARE_ERROR="the host-held secrets metadata is unreadable; repair or remove $(secrets_meta_file)"
+    return 1
+  }
+  # A failed unbind locks the workspace down until a retried apply proves
+  # the bindings are gone; starts/restarts refuse while the marker exists.
+  if [[ -e "$(secrets_lockdown_file "$box")" || -L "$(secrets_lockdown_file "$box")" ]]; then
+    SECRET_PREPARE_ERROR="workspace '$box' is locked down after a failed secret change; retry the change from MSW Monitor to clear the lockdown"
+    return 1
+  fi
+  # Serialize against concurrent applies and other lifecycle boundaries.
+  secrets_lock_acquire || {
+    SECRET_PREPARE_ERROR="another secret operation is already running"
+    return 1
+  }
+  if ! secrets_meta_valid "$file"; then
+    secrets_lock_release
+    SECRET_PREPARE_ERROR="the host-held secrets metadata is unreadable; repair or remove $(secrets_meta_file)"
+    return 1
+  fi
+  # 1) Pending operations owed by this workspace, per-workspace desired
+  #    action (bind: stage the new value; remove: drop the old binding).
+  while IFS=$'\t' read -r name op hosts action; do
+    [[ -n "$name" ]] || continue
+    if [[ "$action" == remove ]]; then
+      if sandbox_inspect_state "$box"; then
+        if ! workspace_msb_with_secret_env "$box" modify "$box" --secret-rm "$name" 9>&-; then
+          secrets_lock_release
+          SECRET_PREPARE_ERROR="the pending removal of secret '$name' could not be applied to '$box'"
+          return 1
+        fi
+      elif (( $? != 1 )); then
+        secrets_lock_release
+        SECRET_PREPARE_ERROR="the pending removal of secret '$name' could not be applied to '$box' because its state could not be inspected"
+        return 1
+      fi
+    else
+      value="$(secret_keychain_get "$name" 2>/dev/null || true)"
+      if ! secret_value_valid "$value"; then
+        secrets_lock_release
+        SECRET_PREPARE_ERROR="secret '$name' is pending on '$box' but its value is missing from Keychain; re-enter the value and restart again"
+        return 1
+      fi
+      MSW_SECRET_BINDINGS="$name=$value"
+      # --next-start: the real runtime refuses to add a guest placeholder to
+      # a running VM without an explicit restart policy; the imminent
+      # start/restart child applies the staged binding (the value stays
+      # resolvable in that child's environment).
+      if ! workspace_msb_with_secret_env "$box" modify "$box" --secret "$name@$hosts" --next-start 9>&-; then
+        secret_bindings_clear
+        secrets_lock_release
+        SECRET_PREPARE_ERROR="the pending change to secret '$name' could not be applied to '$box'"
+        return 1
+      fi
+      secret_bindings_clear
+    fi
+  done < <("$JQ_BIN" -r --arg box "$box" '
+    .secrets | to_entries[] |
+    select(.value.pending != null and ((.value.pending.workspaces[$box] // null) != null)) |
+    [.key, .value.pending.type, (.value.allowedDomains | join(",")), .value.pending.workspaces[$box].action] | @tsv
+  ' "$file" 2>/dev/null || true)
+  # 2) Values the sandbox config will require at start: every entry
+  #    desired-bound on this box (active, or pending bind just applied).
+  #    Pending removals are intentionally never resolved.
+  bindings=""
+  names=""
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    value="$(secret_keychain_get "$name" 2>/dev/null || true)"
+    if ! secret_value_valid "$value"; then
+      secret_bindings_clear
+      secrets_lock_release
+      SECRET_PREPARE_ERROR="secret '$name' is bound to '$box' but its value is missing from Keychain; re-enter the value and restart again"
+      return 1
+    fi
+    if [[ -n "$bindings" ]]; then bindings+=" "; names+=","; fi
+    bindings+="$name=$value"
+    names+="$name"
+  done < <("$JQ_BIN" -r --arg box "$box" '
+    .secrets | to_entries[] |
+    select(.value.workspaces | index($box)) |
+    select(.value.pending == null or .value.pending.type != "remove" or ((.value.pending.workspaces[$box] // null) == null)) |
+    .key
+  ' "$file" 2>/dev/null || true)
+  MSW_SECRET_BINDINGS="$bindings"
+  return 0
+}
+
+# Lifecycle boundary finalization (after a successful start/restart): verify
+# each pending binding against the sandbox config and finalize it. A removal
+# deletes the Keychain item only after the binding is verified absent from
+# every pending workspace; a failed Keychain deletion keeps the removal
+# pending so the next start retries. Verification failures record a safe
+# error and keep the pending state for the next start.
+secret_finalize_start() {
+  local box="$1" file name op hosts action expected_spec present_spec inspect_json="" sandbox_missing=0 inspect_valid=0 inspect_rc=0
+  local ops="[]" op_json="" pending_boxes="" last=0 keychain_ok=0 verified=0 updated=""
+  file="$(secrets_meta_file)"
+  if [[ ! -f "$file" || -L "$file" ]]; then secrets_lock_release; return 0; fi
+  if ! secrets_meta_valid "$file"; then secrets_lock_release; return 0; fi
+  secrets_lock_acquire || return 0
+  if ! secrets_meta_valid "$file"; then secrets_lock_release; return 0; fi
+  if sandbox_inspect_state "$box"; then
+    inspect_json="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null || true)"
+    # A malformed or shape-changed inspect response is NEVER authoritative:
+    # only a successful parse with a .config.secrets object counts.
+    if printf '%s' "$inspect_json" | "$JQ_BIN" -e '.config.secrets | type == "object"' >/dev/null 2>&1; then
+      inspect_valid=1
+    fi
+  else
+    inspect_rc=$?
+    (( inspect_rc == 1 )) && sandbox_missing=1
+  fi
+  while IFS=$'\t' read -r name op hosts action; do
+    [[ -n "$name" ]] || continue
+    expected_spec="${name}@${hosts}"
+    verified=0
+    if (( sandbox_missing )); then
+      # The sandbox is gone: absence is trivially true for removals; a bind
+      # can never be verified on a nonexistent sandbox.
+      [[ "$action" == remove ]] && verified=1
+    elif (( inspect_valid )); then
+      present_spec="$(printf '%s' "$inspect_json" | "$JQ_BIN" -r --arg name "$name" '.config.secrets[$name] // empty' 2>/dev/null || true)"
+      if [[ "$action" == remove ]]; then
+        [[ -z "$present_spec" ]] && verified=1
+      elif [[ "$present_spec" == "$expected_spec" ]]; then
+        verified=1
+      fi
+    fi
+    op_json=""
+    if (( verified )); then
+      if [[ "$op" == remove ]]; then
+        pending_boxes="$(printf '%s' "$("$JQ_BIN" -c --arg name "$name" --arg box "$box" '.secrets[$name].pending.workspaces' "$file" 2>/dev/null || true)")"
+        last=0
+        if [[ "$(printf '%s' "$pending_boxes" | "$JQ_BIN" -r 'keys | length' 2>/dev/null || true)" == 1 ]]; then
+          last=1
+          keychain_ok=0
+          if secret_keychain_delete "$name" 2>/dev/null; then keychain_ok=1; fi
+        fi
+        if (( last && ! keychain_ok )); then
+          op_json="{\"name\":$(app_json_string "$name"),\"type\":\"remove\",\"verified\":false,\"error\":$(app_json_string "The Keychain value for '$name' could not be deleted after its binding was verified absent; the removal retries on the next start of $box.")}"
+        else
+          op_json="{\"name\":$(app_json_string "$name"),\"type\":\"remove\",\"verified\":true,\"last\":$([[ "$last" == 1 ]] && printf true || printf false)}"
+        fi
+      else
+        op_json="{\"name\":$(app_json_string "$name"),\"type\":$(app_json_string "$op"),\"verified\":true,\"last\":false}"
+      fi
+    else
+      op_json="{\"name\":$(app_json_string "$name"),\"type\":$(app_json_string "$op"),\"verified\":false,\"error\":$(app_json_string "The binding of '$name' could not be verified on '$box' after restart; the pending change retries on the next start.")}"
+    fi
+    if [[ "$ops" == "[]" ]]; then ops="$op_json"; else ops="${ops},${op_json}"; fi
+  done < <("$JQ_BIN" -r --arg box "$box" '
+    .secrets | to_entries[] |
+    select(.value.pending != null and ((.value.pending.workspaces[$box] // null) != null)) |
+    [.key, .value.pending.type, (.value.allowedDomains | join(",")), .value.pending.workspaces[$box].action] | @tsv
+  ' "$file" 2>/dev/null || true)
+  if [[ "$ops" != "[]" ]]; then
+    ops="[$ops]"
+    updated="$(printf '%s' "$("$JQ_BIN" -c --argjson ops "$ops" --arg box "$box" '
+      reduce $ops[] as $op (
+        .;
+        if $op.verified then
+          if ($op.type == "remove" and $op.last) then
+            .secrets |= del(.[$op.name])
+          else
+            .secrets[$op.name].pending.workspaces |= del(.[$box])
+            | if ((.secrets[$op.name].pending.workspaces | keys | length) == 0)
+              then .secrets[$op.name].pending = null
+                | .secrets[$op.name].error = null
+              else . end
+          end
+        else
+          .secrets[$op.name].error = $op.error
+        end
+      )
+    ' "$file" 2>/dev/null || true)")"
+    if [[ -n "$updated" ]]; then
+      secrets_meta_write_payload "$updated" || printf 'msw: warning: pending secret finalization could not be recorded for %s\n' "$box" >&2
+    fi
+  fi
+  secrets_lock_release
+  return 0
+}
+
+# Per-workspace secrets snapshot for `msw app state`: state uses the typed
+# workspace enum (active|restart-required|applies-on-next-start|error), not
+# the finer entry statuses. Lifecycle comes from the state observation that
+# is already in hand (never starts a VM); recorded pending states cover
+# unknown/transitional lifecycles.
+app_workspace_secrets_snapshot() {
+  local box="$1" lifecycle="$2" file
+  file="$(secrets_meta_file)"
+  if [[ -e "$(secrets_lockdown_file "$box")" || -L "$(secrets_lockdown_file "$box")" ]]; then
+    printf '{"state":"error","pendingCount":0,"reason":"A previous secret change could not prove the old binding was disabled; retry the change before starting this workspace."}'
+    return 0
+  fi
+  [[ -f "$file" && ! -L "$file" ]] || { printf '{"state":"active","pendingCount":0,"reason":null}'; return 0; }
+  "$JQ_BIN" -c --arg box "$box" --arg lifecycle "$lifecycle" '
+    def ws_state($e):
+      ($e.pending.workspaces[$box] // null) as $recorded |
+      if $recorded == null then null
+      elif ($lifecycle == "Running") then "restart-required"
+      elif ($lifecycle == "Stopped" or $lifecycle == "Exited") then "applies-on-next-start"
+      else $recorded.state end;
+    [.secrets[] |
+      select((.workspaces | index($box)) or (.pending != null and (.pending.workspaces[$box] != null)))] as $entries |
+    ($entries | map(ws_state(.))) as $states |
+    ($entries | map(.error // null) | map(select(. != null)) | .[0] // null) as $reason |
+    ($entries | map(select(.pending != null and (.pending.workspaces[$box] != null))) | length) as $pending_count |
+    (if $reason != null then "error"
+     elif ($states | index("restart-required")) != null then "restart-required"
+     elif ($states | map(select(. != null)) | length) > 0 then "applies-on-next-start"
+     else "active" end) as $state |
+    {state:$state, pendingCount:$pending_count, reason:$reason}
+  ' "$file" 2>/dev/null || printf '{"state":"error","pendingCount":0,"reason":"The host-held secrets metadata is unreadable."}'
+}
+
+app_read_fd() {
+  local fd="$1" input=""
+  [[ -t "$fd" ]] && return 1
+  input="$(dd bs=262145 count=1 <&"$fd" 2>/dev/null || true)"
+  [[ -n "$input" && "${#input}" -le 262144 ]] || return 1
+  printf '%s' "$input"
+}
+
+app_cmd_secrets_list() {
+  local file="" result="" lifecycles="{" sep="" box="" lifecycle="" entries_json="{}"
+  while (( $# > 0 )); do
+    case "$1" in
+      --format) [[ "${2:-}" == json ]] || app_usage_error secrets-list "secrets-list requires --format json"; shift 2 ;;
+      *) app_usage_error secrets-list "unknown secrets-list option '$1'" ;;
+    esac
+  done
+  app_require_config secrets-list
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error secrets-list "MSW_JSON_TOOL_UNAVAILABLE" "The secrets adapter requires jq." "Repair the MSW toolchain and retry." "" true 69
+  for box in "${WORKSPACES[@]}"; do
+    lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
+    lifecycles+="${sep}$(app_json_string "$box"):$(app_json_string "$lifecycle")"
+    sep=","
+  done
+  lifecycles+="}"
+  file="$(secrets_meta_file)"
+  if [[ -f "$file" && ! -L "$file" ]]; then
+    secrets_meta_valid "$file" || app_emit_error secrets-list "MSW_SECRETS_METADATA_INVALID" "The host-held secrets metadata is unreadable." "Repair or remove the secrets metadata file, then refresh." "" false 78
+    entries_json="$(printf '%s' "$("$JQ_BIN" -c '.secrets' "$file" 2>/dev/null || true)")"
+  fi
+  result="$("$JQ_BIN" -nc --argjson lifecycles "$lifecycles" --argjson entries "$entries_json" '
+    def entry_status($e):
+      if ($e.error != null) then "error"
+      elif ($e.pending == null) then "active"
+      else
+        ($e.pending.workspaces | keys | map($lifecycles[.] // "Unknown")) as $kinds |
+        if ($kinds | index("Running")) != null then
+          (if $e.pending.type == "remove" then "removal-pending-restart" else "restart-required" end)
+        else "applies-on-next-start" end
+      end;
+    {
+      entries: [($entries | to_entries[] | {
+        name: .key,
+        workspaces: .value.workspaces,
+        allowedDomains: .value.allowedDomains,
+        status: entry_status(.value),
+        pendingOperation: (if .value.pending then {type: .value.pending.type, createdAt: .value.pending.createdAt} else null end),
+        generation: .value.generation,
+        error: .value.error
+      })],
+      workspaces: [($lifecycles | keys[] | . as $box |
+        ([$entries[] | select(.pending != null and (.pending.workspaces[$box] != null))] | length) as $count |
+        {workspace: $box, restartRequired: (($count > 0) and ($lifecycles[$box] == "Running")), pendingCount: $count}
+      )]
+    }
+  ' 2>/dev/null || true)"
+  [[ -n "$result" ]] || app_emit_error secrets-list "MSW_SECRETS_METADATA_INVALID" "The host-held secrets state could not be presented." "Repair the secrets metadata file, then refresh." "" false 78
+  app_emit_success secrets-list "$result"
+}
+
+app_cmd_secret_plan() {
+  local fd="" request="" op="" name="" domain="" plan_id="" now="" plan_path="" phrase="" effects="" requires_secret="true"
+  local workspaces_json="" domains_json="" configured="" existing=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --input-fd) [[ $# -ge 2 ]] || app_usage_error secret-plan "missing value for --input-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error secret-plan "secret-plan requires --format json"; shift 2 ;;
+      *) app_usage_error secret-plan "unknown secret-plan option '$1'" ;;
+    esac
+  done
+  [[ "$fd" =~ ^[0-9]+$ ]] || app_usage_error secret-plan "an input file descriptor is required"
+  app_require_config secret-plan
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error secret-plan "MSW_JSON_TOOL_UNAVAILABLE" "The secrets adapter requires jq." "Repair the MSW toolchain and retry." "" true 69
+  if ! request="$(app_read_fd "$fd")"; then
+    app_emit_error secret-plan "MSW_INVALID_REQUEST" "The secret plan input could not be read." "Pipe a schema-v1 plan JSON document to the requested file descriptor." "" false 64
+  fi
+  configured="$(printf '%s\n' "${WORKSPACES[@]}" | "$JQ_BIN" -Rsc 'split("\n")[:-1]')" || {
+    app_emit_error secret-plan "MSW_INVALID_REQUEST" "The configured workspaces could not be enumerated." "Repair the MSW configuration and retry." "" false 78
+  }
+  if ! printf '%s\n' "$request" | "$JQ_BIN" -e --argjson configured "$configured" '
+      type == "object" and
+      (keys | sort) == ["allowedDomains","name","operation","workspaces"] and
+      (.operation == "add" or .operation == "edit" or .operation == "remove") and
+      (.name | type == "string" and test("^[A-Za-z_][A-Za-z0-9_]{0,127}$")) and
+      (.workspaces | type == "array" and length >= 1) and
+      ([.workspaces[] | type == "string"] | all) and
+      (([.workspaces[] | select((. as $item | ($configured | index($item))) == null)] | length) == 0) and
+      ((.workspaces | unique | length) == (.workspaces | length)) and
+      (.allowedDomains | type == "array" and length >= 1) and
+      ([.allowedDomains[] | type == "string"] | all) and
+      ((.allowedDomains | unique | length) == (.allowedDomains | length))
+    ' >/dev/null 2>&1; then
+    app_emit_error secret-plan "MSW_INVALID_REQUEST" "The secret plan JSON on the input descriptor failed strict validation." "Send schema-v1 plan JSON with a valid operation, env-grammar name, configured unique workspaces, and valid unique domains." "" false 64
+  fi
+  op="$(printf '%s\n' "$request" | "$JQ_BIN" -r '.operation')"
+  name="$(printf '%s\n' "$request" | "$JQ_BIN" -r '.name')"
+  if secret_name_reserved "$name"; then
+    app_emit_error secret-plan "MSW_SECRET_NAME_INVALID" "The secret name '$name' is reserved for the MSW toolchain." "Choose a different name." "" false 64
+  fi
+  while IFS= read -r domain; do
+    secret_domain_valid "$domain" || app_emit_error secret-plan "MSW_SECRET_DOMAIN_INVALID" "The domain '$domain' is not a valid exact host, *.example.com wildcard, or the special '*'." "Use exact DNS hosts, *.example.com forms, or '*' without schemes, paths, ports, or whitespace." "" false 64
+  done < <(printf '%s\n' "$request" | "$JQ_BIN" -r '.allowedDomains[]' 2>/dev/null || true)
+  secrets_meta_require_valid || app_emit_error secret-plan "MSW_SECRETS_METADATA_INVALID" "The host-held secrets metadata is unreadable." "Repair or remove the secrets metadata file, then retry." "" false 78
+  existing="$(secrets_meta_entry "$name" 2>/dev/null || true)"
+  case "$op" in
+    add)
+      [[ -n "$existing" ]] && app_emit_error secret-plan "MSW_SECRET_ALREADY_EXISTS" "A secret named '$name' already exists." "Edit it or choose a different name." "" false 64
+      phrase="ADD SECRET $name"
+      effects="The value will be stored in the macOS Keychain and bound to the listed workspaces after their next restart."
+      ;;
+    edit)
+      [[ -n "$existing" ]] || app_emit_error secret-plan "MSW_SECRET_NOT_FOUND" "No secret named '$name' exists." "Add it first." "" false 64
+      phrase="REPLACE SECRET $name"
+      effects="The old binding will be disabled immediately; the replacement value and domains bind after the affected workspaces restart."
+      ;;
+    remove)
+      [[ -n "$existing" ]] || app_emit_error secret-plan "MSW_SECRET_NOT_FOUND" "No secret named '$name' exists." "Add it first." "" false 64
+      phrase="REMOVE SECRET $name"
+      effects="The binding will be disabled immediately; the Keychain value is deleted only after the removal is verified absent from the workspaces."
+      requires_secret="false"
+      ;;
+  esac
+  expected_generation=0
+  if [[ "$op" == edit || "$op" == remove ]]; then
+    expected_generation="$(printf '%s' "$existing" | "$JQ_BIN" -r '.generation // 0' 2>/dev/null || printf 0)"
+  fi
+  if [[ "$op" == remove ]]; then
+    # A removal is always reviewed against the CANONICAL current scope, never
+    # a caller-supplied subset: derive the affected workspaces/domains from
+    # the existing entry (restricted to configured workspaces so removed
+    # workspaces cannot deadlock cleanup) and ignore the request lists.
+    workspaces_json="$(printf '%s' "$existing" | "$JQ_BIN" -c --argjson configured "$configured" '[.workspaces[] | select((. as $item | ($configured | index($item))) != null)]' 2>/dev/null || true)"
+    [[ "$workspaces_json" != "[]" ]] || app_emit_error secret-plan "MSW_SECRET_INVALID_REQUEST" "The secret has no configured workspaces left to remove." "Repair the secrets metadata, then retry." "" false 64
+    domains_json="$(printf '%s' "$existing" | "$JQ_BIN" -c '.allowedDomains')"
+  else
+    workspaces_json="$(printf '%s\n' "$request" | "$JQ_BIN" -c '.workspaces')"
+    domains_json="$(printf '%s\n' "$request" | "$JQ_BIN" -c '.allowedDomains')"
+  fi
+  # A literal "*" domain is reviewed with an EXPLICIT acknowledgement: the
+  # confirmation phrase and effects state that the secret may reach ANY
+  # HTTPS host, so a wildcard can never be applied under a generic review.
+  if printf '%s\n' "$domains_json" | "$JQ_BIN" -e 'index("*") != null' >/dev/null 2>&1; then
+    phrase="${phrase} (ANY HOST)"
+    effects="${effects} This plan explicitly acknowledges unrestricted scope: the value may be sent to ANY HTTPS host."
+  fi
+  plan_id="$(app_request_id)"
+  now="$(date +%s)"
+  plan_path="$(app_secret_plan_file "$plan_id")"
+  mkdir -p "$(dirname "$plan_path")" || app_emit_error secret-plan "MSW_PLAN_WRITE_FAILED" "The secret plan directory could not be created." "Repair the MSW metadata directory and retry." "" true 69
+  chmod 700 "$(dirname "$plan_path")" 2>/dev/null || true
+  umask 077
+  if ! printf '{"schemaVersion":1,"planId":%s,"operation":%s,"name":%s,"workspaces":%s,"allowedDomains":%s,"requiresSecret":%s,"confirmationPhrase":%s,"effects":%s,"expectedGeneration":%s,"created":%s,"expires":%s}\n' \
+    "$(app_json_string "$plan_id")" "$(app_json_string "$op")" "$(app_json_string "$name")" "$workspaces_json" "$domains_json" "$requires_secret" "$(app_json_string "$phrase")" "$(app_json_string "$effects")" "$expected_generation" "$now" "$((now + 300))" >"$plan_path"; then
+    rm -f "$plan_path"
+    app_emit_error secret-plan "MSW_PLAN_WRITE_FAILED" "The secret plan could not be written." "Repair the MSW metadata directory and retry." "" true 69
+  fi
+  chmod 600 "$plan_path" 2>/dev/null || true
+  app_emit_success secret-plan "{\"planId\":$(app_json_string "$plan_id"),\"operation\":$(app_json_string "$op"),\"name\":$(app_json_string "$name"),\"affectedWorkspaces\":$workspaces_json,\"requiresSecret\":$requires_secret,\"confirmationPhrase\":$(app_json_string "$phrase"),\"effects\":$(app_json_string "$effects"),\"expiresAt\":$(app_json_string "$(date -u -r "$((now + 300))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$((now + 300))" +%Y-%m-%dT%H:%M:%SZ)")}"
+}
+
+app_cmd_secret_apply() {
+  local plan_id="${1:-}" fd="" request="" confirmation="" value="" op="" name="" phrase="" plan_path="" claimed_path=""
+  local now="" expires="" created="" workspaces_json="" domains_json="" keychain_ok=0 unbind_failed="" pending_rows="" pending_json="" pending_array_json=""
+  local box="" lifecycle="" state="" action="" inspect_json="" present="" entry="" payload="" outcome="" generation=1
+  local expected_generation=0 current_generation="" old_workspaces="" preflight_workspaces="" attempted_boxes="" quarantine_failed="" value_supplied=0 inspect_rc=0
+  shift || true
+  while (( $# > 0 )); do
+    case "$1" in
+      --input-fd) [[ $# -ge 2 ]] || app_usage_error secret-apply "missing value for --input-fd"; fd="$2"; shift 2 ;;
+      --format) [[ "${2:-}" == json ]] || app_usage_error secret-apply "secret-apply requires --format json"; shift 2 ;;
+      *) app_usage_error secret-apply "unknown secret-apply option '$1'" ;;
+    esac
+  done
+  [[ "$plan_id" =~ ^[A-Za-z0-9-]{1,128}$ ]] || app_usage_error secret-apply "plan identifier is required"
+  [[ "$fd" =~ ^[0-9]+$ ]] || app_usage_error secret-apply "an input file descriptor is required"
+  app_require_config secret-apply
+  app_require_runtime secret-apply
+  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error secret-apply "MSW_JSON_TOOL_UNAVAILABLE" "The secrets adapter requires jq." "Repair the MSW toolchain and retry." "" true 69
+  plan_path="$(app_secret_plan_file "$plan_id")"
+  [[ -f "$plan_path" && ! -L "$plan_path" ]] || app_emit_error secret-apply "MSW_PLAN_NOT_FOUND" "The secret plan is missing or expired." "Create a fresh plan." "" true 78
+  op="$(printf '%s' "$("$JQ_BIN" -r '.operation // empty' "$plan_path" 2>/dev/null || true)")"
+  name="$(printf '%s' "$("$JQ_BIN" -r '.name // empty' "$plan_path" 2>/dev/null || true)")"
+  phrase="$(printf '%s' "$("$JQ_BIN" -r '.confirmationPhrase // empty' "$plan_path" 2>/dev/null || true)")"
+  expires="$(printf '%s' "$("$JQ_BIN" -r '.expires // empty' "$plan_path" 2>/dev/null || true)")"
+  expected_generation="$(printf '%s' "$("$JQ_BIN" -r '.expectedGeneration // 0' "$plan_path" 2>/dev/null || true)")"
+  workspaces_json="$(printf '%s' "$("$JQ_BIN" -c '.workspaces // empty' "$plan_path" 2>/dev/null || true)")"
+  domains_json="$(printf '%s' "$("$JQ_BIN" -c '.allowedDomains // empty' "$plan_path" 2>/dev/null || true)")"
+  [[ -n "$op" && -n "$name" && -n "$phrase" && -n "$workspaces_json" && -n "$domains_json" && "$expected_generation" =~ ^[0-9]+$ ]] || app_emit_error secret-apply "MSW_PLAN_INVALID" "The secret plan is malformed." "Create a fresh plan." "" false 78
+  now="$(date +%s)"
+  [[ "$expires" =~ ^[0-9]+$ && "$expires" -gt "$now" ]] || {
+    rm -f "$plan_path"
+    app_emit_error secret-apply "MSW_PLAN_EXPIRED" "The secret plan expired." "Create a fresh plan." "" true 78
+  }
+  if ! request="$(app_read_fd "$fd")"; then
+    app_emit_error secret-apply "MSW_INVALID_REQUEST" "The apply input could not be read." "Send {\"confirmation\":\"...\",\"value\":\"...\"?} JSON on the requested file descriptor." "" false 64
+  fi
+  confirmation="$(printf '%s\n' "$request" | "$JQ_BIN" -r '.confirmation // empty' 2>/dev/null || true)"
+  [[ -n "$confirmation" ]] || app_emit_error secret-apply "MSW_CONFIRMATION_REQUIRED" "The action confirmation was not supplied." "Confirm the exact phrase shown by MSW Monitor." "" false 77
+  [[ "$confirmation" == "$phrase" ]] || app_emit_error secret-apply "MSW_CONFIRMATION_MISMATCH" "The confirmation did not match the reviewed secret action." "Review the plan and confirm again." "" false 77
+  # An existing but unreadable metadata file is a typed fail-closed error
+  # BEFORE the plan is consumed or any side effect runs.
+  secrets_meta_require_valid || app_emit_error secret-apply "MSW_SECRETS_METADATA_INVALID" "The host-held secrets metadata is unreadable." "Repair or remove the secrets metadata file, then retry." "" false 78
+  value="$(printf '%s\n' "$request" | "$JQ_BIN" -r '.value // empty' 2>/dev/null || true)"
+  case "$op" in
+    add)
+      secret_value_valid "$value" || app_emit_error secret-apply "MSW_SECRET_VALUE_REQUIRED" "A value is required for an add and must be 1-4096 printable characters." "Re-enter the value and confirm the plan again." "" false 64
+      value_supplied=1
+      ;;
+    edit)
+      if [[ -n "$value" ]]; then
+        secret_value_valid "$value" || app_emit_error secret-apply "MSW_SECRET_VALUE_REQUIRED" "A replacement value must be 1-4096 printable characters." "Re-enter the value and confirm the plan again." "" false 64
+        value_supplied=1
+      else
+        value="$(secret_keychain_get "$name" 2>/dev/null || true)"
+        secret_value_valid "$value" || app_emit_error secret-apply "MSW_SECRET_KEYCHAIN_UNAVAILABLE" "The current value could not be read from the macOS Keychain." "Enter a replacement value and retry." "" true 69
+      fi
+      ;;
+    remove)
+      if [[ "$(printf '%s\n' "$request" | "$JQ_BIN" -r '(.value != null and .value != "")' 2>/dev/null || true)" == true ]]; then
+        app_emit_error secret-apply "MSW_INVALID_REQUEST" "A value may not be supplied when removing a secret." "Confirm the removal without a value." "" false 64
+      fi
+      ;;
+  esac
+  # Consume the reviewed plan exactly once (atomic rename) before any
+  # mutation. The value never leaves this process except into the Keychain
+  # bridge over a real pipe.
+  claimed_path="${plan_path}.applying.$$"
+  if ! mv "$plan_path" "$claimed_path" 2>/dev/null; then
+    app_emit_error secret-apply "MSW_PLAN_CONFLICT" "The secret plan is already being applied or was consumed." "Refresh state and create a new plan." "" true 73
+  fi
+  plan_path="$claimed_path"
+  rm -f "$plan_path"
+
+  # Serialize the whole validate -> side effects -> metadata commit against
+  # concurrent applies and lifecycle finalization.
+  if ! secrets_lock_acquire; then
+    app_emit_error secret-apply "MSW_OPERATION_CONFLICT" "Another secret operation is already running." "Wait for it to finish, then retry." "" true 73
+  fi
+  entry="$(secrets_meta_entry "$name" 2>/dev/null || true)"
+  case "$op" in
+    add)
+      [[ -n "$entry" ]] && app_emit_error secret-apply "MSW_SECRET_ALREADY_EXISTS" "A secret named '$name' already exists." "Edit it instead." "" false 64
+      generation=1
+      ;;
+    edit|remove)
+      [[ -n "$entry" ]] || app_emit_error secret-apply "MSW_SECRET_NOT_FOUND" "No secret named '$name' exists." "Add it first." "" false 64
+      current_generation="$(printf '%s' "$entry" | "$JQ_BIN" -r '.generation // 0' 2>/dev/null || printf 0)"
+      # Stale-plan CAS: the reviewed plan pins the entry generation it was
+      # created against; a newer mutation invalidates this review.
+      [[ "$current_generation" == "$expected_generation" ]] || app_emit_error secret-apply "MSW_PLAN_STATE_CHANGED" "The secret changed after the plan was reviewed." "Refresh the secret and create a new plan." "" true 73
+      generation="$(printf '%s' "$entry" | "$JQ_BIN" -r '.generation + 1' 2>/dev/null || printf 1)"
+      ;;
+  esac
+  # Preflight every desired and previously-bound workspace before any unbind
+  # or Keychain mutation. Unknown/transitional lifecycle is not safe to edit.
+  old_workspaces="$(printf '%s' "$entry" | "$JQ_BIN" -c '.workspaces // []' 2>/dev/null || printf '[]')"
+  [[ -n "$old_workspaces" ]] || old_workspaces='[]'
+  preflight_workspaces="$("$JQ_BIN" -nc --argjson desired "$workspaces_json" --argjson old "$old_workspaces" '$desired + $old | unique')"
+  while IFS= read -r box; do
+    [[ -n "$box" ]] || continue
+    lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+    case "$lifecycle" in
+      Running|Stopped|Exited) ;;
+      *) app_emit_error secret-apply "MSW_STATE_UNAVAILABLE" "Workspace $box has no stable lifecycle to record the pending secret change." "Wait for the workspace lifecycle to settle, then create a fresh plan." "$box" true 69 ;;
+    esac
+  done < <(printf '%s' "$preflight_workspaces" | "$JQ_BIN" -r '.[]')
+  # Immediate fail-closed unbind: an edit or removal disables every OLD live
+  # binding right now, BEFORE any Keychain mutation or pending state is
+  # recorded. If any unbind cannot be proven, every possibly-bound workspace
+  # is stopped and quarantined so the old value cannot be used, and the
+  # apply fails with no partial credential mutation.
+  if [[ "$op" == edit || "$op" == remove ]]; then
+    attempted_boxes=""
+    while IFS= read -r box; do
+      [[ -n "$box" ]] || continue
+      attempted_boxes+="$box "
+      inspect_rc=0
+      if sandbox_inspect_state "$box"; then
+        inspect_json="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null || true)"
+        if ! printf '%s' "$inspect_json" | "$JQ_BIN" -e '.config.secrets | type == "object"' >/dev/null 2>&1; then
+          unbind_failed=1
+          continue
+        fi
+        present="$(printf '%s' "$inspect_json" | "$JQ_BIN" -r --arg name "$name" '.config.secrets[$name] // empty')"
+        if [[ -n "$present" ]]; then
+          if ! workspace_msb_with_secret_env "$box" modify "$box" --secret-rm "$name" 9>&-; then
+            unbind_failed=1
+            continue
+          fi
+          inspect_json="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null || true)"
+          if ! printf '%s' "$inspect_json" | "$JQ_BIN" -e --arg name "$name" \
+            '(.config.secrets | type == "object") and (.config.secrets[$name] == null)' >/dev/null 2>&1; then
+            unbind_failed=1
+          fi
+        fi
+      else
+        inspect_rc=$?
+        (( inspect_rc == 1 )) || unbind_failed=1
+      fi
+    done < <(printf '%s' "$old_workspaces" | "$JQ_BIN" -r '.[]' 2>/dev/null || true)
+    if [[ -n "$unbind_failed" ]]; then
+      lockdown_failed=""
+      for box in $attempted_boxes; do
+        if ! secrets_lockdown_workspace "$box" "The binding of secret '$name' could not be disabled; the workspace was stopped and locked down before the change could proceed" >/dev/null 2>&1; then
+          lockdown_failed=1
+        fi
+      done
+      if [[ -n "$lockdown_failed" ]]; then
+        app_emit_error secret-apply "MSW_SECRET_LOCKDOWN_FAILED" \
+          "The old binding of '$name' could not be disabled, and at least one affected workspace could not be stopped and locked down." \
+          "Stop the affected workspaces manually before any further change." "$box" true 77
+      fi
+      app_emit_error secret-apply "MSW_SECRET_UNBIND_FAILED" \
+        "The old binding of '$name' could not be disabled immediately; every possibly-bound workspace was stopped and locked down." \
+        "Retry the change after repairing the workspace runtime; a successful retry clears the lockdown." "" true 77
+    else
+      # A proven unbind is the recovery path: clear any prior lockdown.
+      if ! secrets_lockdown_clear "$attempted_boxes"; then
+        app_emit_error secret-apply "MSW_SECRET_LOCKDOWN_FAILED" \
+          "The old binding of '$name' was disabled, but a prior lockdown marker could not be cleared." \
+          "Remove the affected workspace lockdown marker manually, then retry." "$box" true 77
+      fi
+    fi
+  fi
+  # The Keychain value is replaced only after the old bindings are proven
+  # Store only new or replacement values. A scopes/domains-only edit reuses
+  # the verified current Keychain value and reports valueStored=false.
+  if [[ "$op" == add || ( "$op" == edit && "$value_supplied" == 1 ) ]]; then
+    if ! printf '%s' "$value" | secret_keychain_put "$name"; then
+      app_emit_error secret-apply "MSW_SECRET_KEYCHAIN_UNAVAILABLE" "The value could not be stored in the macOS Keychain." "Retry after repairing the Keychain; the value was not stored anywhere else." "" true 69
+    fi
+    keychain_ok=1
+  fi
+  # Observe every affected lifecycle and record the pending per-workspace
+  # desired action: bind for workspaces that must carry the secret, remove
+  # for workspaces dropped by an edit (their old binding is already gone;
+  # the lifecycle finalizes verified absence on their next start).
+  # Lifecycle was preflighted before side effects; derive the pending rows
+  # from the same desired and previous scopes.
+  pending_rows=""
+  while IFS= read -r box; do
+    [[ -n "$box" ]] || continue
+    lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+    case "$lifecycle" in
+      Running)
+        if [[ "$op" == remove ]]; then state="removal-pending-restart"; else state="restart-required"; fi
+        ;;
+      Stopped|Exited) state="applies-on-next-start" ;;
+      *)
+        app_emit_error secret-apply "MSW_STATE_UNAVAILABLE" "Workspace $box has no stable lifecycle to record the pending secret change." "Wait for the workspace lifecycle to settle, then create a fresh plan." "$box" true 69
+        ;;
+    esac
+    if [[ "$op" == remove ]]; then action="remove"; else action="bind"; fi
+    pending_rows+="$box"$'\t'"$state"$'\t'"$action"$'\n'
+  done < <(printf '%s' "$workspaces_json" | "$JQ_BIN" -r '.[]' 2>/dev/null || true)
+  if [[ "$op" == edit ]]; then
+    while IFS= read -r box; do
+      [[ -n "$box" ]] || continue
+      if [[ "$(printf '%s' "$workspaces_json" | "$JQ_BIN" -r --arg box "$box" 'index($box) == null' 2>/dev/null || true)" == true ]]; then
+        lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+        case "$lifecycle" in
+          Running) state="removal-pending-restart" ;;
+          Stopped|Exited) state="applies-on-next-start" ;;
+          *)
+            app_emit_error secret-apply "MSW_STATE_UNAVAILABLE" "Workspace $box has no stable lifecycle to record the pending removal." "Wait for the workspace lifecycle to settle, then create a fresh plan." "$box" true 69
+            ;;
+        esac
+        pending_rows+="$box"$'\t'"$state"$'\t'"remove"$'\n'
+      fi
+    done < <(printf '%s' "$old_workspaces" | "$JQ_BIN" -r '.[]' 2>/dev/null || true)
+  fi
+  pending_json="$(printf '%s' "$pending_rows" | "$JQ_BIN" -Rsc --arg type "$op" --arg createdAt "$(app_now)" '
+    split("\n") | map(select(length > 0) | split("\t")) |
+    map({key: .[0], value: {state: .[1], action: .[2]}}) |
+    from_entries | {type:$type, createdAt:$createdAt, workspaces:.}
+  ' 2>/dev/null || true)"
+  pending_array_json="$(printf '%s' "$pending_rows" | "$JQ_BIN" -Rsc '
+    split("\n") | map(select(length > 0) | split("\t")) | map({workspace: .[0], state: .[1]})
+  ' 2>/dev/null || true)"
+  [[ -n "$pending_json" && -n "$pending_array_json" ]] || app_emit_error secret-apply "MSW_INVALID_REQUEST" "The pending secret state could not be composed." "Retry the apply." "" false 78
+  secrets_meta_ensure || app_emit_error secret-apply "MSW_SECRETS_META_WRITE_FAILED" "The secrets metadata file could not be initialized." "Repair the MSW metadata directory and retry." "" true 69
+  case "$op" in
+    add)
+      payload="$(printf '%s' "$("$JQ_BIN" -c '.' "$(secrets_meta_file)" 2>/dev/null || true)" | "$JQ_BIN" -c --arg name "$name" --argjson workspaces "$workspaces_json" --argjson domains "$domains_json" --argjson pending "$pending_json" --argjson generation "$generation" '
+        .secrets[$name] = {name:$name, workspaces:$workspaces, allowedDomains:$domains, generation:$generation, pending:$pending, error:null}
+      ' 2>/dev/null || true)"
+      ;;
+    edit)
+      payload="$(printf '%s' "$("$JQ_BIN" -c '.' "$(secrets_meta_file)" 2>/dev/null || true)" | "$JQ_BIN" -c --arg name "$name" --argjson workspaces "$workspaces_json" --argjson domains "$domains_json" --argjson pending "$pending_json" --argjson generation "$generation" '
+        .secrets[$name] = (.secrets[$name] | .workspaces=$workspaces | .allowedDomains=$domains | .generation=$generation | .pending=$pending | .error=null)
+      ' 2>/dev/null || true)"
+      ;;
+    remove)
+      payload="$(printf '%s' "$("$JQ_BIN" -c '.' "$(secrets_meta_file)" 2>/dev/null || true)" | "$JQ_BIN" -c --arg name "$name" --argjson pending "$pending_json" --argjson generation "$generation" '
+        .secrets[$name] = (.secrets[$name] | .generation=$generation | .pending=$pending | .error=null)
+      ' 2>/dev/null || true)"
+      ;;
+  esac
+  [[ -n "$payload" ]] || app_emit_error secret-apply "MSW_SECRETS_META_WRITE_FAILED" "The pending secret state could not be composed." "Retry the apply." "" true 69
+  if ! secrets_meta_write_payload "$payload"; then
+    cleanup_failed=""
+    if [[ "$op" == add && "$keychain_ok" == 1 ]]; then
+      secret_keychain_delete "$name" >/dev/null 2>&1 || cleanup_failed=1
+    elif [[ "$op" == edit || "$op" == remove ]]; then
+      for box in $attempted_boxes; do
+        secrets_lockdown_workspace "$box" "A secret change could not be recorded after its old binding was removed; retry the change before starting this workspace" >/dev/null 2>&1 || cleanup_failed=1
+      done
+    fi
+    secrets_lock_release
+    if [[ -n "$cleanup_failed" ]]; then
+      app_emit_error secret-apply "MSW_SECRET_RECOVERY_UNCERTAIN" "The pending secret state could not be recorded and cleanup could not be proven." "Keep the affected workspaces stopped and retry from MSW Monitor." "" true 77
+    fi
+    app_emit_error secret-apply "MSW_SECRETS_META_WRITE_FAILED" "The pending secret state could not be recorded durably." "Retry the secret change." "" true 69
+  fi
+  secrets_lock_release
+  case "$op" in
+    add) outcome="The value is stored in the macOS Keychain and binds after the affected workspaces restart." ;;
+    edit) outcome="The old binding was disabled immediately; the replacement value and domains bind after the affected workspaces restart." ;;
+    remove) outcome="The binding was disabled immediately; the Keychain value is deleted only after the removal is verified absent." ;;
+  esac
+  app_emit_success secret-apply "{\"applied\":true,\"operation\":$(app_json_string "$op"),\"name\":$(app_json_string "$name"),\"workspaces\":$workspaces_json,\"pending\":$pending_array_json,\"valueStored\":$([[ "$keychain_ok" == 1 ]] && printf true || printf false),\"outcome\":$(app_json_string "$outcome")}"
+}
+
 app_cmd_help() {
   cat <<'APPHELP'
 Machine-readable MSW Monitor commands:
@@ -9256,6 +10360,9 @@ Machine-readable MSW Monitor commands:
   msw app github-bind --workspace WORKSPACE --repository OWNER/REPO --mode read-only|host-write --format json
   msw app github-unbind --workspace WORKSPACE --format json
   msw app github-quarantine --workspace WORKSPACE --format json
+  msw app secrets-list --format json
+  msw app secret-plan --input-fd FD --format json   (plan JSON on the descriptor: operation/name/workspaces/allowedDomains)
+  msw app secret-apply PLAN_ID --input-fd FD --format json   ({"confirmation":"...","value":"..."?} on the descriptor; values go to Keychain only)
   msw app url --workspace WORKSPACE [--port PORT] [--scheme http|https] --format json
   msw app clone --workspace WORKSPACE --repository OWNER/REPO [--destination PATH] --format json
   msw app pull --workspace WORKSPACE [--path PATH|all] --format json
@@ -9320,6 +10427,9 @@ cmd_app() {
     github-bind) app_cmd_github_bind "$@" ;;
     github-unbind) app_cmd_github_unbind "$@" ;;
     github-quarantine) app_cmd_github_quarantine "$@" ;;
+    secrets-list) app_cmd_secrets_list "$@" ;;
+    secret-plan) app_cmd_secret_plan "$@" ;;
+    secret-apply) app_cmd_secret_apply "$@" ;;
     plan) app_cmd_plan "$@" ;;
     apply) app_cmd_apply "$@" ;;
     bootstrap) app_cmd_bootstrap "$@" ;;

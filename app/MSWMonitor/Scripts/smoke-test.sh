@@ -27,6 +27,9 @@ case "${1:-}" in
   --navigation-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testUnifiedWindowUsesTopTabsAndWorkspaceSections"
     ;;
+  --secrets-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testSecretsTabAddEditRemoveWildcardConfirmationAndRestartBadges"
+    ;;
   --lifecycle-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testUnifiedWindowOwnsLifecycleConfirmationAndVerifiesRestartGap"
     ;;
@@ -49,7 +52,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--repair-only|--picker-only|--preferences-only|--navigation-only|--lifecycle-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--repair-only|--picker-only|--preferences-only|--navigation-only|--secrets-only|--lifecycle-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
     exit 64
     ;;
 esac

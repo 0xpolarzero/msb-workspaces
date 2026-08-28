@@ -114,7 +114,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         app.buttons["open-monitor.button"].click()
         XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
-        for tab in ["Overview", "Workspaces", "GitHub", "Notifications", "Backup", "General"] {
+        for tab in ["Overview", "Workspaces", "GitHub", "Secrets", "Notifications", "Backup", "General"] {
             let tabButton = app.toolbars.buttons[tab]
             XCTAssertTrue(tabButton.waitForExistence(timeout: 2), "Missing \(tab) tab")
             tabButton.click()
@@ -193,7 +193,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(repairWindow.waitForNonExistence(timeout: 3))
         XCTAssertEqual(app.buttons.matching(identifier: "runtime-repair.window.action").count, 0)
         XCTAssertEqual(app.staticTexts.matching(identifier: "runtime-repair.window.message").count, 0)
-        for tab in ["Overview", "Workspaces", "GitHub", "Notifications", "Backup", "General"] {
+        for tab in ["Overview", "Workspaces", "GitHub", "Secrets", "Notifications", "Backup", "General"] {
             app.toolbars.buttons[tab].click()
             XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.window.banner"].exists)
             XCTAssertFalse(app.staticTexts["runtime-repair.window.message"].exists)
@@ -341,6 +341,170 @@ final class MSWMonitorUITests: XCTestCase {
         app.buttons["Enable Access"].click()
         XCTAssertTrue(app.buttons["Disable Access"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.windows["setup.window"].exists)
+    }
+
+    func testSecretsTabAddEditRemoveWildcardConfirmationAndRestartBadges() {
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-secrets",
+            "--ui-test-lifecycle"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+
+        // Seven tabs in the required order: Secrets sits between GitHub and
+        // Notifications.
+        let githubTab = app.toolbars.buttons["GitHub"]
+        let secretsTab = app.toolbars.buttons["Secrets"]
+        let notificationsTab = app.toolbars.buttons["Notifications"]
+        XCTAssertTrue(githubTab.waitForExistence(timeout: 2))
+        XCTAssertTrue(secretsTab.waitForExistence(timeout: 2))
+        XCTAssertTrue(notificationsTab.waitForExistence(timeout: 2))
+        XCTAssertLessThan(githubTab.frame.minX, secretsTab.frame.minX)
+        XCTAssertLessThan(secretsTab.frame.minX, notificationsTab.frame.minX)
+        secretsTab.click()
+        XCTAssertTrue(app.windows["Secrets"].waitForExistence(timeout: 2))
+        assertConstrainedContent("secrets.content", windowTitle: "Secrets", in: app)
+
+        // Pending restart banner and deterministic fixture rows.
+        assertText("1 workspace needs restart", identifier: "secrets.restart.banner", in: app)
+        XCTAssertTrue(app.buttons["secrets.restart.button"].exists)
+        assertText("OPENAI_API_KEY", identifier: "secrets.entry.OPENAI_API_KEY.name", in: app)
+        assertText("Restart required", identifier: "secrets.entry.OPENAI_API_KEY.status", in: app)
+        assertText("SERVICE_TOKEN", identifier: "secrets.entry.SERVICE_TOKEN.name", in: app)
+        assertText("Active", identifier: "secrets.entry.SERVICE_TOKEN.status", in: app)
+
+        // Workspace rows surface the separate secret restart indicator
+        // without touching GitHub credential state.
+        app.toolbars.buttons["Overview"].click()
+        assertText(
+            "Restart required",
+            identifier: "workspace.dev.summary-secrets",
+            in: app
+        )
+        assertText(
+            "Applies on next start",
+            identifier: "workspace.personal.summary-secrets",
+            in: app
+        )
+        XCTAssertFalse(app.descendants(matching: .any)["workspace.dev.summary-warning"].exists)
+        secretsTab.click()
+
+        // Add: value is typed into the secure field and never rendered again.
+        let addValue = "ci-secret-value-9471"
+        app.buttons["secrets.add.button"].click()
+        let editor = app.descendants(matching: .any)["secrets.editor.sheet"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 2))
+        app.textFields["secrets.editor.name"].click()
+        app.textFields["secrets.editor.name"].typeText("CI_TOKEN")
+        app.secureTextFields["secrets.editor.value"].click()
+        app.secureTextFields["secrets.editor.value"].typeText(addValue)
+        app.descendants(matching: .any)["secrets.editor.workspace.playgrounds"].click()
+        app.descendants(matching: .any)["secrets.editor.workspace.personal"].click()
+        let domainInput = app.textFields["secrets.editor.domain.input"]
+        domainInput.click()
+        domainInput.typeText("api.example.com")
+        app.buttons["secrets.editor.domain.add"].click()
+        domainInput.click()
+        domainInput.typeText("*")
+        app.buttons["secrets.editor.domain.add"].click()
+        // Wildcard requires explicit confirmation before staging.
+        XCTAssertTrue(
+            app.descendants(matching: .any)["secrets.editor.wildcard.warning"]
+                .waitForExistence(timeout: 2)
+        )
+        XCTAssertFalse(app.buttons["secrets.editor.submit"].isEnabled)
+        app.descendants(matching: .any)["secrets.editor.wildcard.confirm"].click()
+        XCTAssertTrue(app.buttons["secrets.editor.submit"].isEnabled)
+        app.buttons["secrets.editor.submit"].click()
+
+        let review = app.descendants(matching: .any)["secrets.review.sheet"]
+        XCTAssertTrue(review.waitForExistence(timeout: 2))
+        let phrase = app.textFields["secrets.review.phrase"]
+        phrase.click()
+        phrase.typeText("ADD CI_TOKEN")
+        XCTAssertTrue(app.buttons["secrets.review.apply"].isEnabled)
+        app.buttons["secrets.review.apply"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["secrets.entry.CI_TOKEN.row"]
+                .waitForExistence(timeout: 3)
+        )
+        assertText("Applies on next start", identifier: "secrets.entry.CI_TOKEN.status", in: app)
+        let leaked = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", addValue, addValue)
+        )
+        XCTAssertEqual(leaked.count, 0, "The secret value must never be rendered")
+
+        // Edit: name immutable, value never preloaded, explicit Replace value.
+        app.buttons["secrets.entry.SERVICE_TOKEN.edit"].click()
+        XCTAssertTrue(editor.waitForExistence(timeout: 2))
+        XCTAssertFalse(app.textFields["secrets.editor.name"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["secrets.editor.value"].exists)
+        assertText(
+            "The current value is not loaded into this form and will be kept.",
+            identifier: "secrets.editor.keep-value",
+            in: app
+        )
+        let replaceValue = "replacement-token-abc"
+        app.descendants(matching: .any)["secrets.editor.replace"].click()
+        let editValue = app.secureTextFields["secrets.editor.value"]
+        XCTAssertTrue(editValue.waitForExistence(timeout: 2))
+        editValue.click()
+        editValue.typeText(replaceValue)
+        app.descendants(matching: .any)["secrets.editor.workspace.dev"].click()
+        app.buttons["secrets.editor.submit"].click()
+        XCTAssertTrue(review.waitForExistence(timeout: 2))
+        phrase.click()
+        phrase.typeText("EDIT SERVICE_TOKEN")
+        app.buttons["secrets.review.apply"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["secrets.entry.SERVICE_TOKEN.row"]
+                .waitForExistence(timeout: 3)
+        )
+        assertText("Restart required", identifier: "secrets.entry.SERVICE_TOKEN.status", in: app)
+        let editLeak = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", replaceValue, replaceValue)
+        )
+        XCTAssertEqual(editLeak.count, 0, "The replacement value must never be rendered")
+
+        // Remove: destructive typed-phrase confirmation.
+        app.buttons["secrets.entry.CI_TOKEN.remove"].click()
+        XCTAssertTrue(review.waitForExistence(timeout: 2))
+        phrase.click()
+        phrase.typeText("REMOVE CI_TOKEN")
+        XCTAssertTrue(app.buttons["secrets.review.apply"].isEnabled)
+        app.buttons["secrets.review.apply"].click()
+        XCTAssertTrue(
+            app.staticTexts["secrets.entry.CI_TOKEN.status"].waitForExistence(timeout: 3)
+        )
+        assertText(
+            "Applies on next start",
+            identifier: "secrets.entry.CI_TOKEN.status",
+            in: app
+        )
+
+        // Batch restart reuses the reviewed lifecycle confirmation; the
+        // completed restart clears the workspace's pending secret state.
+        app.buttons["secrets.restart.button"].click()
+        let lifecycleSheet = app.descendants(matching: .any)["lifecycle.window-confirmation.sheet"]
+        XCTAssertTrue(lifecycleSheet.waitForExistence(timeout: 2))
+        assertText("Restart dev?", identifier: "lifecycle.window-confirmation.title", in: app)
+        app.buttons["lifecycle.window-confirmation.confirm"].click()
+        app.toolbars.buttons["Overview"].click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["workspace.dev.summary-secrets"]
+                .waitForNonExistence(timeout: 10)
+        )
+        secretsTab.click()
+        XCTAssertTrue(app.buttons["secrets.restart.button"].waitForNonExistence(timeout: 2))
+        assertText(
+            "Secret changes will apply on 2 workspaces' next start",
+            identifier: "secrets.restart.banner",
+            in: app
+        )
     }
 
     private func launchFixture(
@@ -672,6 +836,7 @@ final class MSWMonitorUITests: XCTestCase {
 
         XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.windows["Overview"].waitForExistence(timeout: 2))
+        assertConstrainedContent("overview.content", windowTitle: "Overview", in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["overview.system-health"]
                 .waitForExistence(timeout: 2)
@@ -707,6 +872,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(workspacesTab.waitForExistence(timeout: 2))
         workspacesTab.click()
         XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 2))
+        assertConstrainedContent("workspaces.content", windowTitle: "Workspaces", in: app)
         assertWorkspaceSection("Files", in: app)
         let navigationScreenshot = XCTAttachment(screenshot: app.screenshot())
         navigationScreenshot.name = "Workspace primary and secondary navigation"
@@ -880,6 +1046,7 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(githubTab.waitForExistence(timeout: 2))
         githubTab.click()
         XCTAssertTrue(app.windows["GitHub"].waitForExistence(timeout: 2))
+        assertConstrainedContent("settings.github.content", windowTitle: "GitHub", in: app)
 
         let generalTab = app.toolbars.buttons["General"]
         XCTAssertTrue(generalTab.waitForExistence(timeout: 2))
@@ -1939,6 +2106,22 @@ final class MSWMonitorUITests: XCTestCase {
             identifier: "backup.result.completed",
             in: app
         )
+    }
+
+    private func assertConstrainedContent(
+        _ identifier: String,
+        windowTitle: String,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let content = app.descendants(matching: .any)[identifier]
+        let window = app.windows[windowTitle]
+        XCTAssertTrue(content.waitForExistence(timeout: 2), file: file, line: line)
+        XCTAssertTrue(window.exists, file: file, line: line)
+        XCTAssertLessThanOrEqual(content.frame.width, 760, file: file, line: line)
+        XCTAssertGreaterThan(content.frame.minX - window.frame.minX, 30, file: file, line: line)
+        XCTAssertGreaterThan(window.frame.maxX - content.frame.maxX, 30, file: file, line: line)
     }
 
     private func assertAction(

@@ -14,6 +14,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case workspaces = "Workspaces"
     case github = "GitHub"
+    case secrets = "Secrets"
     case notifications = "Notifications"
     case backup = "Backup"
     case general = "General"
@@ -51,6 +52,8 @@ struct AppRoute: Equatable {
         switch requested.lowercased() {
         case "github", "github-access":
             self.init(tab: .github, workspace: workspace)
+        case "secrets", "secret":
+            self.init(tab: .secrets, workspace: workspace)
         case "backup", "backups", "restore":
             self.init(tab: .backup, workspace: workspace)
         case "activity":
@@ -526,6 +529,14 @@ struct SettingsView: View {
                             }
                             .tag(AppTab.github)
 
+                        if let model = applicationState.model {
+                            SecretsView(model: model)
+                                .tabItem {
+                                    Label("Secrets", systemImage: "key")
+                                }
+                                .tag(AppTab.secrets)
+                        }
+
                         notificationSettings
                             .tabItem {
                                 Label("Notifications", systemImage: "bell")
@@ -671,7 +682,7 @@ struct SettingsView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 28)
         .padding(.vertical, 2)
     }
 
@@ -741,7 +752,7 @@ struct SettingsView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Account")
-                            .font(.title3.weight(.semibold))
+                            .font(.headline)
                             .accessibilityAddTraits(.isHeader)
                         if let connectedAccount {
                             Label("Connected as @\(connectedAccount.login)", systemImage: "checkmark.circle.fill")
@@ -774,7 +785,7 @@ struct SettingsView: View {
                     if !isEditingGitHubAccess, !isPreparingGitHubEditor {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Repository access")
-                                .font(.title3.weight(.semibold))
+                                .font(.headline)
                                 .accessibilityAddTraits(.isHeader)
                             if groupedMetadata.isEmpty {
                                 ContentUnavailableView(
@@ -800,7 +811,12 @@ struct SettingsView: View {
                     githubAccessEditorSection
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 720, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("settings.github.content")
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .accessibilityIdentifier("settings.github")
         .onAppear {
@@ -820,7 +836,7 @@ struct SettingsView: View {
     private var localGitHubAccountSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Account")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             switch githubConnectionState {
             case .loading:
@@ -914,7 +930,7 @@ struct SettingsView: View {
         if case .ready = githubConnectionState {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Repository access")
-                    .font(.title3.weight(.semibold))
+                    .font(.headline)
                     .accessibilityAddTraits(.isHeader)
                 RepositoryWorkspacePolicyEditor(
                     workspaces: githubWorkspaceNames,
@@ -965,7 +981,7 @@ struct SettingsView: View {
     private var githubAccessEditorSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Edit repository access")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             if isPreparingGitHubEditor {
                 ProgressView("Preparing repository editor…")
@@ -1380,7 +1396,11 @@ struct SettingsView: View {
                     .foregroundStyle(.orange)
             }
         }
-        .padding(.vertical, 4)
+        .padding(12)
+        .background(
+            Color(nsColor: .controlBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
     }
 
     private func recoveryMessage(_ message: String) -> some View {

@@ -135,6 +135,21 @@ Connect mode (`MSW_GITHUB_MODE=connect`) remains available as a rollback
 alternative; local mode is the default and never reads or writes Connect
 grants.
 
+### Host-held API secrets
+
+Open **MSW Monitor → Secrets** to manage non-GitHub API keys. For each key,
+choose its workspaces and HTTPS destinations: an exact host, `*.example.com`,
+or `*`. The real value stays in macOS Keychain. The VM receives only a
+placeholder, and MicroSandbox substitutes the value at the allowed destination.
+Using `*` requires an explicit warning acknowledgement because any HTTPS host
+could then receive the credential.
+
+Adding, editing, or removing a key creates pending configuration. Running
+workspaces show **Restart required**; stopped workspaces show **Applies on next
+start**. Multiple edits can be staged before using **Restart affected
+workspaces…**. Removal disables the old binding immediately and deletes the
+Keychain value only after MSW verifies the binding is absent.
+
 ## 4. Enter a workspace from Ghostty
 
 ```bash

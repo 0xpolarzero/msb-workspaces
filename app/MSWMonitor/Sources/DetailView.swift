@@ -166,13 +166,14 @@ struct DetailView: View {
     private var workspacePane: some View {
         VStack(spacing: 0) {
             workspaceFilterBar
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 28)
                 .padding(.vertical, 12)
 
             Divider()
 
             sectionContent
-                .padding(20)
+                .padding(.horizontal, 28)
+                .padding(.vertical, 16)
                 .frame(
                     maxWidth: .infinity,
                     minHeight: 400,
@@ -180,6 +181,10 @@ struct DetailView: View {
                     alignment: .topLeading
                 )
         }
+        .frame(maxWidth: 720, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("workspaces.content")
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: navigation.workspaceSection) { _, section in
             visitedWorkspaceSections.insert(section)
         }
@@ -263,7 +268,7 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Workspaces")
-                        .font(.title3.weight(.semibold))
+                        .font(.headline)
                         .accessibilityAddTraits(.isHeader)
                     workspaceSummary
                 }
@@ -272,9 +277,13 @@ struct DetailView: View {
                     systemHealthHeader
                     systemHealth
                 }
-                .accessibilityIdentifier("overview.system-health")
             }
-            .padding(20)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 720, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("overview.content")
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .accessibilityIdentifier("details.overview")
     }
@@ -282,7 +291,7 @@ struct DetailView: View {
     private var systemHealthHeader: some View {
         HStack {
             Text("System health")
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             Spacer()
             if needsInstallationRepair {
@@ -1866,116 +1875,99 @@ private extension DetailView {
     }
 
     private var backup: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Archive scope")
-                        .font(.title3.weight(.semibold))
-                        .accessibilityAddTraits(.isHeader)
-                    Label("Includes managed workspace code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics.", systemImage: "archivebox")
-                    Label("Excludes Mac Keychain records and host credentials.", systemImage: "key.slash")
-                    Text("Treat the archive as sensitive. Store it only in a trusted destination with appropriate disk encryption and access controls.")
+        Form {
+            Section("Archive scope") {
+                Label("Includes managed workspace code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics.", systemImage: "archivebox")
+                Label("Excludes Mac Keychain records and host credentials.", systemImage: "key.slash")
+                Text("Treat the archive as sensitive. Store it only in a trusted destination with appropriate disk encryption and access controls.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                if model.isBackupPreviewLoading {
+                    ProgressView("Estimating managed source data…")
+                        .accessibilityIdentifier("backup.preview.loading")
+                }
+                if let backupDestination {
+                    LabeledContent("Backup destination", value: backupDestination.path(percentEncoded: false))
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            } header: {
+                HStack {
+                    Text("Backup")
+                    Spacer()
+                    Button("Create New Backup…") { chooseBackupDirectory() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isMaintenanceOperationInFlight || model.isBackupPreviewLoading)
+                        .accessibilityIdentifier("backup.create-new.button")
+                }
+            }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Backup")
-                            .font(.title3.weight(.semibold))
+            Section {
+                if let restoreArchive {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Restore preview")
+                            .font(.headline)
                             .accessibilityAddTraits(.isHeader)
-                        Spacer()
-                        Button("Create New Backup…") { chooseBackupDirectory() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(model.isMaintenanceOperationInFlight || model.isBackupPreviewLoading)
-                            .accessibilityIdentifier("backup.create-new.button")
-                    }
-
-                    if model.isBackupPreviewLoading {
-                        ProgressView("Estimating managed source data…")
-                            .accessibilityIdentifier("backup.preview.loading")
-                    }
-                    if let backupDestination {
-                        LabeledContent("Backup destination", value: backupDestination.path(percentEncoded: false))
+                        LabeledContent("Archive", value: restoreArchive.lastPathComponent)
+                        LabeledContent("Size", value: archiveSize(restoreArchive))
+                        Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
                             .font(.caption)
-                            .textSelection(.enabled)
+                        Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Button("Review Destructive Restore…", role: .destructive) { confirmRestore = true }
+                            .disabled(model.isMaintenanceOperationInFlight)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } header: {
+                HStack {
+                    Text("Restore")
+                    Spacer()
+                    Button("Choose Restore Archive…") { chooseRestoreArchive() }
+                        .disabled(model.isMaintenanceOperationInFlight || model.hasActiveBackupOperations)
+                }
+            }
+
+            if !model.presentedBackupOperations.isEmpty {
+                Section("CLI-owned backup operations") {
+                    ForEach(model.presentedBackupOperations) { operation in
+                        BackupOperationCard(
+                            operation: operation,
+                            refreshWorkspaceState: model.refreshBackupWorkspaceState
+                        )
                     }
                 }
+            }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Restore")
-                            .font(.title3.weight(.semibold))
-                            .accessibilityAddTraits(.isHeader)
-                        Spacer()
-                        Button("Choose Restore Archive…") { chooseRestoreArchive() }
-                            .disabled(model.isMaintenanceOperationInFlight || model.hasActiveBackupOperations)
-                    }
-
-                    if let restoreArchive {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Restore preview")
-                                .font(.headline)
-                                .accessibilityAddTraits(.isHeader)
-                            LabeledContent("Archive", value: restoreArchive.lastPathComponent)
-                            LabeledContent("Size", value: archiveSize(restoreArchive))
-                            Text("Impact: replaces managed state for every configured workspace. All workspaces are stopped; the current restore contract does not promise automatic restart.")
-                                .font(.caption)
-                            Text("Checksum verification and rollback status are not available before the runtime reviews the archive. If apply fails, treat the outcome as unknown until diagnostics and a fresh observation confirm state.")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                            Button("Review Destructive Restore…", role: .destructive) { confirmRestore = true }
-                                .disabled(model.isMaintenanceOperationInFlight)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            if let operation = latestRestoreOperation {
+                Section("Operation") {
+                    ModelOperationView(operation: operation) {
+                        retryMaintenance(kind: operation.kind)
                     }
                 }
-
-                if !model.presentedBackupOperations.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("CLI-owned backup operations")
-                            .font(.headline)
-                            .accessibilityAddTraits(.isHeader)
-                        ForEach(model.presentedBackupOperations) { operation in
-                            BackupOperationCard(
-                                operation: operation,
-                                refreshWorkspaceState: model.refreshBackupWorkspaceState
-                            )
+            } else if let operation = maintenanceOperation, operation.kind == .restore {
+                Section("Operation") {
+                    MaintenanceOperationView(operation: operation) {
+                        if operation.kind == .backup, let destination = backupDestination {
+                            beginBackup(to: destination)
+                        } else if operation.kind == .restore, restoreArchive != nil {
+                            confirmRestore = true
                         }
                     }
                 }
+            }
 
-                if let operation = latestRestoreOperation {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Operation")
-                            .font(.headline)
-                            .accessibilityAddTraits(.isHeader)
-                        ModelOperationView(operation: operation) {
-                            retryMaintenance(kind: operation.kind)
-                        }
-                    }
-                } else if let operation = maintenanceOperation, operation.kind == .restore {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Operation")
-                            .font(.headline)
-                            .accessibilityAddTraits(.isHeader)
-                        MaintenanceOperationView(operation: operation) {
-                            if operation.kind == .backup, let destination = backupDestination {
-                                beginBackup(to: destination)
-                            } else if operation.kind == .restore, restoreArchive != nil {
-                                confirmRestore = true
-                            }
-                        }
-                    }
-                }
-
-                if !showsBackupFailureCard {
+            if !showsBackupFailureCard {
+                Section {
                     backupDetailError
                 }
             }
-            .padding(20)
         }
+        .formStyle(.grouped)
         .task { await model.refreshBackupOperations() }
     }
 
@@ -2013,6 +2005,7 @@ private extension DetailView {
                 )
             }
         }
+        .accessibilityIdentifier("overview.system-health")
     }
 
     private var needsInstallationRepair: Bool {
@@ -2250,6 +2243,14 @@ private struct WorkspaceSummaryRow: View {
                     .accessibilityIdentifier(
                         "workspace.\(workspace.id.rawValue).summary-transition"
                     )
+            }
+
+            if let indicator = workspace.secrets.indicatorText {
+                Label(indicator, systemImage: "key")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-secrets")
+                    .accessibilityLabel(indicator)
             }
 
             if let attention {

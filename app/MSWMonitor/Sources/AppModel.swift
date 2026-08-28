@@ -45,10 +45,53 @@ struct Workspace: Identifiable, Equatable, Sendable {
         case quarantined = "Quarantined"
     }
 
+    /// Host-held secret configuration state for a workspace. Deliberately
+    /// separate from `CredentialState`: pending secret restarts must never
+    /// ride the GitHub credential state.
+    struct SecretsState: Equatable, Sendable {
+        enum Status: String, Equatable, Sendable {
+            case active
+            case restartRequired = "restart-required"
+            case appliesOnNextStart = "applies-on-next-start"
+            case error
+
+            var displayName: String {
+                switch self {
+                case .active: return "Active"
+                case .restartRequired: return "Restart required"
+                case .appliesOnNextStart: return "Applies on next start"
+                case .error: return "Error"
+                }
+            }
+        }
+
+        var status: Status
+        var pendingCount: Int
+        var reason: String?
+
+        static let active = SecretsState(status: .active, pendingCount: 0, reason: nil)
+
+        var restartRequired: Bool { status == .restartRequired }
+        var appliesOnNextStart: Bool { status == .appliesOnNextStart }
+        var needsAttention: Bool { status != .active }
+
+        /// Short label for workspace rows and the status popover, or nil when
+        /// no secret configuration is pending.
+        var indicatorText: String? {
+            switch status {
+            case .active: return nil
+            case .restartRequired: return "Restart required"
+            case .appliesOnNextStart: return "Applies on next start"
+            case .error: return "Secrets error"
+            }
+        }
+    }
+
     let id: ID
     let purpose: String
     var state: State
     var credential: CredentialState
+    var secrets: SecretsState
     var freshness: MSWFreshness
     var observedAt: Date?
     var networkHost: String?
@@ -72,6 +115,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         purpose: String? = nil,
         state: State = .stopped,
         credential: CredentialState = .unconfigured,
+        secrets: SecretsState = .active,
         freshness: MSWFreshness = .neverObserved,
         observedAt: Date? = nil,
         networkHost: String? = nil,
@@ -92,6 +136,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         self.purpose = purpose ?? Self.defaultPurpose(for: id)
         self.state = state
         self.credential = credential
+        self.secrets = secrets
         self.freshness = freshness
         self.observedAt = observedAt
         self.networkHost = networkHost
@@ -819,7 +864,6 @@ struct SourceEditorLauncher {
     }
 }
 
-
 @Observable
 @MainActor
 final class AppModel {
@@ -885,6 +929,28 @@ final class AppModel {
     var selectedWorkspace: Workspace.ID?
     private var pendingLifecycleRequests: [LifecycleConfirmationSurface: PendingLifecycleRequest] = [:]
     private(set) var pendingPushPlan: MSWPushPlan?
+    /// Nonsecret host-secret metadata for the Secrets tab. Values never exist
+    /// in app memory beyond the transient apply request body on stdin.
+    private(set) var secretEntries: [SecretEntry] = []
+    private(set) var isSecretsLoading = false
+    private(set) var secretsError: String?
+    /// Plan/apply failures survive the follow-up list refresh so the UI can
+    /// keep showing them (and blocking mutations) until an authoritative
+    /// refresh succeeds or a new operation stages cleanly.
+    private(set) var secretsOperationError: String?
+    private(set) var isSecretOperationInFlight = false
+    private(set) var pendingSecretPlan: MSWSecretPlanResult?
+    private var secretRefreshGeneration = 0
+    private var secretsFixtureEnabled = false
+    private var secretsFixtureRunning: Set<String> = []
+    private var secretsFixtureEntries: [SecretsFixtureEntry] = []
+    private var secretsFixturePlanDomains: [String: [String]] = [:]
+    private struct SecretsRestartBatch {
+        var pending: [Workspace.ID]
+        var current: Workspace.ID
+    }
+
+    private var secretsRestartBatch: SecretsRestartBatch?
     private enum SafetyAction {
         case lifecycle(MSWLifecycleAction)
         case terminal
@@ -939,6 +1005,7 @@ final class AppModel {
     private var lifecycleUITestFixtureEnabled = false
     private var lifecycleUITestAction: MSWLifecycleAction?
     private var lifecycleUITestObservationIndex = 0
+    private var lifecycleUITestWorkspace: Workspace.ID?
     private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
@@ -1813,6 +1880,10 @@ final class AppModel {
     }
 
     func cancelPendingLifecycle(surface: LifecycleConfirmationSurface = .statusPopover) {
+        if surface == .unifiedWindow,
+           let request = pendingLifecycleRequests[surface] {
+            cancelSecretsRestartBatchIfOwned(workspace: request.workspace)
+        }
         pendingLifecycleRequests[surface] = nil
     }
 
@@ -2239,6 +2310,532 @@ final class AppModel {
 
     func cancelPendingBackup() {
         pendingBackupPreview = nil
+    }
+
+    // MARK: - Host-held secrets
+
+    private struct SecretsFixtureEntry {
+        var name: String
+        var workspaces: [String]
+        var allowedDomains: [String]
+        var pendingWorkspaces: Set<String>
+        var pendingOperation: SecretOperation?
+        var generation: Int
+        var error: String?
+    }
+
+    private enum SecretsFixtureError: LocalizedError {
+        case confirmationMismatch
+        case valueRequired
+        case invalidOperation
+
+        var errorDescription: String? {
+            switch self {
+            case .confirmationMismatch: return "Type the exact confirmation phrase before continuing."
+            case .valueRequired: return "A replacement value is required for this secret change."
+            case .invalidOperation: return "The secret change is invalid for its current state."
+            }
+        }
+    }
+
+    /// Running workspaces whose secret configuration is waiting on a restart.
+    var secretsRestartRequiredWorkspaces: [Workspace] {
+        workspaces.filter { $0.secrets.restartRequired && $0.state == .running }
+    }
+
+    /// Workspaces whose pending secret configuration applies on their next
+    /// start because they are not currently running.
+    var secretsAppliesOnNextStartWorkspaces: [Workspace] {
+        workspaces.filter {
+            $0.secrets.appliesOnNextStart ||
+                ($0.secrets.restartRequired && $0.state != .running)
+        }
+    }
+
+    var hasPendingSecretChanges: Bool {
+        !secretsRestartRequiredWorkspaces.isEmpty || !secretsAppliesOnNextStartWorkspaces.isEmpty
+    }
+
+    var secretsRestartBannerMessage: String? {
+        let running = secretsRestartRequiredWorkspaces.count
+        let queued = secretsAppliesOnNextStartWorkspaces.count
+        if running > 0 {
+            return running == 1
+                ? "1 workspace needs restart"
+                : "\(running) workspaces need restart"
+        }
+        if queued > 0 {
+            return queued == 1
+                ? "Secret changes will apply on 1 workspace's next start"
+                : "Secret changes will apply on \(queued) workspaces' next start"
+        }
+        return nil
+    }
+
+    /// Installs the deterministic secrets UI fixture: dev is running with a
+    /// pending add, personal is stopped with the same pending add (Applies on
+    /// next start), playgrounds is untouched. Pair with `--ui-test-lifecycle`
+    /// so "Restart affected workspaces…" exercises the reviewed restart flow.
+    func installSecretsUITestFixture() {
+        guard let index = workspaces.firstIndex(where: { $0.id == .dev }) else { return }
+        workspaces[index].state = .running
+        workspaces[index].freshness = .fresh
+        workspaces[index].canStop = true
+        workspaces[index].canRestart = true
+        workspaces[index].canOpenTerminal = true
+        workspaces[index].serverCapabilities = MSWActionCapabilities(
+            canStart: false,
+            canStop: true,
+            canRestart: true,
+            canOpenTerminal: true,
+            canPush: true
+        )
+        secretsFixtureEnabled = true
+        secretsFixtureEntries = [
+            SecretsFixtureEntry(
+                name: "OPENAI_API_KEY",
+                workspaces: ["dev", "personal"],
+                allowedDomains: ["api.openai.com"],
+                pendingWorkspaces: ["dev", "personal"],
+                pendingOperation: .add,
+                generation: 1,
+                error: nil
+            ),
+            SecretsFixtureEntry(
+                name: "SERVICE_TOKEN",
+                workspaces: ["playgrounds"],
+                allowedDomains: ["*.example.com"],
+                pendingWorkspaces: [],
+                pendingOperation: nil,
+                generation: 1,
+                error: nil
+            )
+        ]
+        applySecretsFixtureToWorkspaces()
+    }
+
+    /// Test seam for batch-restart coverage: personal is also running with
+    /// the same pending secret configuration, so the restart queue spans two
+    /// workspaces. The UI fixture keeps personal stopped to exercise the
+    /// "Applies on next start" presentation.
+    func installSecretsBatchTestFixture() {
+        installSecretsUITestFixture()
+        guard let index = workspaces.firstIndex(where: { $0.id == .personal }) else { return }
+        workspaces[index].state = .running
+        workspaces[index].freshness = .fresh
+        workspaces[index].canStop = true
+        workspaces[index].canRestart = true
+        workspaces[index].serverCapabilities = MSWActionCapabilities(
+            canStart: false,
+            canStop: true,
+            canRestart: true,
+            canOpenTerminal: true,
+            canPush: true
+        )
+        applySecretsFixtureToWorkspaces()
+    }
+
+    /// Refreshes nonsecret secret metadata. In fixture mode this re-derives
+    /// entries and workspace states from the deterministic fixture store.
+    func refreshSecrets() async {
+        secretRefreshGeneration &+= 1
+        let generation = secretRefreshGeneration
+        isSecretsLoading = true
+        defer {
+            if generation == secretRefreshGeneration {
+                isSecretsLoading = false
+            }
+        }
+        if secretsFixtureEnabled {
+            applySecretsFixtureToWorkspaces()
+            secretsError = nil
+            return
+        }
+        guard let client else {
+            secretsError = "Secrets are unavailable in this build."
+            return
+        }
+        do {
+            let result = try await client.secretsList()
+            guard generation == secretRefreshGeneration else { return }
+            secretEntries = result.entries.map { entry in
+                SecretEntry(
+                    name: entry.name,
+                    workspaces: entry.workspaces,
+                    allowedDomains: entry.allowedDomains,
+                    status: SecretEntry.Status(rawValue: entry.status.rawValue) ?? .error,
+                    pendingOperation: entry.pendingOperation.flatMap {
+                        SecretOperation(rawValue: $0.type)
+                    },
+                    generation: entry.generation,
+                    error: entry.error
+                )
+            }
+            secretsError = nil
+            applySecretsWorkspaceSummaries(result.workspaces)
+        } catch {
+            guard generation == secretRefreshGeneration else { return }
+            secretsError = secretsErrorMessage(error)
+        }
+    }
+
+    /// Stages a host-held secret change. The value is never part of planning;
+    /// it is requested only when the plan is confirmed.
+    @discardableResult
+    func prepareSecretPlan(
+        operation: SecretOperation,
+        name: String,
+        workspaces: [String],
+        allowedDomains: [String]
+       ) async -> Bool {
+        guard !isSecretOperationInFlight else {
+            secretsOperationError = "Another secret change is already in progress. Wait for it to finish."
+            return false
+        }
+        isSecretOperationInFlight = true
+        defer { isSecretOperationInFlight = false }
+        if secretsFixtureEnabled {
+            guard let fixturePlan = secretsFixturePlan(
+                operation: operation,
+                name: name,
+                workspaces: workspaces,
+                allowedDomains: allowedDomains
+            ) else {
+                                secretsOperationError = SecretsFixtureError.invalidOperation.localizedDescription
+                return false
+            }
+            pendingSecretPlan = fixturePlan
+                        secretsOperationError = nil
+            return true
+        }
+        guard let client else {
+                        secretsOperationError = "Secret changes are unavailable in this build."
+            return false
+        }
+        do {
+            let request = MSWSecretPlanRequest(
+                operation: operation.rawValue,
+                name: name,
+                workspaces: workspaces,
+                allowedDomains: allowedDomains
+            )
+            let result = try await client.prepareSecretPlan(request)
+            pendingSecretPlan = result
+                        secretsOperationError = nil
+            return true
+        } catch {
+                        secretsOperationError = secretsErrorMessage(error)
+            return false
+        }
+    }
+
+    /// Applies a staged secret change. The value travels only inside the
+    /// stdin request body and is released as soon as the request is encoded.
+       func confirmSecretPlan(confirmation: String, value: String?) async {
+        guard !isSecretOperationInFlight else { return }
+        guard let plan = pendingSecretPlan else { return }
+                pendingSecretPlan = nil
+        isSecretOperationInFlight = true
+        defer { isSecretOperationInFlight = false }
+        if secretsFixtureEnabled {
+            do {
+                try applySecretsFixturePlan(plan, confirmation: confirmation, value: value)
+                                secretsOperationError = nil
+            } catch {
+                                secretsOperationError = error.localizedDescription
+            }
+            await refreshSecrets()
+            return
+        }
+        guard let client else {
+                        secretsOperationError = "Secret changes are unavailable in this build."
+            return
+        }
+        do {
+            _ = try await client.applySecretPlan(plan, confirmation: confirmation, value: value)
+                        secretsOperationError = nil
+        } catch {
+                        secretsOperationError = secretsErrorMessage(error)
+        }
+        await refreshSecrets()
+        }
+
+    /// An explicit user retry after a plan/apply failure: clears the
+    /// operation error and re-reads the authoritative list.
+    func retrySecretsOperation() async {
+        secretsOperationError = nil
+        await refreshSecrets()
+    }
+
+    var secretsMutationsBlocked: Bool {
+        secretsError != nil || secretsOperationError != nil || isSecretOperationInFlight
+    }
+
+    func cancelSecretPlan() {
+        pendingSecretPlan = nil
+    }
+
+    /// Restarts every running workspace with pending secret configuration,
+    /// one at a time, through the existing reviewed lifecycle confirmation.
+    /// The batch owns the current workspace: only ITS verified restart
+    /// advances to the next one, and cancelling or failing the current
+    /// restart aborts the batch instead of launching unrelated restarts.
+    func restartWorkspacesForSecrets() {
+        let affected = secretsRestartRequiredWorkspaces.map(\.id)
+        guard !affected.isEmpty else { return }
+        secretsRestartBatch = SecretsRestartBatch(
+            pending: Array(affected.dropFirst()),
+            current: affected[0]
+        )
+        restart(affected[0], surface: .unifiedWindow)
+    }
+
+    private func verifyAndAdvanceSecretsRestartBatch(workspace: Workspace.ID) {
+        guard secretsRestartBatch?.current == workspace else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.refreshSecrets()
+            guard let batch = self.secretsRestartBatch, batch.current == workspace else { return }
+            guard let current = self.workspaces.first(where: { $0.id == workspace }),
+                  current.secrets.pendingCount == 0,
+                  current.secrets.status == .active else {
+                self.secretsRestartBatch = nil
+                self.secretsOperationError =
+                    "\(workspace.rawValue) restarted, but its secret configuration was not verified. Refresh and retry."
+                return
+            }
+            if let next = batch.pending.first {
+                self.secretsRestartBatch = SecretsRestartBatch(
+                    pending: Array(batch.pending.dropFirst()),
+                    current: next
+                )
+                self.restart(next, surface: .unifiedWindow)
+            } else {
+                self.secretsRestartBatch = nil
+            }
+        }
+    }
+
+    private func cancelSecretsRestartBatchIfOwned(workspace: Workspace.ID) {
+        if secretsRestartBatch?.current == workspace {
+            secretsRestartBatch = nil
+        }
+    }
+
+    private func applySecretsWorkspaceSummaries(
+        _ summaries: [MSWSecretsListResponse.WorkspaceSummary]
+    ) {
+        var byName: [String: MSWSecretsListResponse.WorkspaceSummary] = [:]
+        for summary in summaries where byName[summary.workspace] == nil {
+            byName[summary.workspace] = summary
+        }
+        for index in workspaces.indices {
+            guard let summary = byName[workspaces[index].id.rawValue] else { continue }
+            // The list summary carries no error field; an authoritative
+            // workspace state snapshot reporting `.error` stays visible until
+            // that snapshot (or a new list entry) proves recovery.
+            if workspaces[index].secrets.status == .error { continue }
+            let status: Workspace.SecretsState.Status
+            if summary.pendingCount == 0 {
+                status = .active
+            } else if summary.restartRequired && workspaces[index].state == .running {
+                status = .restartRequired
+            } else {
+                status = .appliesOnNextStart
+            }
+            workspaces[index].secrets = Workspace.SecretsState(
+                status: status,
+                pendingCount: summary.pendingCount,
+                reason: summary.pendingCount == 0
+                    ? nil
+                    : "Host-held secret changes are pending."
+            )
+        }
+    }
+
+    private func secretsFixturePlan(
+        operation: SecretOperation,
+        name: String,
+        workspaces: [String],
+        allowedDomains: [String]
+    ) -> MSWSecretPlanResult? {
+        guard SecretNameRule.isValid(name),
+              !workspaces.isEmpty,
+              workspaces.allSatisfy(WorkspaceID.isValid),
+              !allowedDomains.isEmpty,
+              allowedDomains.allSatisfy(SecretDomainRule.isAllowed) else {
+            return nil
+        }
+        let exists = secretsFixtureEntries.contains { $0.name == name }
+        if operation == .add, exists { return nil }
+        if operation != .add, !exists { return nil }
+        let plan = MSWSecretPlanResult(
+            planId: "ui-test-\(operation.rawValue)-\(name)",
+            operation: operation.rawValue,
+            name: name,
+            affectedWorkspaces: workspaces,
+            requiresSecret: operation != .remove,
+            confirmationPhrase: "\(operation.rawValue.uppercased()) \(name)",
+            effects: "Deterministic secrets fixture.",
+            expiresAt: Date().addingTimeInterval(300)
+        )
+        secretsFixturePlanDomains[plan.planId] = allowedDomains
+        return plan
+    }
+
+    private func applySecretsFixturePlan(
+        _ plan: MSWSecretPlanResult,
+        confirmation: String,
+        value: String?
+    ) throws {
+        guard confirmation == plan.confirmationPhrase else {
+            throw SecretsFixtureError.confirmationMismatch
+        }
+        guard let operation = SecretOperation(rawValue: plan.operation),
+              let allowedDomains = secretsFixturePlanDomains.removeValue(forKey: plan.planId) else {
+            throw SecretsFixtureError.invalidOperation
+        }
+        switch operation {
+        case .add:
+            guard let value, !value.isEmpty else {
+                throw SecretsFixtureError.valueRequired
+            }
+        case .edit:
+            guard value.map({ !$0.isEmpty }) ?? true else {
+                throw SecretsFixtureError.valueRequired
+            }
+        case .remove:
+            guard value == nil else {
+                throw SecretsFixtureError.invalidOperation
+            }
+        }
+        switch operation {
+        case .add:
+            guard !secretsFixtureEntries.contains(where: { $0.name == plan.name }) else {
+                throw SecretsFixtureError.invalidOperation
+            }
+            secretsFixtureEntries.append(
+                SecretsFixtureEntry(
+                    name: plan.name,
+                    workspaces: plan.affectedWorkspaces,
+                    allowedDomains: allowedDomains,
+                    pendingWorkspaces: Set(plan.affectedWorkspaces),
+                    pendingOperation: .add,
+                    generation: 1,
+                    error: nil
+                )
+            )
+        case .edit:
+            guard let index = secretsFixtureEntries.firstIndex(where: { $0.name == plan.name }) else {
+                throw SecretsFixtureError.invalidOperation
+            }
+            var entry = secretsFixtureEntries[index]
+            entry.workspaces = plan.affectedWorkspaces
+            entry.allowedDomains = allowedDomains
+            entry.pendingWorkspaces.formUnion(plan.affectedWorkspaces)
+            entry.pendingOperation = .edit
+            entry.generation += 1
+            entry.error = nil
+            secretsFixtureEntries[index] = entry
+        case .remove:
+            guard let index = secretsFixtureEntries.firstIndex(where: { $0.name == plan.name }) else {
+                throw SecretsFixtureError.invalidOperation
+            }
+            var entry = secretsFixtureEntries[index]
+            entry.pendingWorkspaces.formUnion(plan.affectedWorkspaces)
+            entry.pendingOperation = .remove
+            entry.generation += 1
+            entry.error = nil
+            secretsFixtureEntries[index] = entry
+        }
+    }
+
+    /// Re-derives entries and per-workspace states from the fixture store.
+    private func applySecretsFixtureToWorkspaces() {
+        guard secretsFixtureEnabled else { return }
+        secretsFixtureRunning = Set(
+            workspaces.filter { $0.state == .running }.map(\.id.rawValue)
+        )
+        secretEntries = secretsFixtureEntries.map { entry in
+            let pending = entry.pendingWorkspaces
+            let status: SecretEntry.Status
+            if entry.error != nil {
+                status = .error
+            } else if pending.isEmpty {
+                status = .active
+            } else if pending.contains(where: { secretsFixtureRunning.contains($0) }) {
+                status = entry.pendingOperation == .remove ? .removalPendingRestart : .restartRequired
+            } else {
+                status = .appliesOnNextStart
+            }
+            return SecretEntry(
+                name: entry.name,
+                workspaces: entry.workspaces,
+                allowedDomains: entry.allowedDomains,
+                status: status,
+                pendingOperation: entry.pendingOperation,
+                generation: entry.generation,
+                error: entry.error
+            )
+        }
+        var pendingCounts: [String: Int] = [:]
+        for entry in secretsFixtureEntries {
+            for workspace in entry.pendingWorkspaces {
+                pendingCounts[workspace, default: 0] += 1
+            }
+        }
+        for index in workspaces.indices {
+            let id = workspaces[index].id.rawValue
+            let pending = pendingCounts[id] ?? 0
+            let status: Workspace.SecretsState.Status = pending == 0
+                ? .active
+                : (secretsFixtureRunning.contains(id) ? .restartRequired : .appliesOnNextStart)
+            workspaces[index].secrets = Workspace.SecretsState(
+                status: status,
+                pendingCount: pending,
+                reason: pending == 0 ? nil : "Host-held secret changes are pending."
+            )
+        }
+    }
+
+    /// Fixture-mode hook: a workspace that just finished restarting has
+    /// consumed its pending secret configuration.
+    private func reconcileSecretsFixture(previousByID: [Workspace.ID: Workspace]) {
+        guard secretsFixtureEnabled else { return }
+        let restartedIDs = Set(
+            workspaces
+                .filter { workspace in
+                    guard workspace.state == .running else { return false }
+                    if previousByID[workspace.id]?.state == .restarting { return true }
+                    let operation = operationStates[
+                        operationKey(kind: .lifecycle, workspace: workspace.id.rawValue)
+                    ]
+                    return operation?.phase == .verifying && operation?.action == "restart"
+                }
+                .map(\.id.rawValue)
+        )
+        guard !restartedIDs.isEmpty else { return }
+        for index in secretsFixtureEntries.indices {
+            secretsFixtureEntries[index].pendingWorkspaces.subtract(restartedIDs)
+        }
+        // A removal is complete once every affected workspace has restarted.
+        secretsFixtureEntries.removeAll { entry in
+            entry.pendingWorkspaces.isEmpty && entry.pendingOperation == .remove
+        }
+        for index in secretsFixtureEntries.indices
+        where secretsFixtureEntries[index].pendingWorkspaces.isEmpty {
+            secretsFixtureEntries[index].pendingOperation = nil
+        }
+        applySecretsFixtureToWorkspaces()
+    }
+
+    private func secretsErrorMessage(_ error: Error) -> String {
+        if let clientError = error as? MSWClientError,
+           case .malformedJSON(let command) = clientError,
+           ["secrets-list", "secret-plan", "secret-apply"].contains(command) {
+            return "MSW returned malformed secret metadata for \(command)."
+        }
+        return error.localizedDescription
     }
 
     func createBackup(to directory: URL) {
@@ -2879,6 +3476,7 @@ final class AppModel {
         let commandObservedAt = lifecycleNow()
         lifecycleUITestAction = action
         lifecycleUITestObservationIndex = 0
+        lifecycleUITestWorkspace = id
         beginLifecycleVerification(
             ownership,
             action: action,
@@ -2893,7 +3491,8 @@ final class AppModel {
 
     private func refreshLifecycleUITestResult() async -> RefreshResult {
         guard let action = lifecycleUITestAction,
-              let verification = lifecycleVerifications[Workspace.ID.dev.rawValue] else {
+              let workspace = lifecycleUITestWorkspace,
+              let verification = lifecycleVerifications[workspace.rawValue] else {
             return .failed
         }
         let index = lifecycleUITestObservationIndex
@@ -2915,10 +3514,14 @@ final class AppModel {
         case .stop:
             lifecycle = .stopped
         case .restart:
-            lifecycle = index <= lifecycleVerificationDelays.count ? .stopped : .running
+            lifecycle = index < lifecycleVerificationDelays.count ? .stopped : .running
         }
         let observedAt = verification.minimumObservedAt.addingTimeInterval(Double(index + 1))
-        let state = lifecycleUITestState(devLifecycle: lifecycle, observedAt: observedAt)
+        let state = lifecycleUITestState(
+            workspace: workspace,
+            lifecycle: lifecycle,
+            observedAt: observedAt
+        )
         let reconciled = apply(
             state: state,
             observedAt: observedAt,
@@ -2927,17 +3530,28 @@ final class AppModel {
         lastAppliedStateRefreshSequence = observationGeneration
         if reconciled.contains(where: { $0.outcome == .succeeded }) {
             lifecycleUITestAction = nil
+            lifecycleUITestWorkspace = nil
         }
         return .applied(state)
     }
 
     private func lifecycleUITestState(
-        devLifecycle: MSWLifecycle,
+        workspace targetWorkspace: Workspace.ID,
+        lifecycle targetLifecycle: MSWLifecycle,
         observedAt: Date
     ) -> MSWStateResponse {
         let snapshots = configuredWorkspaceIDs.map { id in
-            let lifecycle: MSWLifecycle = id == .dev ? devLifecycle : .stopped
+            let existing = workspaces.first(where: { $0.id == id })
+            let lifecycle = id == targetWorkspace
+                ? targetLifecycle
+                : MSWLifecycle(rawValue: existing?.state.rawValue ?? "") ?? .stopped
             let running = lifecycle == .running
+            let secrets = existing?.secrets ?? .active
+            let secretsSnapshot = MSWSecretsSnapshot(
+                state: MSWSecretsSnapshot.State(rawValue: secrets.status.rawValue) ?? .active,
+                pendingCount: secrets.pendingCount,
+                reason: secrets.reason
+            )
             return MSWWorkspaceSnapshot(
                 id: id.rawValue,
                 purpose: "Deterministic lifecycle verification fixture.",
@@ -2954,6 +3568,7 @@ final class AppModel {
                     refreshExpiresAt: nil,
                     needsRestart: false
                 ),
+                secrets: secretsSnapshot,
                 resources: MSWResourceSnapshot(
                     cpus: "1",
                     maxCpus: "1",
@@ -3080,6 +3695,7 @@ final class AppModel {
                 purpose: snapshot.purpose,
                 state: lifecycle,
                 credential: isQuarantined ? .quarantined : credentialState(snapshot.credential.state),
+                secrets: secretsState(snapshot.secrets),
                 freshness: snapshot.freshness,
                 observedAt: stateObservedAt,
                 networkHost: snapshot.network.host,
@@ -3124,6 +3740,19 @@ final class AppModel {
         }
         if nextWorkspaces != workspaces {
             workspaces = nextWorkspaces
+        }
+        if secretsFixtureEnabled {
+            reconcileSecretsFixture(previousByID: previousByID)
+        }
+        if !secretsFixtureEnabled,
+           client != nil,
+           workspaces.contains(where: { workspace in
+               workspace.secrets.pendingCount == 0 &&
+                   (previousByID[workspace.id]?.secrets.pendingCount ?? 0) > 0
+           }) {
+            Task { [weak self] in
+                await self?.refreshSecrets()
+            }
         }
         for workspace in workspaces {
             let previous = previousByID[workspace.id]
@@ -3225,6 +3854,15 @@ final class AppModel {
         case .quarantined: return .quarantined
         case .unconfigured: return .unconfigured
         }
+    }
+
+    private func secretsState(_ snapshot: MSWSecretsSnapshot?) -> Workspace.SecretsState {
+        guard let snapshot else { return .active }
+        return Workspace.SecretsState(
+            status: Workspace.SecretsState.Status(rawValue: snapshot.state.rawValue) ?? .error,
+            pendingCount: max(0, snapshot.pendingCount),
+            reason: snapshot.reason
+        )
     }
 
     private func nextAction(_ snapshot: MSWWorkspaceSnapshot, isQuarantined: Bool = false) -> String {
@@ -3334,6 +3972,12 @@ final class AppModel {
            latestOperationFailure?.workspace?.rawValue == operation.workspace {
             latestOperationFailure = nil
         }
+        if outcome == .succeeded,
+           operation.kind == .lifecycle,
+           let workspace = operation.workspace.flatMap(Workspace.ID.init(rawValue:)),
+           secretsRestartBatch?.current == workspace {
+            verifyAndAdvanceSecretsRestartBatch(workspace: workspace)
+        }
     }
 
     private func recordOperationFailure(
@@ -3365,6 +4009,10 @@ final class AppModel {
         if let expectedOperationID,
            operationStates[key]?.id != expectedOperationID {
             return
+        }
+        if kind == .lifecycle,
+           let workspace = workspace.flatMap(Workspace.ID.init(rawValue:)) {
+            cancelSecretsRestartBatchIfOwned(workspace: workspace)
         }
         noteRuntimeRepairFailure(error)
         if operationStates[key] == nil {

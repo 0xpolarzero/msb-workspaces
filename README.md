@@ -50,6 +50,14 @@ repositories. Port warnings during setup are nonfatal. The CLI mirrors this
 surface: `msw github auth|repos|status|verify|remove`. See
 [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
 
+### Host-held API secrets
+
+Use **MSW Monitor → Secrets** to add, edit, remove, and scope API keys to
+workspaces and exact domains, `*.example.com`, or all HTTPS hosts (`*`). Values
+stay in macOS Keychain; VMs receive placeholders that MicroSandbox substitutes
+only at the configured HTTPS destinations. Every change is staged and shows
+**Restart required** or **Applies on next start** until MSW verifies it.
+
 ## Daily use
 
 ```bash

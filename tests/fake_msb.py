@@ -147,10 +147,14 @@ def git_env(state: dict[str, Any], box: str) -> dict[str, str]:
         # host /etc/gitconfig.
         "GIT_CONFIG_SYSTEM": str(Path(sb["root"]) / "gitconfig"),
     })
-    # Local mode must not expose GH_TOKEN inside the guest: only inject the
-    # placeholder when the sandbox actually carries the secret.
-    if "GH_TOKEN" in sb.get("secrets", {}):
-        env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
+    # Bound secrets substitute placeholders inside the guest, so a real value
+    # can never reach the simulated VM environment even if the host-side CLI
+    # leaked it (GitHub's legacy GH_TOKEN keeps its historical placeholder).
+    for secret_name in sb.get("secrets", {}):
+        if secret_name == "GH_TOKEN":
+            env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
+        else:
+            env[secret_name] = "$MSB_" + secret_name
     if os.environ.get("MSW_FAKE_GUEST_PUSH_ALLOWED") != "1":
         env["MSW_GUEST_READ_ONLY"] = "1"
     if REMOTE_ROOT:
@@ -177,6 +181,26 @@ def parse_named_arg(args: list[str]) -> str | None:
         else:
             positional.append(arg)
     return positional[-1] if positional else None
+
+
+def first_box_arg(args: list[str]) -> str:
+    """First non-flag argument (the sandbox name) for credential-env events."""
+    skip = False
+    value_opts = {
+        "-t", "--timeout", "--source", "--tail", "--label", "--format",
+        "-w", "--workdir", "-u", "--user", "-e", "--env", "--rlimit",
+    }
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg in value_opts:
+            skip = True
+        elif arg.startswith("-"):
+            continue
+        else:
+            return arg
+    return ""
 
 
 def parse_create(args: list[str], state: dict[str, Any]) -> int:
@@ -568,11 +592,24 @@ def main() -> int:
         return 0
     cmd, rest = args[0], args[1:]
     if os.environ.get("MSW_FAKE_RECORD_CREDENTIAL_ENV") == "1":
+        exported = [n for n in os.environ.get("MSW_SECRET_EXPORTED", "").split(",") if n]
+        box = first_box_arg(rest) if cmd in {
+            "start", "restart", "stop", "rm", "exec", "inspect", "ping",
+            "logs", "modify", "copy", "cp", "ssh",
+        } else ""
+        sb = state["sandboxes"].get(box) if box else None
+        bound = sorted((sb or {}).get("secrets", {}).keys())
         log_event(
             state,
             "credential-env",
             command=cmd,
+            # Nonsecret command args (boxes, --secret NAME@HOSTS specs, flags)
+            # so tests can observe the exact lifecycle-boundary invocation.
+            args=rest,
             gh_token_present=bool(os.environ.get("GH_TOKEN")),
+            secret_exported=exported,
+            secret_resolved={n: bool(os.environ.get(n)) for n in exported},
+            bound_env_present={n: bool(os.environ.get(n)) for n in bound},
         )
         save(state)
     if cmd == "doctor":
@@ -621,8 +658,9 @@ def main() -> int:
         record_lock_fd()
         if os.environ.get("MSW_FAKE_START_FAIL") == "1":
             return fail("fake start failure")
-        if state["sandboxes"][box].get("secrets", {}).get("GH_TOKEN") and not os.environ.get("GH_TOKEN"):
-            return fail("host source GH_TOKEN missing")
+        missing = [n for n in state["sandboxes"][box].get("secrets", {}) if not os.environ.get(n)]
+        if missing:
+            return fail("host source %s missing" % missing[0])
         state["sandboxes"][box]["running"] = True
         log_event(state, cmd, box=box)
         save(state)

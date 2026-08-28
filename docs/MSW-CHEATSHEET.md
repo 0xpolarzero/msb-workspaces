@@ -70,6 +70,14 @@ revocation must be performed by MSW Monitor; use the app's workspace removal or
 account disconnect action so the service grant and local credential state are
 updated together.
 
+## Host-held API secrets
+
+Use **MSW Monitor → Secrets**. Configure a name, workspace scope, and allowed
+HTTPS destinations (`api.example.com`, `*.example.com`, or `*`). Values remain
+in macOS Keychain; guests receive placeholders. `*` requires explicit
+confirmation. Add/edit/remove changes show **Restart required** for running
+workspaces or **Applies on next start** for stopped workspaces.
+
 ## Push from the Mac
 
 ```bash

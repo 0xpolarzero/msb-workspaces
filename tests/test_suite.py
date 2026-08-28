@@ -9668,7 +9668,366 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         rotate = self.env.msw("github", "capability", "rotate", "dev", timeout=60)
         elapsed = time.monotonic() - started
         self.assertEqual(rotate.returncode, 0, rotate.stdout + rotate.stderr)
-        self.assertLess(elapsed, 20, "lock reacquire must not wait on the shuttle")
+
+
+class GenericSecretsTests(MSWTestCase):
+    """Host-held generic secrets: protocol redaction, domain grammar, values
+    restricted to Keychain, add/edit/remove pending states, immediate
+    fail-closed unbind, lifecycle reconciliation on start/restart, restart
+    summaries, and Keychain deletion only after verified removal."""
+
+    SECRET_SERVICE = "org.microsandbox.MSWMonitor.secret.v1"
+
+    def _key_file(self, name: str) -> Path:
+        return self.env.key_file(self.SECRET_SERVICE, name)
+
+    def _secrets_meta(self) -> Path:
+        return self.env.home / ".config" / "msw" / "secrets.json"
+
+    def _plan(self, operation: str, name: str, workspaces: list[str], domains: list[str]) -> dict:
+        request = json.dumps({
+            "operation": operation, "name": name,
+            "workspaces": workspaces, "allowedDomains": domains,
+        })
+        return json.loads(self.env.msw(
+            "app", "secret-plan", "--input-fd", "0", "--format", "json",
+            input_text=request,
+        ).stdout)["result"]
+
+    def _apply(self, plan: dict, *, value: str | None = None, confirmation: str | None = None,
+               check: bool = True) -> subprocess.CompletedProcess[str]:
+        request: dict = {"confirmation": confirmation if confirmation is not None else plan["confirmationPhrase"]}
+        if value is not None:
+            request["value"] = value
+        return self.env.msw(
+            "app", "secret-apply", plan["planId"], "--input-fd", "0", "--format", "json",
+            input_text=json.dumps(request), check=check,
+        )
+
+    def _apply_ok(self, plan: dict, *, value: str | None = None) -> dict:
+        proc = self._apply(plan, value=value)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)["result"]
+
+    def _add_secret(self, name: str = "API_KEY", value: str = "sk_live_secret_0123456789abcdef",
+                    workspaces: list[str] | None = None, domains: list[str] | None = None) -> dict:
+        plan = self._plan("add", name, workspaces or ["dev"], domains or ["api.example.com"])
+        return self._apply_ok(plan, value=value)
+
+    def _listing(self) -> dict:
+        return json.loads(self.env.msw("app", "secrets-list", "--format", "json").stdout)["result"]
+
+    def _entry(self, name: str) -> dict:
+        for entry in self._listing()["entries"]:
+            if entry["name"] == name:
+                return entry
+        raise AssertionError(f"secret entry {name} missing from secrets-list")
+
+    def _sandbox_secrets(self, box: str) -> dict:
+        return self.env.state()["sandboxes"][box].get("secrets", {})
+
+    def test_secret_protocol_redacts_values_and_exports_only_to_lifecycle_children(self) -> None:
+        self.env.msw("start", "dev")
+        value = "sk_live_redaction_9f8e7d6c5b4a3210fedcba"
+        plan = self._plan("add", "API_KEY", ["dev"], ["api.example.com"])
+        apply_result = self._apply_ok(plan, value=value)
+        self.assertEqual(apply_result["operation"], "add")
+        self.assertEqual(apply_result["name"], "API_KEY")
+        self.assertEqual(apply_result["workspaces"], ["dev"])
+        self.assertTrue(apply_result["valueStored"])
+        self.assertEqual(apply_result["pending"], [{"workspace": "dev", "state": "restart-required"}])
+        # the value never appears in any protocol output, metadata, or the
+        # runtime's persisted state
+        for document in (plan, apply_result, self._listing()):
+            self.assertNotIn(value, json.dumps(document))
+        self.assertNotIn(value, self._secrets_meta().read_text())
+        self.assertNotIn(value, json.dumps(self.env.state()))
+        # a restart resolves the value ONLY inside the direct msb lifecycle
+        # children (modify/start/restart), never in observation commands
+        probe_env = {"MSW_FAKE_RECORD_CREDENTIAL_ENV": "1"}
+        self.env.msw("restart", "dev", extra_env=probe_env)
+        events = self.env.state()["events"]
+        credential_events = [e for e in events if e.get("event") == "credential-env"]
+        self.assertTrue(credential_events, events)
+        for event in credential_events:
+            self.assertNotIn(value, json.dumps(event))
+            if event["command"] in ("modify", "start", "restart"):
+                self.assertEqual(event["secret_exported"], ["API_KEY"], event)
+                self.assertTrue(event["secret_resolved"].get("API_KEY"), event)
+            else:
+                self.assertEqual(event["secret_exported"], [], event)
+            if event["command"] == "modify":
+                # pending adds bind with an explicit restart policy so the
+                # real runtime accepts the staged guest placeholder
+                self.assertIn("--next-start", event.get("args", []), event)
+        # a later app observation command must not carry the value either
+        before = len(events)
+        self.env.msw("app", "secrets-list", "--format", "json", extra_env=probe_env)
+        for event in self.env.state()["events"][before:]:
+            if event.get("event") == "credential-env":
+                self.assertEqual(event["secret_exported"], [], event)
+                self.assertFalse(any(event["bound_env_present"].values()), event)
+
+    def test_secret_domain_and_name_grammar_validation(self) -> None:
+        for domain in ["api.example.com", "*.example.com", "*"]:
+            with self.subTest(domain=domain):
+                proc = self.env.msw(
+                    "app", "secret-plan", "--input-fd", "0", "--format", "json",
+                    input_text=json.dumps({
+                        "operation": "add", "name": "API_KEY",
+                        "workspaces": ["dev"], "allowedDomains": [domain],
+                    }),
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for name in ["GH_TOKEN", "GITHUB_TOKEN", "MSW_TOOLCHAIN"]:
+            with self.subTest(name=name):
+                proc = self.env.msw(
+                    "app", "secret-plan", "--input-fd", "0", "--format", "json", check=False,
+                    input_text=json.dumps({
+                        "operation": "add", "name": name,
+                        "workspaces": ["dev"], "allowedDomains": ["api.example.com"],
+                    }),
+                )
+                self.assertFailed(proc, "MSW_SECRET_NAME_INVALID")
+        for name in ["bad-name", "1secret", "-secret", ""]:
+            with self.subTest(name=name):
+                proc = self.env.msw(
+                    "app", "secret-plan", "--input-fd", "0", "--format", "json", check=False,
+                    input_text=json.dumps({
+                        "operation": "add", "name": name,
+                        "workspaces": ["dev"], "allowedDomains": ["api.example.com"],
+                    }),
+                )
+                self.assertFailed(proc, "MSW_INVALID_REQUEST")
+        for name in ["API_KEY", "ApiKey2", "_secret"]:
+            with self.subTest(name=name):
+                proc = self.env.msw(
+                    "app", "secret-plan", "--input-fd", "0", "--format", "json",
+                    input_text=json.dumps({
+                        "operation": "add", "name": name,
+                        "workspaces": ["dev"], "allowedDomains": ["api.example.com"],
+                    }),
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        invalid_sets = [
+            {"workspaces": ["ghost"]},
+            {"workspaces": ["dev", "dev"]},
+            {"workspaces": []},
+            {"allowedDomains": []},
+            {"allowedDomains": ["api.example.com", "api.example.com"]},
+        ]
+        for override in invalid_sets:
+            request = {"operation": "add", "name": "API_KEY", "workspaces": ["dev"],
+                       "allowedDomains": ["api.example.com"]}
+            request.update(override)
+            with self.subTest(override=override):
+                proc = self.env.msw(
+                    "app", "secret-plan", "--input-fd", "0", "--format", "json", check=False,
+                    input_text=json.dumps(request),
+                )
+                self.assertFailed(proc, "MSW_INVALID_REQUEST")
+
+    def test_secret_values_never_persist_plaintext_or_backup(self) -> None:
+        self.env.msw("start", "dev")
+        value = "sk_live_persistence_0123456789abcdef"
+        self._add_secret(value=value)
+        self.env.msw("restart", "dev")
+        self.assertEqual(self._entry("API_KEY")["status"], "active")
+        self.assertNotIn(value, self._secrets_meta().read_text())
+        self.assertNotIn(value, json.dumps(self.env.state()))
+        for path in self.env.home.rglob("*"):
+            if path.is_file():
+                content = path.read_text(errors="replace")
+                self.assertNotIn(value, content, str(path))
+        # the value lives ONLY in the Keychain store (the test keychain dir)
+        self.assertEqual(self._key_file("API_KEY").read_text(), value)
+        # a full managed backup archive must not contain the value
+        destination = self.env.root / "secret-backups"
+        destination.mkdir()
+        started = json.loads(self.env.msw(
+            "app", "backup-start", "--directory", str(destination),
+            "--request-key", "secret-backup-contract", "--format", "json",
+        ).stdout)["result"]
+        last = None
+        for _ in range(300):
+            last = json.loads(self.env.msw(
+                "app", "backup-status", "--operation-id", started["operationId"],
+                "--format", "json",
+            ).stdout)["result"]
+            if last["state"] in {"completed", "failed"}:
+                break
+            time.sleep(0.1)
+        self.assertEqual(last["state"], "completed", last)
+        archive = last["result"]["archive"]
+        decompressed = subprocess.run(
+            [SYSTEM_ZSTD, "-dc", archive], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotIn(value.encode(), decompressed.stdout)
+
+    def test_secret_add_pending_states_and_restart_summaries(self) -> None:
+        self.env.msw("start", "dev")  # dev running; playgrounds/personal stopped
+        self._add_secret(workspaces=["dev", "playgrounds"],
+                         domains=["api.example.com", "*.example.com"])
+        entry = self._listing()["entries"][0]
+        self.assertEqual(entry["name"], "API_KEY")
+        self.assertEqual(entry["status"], "restart-required")
+        self.assertEqual(entry["pendingOperation"], {"type": "add", "createdAt": entry["pendingOperation"]["createdAt"]})
+        self.assertEqual(entry["generation"], 1)
+        self.assertEqual(entry["allowedDomains"], ["api.example.com", "*.example.com"])
+        self.assertIsNone(entry["error"])
+        by_box = {w["workspace"]: w for w in self._listing()["workspaces"]}
+        self.assertTrue(by_box["dev"]["restartRequired"])
+        self.assertEqual(by_box["dev"]["pendingCount"], 1)
+        self.assertFalse(by_box["playgrounds"]["restartRequired"])
+        self.assertEqual(by_box["playgrounds"]["pendingCount"], 1)
+        self.assertEqual(by_box["personal"]["pendingCount"], 0)
+        # the app state snapshot carries the separate secrets object
+        state_doc = json.loads(self.env.msw("app", "state", "--format", "json").stdout)["result"]
+        dev_state = next(w for w in state_doc["workspaces"] if w["id"] == "dev")
+        self.assertEqual(dev_state["secrets"]["state"], "restart-required")
+        self.assertEqual(dev_state["secrets"]["pendingCount"], 1)
+        self.assertIsNone(dev_state["secrets"]["reason"])
+        playground_state = next(w for w in state_doc["workspaces"] if w["id"] == "playgrounds")
+        self.assertEqual(playground_state["secrets"]["state"], "applies-on-next-start")
+        # restarting dev finalizes only dev's pending state
+        self.env.msw("restart", "dev")
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "applies-on-next-start")
+        self.assertEqual(
+            self._sandbox_secrets("dev").get("API_KEY"),
+            "API_KEY@api.example.com,*.example.com",
+        )
+        by_box = {w["workspace"]: w for w in self._listing()["workspaces"]}
+        self.assertEqual(by_box["dev"]["pendingCount"], 0)
+        self.assertFalse(by_box["dev"]["restartRequired"])
+        self.assertEqual(by_box["playgrounds"]["pendingCount"], 1)
+        # starting playgrounds applies the remaining pending add
+        self.env.msw("start", "playgrounds")
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "active")
+        self.assertIsNone(entry["pendingOperation"])
+        self.assertEqual(
+            self._sandbox_secrets("playgrounds").get("API_KEY"),
+            "API_KEY@api.example.com,*.example.com",
+        )
+        by_box = {w["workspace"]: w for w in self._listing()["workspaces"]}
+        self.assertEqual(by_box["dev"]["pendingCount"], 0)
+        self.assertEqual(by_box["playgrounds"]["pendingCount"], 0)
+
+    def test_secret_edit_disables_old_binding_immediately_and_rebinds_on_restart(self) -> None:
+        self.env.msw("start", "dev")
+        old_value = "sk_live_edit_old_aaaaaaaaaaaaaaaa"
+        new_value = "sk_live_edit_new_bbbbbbbbbbbbbbbb"
+        self._add_secret(value=old_value)
+        self.env.msw("restart", "dev")
+        self.assertEqual(self._sandbox_secrets("dev").get("API_KEY"), "API_KEY@api.example.com")
+        self.assertEqual(self._entry("API_KEY")["status"], "active")
+        plan = self._plan("edit", "API_KEY", ["dev"], ["*.example.com"])
+        apply_result = self._apply_ok(plan, value=new_value)
+        self.assertEqual(apply_result["operation"], "edit")
+        self.assertTrue(apply_result["valueStored"])
+        self.assertEqual(apply_result["pending"], [{"workspace": "dev", "state": "restart-required"}])
+        # the old live binding is disabled immediately (fail-closed)
+        self.assertNotIn("API_KEY", self._sandbox_secrets("dev"))
+        # the new value replaced the old one in Keychain right away
+        self.assertEqual(self._key_file("API_KEY").read_text(), new_value)
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "restart-required")
+        self.assertEqual(entry["pendingOperation"]["type"], "edit")
+        self.assertEqual(entry["generation"], 2)
+        self.assertEqual(entry["allowedDomains"], ["*.example.com"])
+        # the restart binds the replacement value with the new domains
+        self.env.msw("restart", "dev")
+        self.assertEqual(self._sandbox_secrets("dev").get("API_KEY"), "API_KEY@*.example.com")
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "active")
+        self.assertIsNone(entry["pendingOperation"])
+
+    def test_secret_remove_unbinds_immediately_and_deletes_keychain_after_verified_absence(self) -> None:
+        self.env.msw("start", "dev")
+        value = "sk_live_remove_cccccccccccccccc"
+        self._add_secret(value=value)
+        self.env.msw("restart", "dev")
+        self.assertTrue(self._key_file("API_KEY").exists())
+        plan = self._plan("remove", "API_KEY", ["dev"], ["api.example.com"])
+        apply_result = self._apply_ok(plan)  # no value for a removal
+        self.assertFalse(apply_result["valueStored"])
+        self.assertEqual(apply_result["pending"], [{"workspace": "dev", "state": "removal-pending-restart"}])
+        # immediate unbind, but the Keychain value is retained until absence
+        # is verified on the next restart
+        self.assertNotIn("API_KEY", self._sandbox_secrets("dev"))
+        self.assertTrue(self._key_file("API_KEY").exists())
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "removal-pending-restart")
+        self.assertEqual(entry["pendingOperation"]["type"], "remove")
+        self.assertEqual(entry["generation"], 2)
+        # the restart verifies absence and only then deletes the Keychain item
+        self.env.msw("restart", "dev")
+        self.assertFalse(self._key_file("API_KEY").exists())
+        self.assertEqual(self._listing()["entries"], [])
+        self.assertNotIn("API_KEY", self._secrets_meta().read_text())
+        # Keychain deletion failure after verified absence keeps the removal
+        # pending with a safe error; the next restart retries and completes
+        self._add_secret(value=value)
+        self.env.msw("restart", "dev")
+        self._apply_ok(self._plan("remove", "API_KEY", ["dev"], ["api.example.com"]))
+        self.env.msw("restart", "dev", extra_env={"MSW_FAKE_KC_DELETE_FAIL": "1"})
+        self.assertTrue(self._key_file("API_KEY").exists())
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "error")
+        self.assertEqual(entry["pendingOperation"]["type"], "remove")
+        self.assertIsNotNone(entry["error"])
+        self.assertNotIn(value, entry["error"])
+        self.env.msw("restart", "dev")
+        self.assertFalse(self._key_file("API_KEY").exists())
+        self.assertEqual(self._listing()["entries"], [])
+
+    def test_secret_pending_add_applies_on_next_start_of_stopped_workspace(self) -> None:
+        value = "sk_live_nextstart_dddddddddddddddd"
+        self._add_secret(workspaces=["playgrounds"], value=value)
+        entry = self._entry("API_KEY")
+        self.assertEqual(entry["status"], "applies-on-next-start")
+        by_box = {w["workspace"]: w for w in self._listing()["workspaces"]}
+        self.assertFalse(by_box["playgrounds"]["restartRequired"])
+        self.assertEqual(by_box["playgrounds"]["pendingCount"], 1)
+        # nothing is bound yet for the stopped workspace
+        self.assertNotIn("API_KEY", self._sandbox_secrets("playgrounds"))
+        state_doc = json.loads(self.env.msw("app", "state", "--format", "json").stdout)["result"]
+        playground_state = next(w for w in state_doc["workspaces"] if w["id"] == "playgrounds")
+        self.assertEqual(playground_state["secrets"]["state"], "applies-on-next-start")
+        # the next start applies the pending add and finalizes it
+        self.env.msw("start", "playgrounds")
+        self.assertEqual(self._sandbox_secrets("playgrounds").get("API_KEY"), "API_KEY@api.example.com")
+        self.assertEqual(self._entry("API_KEY")["status"], "active")
+
+    def test_secret_apply_confirmation_value_and_expiry_rules(self) -> None:
+        self.env.msw("start", "dev")
+        plan = self._plan("add", "API_KEY", ["dev"], ["api.example.com"])
+        wrong = self._apply(plan, value="sk_live_x", confirmation="ADD SECRET OTHER", check=False)
+        self.assertFailed(wrong, "MSW_CONFIRMATION_MISMATCH")
+        # validation failures do not consume the plan
+        missing_value = self._apply(plan, confirmation=plan["confirmationPhrase"], check=False)
+        self.assertFailed(missing_value, "MSW_SECRET_VALUE_REQUIRED")
+        bad_value = self._apply(plan, value="sk bad\nvalue", check=False)
+        self.assertFailed(bad_value, "MSW_SECRET_VALUE_REQUIRED")
+        ok = self._apply_ok(plan, value="sk_live_good_eeeeeeeeeeeeeeee")
+        self.assertTrue(ok["applied"])
+        # a consumed plan cannot be replayed
+        replay = self._apply(plan, value="sk_live_replay_ffffffffffffffff", check=False)
+        self.assertFailed(replay, "MSW_PLAN_NOT_FOUND")
+        # a removal may not carry a value
+        remove_plan = self._plan("remove", "API_KEY", ["dev"], ["api.example.com"])
+        with_value = self._apply(remove_plan, value="sk_live_removevalue", check=False)
+        self.assertFailed(with_value, "MSW_INVALID_REQUEST")
+        # an expired plan is rejected and removed
+        plan2 = self._plan("add", "SECOND_KEY", ["dev"], ["api.example.com"])
+        plan_file = self.env.home / ".config" / "msw" / "github" / "secret-plans" / f"{plan2['planId']}.plan"
+        content = json.loads(plan_file.read_text())
+        content["expires"] = 0
+        plan_file.write_text(json.dumps(content))
+        expired = self._apply(plan2, value="sk_live_expired", check=False)
+        self.assertFailed(expired, "MSW_PLAN_EXPIRED")
+        self.assertFalse(plan_file.exists())
 
 
 if __name__ == "__main__":

@@ -3873,7 +3873,7 @@ struct RepositoryWorkspacePolicyEditor: View {
         .background(
             highlightsEdits && editedWorkspaces.contains(workspace)
                 ? Color.accentColor.opacity(0.10)
-                : Color(nsColor: .windowBackgroundColor),
+                : Color(nsColor: usesContainerBackground ? .windowBackgroundColor : .controlBackgroundColor),
             in: RoundedRectangle(cornerRadius: 6)
         )
     }
