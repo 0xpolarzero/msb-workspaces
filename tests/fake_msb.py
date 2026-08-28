@@ -62,6 +62,19 @@ def record_lock_fd() -> None:
         value = "open"
     Path(marker).write_text(value + "\n")
 
+def record_secrets_lock_fd(command: str) -> None:
+    marker = os.environ.get("MSW_FAKE_SECRETS_LOCK_FD_MARKER", "")
+    if not marker:
+        return
+    try:
+        os.fstat(6)
+    except OSError:
+        value = "closed"
+    else:
+        value = "open"
+    with Path(marker).open("a") as handle:
+        handle.write(f"{command}:{value}\n")
+
 
 
 def log_event(state: dict[str, Any], event: str, **data: Any) -> None:
@@ -591,6 +604,7 @@ def main() -> int:
         print("microsandbox 0.6.9-fake")
         return 0
     cmd, rest = args[0], args[1:]
+    record_secrets_lock_fd(cmd)
     if os.environ.get("MSW_FAKE_RECORD_CREDENTIAL_ENV") == "1":
         exported = [n for n in os.environ.get("MSW_SECRET_EXPORTED", "").split(",") if n]
         box = first_box_arg(rest) if cmd in {

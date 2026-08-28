@@ -435,9 +435,6 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertEqual(leaked.count, 0, "The secret value must never be rendered")
 
-        let review = app.descendants(matching: .any)["secrets.review.sheet"]
-        let phrase = app.textFields["secrets.review.phrase"]
-
         // Edit: name immutable, value never preloaded, explicit Replace value.
         app.buttons["secrets.entry.SERVICE_TOKEN.edit"].click()
         XCTAssertTrue(editor.waitForExistence(timeout: 2))
@@ -456,10 +453,10 @@ final class MSWMonitorUITests: XCTestCase {
         editValue.typeText(replaceValue)
         app.descendants(matching: .any)["secrets.editor.workspace.dev"].click()
         app.buttons["secrets.editor.submit"].click()
-        XCTAssertTrue(review.waitForExistence(timeout: 2))
-        phrase.click()
-        phrase.typeText("EDIT SERVICE_TOKEN")
-        app.buttons["secrets.review.apply"].click()
+        XCTAssertFalse(
+            app.descendants(matching: .any)["secrets.review.sheet"].exists,
+            "Editing a secret should apply without a second confirmation screen"
+        )
         XCTAssertTrue(
             app.descendants(matching: .any)["secrets.entry.SERVICE_TOKEN.row"]
                 .waitForExistence(timeout: 3)
@@ -469,6 +466,9 @@ final class MSWMonitorUITests: XCTestCase {
             NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", replaceValue, replaceValue)
         )
         XCTAssertEqual(editLeak.count, 0, "The replacement value must never be rendered")
+
+        let review = app.descendants(matching: .any)["secrets.review.sheet"]
+        let phrase = app.textFields["secrets.review.phrase"]
 
         // Remove: destructive typed-phrase confirmation.
         app.buttons["secrets.entry.CI_TOKEN.remove"].click()

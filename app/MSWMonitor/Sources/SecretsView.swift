@@ -352,7 +352,7 @@ struct SecretsView: View {
             allowedDomains: allowedDomains
         )
         if staged {
-            if operation == .add, let plan = model.pendingSecretPlan {
+            if operation != .remove, let plan = model.pendingSecretPlan {
                 await model.confirmSecretPlan(
                     confirmation: plan.confirmationPhrase,
                     value: value
@@ -604,7 +604,7 @@ private struct SecretEditorSheet: View {
                     .keyboardShortcut(.cancelAction)
                     .focused($cancelFocused)
                     .accessibilityIdentifier("secrets.editor.cancel")
-                Button(isEditing ? "Stage Edit" : "Add") {
+                Button(isEditing ? "Edit" : "Add") {
                     Task { await submit() }
                 }
                 .buttonStyle(.borderedProminent)

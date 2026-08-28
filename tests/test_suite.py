@@ -9744,7 +9744,11 @@ class GenericSecretsTests(MSWTestCase):
         self.assertNotIn(value, json.dumps(self.env.state()))
         # a restart resolves the value ONLY inside the direct msb lifecycle
         # children (modify/start/restart), never in observation commands
-        probe_env = {"MSW_FAKE_RECORD_CREDENTIAL_ENV": "1"}
+        secrets_fd_marker = self.env.root / "secrets-fd.log"
+        probe_env = {
+            "MSW_FAKE_RECORD_CREDENTIAL_ENV": "1",
+            "MSW_FAKE_SECRETS_LOCK_FD_MARKER": str(secrets_fd_marker),
+        }
         self.env.msw("restart", "dev", extra_env=probe_env)
         events = self.env.state()["events"]
         credential_events = [e for e in events if e.get("event") == "credential-env"]
@@ -9760,6 +9764,12 @@ class GenericSecretsTests(MSWTestCase):
                 # pending adds bind with an explicit restart policy so the
                 # real runtime accepts the staged guest placeholder
                 self.assertIn("--next-start", event.get("args", []), event)
+        fd_events = secrets_fd_marker.read_text().splitlines()
+        self.assertTrue(fd_events, "The fake runtime did not observe any lifecycle commands")
+        self.assertFalse(
+            [event for event in fd_events if event.endswith(":open")],
+            f"The secrets lock leaked into a MicroSandbox child: {fd_events}",
+        )
         # a later app observation command must not carry the value either
         before = len(events)
         self.env.msw("app", "secrets-list", "--format", "json", extra_env=probe_env)
@@ -9890,9 +9900,18 @@ class GenericSecretsTests(MSWTestCase):
         playground_state = next(w for w in state_doc["workspaces"] if w["id"] == "playgrounds")
         self.assertEqual(playground_state["secrets"]["state"], "applies-on-next-start")
         # restarting dev finalizes only dev's pending state
+        metadata = json.loads(self._secrets_meta().read_text())
+        metadata["secrets"]["API_KEY"]["error"] = (
+            "The binding could not be verified on dev after restart."
+        )
+        self._secrets_meta().write_text(json.dumps(metadata))
+        retryable = self._entry("API_KEY")
+        self.assertEqual(retryable["status"], "restart-required")
+        self.assertIsNone(retryable["error"])
         self.env.msw("restart", "dev")
         entry = self._entry("API_KEY")
         self.assertEqual(entry["status"], "applies-on-next-start")
+        self.assertIsNone(entry["error"])
         self.assertEqual(
             self._sandbox_secrets("dev").get("API_KEY"),
             "API_KEY@api.example.com,*.example.com",
@@ -9966,18 +9985,17 @@ class GenericSecretsTests(MSWTestCase):
         self.assertFalse(self._key_file("API_KEY").exists())
         self.assertEqual(self._listing()["entries"], [])
         self.assertNotIn("API_KEY", self._secrets_meta().read_text())
-        # Keychain deletion failure after verified absence keeps the removal
-        # pending with a safe error; the next restart retries and completes
+        # Keychain deletion failure after verified absence remains a compact
+        # removal-pending state; the next restart retries and completes.
         self._add_secret(value=value)
         self.env.msw("restart", "dev")
         self._apply_ok(self._plan("remove", "API_KEY", ["dev"], ["api.example.com"]))
         self.env.msw("restart", "dev", extra_env={"MSW_FAKE_KC_DELETE_FAIL": "1"})
         self.assertTrue(self._key_file("API_KEY").exists())
         entry = self._entry("API_KEY")
-        self.assertEqual(entry["status"], "error")
+        self.assertEqual(entry["status"], "removal-pending-restart")
         self.assertEqual(entry["pendingOperation"]["type"], "remove")
-        self.assertIsNotNone(entry["error"])
-        self.assertNotIn(value, entry["error"])
+        self.assertIsNone(entry["error"])
         self.env.msw("restart", "dev")
         self.assertFalse(self._key_file("API_KEY").exists())
         self.assertEqual(self._listing()["entries"], [])

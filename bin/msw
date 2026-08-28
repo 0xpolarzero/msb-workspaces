@@ -1658,9 +1658,9 @@ workspace_msb() {
     unset_args+=("-u" "$name")
   done < <(workspace_msb_unset_args)
   if (( ${#unset_args[@]} > 0 )); then
-    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&-
+    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&- 6>&-
   else
-    "$MSB_BIN" "$@" 9>&-
+    "$MSB_BIN" "$@" 9>&- 6>&-
   fi
 }
 
@@ -1680,12 +1680,12 @@ workspace_msb_with_read_token() {
   # Path C §1: local mode never reads Connect grants or keychain tokens.
   if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
     if (( ${#unset_args[@]} > 0 )); then
-      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
         status=0
       else
         status=$?
       fi
-    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
       status=0
     else
       status=$?
@@ -1694,9 +1694,9 @@ workspace_msb_with_read_token() {
     return "$status"
   fi
   if (( ${#unset_args[@]} > 0 )); then
-    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&-
+    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&- 6>&-
   else
-    "$MSB_BIN" "$@" 9>&-
+    "$MSB_BIN" "$@" 9>&- 6>&-
   fi
 }
 workspace_msb_with_read_token_for_cleanup() {
@@ -1714,12 +1714,12 @@ workspace_msb_with_read_token_for_cleanup() {
   done < <(workspace_msb_unset_args)
   if [[ "$MSW_GITHUB_MODE" != local ]] && token="$(app_credential_value_for_cleanup "$box" guest 2>/dev/null)"; then
     if (( ${#unset_args[@]} > 0 )); then
-      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
         status=0
       else
         status=$?
       fi
-    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&-; then
+    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
       status=0
     else
       status=$?
@@ -1728,9 +1728,9 @@ workspace_msb_with_read_token_for_cleanup() {
     return "$status"
   fi
   if (( ${#unset_args[@]} > 0 )); then
-    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&-
+    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&- 6>&-
   else
-    "$MSB_BIN" "$@" 9>&-
+    "$MSB_BIN" "$@" 9>&- 6>&-
   fi
 }
 
@@ -9486,30 +9486,49 @@ secrets_meta_entry() {
   "$JQ_BIN" -c --arg name "$name" '.secrets[$name] // empty' "$file" 2>/dev/null
 }
 
-# Global secrets lock: serializes apply and lifecycle reconciliation. It uses
-# fd 6, distinct from backup fd 7, host-credential fd 8, and GitHub fd 9.
-# Process exit closes the descriptor automatically; never replace caller traps.
+# Global secrets lock: serializes apply and lifecycle reconciliation without
+# holding an inheritable descriptor. A crashed owner leaves only its PID; the
+# next operation removes that directory after proving the process is gone.
 SECRETS_LOCK_HELD=0
-secrets_lock_file() { printf '%s/secrets.lock\n' "$GITHUB_META_DIR"; }
+secrets_lock_dir() { printf '%s/secrets.lock.d\n' "$GITHUB_META_DIR"; }
 secrets_lock_acquire() {
-  local lock
+  local lock owner="" attempt=0
   (( SECRETS_LOCK_HELD == 0 )) || return 0
-  require_command_path lockf "$LOCKF_BIN"
   mkdir -p "$GITHUB_META_DIR" || return 1
   chmod 700 "$GITHUB_META_DIR" 2>/dev/null || true
-  lock="$(secrets_lock_file)"
-  if ! exec 6>>"$lock"; then return 1; fi
-  if ! "$LOCKF_BIN" -s -t 30 6; then
-    exec 6>&-
+  lock="$(secrets_lock_dir)"
+  while ! mkdir "$lock" 2>/dev/null; do
+    [[ -d "$lock" && ! -L "$lock" ]] || return 1
+    if [[ -f "$lock/pid" && ! -L "$lock/pid" ]]; then
+      owner="$(cat "$lock/pid" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -f "$lock/pid" 2>/dev/null || return 1
+        rmdir "$lock" 2>/dev/null || return 1
+        continue
+      fi
+    fi
+    attempt=$((attempt + 1))
+    (( attempt < 30 )) || return 1
+    sleep 1
+  done
+  if ! printf '%s\n' "$$" >"$lock/pid"; then
+    rmdir "$lock" 2>/dev/null || true
     return 1
   fi
-  printf '%s\n' "$$" >"$lock"
   SECRETS_LOCK_HELD=1
   return 0
 }
 secrets_lock_release() {
+  local lock owner=""
   if (( SECRETS_LOCK_HELD )); then
-    exec 6>&-
+    lock="$(secrets_lock_dir)"
+    if [[ -f "$lock/pid" && ! -L "$lock/pid" ]]; then
+      owner="$(cat "$lock/pid" 2>/dev/null || true)"
+      if [[ "$owner" == "$$" ]]; then
+        rm -f "$lock/pid" 2>/dev/null || true
+        rmdir "$lock" 2>/dev/null || true
+      fi
+    fi
     SECRETS_LOCK_HELD=0
   fi
 }
@@ -9906,9 +9925,9 @@ secret_finalize_start() {
             .secrets |= del(.[$op.name])
           else
             .secrets[$op.name].pending.workspaces |= del(.[$box])
+            | .secrets[$op.name].error = null
             | if ((.secrets[$op.name].pending.workspaces | keys | length) == 0)
               then .secrets[$op.name].pending = null
-                | .secrets[$op.name].error = null
               else . end
           end
         else
@@ -9949,11 +9968,11 @@ app_workspace_secrets_snapshot() {
     ($entries | map(ws_state(.))) as $states |
     ($entries | map(.error // null) | map(select(. != null)) | .[0] // null) as $reason |
     ($entries | map(select(.pending != null and (.pending.workspaces[$box] != null))) | length) as $pending_count |
-    (if $reason != null then "error"
-     elif ($states | index("restart-required")) != null then "restart-required"
+    (if ($states | index("restart-required")) != null then "restart-required"
      elif ($states | map(select(. != null)) | length) > 0 then "applies-on-next-start"
+     elif $reason != null then "error"
      else "active" end) as $state |
-    {state:$state, pendingCount:$pending_count, reason:$reason}
+    {state:$state, pendingCount:$pending_count, reason:(if $state == "error" then $reason else null end)}
   ' "$file" 2>/dev/null || printf '{"state":"error","pendingCount":0,"reason":"The host-held secrets metadata is unreadable."}'
 }
 
@@ -9988,8 +10007,8 @@ app_cmd_secrets_list() {
   fi
   result="$("$JQ_BIN" -nc --argjson lifecycles "$lifecycles" --argjson entries "$entries_json" '
     def entry_status($e):
-      if ($e.error != null) then "error"
-      elif ($e.pending == null) then "active"
+      if ($e.pending == null) then
+        (if $e.error != null then "error" else "active" end)
       else
         ($e.pending.workspaces | keys | map($lifecycles[.] // "Unknown")) as $kinds |
         if ($kinds | index("Running")) != null then
@@ -10004,7 +10023,7 @@ app_cmd_secrets_list() {
         status: entry_status(.value),
         pendingOperation: (if .value.pending then {type: .value.pending.type, createdAt: .value.pending.createdAt} else null end),
         generation: .value.generation,
-        error: .value.error
+        error: (if .value.pending == null then .value.error else null end)
       })],
       workspaces: [($lifecycles | keys[] | . as $box |
         ([$entries[] | select(.pending != null and (.pending.workspaces[$box] != null))] | length) as $count |
