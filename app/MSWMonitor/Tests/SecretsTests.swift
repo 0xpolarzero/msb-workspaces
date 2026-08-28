@@ -611,7 +611,7 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(model.secretsRestartBlockedWorkspaces.map(\.id), [.dev])
         XCTAssertEqual(
             model.secretsRestartBannerMessage,
-            "1 workspace needs repair before secrets can apply"
+            "1 workspace requires repair"
         )
 
         let playgrounds = try XCTUnwrap(model.workspaces.first { $0.id == .playgrounds })

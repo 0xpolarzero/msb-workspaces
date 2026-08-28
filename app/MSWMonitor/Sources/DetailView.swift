@@ -2284,9 +2284,7 @@ private struct WorkspaceSummaryRow: View {
         }
         let availability = workspace.actionAvailability(for: .restart)
         guard !availability.isAllowed else { return workspace.secrets.indicatorText }
-        return availability.reason?.localizedCaseInsensitiveContains("storage") == true
-            ? "Secrets waiting for storage repair"
-            : "Secrets waiting for workspace repair"
+        return "Requires repair"
     }
 
     private var attention: Attention? {

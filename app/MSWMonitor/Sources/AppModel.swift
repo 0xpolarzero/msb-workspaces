@@ -2381,11 +2381,11 @@ final class AppModel {
         let queued = secretsAppliesOnNextStartWorkspaces.count
         if blocked > 0 {
             if running > 0 {
-                return "\(running) workspace\(running == 1 ? "" : "s") can restart; \(blocked) need\(blocked == 1 ? "s" : "") repair first"
+                return "\(running) workspace\(running == 1 ? "" : "s") can restart; \(blocked) workspace\(blocked == 1 ? "" : "s") require\(blocked == 1 ? "s" : "") repair"
             }
             return blocked == 1
-                ? "1 workspace needs repair before secrets can apply"
-                : "\(blocked) workspaces need repair before secrets can apply"
+                ? "1 workspace requires repair"
+                : "\(blocked) workspaces require repair"
         }
         if running > 0 {
             return running == 1
