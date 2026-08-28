@@ -103,18 +103,37 @@ private func makeBackupModel(temporary: URL, response: String) throws -> AppMode
     return AppModel(client: client, diagnostics: MSWDiagnostics(client: client))
 }
 
-private final class FailingNotificationCenter: MSWNotificationCenterControlling {
+private final class ControllableNotificationCenter: MSWNotificationCenterControlling {
+    var status: UNAuthorizationStatus
+    var authorizationResult: Result<Bool, Error>
+    var shouldFailDelivery: Bool
+    private(set) var requestedOptions: [UNAuthorizationOptions] = []
     private(set) var addInvocationCount = 0
 
-    func authorizationStatus() async -> UNAuthorizationStatus { .authorized }
+    init(
+        status: UNAuthorizationStatus = .authorized,
+        authorizationResult: Result<Bool, Error> = .success(true),
+        shouldFailDelivery: Bool = false
+    ) {
+        self.status = status
+        self.authorizationResult = authorizationResult
+        self.shouldFailDelivery = shouldFailDelivery
+    }
+
+    func authorizationStatus() async -> UNAuthorizationStatus { status }
 
     func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
-        true
+        requestedOptions.append(options)
+        let result = try authorizationResult.get()
+        if result { status = .authorized }
+        return result
     }
 
     func add(_ request: UNNotificationRequest) async throws {
         addInvocationCount += 1
-        throw NSError(domain: "NotificationTest", code: 1)
+        if shouldFailDelivery {
+            throw NSError(domain: "NotificationTest", code: 1)
+        }
     }
 }
 
@@ -1462,8 +1481,9 @@ final class AppModelTests: XCTestCase {
 
     func testNotificationDeliveryCapsPersistentFailures() async {
         let defaults = UserDefaults(suiteName: "notification-retry-\(UUID().uuidString)")!
+        defaults.set(true, forKey: "notifications.enabled")
         defaults.set(true, forKey: "notifications.category.operations.enabled")
-        let center = FailingNotificationCenter()
+        let center = ControllableNotificationCenter(shouldFailDelivery: true)
         let coordinator = NotificationCoordinator(
             defaults: defaults,
             notificationCenter: center,
@@ -1487,6 +1507,72 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(coordinator.permanentFailures.first?.attempts, 3)
         coordinator.clearPermanentFailures()
         XCTAssertNil(coordinator.notificationFailureMessage)
+    }
+
+    func testDirectNotificationEnablementRequestsAlertAndSoundPermission() async {
+        let defaults = UserDefaults(suiteName: "notification-enable-\(UUID().uuidString)")!
+        let center = ControllableNotificationCenter(status: .notDetermined)
+        let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
+
+        let enabled = await coordinator.setNotificationsEnabled(true)
+        XCTAssertTrue(enabled)
+        XCTAssertTrue(coordinator.notificationsEnabled())
+        XCTAssertEqual(center.requestedOptions, [[.alert, .sound]])
+    }
+
+    func testEnablingCategoryEnablesNotificationsFirst() async {
+        let defaults = UserDefaults(suiteName: "notification-category-enable-\(UUID().uuidString)")!
+        let center = ControllableNotificationCenter(status: .notDetermined)
+        let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
+
+        let enabled = await coordinator.setEnabled(true, for: .operations)
+        XCTAssertTrue(enabled)
+        XCTAssertTrue(coordinator.notificationsEnabled())
+        XCTAssertEqual(coordinator.enabledCategories(), [.operations])
+        XCTAssertEqual(center.requestedOptions.count, 1)
+    }
+
+    func testDeniedNotificationEnablementStaysOffWithoutRequestingPermission() async {
+        let defaults = UserDefaults(suiteName: "notification-denied-\(UUID().uuidString)")!
+        let center = ControllableNotificationCenter(status: .denied)
+        let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
+
+        let enabled = await coordinator.setNotificationsEnabled(true)
+        XCTAssertFalse(enabled)
+        XCTAssertFalse(coordinator.notificationsEnabled())
+        XCTAssertTrue(center.requestedOptions.isEmpty)
+    }
+
+    func testFailedPermissionDoesNotClearSavedCategories() async {
+        for (status, result) in [
+            (UNAuthorizationStatus.notDetermined, Result<Bool, Error>.success(false)),
+            (.denied, .success(true)),
+        ] {
+            let defaults = UserDefaults(suiteName: "notification-preserve-\(UUID().uuidString)")!
+            defaults.set(true, forKey: "notifications.category.operations.enabled")
+            let center = ControllableNotificationCenter(status: status, authorizationResult: result)
+            let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
+
+            let enabled = await coordinator.setEnabled(true, for: .operations)
+            XCTAssertFalse(enabled)
+            XCTAssertEqual(coordinator.enabledCategories(), [.operations])
+            XCTAssertFalse(coordinator.notificationsEnabled())
+        }
+    }
+
+    func testGlobalNotificationDisableSuppressesDeliveryAndPreservesCategories() async {
+        let defaults = UserDefaults(suiteName: "notification-suppression-\(UUID().uuidString)")!
+        defaults.set(true, forKey: "notifications.enabled")
+        defaults.set(true, forKey: "notifications.category.operations.enabled")
+        let center = ControllableNotificationCenter()
+        let coordinator = NotificationCoordinator(defaults: defaults, notificationCenter: center)
+
+        let enabled = await coordinator.setNotificationsEnabled(false)
+        XCTAssertFalse(enabled)
+        await coordinator.deliver(makeNotificationEvent())
+
+        XCTAssertEqual(center.addInvocationCount, 0)
+        XCTAssertEqual(coordinator.enabledCategories(), [.operations])
     }
 
     func testClientBackedColdLaunchAndFailedObservationsRemainTruthful() async throws {

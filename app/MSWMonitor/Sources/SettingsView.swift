@@ -437,8 +437,10 @@ struct SettingsView: View {
         forKey: "github.settings.access-disabled"
     )
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
+    @State private var notificationsEnabled = false
     @State private var enabledNotificationCategories: Set<MSWNotificationCategory> = []
     @State private var notificationMessage: String?
+    @State private var isUpdatingNotifications = false
     @State private var updatingNotificationCategories: Set<MSWNotificationCategory> = []
 
     init(
@@ -1266,15 +1268,19 @@ struct SettingsView: View {
     private var notificationSettings: some View {
         Form {
             Section("Permission") {
-                LabeledContent("System authorization", value: notificationAuthorizationText)
-                Text("Notifications stay off until you enable a category. The system permission prompt appears only after that deliberate choice.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Toggle(
+                    "Enable notifications",
+                    isOn: Binding(
+                        get: { notificationsEnabled },
+                        set: { updateNotificationsEnabled($0) }
+                    )
+                )
+                .disabled(isUpdatingNotifications)
                 if notificationAuthorizationStatus == .denied {
                     Button("Open Notification Settings", action: openNotificationSettings)
                 }
-                Button("Retry permission check") {
-                    Task { await loadNotificationState() }
+                if let notificationMessage {
+                    recoveryMessage(notificationMessage)
                 }
             }
 
@@ -1437,17 +1443,6 @@ struct SettingsView: View {
         case .ready(let account, let owners, _):
             if let account { return "Connected as @\(account.login)" }
             return owners.isEmpty ? "Connected · no repository access" : "Connected · \(owners.count) owner\(owners.count == 1 ? "" : "s")"
-        }
-    }
-
-    private var notificationAuthorizationText: String {
-        switch notificationAuthorizationStatus {
-        case .notDetermined: return "Not requested"
-        case .denied: return "Denied in System Settings"
-        case .authorized: return "Allowed"
-        case .provisional: return "Allowed provisionally"
-        case .ephemeral: return "Allowed for this session"
-        @unknown default: return "Unavailable — retry"
         }
     }
 
@@ -1681,13 +1676,23 @@ struct SettingsView: View {
 
     private func loadNotificationState() async {
         notificationAuthorizationStatus = await notificationCoordinator.authorizationStatus()
+        notificationsEnabled = notificationCoordinator.notificationsEnabled()
         enabledNotificationCategories = notificationCoordinator.enabledCategories()
-        if (notificationAuthorizationStatus == .denied || notificationAuthorizationStatus == .notDetermined),
-           !enabledNotificationCategories.isEmpty {
-            enabledNotificationCategories = []
-            for category in MSWNotificationCategory.allCases {
-                _ = await notificationCoordinator.setEnabled(false, for: category)
+        if notificationsEnabled, !notificationAuthorizationStatus.allowsNotificationEnablement {
+            notificationsEnabled = await notificationCoordinator.setNotificationsEnabled(false)
+        }
+    }
+
+    private func updateNotificationsEnabled(_ enabled: Bool) {
+        isUpdatingNotifications = true
+        notificationMessage = nil
+        Task {
+            notificationsEnabled = await notificationCoordinator.setNotificationsEnabled(enabled)
+            if enabled, !notificationsEnabled {
+                notificationMessage = "Notification permission was denied or is unavailable. Open Notification Settings, allow MSW Monitor, then retry."
             }
+            notificationAuthorizationStatus = await notificationCoordinator.authorizationStatus()
+            isUpdatingNotifications = false
         }
     }
 
@@ -1698,10 +1703,12 @@ struct SettingsView: View {
             let resultingValue = await notificationCoordinator.setEnabled(enabled, for: category)
             if resultingValue {
                 enabledNotificationCategories.insert(category)
+                notificationsEnabled = true
             } else {
-                enabledNotificationCategories.remove(category)
                 if enabled {
                     notificationMessage = "Notification permission was denied or is unavailable. Open Notification Settings, allow MSW Monitor, then retry."
+                } else {
+                    enabledNotificationCategories.remove(category)
                 }
             }
             notificationAuthorizationStatus = await notificationCoordinator.authorizationStatus()
@@ -1717,6 +1724,16 @@ struct SettingsView: View {
     private func openNotificationSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") else { return }
         NSWorkspace.shared.open(url)
+    }
+}
+
+private extension UNAuthorizationStatus {
+    var allowsNotificationEnablement: Bool {
+        switch self {
+        case .authorized, .provisional, .ephemeral: return true
+        case .notDetermined, .denied: return false
+        @unknown default: return false
+        }
     }
 }
 

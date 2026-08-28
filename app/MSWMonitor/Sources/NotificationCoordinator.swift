@@ -98,6 +98,7 @@ struct MSWNotificationDeliveryFailure: Identifiable, Equatable, Sendable {
 @MainActor
 final class NotificationCoordinator {
     static let shared = NotificationCoordinator()
+    private static let enabledPreferenceKey = "notifications.enabled"
 
     private struct RetryEntry {
         let event: MSWNotificationEvent
@@ -147,10 +148,14 @@ final class NotificationCoordinator {
         Set(MSWNotificationCategory.allCases.filter { defaults.bool(forKey: $0.preferenceKey) })
     }
 
+    func notificationsEnabled() -> Bool {
+        defaults.bool(forKey: Self.enabledPreferenceKey)
+    }
+
     @discardableResult
-    func setEnabled(_ enabled: Bool, for category: MSWNotificationCategory) async -> Bool {
+    func setNotificationsEnabled(_ enabled: Bool) async -> Bool {
         guard enabled else {
-            defaults.set(false, forKey: category.preferenceKey)
+            defaults.set(false, forKey: Self.enabledPreferenceKey)
             return false
         }
 
@@ -167,8 +172,20 @@ final class NotificationCoordinator {
             authorized = false
         }
 
-        defaults.set(authorized, forKey: category.preferenceKey)
+        defaults.set(authorized, forKey: Self.enabledPreferenceKey)
         return authorized
+    }
+
+    @discardableResult
+    func setEnabled(_ enabled: Bool, for category: MSWNotificationCategory) async -> Bool {
+        guard enabled else {
+            defaults.set(false, forKey: category.preferenceKey)
+            return false
+        }
+
+        guard await setNotificationsEnabled(true) else { return false }
+        defaults.set(true, forKey: category.preferenceKey)
+        return true
     }
 
     private enum DeliveryResult {
@@ -250,7 +267,8 @@ final class NotificationCoordinator {
     }
 
     private func deliverEvent(_ event: MSWNotificationEvent) async -> DeliveryResult {
-        guard let category = MSWNotificationCategory.category(for: event.kind),
+        guard notificationsEnabled(),
+              let category = MSWNotificationCategory.category(for: event.kind),
               defaults.bool(forKey: category.preferenceKey),
               (await self.authorizationStatus()).allowsDelivery,
               let payload = Self.deepLinkPayload(for: event) else {
