@@ -3339,6 +3339,20 @@ class PackagedBehaviorTests(MSWTestCase):
             write_image(images["workspace"], kind)
             digest = hashlib.sha256(images["workspace"].read_bytes()).hexdigest()
             start_count = sum(event["event"] == "start" for event in self.env.state()["events"])
+            if kind == "truncated":
+                running_state = self.env.state()
+                running_state["sandboxes"]["dev"]["running"] = True
+                self.env.state_file.write_text(json.dumps(running_state, indent=2, sort_keys=True))
+                state_document = json.loads(self.env.msw(
+                    "app", "state", "--format", "json",
+                    extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"},
+                ).stdout)["result"]
+                dev = next(item for item in state_document["workspaces"] if item["id"] == "dev")
+                self.assertFalse(dev["actionCapabilities"]["canRestart"])
+                self.assertIn("storage", dev["actionCapabilities"]["reason"].lower())
+                self.assertIn("shorter", dev["actionCapabilities"]["recovery"].lower())
+                running_state["sandboxes"]["dev"]["running"] = False
+                self.env.state_file.write_text(json.dumps(running_state, indent=2, sort_keys=True))
             rejected = self._apply_start(extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"})
             self.assertEqual(rejected.returncode, 78, (kind, rejected.stdout, rejected.stderr))
             self.assertEqual(

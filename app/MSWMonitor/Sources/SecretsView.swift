@@ -221,7 +221,9 @@ struct SecretsView: View {
 
     private func restartBanner(_ message: String) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "arrow.triangle.2.circlepath")
+            Image(systemName: model.secretsRestartBlockedWorkspaces.isEmpty
+                ? "arrow.triangle.2.circlepath"
+                : "wrench.and.screwdriver")
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
             Text(message)

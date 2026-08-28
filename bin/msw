@@ -6264,7 +6264,7 @@ app_workspace_json() {
   local metrics_observed_at="" github_observed_at="" activity_observed_at=""
   local credential purpose host ip cpus max_cpus memory max_memory root_disk verification_repo access
   local account_login installation_id access_expires refresh_expires needs_restart host_needs_restart quarantine_reason role
-  local skipped_ports_json port_warning secrets_snapshot
+  local skipped_ports_json port_warning secrets_snapshot storage_ready=true action_reason="" action_recovery=""
   if app_workspace_quarantined "$box"; then
     quarantine="quarantined"
     if [[ -f "$(quarantine_file "$box")" && ! -L "$(quarantine_file "$box")" ]]; then
@@ -6321,7 +6321,14 @@ app_workspace_json() {
   skipped_ports_json="$(workspace_state_skipped_json "$box")"
   port_warning="$(workspace_port_warning "$box")"
   secrets_snapshot="$(app_workspace_secrets_snapshot "$box" "$lifecycle")"
-  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s}}' \
+  if [[ "$quarantine" == clear &&
+        ( "$lifecycle" == Running || "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] &&
+     ! workspace_storage_check "$box"; then
+    storage_ready=false
+    action_reason="Workspace storage must be repaired before starting or restarting $box."
+    action_recovery="$WORKSPACE_STORAGE_ERROR"
+  fi
+  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s,"reason":%s,"recovery":%s}}' \
     "$(app_json_string "$box")" \
     "$(app_json_string "$purpose")" \
     "$(app_json_string "$lifecycle")" \
@@ -6350,11 +6357,13 @@ app_workspace_json() {
     "$skipped_ports_json" \
     "$(app_json_string "$port_warning")" \
     "$secrets_snapshot" \
-    "$([[ "$quarantine" == clear && ( "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] && printf true || printf false)" \
+    "$([[ "$storage_ready" == true && "$quarantine" == clear && ( "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] && printf true || printf false)" \
     "$([[ "$lifecycle" == Running ]] && printf true || printf false)" \
+    "$([[ "$storage_ready" == true && "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
     "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
-    "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
-    "$([[ "$quarantine" == clear && "$credential" == Ready && "$lifecycle" == Running ]] && printf true || printf false)"
+    "$([[ "$quarantine" == clear && "$credential" == Ready && "$lifecycle" == Running ]] && printf true || printf false)" \
+    "$(app_json_optional "$action_reason")" \
+    "$(app_json_optional "$action_recovery")"
 }
 app_valid_control_free() {
   local value="${1-}"

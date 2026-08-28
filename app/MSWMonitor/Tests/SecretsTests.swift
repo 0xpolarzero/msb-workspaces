@@ -493,7 +493,10 @@ final class SecretsTests: XCTestCase {
             id: String,
             lifecycle: MSWLifecycle,
             credentialNeedsRestart: Bool,
-            secrets: MSWSecretsSnapshot?
+            secrets: MSWSecretsSnapshot?,
+            canRestart: Bool = true,
+            capabilityReason: String? = nil,
+            capabilityRecovery: String? = nil
         ) -> MSWWorkspaceSnapshot {
             MSWWorkspaceSnapshot(
                 id: id,
@@ -517,8 +520,10 @@ final class SecretsTests: XCTestCase {
                 ),
                 network: MSWNetworkSnapshot(host: "\(id).msw.test", ip: "127.0.0.10"),
                 actionCapabilities: MSWActionCapabilities(
-                    canStart: true, canStop: true, canRestart: true,
-                    canOpenTerminal: true, canPush: true
+                    canStart: true, canStop: true, canRestart: canRestart,
+                    canOpenTerminal: true, canPush: true,
+                    reason: capabilityReason,
+                    recovery: capabilityRecovery
                 )
             )
         }
@@ -534,7 +539,10 @@ final class SecretsTests: XCTestCase {
                         state: .restartRequired,
                         pendingCount: 1,
                         reason: "Host-held secret changes are pending."
-                    )
+                    ),
+                    canRestart: false,
+                    capabilityReason: "Workspace storage must be repaired before restarting dev.",
+                    capabilityRecovery: "Restore a verified ext4 workspace disk."
                 ),
                 snapshot(
                     id: "playgrounds",
@@ -598,6 +606,13 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(dev.secrets.reason, "Host-held secret changes are pending.")
         // The GitHub credential state must remain untouched by secret state.
         XCTAssertEqual(dev.credential, .ready)
+        XCTAssertFalse(dev.actionAvailability(for: .restart).isAllowed)
+        XCTAssertEqual(model.secretsRestartRequiredWorkspaces.map(\.id), [])
+        XCTAssertEqual(model.secretsRestartBlockedWorkspaces.map(\.id), [.dev])
+        XCTAssertEqual(
+            model.secretsRestartBannerMessage,
+            "1 workspace needs repair before secrets can apply"
+        )
 
         let playgrounds = try XCTUnwrap(model.workspaces.first { $0.id == .playgrounds })
         XCTAssertEqual(playgrounds.secrets.status, .appliesOnNextStart)

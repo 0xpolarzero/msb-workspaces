@@ -2245,7 +2245,7 @@ private struct WorkspaceSummaryRow: View {
                     )
             }
 
-            if let indicator = workspace.secrets.indicatorText {
+            if let indicator = secretIndicatorText {
                 Label(indicator, systemImage: "key")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.orange)
@@ -2276,6 +2276,17 @@ private struct WorkspaceSummaryRow: View {
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 9))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-row")
+    }
+
+    private var secretIndicatorText: String? {
+        guard workspace.secrets.restartRequired, workspace.state == .running else {
+            return workspace.secrets.indicatorText
+        }
+        let availability = workspace.actionAvailability(for: .restart)
+        guard !availability.isAllowed else { return workspace.secrets.indicatorText }
+        return availability.reason?.localizedCaseInsensitiveContains("storage") == true
+            ? "Secrets waiting for storage repair"
+            : "Secrets waiting for workspace repair"
     }
 
     private var attention: Attention? {

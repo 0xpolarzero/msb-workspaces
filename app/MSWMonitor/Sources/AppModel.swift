@@ -2340,9 +2340,24 @@ final class AppModel {
         }
     }
 
-    /// Running workspaces whose secret configuration is waiting on a restart.
+    /// Running workspaces whose pending secret configuration can be restarted
+    /// now according to the authoritative lifecycle capabilities.
     var secretsRestartRequiredWorkspaces: [Workspace] {
-        workspaces.filter { $0.secrets.restartRequired && $0.state == .running }
+        workspaces.filter {
+            $0.secrets.restartRequired &&
+                $0.state == .running &&
+                $0.actionAvailability(for: .restart).isAllowed
+        }
+    }
+
+    /// Running workspaces with pending secrets whose restart is blocked by a
+    /// separate repair requirement, such as invalid workspace storage.
+    var secretsRestartBlockedWorkspaces: [Workspace] {
+        workspaces.filter {
+            $0.secrets.restartRequired &&
+                $0.state == .running &&
+                !$0.actionAvailability(for: .restart).isAllowed
+        }
     }
 
     /// Workspaces whose pending secret configuration applies on their next
@@ -2355,12 +2370,23 @@ final class AppModel {
     }
 
     var hasPendingSecretChanges: Bool {
-        !secretsRestartRequiredWorkspaces.isEmpty || !secretsAppliesOnNextStartWorkspaces.isEmpty
+        !secretsRestartRequiredWorkspaces.isEmpty ||
+            !secretsRestartBlockedWorkspaces.isEmpty ||
+            !secretsAppliesOnNextStartWorkspaces.isEmpty
     }
 
     var secretsRestartBannerMessage: String? {
         let running = secretsRestartRequiredWorkspaces.count
+        let blocked = secretsRestartBlockedWorkspaces.count
         let queued = secretsAppliesOnNextStartWorkspaces.count
+        if blocked > 0 {
+            if running > 0 {
+                return "\(running) workspace\(running == 1 ? "" : "s") can restart; \(blocked) need\(blocked == 1 ? "s" : "") repair first"
+            }
+            return blocked == 1
+                ? "1 workspace needs repair before secrets can apply"
+                : "\(blocked) workspaces need repair before secrets can apply"
+        }
         if running > 0 {
             return running == 1
                 ? "1 workspace needs restart"
