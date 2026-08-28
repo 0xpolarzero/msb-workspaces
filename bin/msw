@@ -9125,7 +9125,10 @@ app_reconcile_named_volume_capacity() {
     return 1
   fi
   "$MSB_BIN" volume create "$temp" --kind disk --size "${size}G" -q >/dev/null || return 1
-  volume_ext4_status "$temp" || return 1
+  if ! finalize_fresh_ext4_volume "$temp"; then
+    "$MSB_BIN" volume rm "$temp" >/dev/null 2>&1 || true
+    return 1
+  fi
   if ! app_copy_named_volume "$volume" "$temp" "$helper"; then
     "$MSB_BIN" volume rm "$temp" >/dev/null 2>&1 || true
     return 1
@@ -9135,8 +9138,9 @@ app_reconcile_named_volume_capacity() {
     warn "workspace data remains recoverable in '$temp'"
     return 1
   fi
-  if ! volume_ext4_status "$volume"; then
-    warn "workspace data remains recoverable in '$temp'; replacement storage is not verified ext4"
+  if ! finalize_fresh_ext4_volume "$volume"; then
+    "$MSB_BIN" volume rm "$volume" >/dev/null 2>&1 || true
+    warn "workspace data remains recoverable in '$temp'; invalid fresh replacement storage was removed"
     return 1
   fi
   if ! app_copy_named_volume "$temp" "$volume" "$helper"; then

@@ -415,6 +415,28 @@ class TestEnv:
             handle.close()
 
 
+def materialize_ext4_raw_images(test_env: TestEnv) -> None:
+    state = test_env.state()
+    for name, entry in state["volumes"].items():
+        root = test_env.home / ".microsandbox" / "volumes" / name
+        guest_data = root / "guest-data"
+        guest_data.mkdir()
+        for child in list(root.iterdir()):
+            if child != guest_data:
+                shutil.move(str(child), guest_data / child.name)
+        image = root / "disk.raw"
+        with image.open("wb") as handle:
+            handle.truncate(4 * 1024 * 1024)
+            handle.seek(1028)
+            handle.write((1024).to_bytes(4, "little"))
+            handle.seek(1048)
+            handle.write((2).to_bytes(4, "little"))
+            handle.seek(1080)
+            handle.write(b"\x53\xef")
+        entry["path"] = str(image)
+    test_env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
 class MSWTestCase(unittest.TestCase):
     env: TestEnv
 
@@ -637,6 +659,44 @@ class InstallerAndDailyTests(MSWTestCase):
         state_dir = self.env.home / ".local" / "state" / "msw"
         self.assertTrue(state_dir.is_dir())
         self.assertEqual(oct(state_dir.stat().st_mode & 0o777), "0o700")
+
+    def test_setup_corrects_fresh_ext4_geometry_before_workspace_creation(self) -> None:
+        materialize_ext4_raw_images(self.env)
+        state = self.env.state()
+        for role in ("workspace", "runtime"):
+            name = f"msw-personal-{role}"
+            path = Path(state["volumes"].pop(name)["path"])
+            shutil.rmtree(path, ignore_errors=True)
+        state["sandboxes"].pop("personal")
+        event_count = len(state["events"])
+        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+        proc = self.env.setup(extra_env={
+            "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
+            "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+        })
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        after = self.env.state()
+        events = after["events"][event_count:]
+        create_index = next(
+            index for index, event in enumerate(events)
+            if event.get("event") == "create" and event.get("box") == "personal"
+        )
+        for role in ("workspace", "runtime"):
+            name = f"msw-personal-{role}"
+            image = Path(after["volumes"][name]["path"])
+            with image.open("rb") as handle:
+                handle.seek(1028)
+                block_count = int.from_bytes(handle.read(4), "little")
+                handle.seek(1048)
+                log_block_size = int.from_bytes(handle.read(4), "little")
+            self.assertEqual(image.stat().st_size, block_count * (1024 << log_block_size))
+            volume_index = next(
+                index for index, event in enumerate(events)
+                if event.get("event") == "volume-create" and event.get("volume") == name
+            )
+            self.assertLess(volume_index, create_index)
 
     def test_recreate_cleans_stale_host_key_from_dedicated_known_hosts(self) -> None:
         # Recreated VMs regenerate their host keys: the stale entry must be
@@ -3012,25 +3072,7 @@ class PackagedBehaviorTests(MSWTestCase):
         )
 
     def test_new_blank_workspace_disks_initialize_ext4_once_before_attach(self) -> None:
-        state = self.env.state()
-        for name, entry in state["volumes"].items():
-            root = self.env.home / ".microsandbox" / "volumes" / name
-            guest_data = root / "guest-data"
-            guest_data.mkdir()
-            for child in list(root.iterdir()):
-                if child != guest_data:
-                    shutil.move(str(child), guest_data / child.name)
-            image = root / "disk.raw"
-            with image.open("wb") as handle:
-                handle.truncate(4 * 1024 * 1024)
-                handle.seek(1028)
-                handle.write((1024).to_bytes(4, "little"))
-                handle.seek(1048)
-                handle.write((2).to_bytes(4, "little"))
-                handle.seek(1080)
-                handle.write(b"\x53\xef")
-            entry["path"] = str(image)
-        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+        materialize_ext4_raw_images(self.env)
 
         desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
         desired["workspaces"].append({
@@ -3093,6 +3135,38 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn("msw-broken-workspace", failed_state["volumes"])
         self.assertNotIn("msw-broken-runtime", failed_state["volumes"])
         self.assertNotIn("broken", failed_state["sandboxes"])
+
+    def test_capacity_replacement_corrects_fresh_ext4_before_copying_data(self) -> None:
+        materialize_ext4_raw_images(self.env)
+        source = (
+            self.env.home / ".microsandbox/volumes/msw-personal-workspace/guest-data"
+        )
+        (source / "repository-data").write_text("preserved")
+        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        personal = next(item for item in desired["workspaces"] if item["name"] == "personal")
+        personal["workspaceStorageGiB"] = 80
+
+        proc = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=json.dumps(desired), timeout=90,
+            extra_env={
+                "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
+                "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+            },
+        )
+        self.assertTrue(json.loads(proc.stdout)["ok"], proc.stdout + proc.stderr)
+
+        state = self.env.state()
+        name = "msw-personal-workspace"
+        image = Path(state["volumes"][name]["path"])
+        with image.open("rb") as handle:
+            handle.seek(1028)
+            block_count = int.from_bytes(handle.read(4), "little")
+            handle.seek(1048)
+            log_block_size = int.from_bytes(handle.read(4), "little")
+        self.assertEqual(image.stat().st_size, block_count * (1024 << log_block_size))
+        self.assertEqual((image.parent / "guest-data/repository-data").read_text(), "preserved")
+        self.assertNotIn(f"{name}-resize", state["volumes"])
 
     def test_app_bootstrap_waits_for_delayed_guest_systemd_readiness(self) -> None:
         desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())

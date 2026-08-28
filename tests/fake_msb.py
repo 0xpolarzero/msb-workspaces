@@ -392,8 +392,8 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             destination_name = sb.get("mounts", {}).get("/destination")
             if not source_name or not destination_name:
                 return fail("volume migration mounts missing")
-            source = Path(state["volumes"][source_name]["path"])
-            destination = Path(state["volumes"][destination_name]["path"])
+            source = volume_path(state, source_name)
+            destination = volume_path(state, destination_name)
             for child in source.iterdir():
                 target = destination / child.name
                 if child.is_dir() and not child.is_symlink():

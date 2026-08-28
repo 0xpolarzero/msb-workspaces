@@ -80,6 +80,7 @@ fi
 
 MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 [[ -n "$MSB_BIN" && -x "$MSB_BIN" ]] || fatal "msb is unavailable"
+TRUNCATE_BIN="${MSW_TRUNCATE_BIN:-/usr/bin/truncate}"
 
 log "Installing the MSW CLI and documentation"
 if [[ "$RESET_CONFIG" == 1 || ! -f "$HOME/.config/msw/config.sh" ]]; then
@@ -330,31 +331,75 @@ ext4_u32_le() {
   printf '%u\n' "$((16#$b0 + (16#$b1 << 8) + (16#$b2 << 16) + (16#$b3 << 24)))"
 }
 
-ext4_geometry_is_valid() {
-  local path="$1" file_bytes blocks_lo blocks_hi log_block_size block_size max_blocks
+ext4_declared_bytes() {
+  local path="$1" blocks_lo blocks_hi log_block_size block_size limit_blocks declared_blocks
   VOLUME_EXT4_DETAIL=""
-  file_bytes="$(file_size_bytes "$path")" || {
-    VOLUME_EXT4_DETAIL="The backing image size could not be read safely."
+  blocks_lo="$(ext4_u32_le "$path" 1028)" || {
+    VOLUME_EXT4_DETAIL="The ext4 block count could not be read safely."
     return 1
   }
-  blocks_lo="$(ext4_u32_le "$path" 1028)" || return 1
-  log_block_size="$(ext4_u32_le "$path" 1048)" || return 1
-  blocks_hi="$(ext4_u32_le "$path" 1360)" || return 1
+  log_block_size="$(ext4_u32_le "$path" 1048)" || {
+    VOLUME_EXT4_DETAIL="The ext4 block size could not be read safely."
+    return 1
+  }
+  blocks_hi="$(ext4_u32_le "$path" 1360)" || {
+    VOLUME_EXT4_DETAIL="The ext4 high block count could not be read safely."
+    return 1
+  }
   if (( log_block_size > 6 )); then
     VOLUME_EXT4_DETAIL="The ext4 superblock declares an invalid block size."
     return 1
   fi
   block_size=$((1024 << log_block_size))
-  max_blocks=$((file_bytes / block_size))
-  if (( blocks_hi > max_blocks / 4294967296 )); then
+  limit_blocks=$((9223372036854775807 / block_size))
+  if (( blocks_lo == 0 || blocks_hi > limit_blocks / 4294967296 )); then
+    VOLUME_EXT4_DETAIL="The ext4 superblock declares an unsupported filesystem size."
+    return 1
+  fi
+  limit_blocks=$((limit_blocks - blocks_hi * 4294967296))
+  if (( blocks_lo > limit_blocks )); then
+    VOLUME_EXT4_DETAIL="The ext4 superblock declares an unsupported filesystem size."
+    return 1
+  fi
+  declared_blocks=$((blocks_hi * 4294967296 + blocks_lo))
+  printf '%s\n' "$((declared_blocks * block_size))"
+}
+
+ext4_geometry_is_valid() {
+  local path="$1" file_bytes declared_bytes
+  file_bytes="$(file_size_bytes "$path")" || {
+    VOLUME_EXT4_DETAIL="The backing image size could not be read safely."
+    return 1
+  }
+  declared_bytes="$(ext4_declared_bytes "$path")" || return 1
+  if (( file_bytes < declared_bytes )); then
     VOLUME_EXT4_DETAIL="The backing image is shorter than the filesystem declared by its ext4 superblock."
     return 1
   fi
-  max_blocks=$((max_blocks - blocks_hi * 4294967296))
-  if (( blocks_lo == 0 || blocks_lo > max_blocks )); then
-    VOLUME_EXT4_DETAIL="The backing image is shorter than the filesystem declared by its ext4 superblock."
-    return 1
+}
+
+finalize_fresh_ext4_volume() {
+  local name="$1" kind filesystem path expected magic file_bytes declared_bytes
+  volume_probe "$name" || return 1
+  kind="$(volume_inspect_field Kind)"
+  filesystem="$(volume_inspect_field Filesystem)"
+  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 1
+  if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
+    magic="$(volume_inspect_field Magic)"
+    [[ -z "$magic" || "$magic" == 53ef ]]
+    return
   fi
+  path="$(volume_inspect_field Path)"
+  expected="$HOME/.microsandbox/volumes/$name/disk.raw"
+  [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 1
+  magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
+  [[ "$magic" == 53ef ]] || return 1
+  file_bytes="$(file_size_bytes "$path")" || return 1
+  declared_bytes="$(ext4_declared_bytes "$path")" || return 1
+  if (( file_bytes < declared_bytes )); then
+    "$TRUNCATE_BIN" -s "$declared_bytes" "$path" || return 1
+  fi
+  ext4_volume_status "$name"
 }
 
 ext4_volume_status() {
@@ -387,8 +432,10 @@ ensure_ext4_volume() {
   # the name exists, so a newly allocated blank image is formatted once.
   "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null ||
     fatal "could not create workspace storage '$name'"
-  ext4_volume_status "$name" ||
-    fatal "new workspace storage '$name' did not initialize as ext4; it was retained for inspection"
+  if ! finalize_fresh_ext4_volume "$name"; then
+    "$MSB_BIN" volume rm "$name" >/dev/null 2>&1 || true
+    fatal "new workspace storage '$name' was invalid; the fresh artifact was removed before any VM used it"
+  fi
 }
 
 BASE_STAMP="$HOME/.config/msw/base-version"
