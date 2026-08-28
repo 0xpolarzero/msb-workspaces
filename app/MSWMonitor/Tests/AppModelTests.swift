@@ -735,6 +735,71 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(AppNavigationState().workspaceSection, .files)
     }
 
+    func testWorkspaceMaintenanceGuidanceNeverReportsAttentionStatesHealthy() {
+        let repair = Workspace(
+            id: .dev,
+            state: .running,
+            credential: .ready,
+            freshness: .fresh,
+            statusReason: "Workspace storage is not a verified ext4 filesystem.",
+            recoveryAction: "Restore a known-good workspace disk.",
+            canStop: true,
+            serverCapabilities: MSWActionCapabilities(
+                canStart: false,
+                canStop: true,
+                canRestart: false,
+                canOpenTerminal: true,
+                canPush: true,
+                reason: "Workspace storage is not a verified ext4 filesystem.",
+                recovery: "Restore a known-good workspace disk."
+            )
+        )
+        XCTAssertEqual(
+            repair.maintenanceGuidance,
+            WorkspaceMaintenanceGuidance(
+                title: "Requires repair",
+                reason: "Workspace storage is not a verified ext4 filesystem.",
+                recovery: "Restore a known-good workspace disk."
+            )
+        )
+
+        let quarantined = Workspace(
+            id: .dev,
+            state: .quarantined,
+            credential: .quarantined,
+            freshness: .fresh,
+            quarantineReason: "Workspace safety state could not be verified.",
+            recoveryAction: "Stop the workspace and repair its authorization."
+        )
+        XCTAssertNil(quarantined.repairRequirement)
+        XCTAssertEqual(
+            quarantined.maintenanceGuidance,
+            WorkspaceMaintenanceGuidance(
+                title: "Quarantined",
+                reason: "Workspace safety state could not be verified.",
+                recovery: "Stop the workspace and repair its authorization."
+            )
+        )
+
+        let stale = Workspace(
+            id: .dev,
+            state: .running,
+            credential: .ready,
+            freshness: .stale,
+            statusReason: "The latest observation failed; this is the last known snapshot.",
+            recoveryAction: "Retry the observation."
+        )
+        XCTAssertNil(stale.repairRequirement)
+        XCTAssertEqual(
+            stale.maintenanceGuidance,
+            WorkspaceMaintenanceGuidance(
+                title: "State needs attention",
+                reason: "The latest observation failed; this is the last known snapshot.",
+                recovery: "Retry the observation."
+            )
+        )
+    }
+
     func testGitHubSettingsRefreshPreservesCachedState() async throws {
         let provider = GitHubFixtureProvider(scenario: "interaction-states")
         let state = GitHubSettingsState(

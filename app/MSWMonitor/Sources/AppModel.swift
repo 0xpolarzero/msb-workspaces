@@ -219,6 +219,12 @@ struct WorkspaceRepairRequirement: Equatable, Sendable {
     let recovery: String
 }
 
+struct WorkspaceMaintenanceGuidance: Equatable, Sendable {
+    let title: String
+    let reason: String
+    let recovery: String
+}
+
 extension Workspace {
     var repairRequirement: WorkspaceRepairRequirement? {
         guard freshness == .fresh,
@@ -237,6 +243,38 @@ extension Workspace {
             : (state == .stopped || state == .exited) && !serverCapabilities.canStart
         guard lifecycleBlocked else { return nil }
         return WorkspaceRepairRequirement(reason: reason, recovery: recovery)
+    }
+
+    var maintenanceGuidance: WorkspaceMaintenanceGuidance? {
+        if let requirement = repairRequirement {
+            return WorkspaceMaintenanceGuidance(
+                title: "Requires repair",
+                reason: requirement.reason,
+                recovery: requirement.recovery
+            )
+        }
+        if state == .quarantined || credential == .quarantined {
+            return WorkspaceMaintenanceGuidance(
+                title: "Quarantined",
+                reason: quarantineReason
+                    ?? statusReason
+                    ?? "Workspace safety state could not be verified.",
+                recovery: serverCapabilities.recovery
+                    ?? recoveryAction
+                    ?? "Stop the workspace, then repair its safety state."
+            )
+        }
+        if freshness != .fresh {
+            return WorkspaceMaintenanceGuidance(
+                title: "State needs attention",
+                reason: statusReason
+                    ?? "The latest workspace state is not authoritative.",
+                recovery: recoveryAction
+                    ?? serverCapabilities.recovery
+                    ?? "Retry the observation."
+            )
+        }
+        return nil
     }
 
     func actionAvailability(

@@ -387,18 +387,18 @@ struct DetailView: View {
                     Text("\(workspace.id.rawValue) maintenance")
                         .font(.headline)
                         .accessibilityAddTraits(.isHeader)
-                    if let requirement = workspace.repairRequirement {
-                        Label("Requires repair", systemImage: "wrench.and.screwdriver.fill")
+                    if let guidance = workspace.maintenanceGuidance {
+                        Label(guidance.title, systemImage: "wrench.and.screwdriver.fill")
                             .font(.body.weight(.semibold))
                             .foregroundStyle(.orange)
                             .accessibilityIdentifier(
                                 "workspace.\(workspace.id.rawValue).repair.status"
                             )
-                        Text(requirement.reason)
+                        Text(guidance.reason)
                             .accessibilityIdentifier(
                                 "workspace.\(workspace.id.rawValue).repair.reason"
                             )
-                        Text(requirement.recovery)
+                        Text(guidance.recovery)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier(
                                 "workspace.\(workspace.id.rawValue).repair.recovery"
