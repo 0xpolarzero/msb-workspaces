@@ -71,7 +71,9 @@ struct Workspace: Identifiable, Equatable, Sendable {
 
         static let active = SecretsState(status: .active, pendingCount: 0, reason: nil)
 
-        var restartRequired: Bool { status == .restartRequired }
+        var restartRequired: Bool {
+            status == .restartRequired || (status == .error && pendingCount > 0)
+        }
         var appliesOnNextStart: Bool { status == .appliesOnNextStart }
         var needsAttention: Bool { status != .active }
 

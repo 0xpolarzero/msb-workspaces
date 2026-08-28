@@ -609,6 +609,22 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(personal.secrets.pendingCount, 0)
     }
 
+    func testPendingSecretVerificationErrorRemainsRestartable() {
+        let pendingError = Workspace.SecretsState(
+            status: .error,
+            pendingCount: 1,
+            reason: "Verification failed."
+        )
+        XCTAssertTrue(pendingError.restartRequired)
+
+        let terminalError = Workspace.SecretsState(
+            status: .error,
+            pendingCount: 0,
+            reason: "Keychain unavailable."
+        )
+        XCTAssertFalse(terminalError.restartRequired)
+    }
+
         func testSecretsFixtureAddEditRemoveAndRestartBadges() async throws {
         let model = AppModel()
         model.installSecretsUITestFixture()

@@ -435,6 +435,9 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertEqual(leaked.count, 0, "The secret value must never be rendered")
 
+        let review = app.descendants(matching: .any)["secrets.review.sheet"]
+        let phrase = app.textFields["secrets.review.phrase"]
+
         // Edit: name immutable, value never preloaded, explicit Replace value.
         app.buttons["secrets.entry.SERVICE_TOKEN.edit"].click()
         XCTAssertTrue(editor.waitForExistence(timeout: 2))
