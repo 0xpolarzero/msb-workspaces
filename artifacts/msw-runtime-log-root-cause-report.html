@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MSW Runtime Log Failures — Root-Cause Report</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --text: #17191d;
+    --muted: #656b75;
+    --line: #dfe2e7;
+    --accent: #1677ff;
+    --accent-soft: #e9f2ff;
+    --danger: #b42318;
+    --warning: #9a6700;
+    --success: #16803c;
+    --code: #f1f3f6;
+    --shadow: 0 16px 42px rgba(20, 28, 42, .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15171a;
+      --surface: #1d2024;
+      --surface-2: #24282d;
+      --text: #f3f4f6;
+      --muted: #a8adb6;
+      --line: #353a41;
+      --accent: #68a7ff;
+      --accent-soft: #1c3558;
+      --danger: #ff8a80;
+      --warning: #ffd166;
+      --success: #6bd58c;
+      --code: #252a30;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.58 -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, sans-serif; }
+  main { max-width: 1120px; margin: 0 auto; padding: 64px 28px 96px; }
+  h1, h2, h3, h4 { line-height: 1.18; letter-spacing: -.025em; }
+  h1 { margin: 14px 0 18px; max-width: 920px; font-size: clamp(36px, 6vw, 62px); }
+  h2 { margin: 0 0 18px; font-size: 28px; }
+  h3 { margin: 0 0 10px; font-size: 21px; }
+  h4 { margin: 20px 0 6px; font-size: 14px; letter-spacing: .02em; text-transform: uppercase; }
+  p { margin: 0 0 14px; }
+  ul, ol { margin: 8px 0 0; padding-left: 22px; }
+  li { margin: 8px 0; }
+  code { padding: 2px 6px; background: var(--code); border-radius: 5px; font: 13px ui-monospace, "SFMono-Regular", Menlo, monospace; overflow-wrap: anywhere; }
+  .eyebrow { color: var(--accent); font-size: 13px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+  .lede { max-width: 870px; color: var(--muted); font-size: 20px; }
+  .verdict { margin: 34px 0 18px; padding: 22px 24px; background: var(--surface); border-left: 4px solid var(--danger); border-radius: 10px; box-shadow: var(--shadow); font-size: 17px; }
+  .evidence { margin: 18px 0 46px; padding: 18px 20px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; color: var(--muted); }
+  section { margin-top: 56px; }
+  .issue { padding: 26px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+  .issue + .issue { margin-top: 22px; }
+  .issue-head { display: flex; gap: 14px; align-items: start; margin-bottom: 14px; }
+  .number { flex: 0 0 auto; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 750; }
+  .issue-head p { color: var(--muted); margin: 4px 0 0; }
+  .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
+  .fact { padding: 17px 18px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 11px; }
+  .fact p, .fact li { color: var(--muted); }
+  .fix { margin-top: 18px; padding: 18px 20px; border-left: 4px solid var(--success); background: var(--surface-2); border-radius: 9px; }
+  .fix strong { color: var(--success); }
+  table { width: 100%; border-collapse: collapse; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+  th, td { padding: 14px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { color: var(--muted); background: var(--surface-2); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  tr:last-child td { border-bottom: 0; }
+  .bad { color: var(--danger); font-weight: 700; }
+  .warn { color: var(--warning); font-weight: 700; }
+  .good { color: var(--success); font-weight: 700; }
+  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+  .flow div { position: relative; padding: 16px; min-height: 96px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; }
+  .flow div:not(:last-child)::after { content: "→"; position: absolute; right: -11px; top: 35px; z-index: 2; color: var(--accent); font-weight: 800; }
+  .flow strong { display: block; margin-bottom: 5px; }
+  .refs { color: var(--muted); font-size: 13px; }
+  footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  @media (max-width: 760px) {
+    .facts, .flow { grid-template-columns: 1fr; }
+    .flow div:not(:last-child)::after { content: "↓"; right: auto; left: 20px; top: auto; bottom: -18px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">MSW Monitor · Runtime log investigation</div>
+  <h1>Three different failures share one missing boundary.</h1>
+  <p class="lede">Provisioning, health checks, and Monitor queries run inside guests, but their sessions are captured as if they were user workload logs. One stale transport process then turns a missing runtime file into an endless visible retry storm.</p>
+
+  <div class="verdict"><strong>Decision:</strong> fix lifecycle reconciliation and session provenance upstream. UI string filtering would hide symptoms, delete legitimate user output, and leave the broken relay and partial workspace configuration intact.</div>
+  <div class="evidence"><strong>Live evidence collected:</strong> all three workspaces reported <code>Running</code> with systemd as PID 1; the relay file was absent in every guest; the bounded log contained 197 missing-relay failures from 197 <code>personal</code> sessions at a mean 8.96-second interval; only <code>personal</code> had an orphaned shuttle process. These observations came from the live runtime, not MSWMonitor’s deterministic UI fixtures.</div>
+
+  <section>
+    <h2>Issue-by-issue findings</h2>
+
+    <article class="issue">
+      <div class="issue-head"><div class="number">1</div><div><h3>Missing GitHub relay retries forever</h3><p><code>personal</code> prints a Python ENOENT about every nine seconds.</p></div></div>
+      <div class="facts">
+        <div class="fact"><h4>What is happening</h4><p><code>Shuttle.spawn_relay</code> executes <code>python3 /var/lib/msw-runtime/msw-github-relay.py</code> inside the workspace. The file is missing, so the child exits immediately. <code>Shuttle.run</code> respawns it; the backoff caps at eight seconds, producing the measured cadence.</p></div>
+        <div class="fact"><h4>Why it is wrong</h4><p>This is a permanent precondition failure treated as transient. It wastes sessions, evicts useful records from the bounded log, floods the UI, and never repairs GitHub transport. A log viewer cannot make this healthy.</p></div>
+        <div class="fact"><h4>Root cause</h4><p>Relay installation occurs only during provisioning. Startup accepts a matching live shuttle without checking that the guest relay exists or matches the expected hash. Semantic policy no-ops skip transport checks; empty policies do not remove stale shuttles. The orphaned <code>personal</code> shuttle survived with parent PID 1, while <code>dev</code> and <code>playgrounds</code> had no shuttle, explaining the workspace difference.</p></div>
+        <div class="fact"><h4>Evidence boundary</h4><p>The investigation proved the relay is absent in all three guests and found the orphaned process. Retained evidence cannot prove what deleted the files or originally orphaned that process.</p></div>
+      </div>
+      <div class="fix"><strong>Permanent fix</strong><ol><li>Add one idempotent transport reconciler after app startup, workspace create/recreate/start, repair, and every policy application, including semantic no-ops.</li><li>For active policies, verify workspace stability, relay existence and hash, install atomically on drift, verify Git configuration, own exactly one shuttle, and require an end-to-end heartbeat before reporting <code>provisioned</code>.</li><li>For empty policies, stop owned children and remove stale PID, signature, plist, and LaunchAgent state.</li><li>Classify a missing relay or hash mismatch as permanent <code>MSW_RELAY_NOT_INSTALLED</code>: open the retry circuit and emit one repair action. Reserve jittered exponential retry for transient sandbox or transport failures; reset only after a verified heartbeat.</li></ol></div>
+      <p class="refs">Primary code: <code>lib/msw-github-shuttle.py:51–58, 111–133, 210–213, 382–418</code>; <code>bin/msw:3687–3720, 3869–3875, 7527–7541, 8112–8164</code>.</p>
+    </article>
+
+    <article class="issue">
+      <div class="issue-head"><div class="number">2</div><div><h3>Systemd commands run before systemd is ready</h3><p>The message says the image lacks systemd, but the verified guests do use systemd as PID 1.</p></div></div>
+      <div class="facts">
+        <div class="fact"><h4>What is happening</h4><p>Bootstrap creates a configured workspace, then immediately runs guest configuration. <code>hostnamectl</code> is the first systemd client, followed by <code>systemctl</code>. There is no readiness barrier after <code>msb run</code>.</p></div>
+        <div class="fact"><h4>Why it is wrong</h4><p>The error is both alarming and misleading: it looks like a permanently incompatible image, but it is a startup race. Worse, the configuration is recorded before guest setup succeeds, so retries can skip a partially configured workspace.</p></div>
+        <div class="fact"><h4>Root cause</h4><p>The newer bootstrap path omitted the readiness wait already present in <code>setup.sh</code>. Its transaction order is also wrong: <code>workspaces.json</code> is committed before configuration completes, and an existing sandbox is later treated as complete.</p></div>
+        <div class="fact"><h4>Producer certainty</h4><p><code>hostnamectl</code> is the leading producer because it runs first and <code>set -e</code> ends the session. This remains an inference because current log records omit argv. The missing startup seam and early commit are verified.</p></div>
+      </div>
+      <div class="fix"><strong>Permanent fix</strong><ol><li>Poll a silent PID-1 and systemd-bus readiness predicate with a bounded deadline before any systemd client.</li><li>Journal per-workspace configuration stages and make every guest configuration step repeatable.</li><li>Commit workspace configuration only after all steps pass verification. On failure, restore the previous lifecycle and retain an explicit <code>needs-configuration</code> state.</li><li>Report a typed, retryable startup timeout in internal diagnostics, not raw guest stderr in workload logs.</li></ol></div>
+      <p class="refs">Call chain: <code>BootstrapCoordinator.swift:974</code> → <code>MSWClient.swift:686–700</code> → <code>bin/msw:8719–8793</code> → <code>bin/msw:8597–8717</code> → <code>bin/msw:8493–8531</code>. Existing correct wait: <code>setup.sh:459–470</code>.</p>
+    </article>
+
+    <article class="issue">
+      <div class="issue-head"><div class="number">3</div><div><h3>Monitor control responses appear as user logs</h3><p>Empty directory JSON, standalone <code>[</code>/<code>]</code>, and storage probes are successful internal operations, not workload events.</p></div></div>
+      <div class="facts">
+        <div class="fact"><h4>What is happening</h4><p>Opening or refreshing workspace Files triggers a guest directory query, which prints compact JSON. Repository refresh prints a JSON array incrementally, so empty results become separate bracket writes. MicroSandbox captures every guest exec write; the log adapter marks every valid unrecognized record safe for display.</p></div>
+        <div class="fact"><h4>Why it is wrong</h4><p>The UI gives successful RPC responses no operation label or context, so users read them as application output or corruption. Filtering literal <code>[]</code> or JSON would also delete legitimate user logs.</p></div>
+        <div class="fact"><h4>Root cause</h4><p>Guest sessions carry no reliable origin or visibility metadata. Control-plane and workload output share one undifferentiated capture stream, and the adapter defaults unknown records to visible.</p></div>
+        <div class="fact"><h4>The ext4 line</h4><p><code>workspace=ext4 runtime=ext4</code> came from an ad hoc <code>findmnt</code> verification command in an earlier Smithers execution, not tracked application code. It leaked into the same log because the underlying session-origin boundary is missing.</p></div>
+      </div>
+      <div class="fix"><strong>Permanent fix</strong><ol><li>Add structured session-origin metadata, or a first-class internal/no-capture execution mode, at the MicroSandbox/MSW boundary.</li><li>Tag directory, repository, setup, storage, health, and relay sessions as <code>control-plane</code>; tag user processes as <code>workload</code>.</li><li>Default the Logs tab to workload records. Put typed internal diagnostics behind an explicit disclosure with operation name, result, and repair action.</li><li>Preserve unknown user payloads verbatim. Never classify by message content.</li></ol></div>
+      <p class="refs">Directory chain: <code>DetailView.swift:889–942, 1013–1053</code> → <code>AppModel.swift:1354–1435</code> → <code>MSWClient.swift:218–255</code> → <code>bin/msw:6127–6243, 6301–6352</code>. Repository chain: <code>DetailView.swift:186–199, 243–249</code> → <code>AppModel.swift:1850–1879</code> → <code>MSWOperationService.swift:47–51</code> → <code>MSWClient.swift:204–215</code> → <code>bin/msw:7855–8069</code>.</p>
+    </article>
+
+    <article class="issue">
+      <div class="issue-head"><div class="number">4</div><div><h3>Clock-only timestamps make correct ordering look wrong</h3><p>Rows can be sorted correctly while appearing chronologically reversed.</p></div></div>
+      <div class="facts">
+        <div class="fact"><h4>What is happening</h4><p>The app sorts by the full <code>Date</code>, then renders and copies only <code>HH:mm:ss</code>. Logs spanning midnight or several days therefore lose the date that explains their order. Shuttle output also writes clock time only.</p></div>
+        <div class="fact"><h4>Why it is wrong</h4><p>A user cannot distinguish “today at 10:25” from “yesterday at 19:55.” The presentation contradicts the underlying order and copied evidence is ambiguous.</p></div>
+      </div>
+      <div class="fix"><strong>Permanent fix</strong><p>Add day separators or render a date whenever results span calendar days. Always copy an ISO 8601 timestamp with date and offset. Keep compact clock time only for a single-day visible range.</p></div>
+      <p class="refs">Presentation: <code>DetailView.swift:665–700, 716–740</code>. Shuttle: <code>lib/msw-github-shuttle.py:71–73</code>. Existing timestamp-preservation tests: <code>AppModelTests.swift:860–906</code>; multi-day rendering is uncovered.</p>
+    </article>
+  </section>
+
+  <section>
+    <h2>Required architecture boundary</h2>
+    <div class="flow" aria-label="Recommended runtime logging flow">
+      <div><strong>Operation starts</strong>Every guest exec declares origin, operation ID, and visibility.</div>
+      <div><strong>Runtime captures</strong>Workload output and control-plane diagnostics remain typed and separate.</div>
+      <div><strong>Adapter normalizes</strong>Permanent errors circuit-break; transient errors retry within policy.</div>
+      <div><strong>Monitor presents</strong>Workload is default. Internal diagnostics are explicit and actionable.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Regression gates</h2>
+    <table>
+      <thead><tr><th>Invariant</th><th>Regression proof</th></tr></thead>
+      <tbody>
+        <tr><td class="good">Relay desired state</td><td>Delete the guest relay, apply an unchanged non-empty policy, and prove it installs atomically, owns exactly one shuttle, and passes a heartbeat. Apply an empty policy and prove every owned artifact and process disappears.</td></tr>
+        <tr><td class="good">Retry classification</td><td>Prove missing relay/hash mismatch opens the circuit after one actionable event. Prove transient transport failures use bounded jittered backoff and reset only after verified health.</td></tr>
+        <tr><td class="good">Bootstrap transaction</td><td>Delay systemd readiness in <code>fake_msb</code>; prove no workload noise, no incomplete commit, lifecycle restoration on timeout, explicit retryable state, and idempotent success on retry.</td></tr>
+        <tr><td class="good">Log provenance</td><td>Origin-tagged directory/repository/setup sessions must be absent from default logs while identical user messages such as <code>[]</code> and <code>{}</code> remain visible.</td></tr>
+        <tr><td class="good">Timestamp clarity</td><td>Render records across midnight and multiple days; prove visible day context and full-date copy output.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Verification performed</h2>
+    <table>
+      <tbody>
+        <tr><td>Runtime state</td><td>Queried typed state and bounded logs for <code>dev</code>, <code>playgrounds</code>, and <code>personal</code>; checked guest PID 1, relay presence, and shuttle ownership.</td></tr>
+        <tr><td>Focused tests</td><td><code>PackagedBehaviorTests.test_app_logs_normalizes_and_redacts_jsonl</code> and <code>test_app_logs_filters_the_complete_relay_session_by_structured_protocol</code> passed through the suite entry point.</td></tr>
+        <tr><td>Scope</td><td>Read-only investigation. No source edit, formatter, linter, build, project-wide test, or UI smoke test was performed.</td></tr>
+        <tr><td>Coverage gap</td><td>Existing bootstrap and policy-idempotency tests do not exercise delayed systemd readiness, incomplete configuration rollback, semantic no-op relay repair, orphan removal, or origin-tagged control sessions.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>Evidence collected and independently reviewed through Smithers run <code>run-1787906766860</code>. Findings distinguish verified runtime behavior from the one explicitly marked producer inference.</footer>
+</main>
+</body>
+</html>

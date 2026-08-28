@@ -396,7 +396,6 @@ struct DetailView: View {
         let id: LogRowID
         let workspace: Workspace.ID
         let observedAt: Date
-        let timestamp: String
         let message: String
         let prettyJSON: String?
     }
@@ -406,6 +405,7 @@ struct DetailView: View {
         let allRows = visibleLogLines
         let rows = Self.filteredLogLines(allRows, query: logSearch)
         let selectedRows = rows.filter { logSelection.contains($0.id) }
+        let spansDays = LogTimestamp.spansMultipleDays(rows.map(\.observedAt))
 
         VStack(alignment: .leading, spacing: 10) {
             if let failure = model.latestOperationFailure,
@@ -436,7 +436,7 @@ struct DetailView: View {
                     ScrollViewReader { proxy in
                         Table(rows, selection: $logSelection) {
                             TableColumn("Timestamp") { row in
-                                Text(row.timestamp)
+                                Text(LogTimestamp.display(row.observedAt, spanningDays: spansDays))
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -444,7 +444,11 @@ struct DetailView: View {
                                         "logs.row.\(row.workspace.rawValue).\(row.id.ordinal).timestamp"
                                     )
                             }
-                            .width(min: 84, ideal: 92, max: 112)
+                            .width(
+                                min: spansDays ? 150 : 84,
+                                ideal: spansDays ? 168 : 92,
+                                max: spansDays ? 200 : 112
+                            )
 
                             TableColumn("Workspace") { row in
                                 Text(row.workspace.rawValue)
@@ -681,7 +685,6 @@ struct DetailView: View {
                         ),
                         workspace: workspace.id,
                         observedAt: line.observedAt,
-                        timestamp: line.observedAt.formatted(date: .omitted, time: .standard),
                         message: message,
                         prettyJSON: Self.prettyJSON(from: message)
                     )
@@ -707,17 +710,17 @@ struct DetailView: View {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return lines }
         return lines.filter {
-            $0.timestamp.localizedCaseInsensitiveContains(query)
+            LogTimestamp.display($0.observedAt, spanningDays: true).localizedCaseInsensitiveContains(query)
                 || $0.workspace.rawValue.localizedCaseInsensitiveContains(query)
                 || $0.message.localizedCaseInsensitiveContains(query)
         }
     }
 
     private static func formattedLogText(_ lines: [TaggedLogLine]) -> String {
-        let timestampWidth = lines.map(\.timestamp.count).max() ?? 0
+        let timestampWidth = lines.map { LogTimestamp.copy($0.observedAt).count }.max() ?? 0
         let workspaceWidth = lines.map(\.workspace.rawValue.count).max() ?? 0
         return lines.map { line in
-            let timestamp = line.timestamp.padding(
+            let timestamp = LogTimestamp.copy(line.observedAt).padding(
                 toLength: timestampWidth,
                 withPad: " ",
                 startingAt: 0
@@ -868,6 +871,42 @@ struct DetailView: View {
     }
 
 }
+
+/// Timestamp presentation and copy formatting for the log viewer.
+enum LogTimestamp {
+    /// Shared ISO 8601 value style for copied evidence. Locale-independent and Sendable.
+    private static let copyStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
+    /// True when `dates` fall on more than one calendar day.
+    static func spansMultipleDays(_ dates: [Date], calendar: Calendar = .current) -> Bool {
+        guard let first = dates.min(), let last = dates.max() else { return false }
+        return !calendar.isDate(first, inSameDayAs: last)
+    }
+
+    /// Row timestamp: clock-only for a single visible day, date-inclusive when the
+    /// visible range spans calendar days. The date-inclusive form is a superset of
+    /// the clock-only form, so time-based search queries match either way.
+    static func display(
+        _ date: Date,
+        spanningDays: Bool,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String {
+        let style = Date.FormatStyle(
+            date: spanningDays ? .abbreviated : .omitted,
+            time: .standard,
+            locale: locale,
+            timeZone: timeZone
+        )
+        return date.formatted(style)
+    }
+
+    /// Locale-independent full ISO 8601 timestamp with timezone offset, used for copied evidence.
+    static func copy(_ date: Date) -> String {
+        date.formatted(copyStyle)
+    }
+}
+
 private struct RepositoryLoadingSkeleton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {

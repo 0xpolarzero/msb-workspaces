@@ -279,6 +279,11 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             break
     if not box or box not in state["sandboxes"]:
         return fail("unknown sandbox")
+    # Real msb also accepts transport flags AFTER the box (`exec <box>
+    # --stream -- ...` is how the shuttle spawns relays); skip them before
+    # the `--` command separator.
+    while i < len(args) and args[i] in ("--no-tty", "-t", "--tty", "-q", "--quiet", "--stream"):
+        i += 1
     if i < len(args) and args[i] == "--": i += 1
     command = args[i:]
     if not command:
@@ -287,6 +292,27 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     if not require_secret_source(sb):
         return 1
     sb["running"] = True
+    # MSW control-plane execs run through a bash -c wrapper that prints the
+    # reserved internal-session marker (control conn-id 0, length 1, payload
+    # "H") to stderr before exec'ing the real command. Strip that wrapper so
+    # every stub below — including the relay stub and systemctl branches —
+    # matches the unchanged real command shape. The CLI wrappers use $0="_"
+    # and exec "$@" (the payload follows the marker); the shuttle's relay
+    # wrapper uses $0="msw-shuttle" and execs `python3 "$1"` explicitly, so
+    # the stripped command must restore the python3 it would run. Only the
+    # marker wrapper is stripped: plain `bash -c ... _ ARG` commands that
+    # legitimately use "_" as $0 (git verification probes) are left intact.
+    if (len(command) >= 4 and command[:2] == ["bash", "-c"]
+            and command[3] in ("_", "msw-shuttle")
+            and command[2].startswith("printf ")
+            and "exec " in command[2]):
+        # Journal that this exec arrived as the marker-wrapped control-plane
+        # argv so regressions can prove control-session provenance.
+        sb["wrapped_control_execs"] = sb.get("wrapped_control_execs", 0) + 1
+        if command[3] == "msw-shuttle":
+            command = ["python3"] + command[4:]
+        else:
+            command = command[4:]
     mapped_workdir = Path(map_guest_path(state, box, workdir))
     mapped_workdir.mkdir(parents=True, exist_ok=True)
     env = git_env(state, box)
@@ -320,6 +346,9 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             save(state)
             return 0
         if "findmnt -n -o FSTYPE /workspace" in text and "docker buildx version" in text:
+            if os.environ.get("MSW_FAKE_DEEP_CHECK_FAIL") == "1":
+                print("Docker/containerd did not become ready within 30 seconds", file=sys.stderr)
+                return 1
             return 0
         if "MSW named-volume migration" in text:
             source_name = sb.get("mounts", {}).get("/source")
@@ -347,6 +376,20 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
         return 0
 
     if command[0] == "systemctl":
+        # Delayed systemd-bus readiness: with MSW_FAKE_GUEST_READY_ATTEMPTS
+        # set, the first N daemon-reload probes fail (the bootstrap readiness
+        # wait discards this raw stderr), then the bus comes up. The probe
+        # count is journaled on the sandbox so tests can prove guest
+        # configuration ran only after readiness.
+        if command[1:2] == ["daemon-reload"]:
+            delay = os.environ.get("MSW_FAKE_GUEST_READY_ATTEMPTS", "")
+            if delay:
+                attempts = sb.setdefault("systemd_reload_attempts", 0) + 1
+                sb["systemd_reload_attempts"] = attempts
+                save(state)
+                if attempts <= int(delay):
+                    print("Failed to connect to bus: no such file or directory", file=sys.stderr)
+                    return 1
         if "stop" in command and any("msw-health-direct" in x for x in command):
             sb.setdefault("port_content", {}).pop("24678", None)
             save(state)
@@ -378,7 +421,29 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     # Stub it as a bounded sleep so shuttle-spawned relay processes keep the
     # exec stream alive without ever touching the proxy port; the frame
     # protocol itself is exercised by the real relay in integration tests.
+    # Faithful failure modes: an absent relay artifact fails exactly like
+    # python3 (rc 2 + "can't open file ... No such file or directory") so the
+    # shuttle's permanent-failure circuit can be exercised; while
+    # MSW_FAKE_RELAY_FAIL_FILE exists the relay fails with a plain transient
+    # error (rc 1, no ENOENT signature) so bounded retry can be exercised.
     if command[0] == "python3" and len(command) >= 2 and command[1].endswith("msw-github-relay.py"):
+        relay_path = Path(map_guest_path(state, box, command[1]))
+        fail_file = os.environ.get("MSW_FAKE_RELAY_FAIL_FILE", "")
+        if fail_file and Path(fail_file).exists():
+            if Path(fail_file).read_text().strip() == "enoent":
+                # An ENOENT-flavored failure AFTER a passing precondition
+                # probe: the artifact exists, so this is an unrelated runtime
+                # error and must stay transient.
+                return fail(
+                    "python3: can't open file '%s': [Errno 2] No such file or directory" % relay_path,
+                    2,
+                )
+            return fail("relay: transient transport failure", 1)
+        if not relay_path.exists():
+            return fail(
+                "python3: can't open file '%s': [Errno 2] No such file or directory" % relay_path,
+                2,
+            )
         return subprocess.run(["python3", "-c", "import time; time.sleep(600)"],
                               cwd=mapped_workdir, env=env).returncode
 
@@ -396,6 +461,11 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
         # not remapped a second time after /workspace substitution.
         script = script.replace("/tmp/", str(Path(sb["root"]) / "tmp") + "/")
         script = script.replace("/workspace/", str(guest_workspace(state, box)) + "/")
+        script = script.replace("/var/lib/msw-runtime/", str(guest_runtime(state, box)) + "/")
+        # Test seam: model a guest without python3 (the shuttle's relay
+        # precondition probes `command -v python3`).
+        if os.environ.get("MSW_FAKE_GUEST_PYTHON_MISSING") == "1" and "command -v python3" in script:
+            return fail("python3: command not found", 1)
         mapped[2] = script
 
     pause_file = os.environ.get("MSW_FAKE_VERIFY_PAUSE_FILE", "")

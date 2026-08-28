@@ -425,7 +425,16 @@ msw app apply PLAN_ID --confirmation-fd FD --format json
 msw app bootstrap --resume --workspace-config-fd FD [--events-fd FD] --format json
 ```
 
-Exact names may be consolidated during implementation, but the properties below are mandatory.
+The `logs` stream classifies records by session ORIGIN, never by message
+content: the MSW adapter removes every record of a session that carries the
+reserved internal-session marker (control conn-id 0, length 1, payload "H" —
+the GitHub relay heartbeat frame) and emits only unmarked workload sessions.
+Directory, repository, setup, storage, health, and relay exec sessions emit
+the marker as their first write, so control-plane output — including
+incomplete relay failures that never heartbeated — stays out of the default
+Logs view while identical user output (e.g. `[]`, `{}`, arbitrary JSON)
+remains visible verbatim. Typed operation diagnostics remain available
+through each command's finite envelope.
 
 ### 7.2 Finite response envelope
 

@@ -905,6 +905,89 @@ final class AppModelTests: XCTestCase {
         )
     }
 
+    func testLogTimestampsStayClockOnlyForASingleCalendarDay() {
+        let utc = TimeZone(identifier: "UTC")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        let locale = Locale(identifier: "en_US")
+
+        let morning = Date(timeIntervalSince1970: 1_787_654_400)    // 2026-08-25T10:40:00Z
+        let evening = Date(timeIntervalSince1970: 1_787_681_401.125) // 2026-08-25T18:10:01.125Z
+
+        XCTAssertFalse(LogTimestamp.spansMultipleDays([morning, evening], calendar: calendar))
+        XCTAssertFalse(LogTimestamp.spansMultipleDays([], calendar: calendar))
+        XCTAssertFalse(LogTimestamp.spansMultipleDays([evening], calendar: calendar))
+
+        let rendered = LogTimestamp.display(evening, spanningDays: false, locale: locale, timeZone: utc)
+        XCTAssertTrue(rendered.contains("6:10:01"))
+        XCTAssertFalse(rendered.contains("2026"))
+    }
+
+    func testLogTimestampsSpanningMidnightAddDayContext() {
+        let utc = TimeZone(identifier: "UTC")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        let locale = Locale(identifier: "en_US")
+
+        let beforeMidnight = Date(timeIntervalSince1970: 1_787_702_399) // 2026-08-25T23:59:59Z
+        let afterMidnight = Date(timeIntervalSince1970: 1_787_702_401)  // 2026-08-26T00:00:01Z
+
+        XCTAssertTrue(LogTimestamp.spansMultipleDays([beforeMidnight, afterMidnight], calendar: calendar))
+
+        let clockOnly = LogTimestamp.display(afterMidnight, spanningDays: false, locale: locale, timeZone: utc)
+        let withDate = LogTimestamp.display(afterMidnight, spanningDays: true, locale: locale, timeZone: utc)
+        XCTAssertTrue(withDate.contains("Aug 26, 2026"))
+        XCTAssertTrue(withDate.contains(clockOnly))
+        XCTAssertTrue(
+            LogTimestamp.display(beforeMidnight, spanningDays: true, locale: locale, timeZone: utc)
+                .contains("Aug 25, 2026")
+        )
+    }
+
+    func testLogTimestampsAcrossMultipleDaysAreDatedAndOrderIndependent() {
+        let utc = TimeZone(identifier: "UTC")!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+        let locale = Locale(identifier: "en_US")
+
+        let dayOne = Date(timeIntervalSince1970: 1_787_681_401.125)  // 2026-08-25T18:10:01.125Z
+        let dayTwo = Date(timeIntervalSince1970: 1_787_767_801.125)  // 2026-08-26T18:10:01.125Z
+        let dayThree = Date(timeIntervalSince1970: 1_787_854_201.125) // 2026-08-27T18:10:01.125Z
+
+        XCTAssertTrue(LogTimestamp.spansMultipleDays([dayOne, dayTwo, dayThree], calendar: calendar))
+        XCTAssertTrue(LogTimestamp.spansMultipleDays([dayThree, dayOne], calendar: calendar))
+
+        let clockOnly = LogTimestamp.display(dayOne, spanningDays: false, locale: locale, timeZone: utc)
+        let withDate = LogTimestamp.display(dayOne, spanningDays: true, locale: locale, timeZone: utc)
+        XCTAssertTrue(withDate.contains("Aug 25, 2026"))
+        XCTAssertTrue(withDate.contains(clockOnly))
+        XCTAssertTrue(
+            LogTimestamp.display(dayTwo, spanningDays: true, locale: locale, timeZone: utc)
+                .contains("Aug 26, 2026")
+        )
+    }
+
+    func testLogTimestampCopyCarriesFullISO8601WithOffset() throws {
+        let dates = [
+            Date(timeIntervalSince1970: 1_787_681_401.125), // 2026-08-25T18:10:01.125Z
+            Date(timeIntervalSince1970: 1_787_702_400),     // 2026-08-26T00:00:00Z (midnight)
+            Date(timeIntervalSince1970: 0)                  // 1970-01-01T00:00:00Z
+        ]
+        let pattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(Z|[+-]\d{2}:\d{2})$"#
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds, .withColonSeparatorInTimeZone]
+
+        for date in dates {
+            let copied = LogTimestamp.copy(date)
+            XCTAssertNotNil(
+                copied.range(of: pattern, options: .regularExpression),
+                "Expected full ISO 8601 with offset, got \(copied)"
+            )
+            let parsed = try XCTUnwrap(parser.date(from: copied), "copy \(copied) must parse as ISO 8601")
+            XCTAssertEqual(parsed.timeIntervalSince1970, date.timeIntervalSince1970, accuracy: 0.001)
+        }
+    }
+
     func testAppNavigationAppliesRouteWithoutDroppingWorkspaceContext() {
         let navigation = AppNavigationState(
             tab: .workspaces,

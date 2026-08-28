@@ -3035,14 +3035,177 @@ class PackagedBehaviorTests(MSWTestCase):
             ]
             self.assertEqual(len(creates), 1)
 
-        second = self.env.msw(
+    def test_app_bootstrap_waits_for_delayed_guest_systemd_readiness(self) -> None:
+        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired["workspaces"].append({
+            "name": "lab", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        request = json.dumps(desired)
+        proc = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, timeout=90,
+            extra_env={"MSW_FAKE_GUEST_READY_ATTEMPTS": "3"},
+        )
+        self.assertTrue(json.loads(proc.stdout)["ok"], proc.stdout + proc.stderr)
+        state = self.env.state()
+        lab = state["sandboxes"]["lab"]
+        # Guest configuration ran only after the bounded readiness wait: the
+        # first three systemd-bus probes failed, later probes (and the guest
+        # script's own daemon-reload) succeeded, and the guest was configured.
+        self.assertGreaterEqual(lab.get("systemd_reload_attempts", 0), 4)
+        # The readiness probe is a marker-wrapped control-plane exec (the
+        # reserved internal-session marker + "_" sentinel), so its transient
+        # stderr is classified internal and never becomes a workload log.
+        self.assertGreaterEqual(lab.get("wrapped_control_execs", 0), 4)
+        self.assertTrue(lab["configured"])
+        self.assertEqual(
+            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            desired,
+        )
+        journal = json.loads(
+            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+        )
+        self.assertEqual(journal["state"], "configured")
+
+    def test_app_bootstrap_systemd_timeout_is_typed_retryable_and_never_commits(self) -> None:
+        before = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired = json.loads(json.dumps(before))
+        desired["workspaces"].append({
+            "name": "lab", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        request = json.dumps(desired)
+        never_ready = {
+            "MSW_FAKE_GUEST_READY_ATTEMPTS": "100",
+            "MSW_FAKE_GUEST_READY_BOUND": "3",
+            "MSW_FAKE_GUEST_READY_SLEEP": "0",
+        }
+        proc = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, check=False, timeout=90, extra_env=never_ready,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        envelope = json.loads(proc.stdout)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "MSW_WORKSPACE_STARTUP_TIMEOUT")
+        self.assertTrue(envelope["error"]["retryable"])
+        self.assertEqual(envelope["error"]["workspace"], "lab")
+        # Raw guest stderr stays out of the typed envelope and workload logs:
+        # the readiness poll is silent, so the fake systemd error never leaks.
+        self.assertNotIn("Failed to connect to bus", proc.stdout)
+        self.assertNotIn("Failed to connect to bus", proc.stderr)
+        # No premature commit: the requested configuration is not recorded.
+        self.assertEqual(
+            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            before,
+        )
+        # Explicit retryable state: the failed box keeps a needs-configuration
+        # journal naming the failing stage.
+        journal = json.loads(
+            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+        )
+        self.assertEqual(journal["state"], "needs-configuration")
+        self.assertIn("systemd", journal["error"])
+        # Lifecycle restoration: the half-started VM is removed, not left
+        # running with a partial guest.
+        self.assertNotIn("lab", self.env.state()["sandboxes"])
+
+        # A subsequent bootstrap with a healthy bus retries and succeeds.
+        retry = self.env.msw(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
         )
-        self.assertTrue(json.loads(second.stdout)["ok"])
+        self.assertTrue(json.loads(retry.stdout)["ok"], retry.stdout + retry.stderr)
         state = self.env.state()
-        self.assertEqual(state["volumes"]["msw-lab-workspace"]["formatCount"], 1)
-        self.assertEqual(state["volumes"]["msw-lab-runtime"]["formatCount"], 1)
+        self.assertIn("lab", state["sandboxes"])
+        self.assertTrue(state["sandboxes"]["lab"]["configured"])
+        self.assertEqual(
+            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            desired,
+        )
+        journal = json.loads(
+            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+        )
+        self.assertEqual(journal["state"], "configured")
+
+        # A further retry is idempotent: the configured sandbox is not
+        # recreated and the configuration is not churned.
+        def lab_create_count() -> int:
+            return sum(
+                event["event"] == "create" and event.get("box") == "lab"
+                for event in self.env.state()["events"]
+            )
+
+    def test_app_bootstrap_deep_failure_keeps_old_config_and_marks_boxes_for_retry(self) -> None:
+        before = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired = json.loads(json.dumps(before))
+        desired["workspaces"].append({
+            "name": "lab", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        request = json.dumps(desired)
+        proc = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, check=False, timeout=90,
+            extra_env={"MSW_FAKE_DEEP_CHECK_FAIL": "1"},
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        envelope = json.loads(proc.stdout)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "MSW_BOOTSTRAP_VERIFICATION_FAILED")
+        self.assertTrue(envelope["error"]["retryable"])
+        # The previously committed configuration stays byte-identical; the
+        # staged configuration was never committed.
+        self.assertEqual(
+            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            before,
+        )
+        # The new VM exists but is explicitly unverified: its journal says
+        # needs-configuration so a retry recreates it instead of trusting it.
+        state = self.env.state()
+        self.assertIn("lab", state["sandboxes"])
+        journal = json.loads(
+            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+        )
+        self.assertEqual(journal["state"], "needs-configuration")
+        self.assertIn("verification", journal["error"])
+
+        # A subsequent bootstrap with healthy verification recreates the box,
+        # commits the configuration, and records it configured.
+        retry = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, timeout=90,
+        )
+        self.assertTrue(json.loads(retry.stdout)["ok"], retry.stdout + retry.stderr)
+        state = self.env.state()
+        self.assertTrue(state["sandboxes"]["lab"]["configured"])
+        self.assertEqual(
+            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            desired,
+        )
+        journal = json.loads(
+            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+        )
+        self.assertEqual(journal["state"], "configured")
+
+        # A further retry is idempotent: the verified sandbox is not recreated.
+        def lab_create_count() -> int:
+            return sum(
+                event["event"] == "create" and event.get("box") == "lab"
+                for event in self.env.state()["events"]
+            )
+
+        creates = lab_create_count()
+        again = self.env.msw(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=request, timeout=90,
+        )
+        self.assertTrue(json.loads(again.stdout)["ok"], again.stdout + again.stderr)
+        self.assertEqual(lab_create_count(), creates)
 
     def test_ext4_workspace_disk_starts_normally(self) -> None:
         before = len(self.env.state()["events"])
@@ -4052,7 +4215,7 @@ class PackagedBehaviorTests(MSWTestCase):
             event for event in self.env.state()["events"]
             if event.get("event") == "logs" and event.get("box") == "dev"
         ]
-        self.assertEqual(log_events[-1]["args"], ["--json", "--tail", "200"])
+        self.assertEqual(log_events[-1]["args"], ["--json", "--tail", "200000"])
 
         self.env.msw("stop", "dev")
         stopped = self.env.msw(
@@ -4076,7 +4239,7 @@ class PackagedBehaviorTests(MSWTestCase):
         ]
         self.assertEqual(
             log_events[-1]["args"],
-            ["--source", "system", "--json", "--tail", "200"],
+            ["--source", "system", "--json", "--tail", "200000"],
         )
 
     def test_app_logs_filters_the_complete_relay_session_by_structured_protocol(self) -> None:
@@ -4127,6 +4290,138 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(unsupported.returncode, 69)
         self.assertEqual(json.loads(unsupported.stdout)["error"]["code"], "MSW_LOGS_UNAVAILABLE")
         self.assertNotIn('"type":"stream-start"', unsupported.stdout)
+
+    def test_app_logs_hides_origin_tagged_control_sessions_but_keeps_identical_user_output(self) -> None:
+        self.env.msw("start", "dev")
+        marker = "\x00\x00\x00\x00\x01H"
+        marker_newline = marker + "\n"
+        empty_directory = json.dumps(
+            {"path": ".", "query": None, "entries": [], "truncated": False},
+            separators=(",", ":"),
+        )
+        records = [
+            # Control-plane directory session: stderr marker (newline form)
+            # then the compact JSON the adapter consumes.
+            {"t": "2026-08-25T18:10:00Z", "s": "stderr", "id": 500, "e": None, "d": marker_newline},
+            {"t": "2026-08-25T18:10:01Z", "s": "stdout", "id": 500, "e": None, "d": "[]"},
+            {"t": "2026-08-25T18:10:02Z", "s": "stdout", "id": 500, "e": None, "d": empty_directory},
+            # Control-plane repository session: exact marker frame plus the
+            # incremental JSON-array writes the app sees while refreshing.
+            {"t": "2026-08-25T18:10:03Z", "s": "stdout", "id": 501, "e": None, "d": marker},
+            {"t": "2026-08-25T18:10:04Z", "s": "stdout", "id": 501, "e": None, "d": "["},
+            {"t": "2026-08-25T18:10:05Z", "s": "stdout", "id": 501, "e": None, "d": "]"},
+            # Control-plane relay session: stderr marker plus transport noise.
+            {"t": "2026-08-25T18:10:06Z", "s": "stderr", "id": 502, "e": None, "d": marker_newline},
+            {"t": "2026-08-25T18:10:07Z", "s": "stderr", "id": 502, "e": None, "d": "relay: listening"},
+            # Identical user payloads in an unmarked session stay visible.
+            {"t": "2026-08-25T18:10:08Z", "s": "stdout", "id": 503, "e": None, "d": "[]"},
+            {"t": "2026-08-25T18:10:09Z", "s": "stdout", "id": 503, "e": None, "d": "{}"},
+            {"t": "2026-08-25T18:10:10Z", "s": "stdout", "id": 503, "e": None, "d": empty_directory},
+            {"t": "2026-08-25T18:10:11Z", "s": "stdout", "id": 503, "e": None, "d": "["},
+            {"t": "2026-08-25T18:10:12Z", "s": "stdout", "id": 503, "e": None, "d": "]"},
+            {"t": "2026-08-25T18:10:13Z", "s": "stderr", "id": 503, "e": None, "d": "relay: listening"},
+            {"t": "2026-08-25T18:10:14Z", "s": "stdout", "id": 503, "e": None, "d": "H"},
+            {"t": "2026-08-25T18:10:15Z", "s": "stdout", "id": 503, "e": None, "d": "HH"},
+            {"t": "2026-08-25T18:10:16Z", "s": "stdout", "id": 503, "e": None, "d": "3000"},
+            {"t": "2026-08-25T18:10:17Z", "s": "stdout", "id": 503, "e": None, "d": '{"event":"build","level":"info","ok":true}'},
+        ]
+        document = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+        )
+        lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
+        log_lines = [line for line in lines if line["type"] == "log"]
+        self.assertEqual({line["sessionId"] for line in log_lines}, {503})
+        expected = [
+            "[]", "{}", empty_directory, "[", "]", "relay: listening",
+            "H", "HH", "3000", '{"event":"build","level":"info","ok":true}',
+        ]
+        self.assertEqual([line["message"] for line in log_lines], expected)
+        for internal_session in (500, 501, 502):
+            self.assertFalse(
+                any(line.get("sessionId") == internal_session for line in lines),
+                f"session {internal_session} leaked into workload logs",
+            )
+
+    def test_app_logs_fail_closed_for_incomplete_relay_session_without_heartbeat(self) -> None:
+        self.env.msw("start", "dev")
+        marker = "\x00\x00\x00\x00\x01H"
+        enoent = (
+            "python3: can't open file '/var/lib/msw-runtime/msw-github-relay.py': "
+            "[Errno 2] No such file or directory"
+        )
+        records = [
+            # The shuttle wrapper prints the marker frame before exec'ing the
+            # relay, so a relay that never starts (and therefore never emits
+            # a heartbeat) still has an origin-tagged session that must be
+            # removed as a whole.
+            {"t": "2026-08-25T18:10:00Z", "s": "stdout", "id": 600, "e": None, "d": marker},
+            {"t": "2026-08-25T18:10:01Z", "s": "stderr", "id": 600, "e": None, "d": enoent},
+            # Identical failure text from a user process stays visible:
+            # classification is provenance-based, never content-based.
+            {"t": "2026-08-25T18:10:02Z", "s": "stderr", "id": 601, "e": None, "d": enoent},
+        ]
+        document = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+        )
+        lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
+        log_lines = [line for line in lines if line["type"] == "log"]
+        self.assertEqual([line["sessionId"] for line in log_lines], [601])
+    def test_app_logs_classifies_before_the_presentation_cap_hides_long_control_sessions(self) -> None:
+        # A control session with more records than the 200-record presentation
+        # cap must still be hidden as a whole: classification uses the full
+        # bounded classification window, so the marker (the session's first
+        # write) is never outside the fetched window the way it would be with
+        # a 200-record tail fetch.
+        self.env.msw("start", "dev")
+        marker_newline = "\x00\x00\x00\x00\x01H\n"
+        base = 18 * 3600 + 10 * 60  # 18:10:00Z
+        records = []
+        # Control session: marker first, then 249 JSON payloads (> 200).
+        for index in range(250):
+            if index == 0:
+                payload = marker_newline
+                source = "stderr"
+            else:
+                payload = json.dumps(
+                    {"path": ".", "query": None, "entries": [], "truncated": False, "n": index},
+                    separators=(",", ":"),
+                )
+                source = "stdout"
+            tick = base + index
+            records.append({
+                "t": "2026-08-25T18:%02d:%02dZ" % (tick // 60 % 60, tick % 60),
+                "s": source, "id": 700, "e": None, "d": payload,
+            })
+        # User session with 250 records, all newer than the control session.
+        user_payloads = []
+        for index in range(250):
+            tick = base + 1000 + index
+            payload = json.dumps(
+                {"path": ".", "query": None, "entries": [], "truncated": False, "n": index},
+                separators=(",", ":"),
+            )
+            user_payloads.append(payload)
+            records.append({
+                "t": "2026-08-25T18:%02d:%02dZ" % (tick // 60 % 60, tick % 60),
+                "s": "stdout", "id": 701, "e": None, "d": payload,
+            })
+        document = self.env.msw(
+            "app", "logs", "--workspace", "dev", "--format", "jsonl",
+            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+        )
+        lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
+        log_lines = [line for line in lines if line["type"] == "log"]
+        # The whole 250-record control session is hidden even though its
+        # marker is outside the final visible tail...
+        self.assertFalse(any(line.get("sessionId") == 700 for line in lines))
+        self.assertNotIn("\u0000", document.stdout)
+        # ...and the presentation is capped at the newest 200 workload
+        # records, all from the user session.
+        self.assertEqual(len(log_lines), 200)
+        self.assertEqual({line["sessionId"] for line in log_lines}, {701})
+        self.assertEqual([line["message"] for line in log_lines], user_payloads[50:])
 
 
     def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
@@ -6498,6 +6793,20 @@ class _LocalModeGitHubBase(MSWTestCase):
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
 
+    def guest_relay_path(self, box: str) -> Path:
+        """Host path of the fake guest's /var/lib/msw-runtime relay artifact
+        (mirrors map_guest_path/guest_runtime in fake_msb)."""
+        state = self.env.state()
+        sb = state["sandboxes"][box]
+        name = sb.get("runtime_volume")
+        if name:
+            base = Path(state["volumes"][name]["path"])
+            if base.is_file() and os.environ.get("MSW_TEST_VALIDATE_RAW_DISKS") == "1":
+                base = base.parent / "guest-data"
+        else:
+            base = Path(sb["root"]) / "runtime"
+        return base / "msw-github-relay.py"
+
     def host_record(self, *, token: str = HOST_TOKEN, generation: int = 1,
                     provider: str = "gh-cli", kind: str = "oauth",
                     login: str = "fake-user") -> dict:
@@ -8425,7 +8734,42 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
                             input_text=input_text if input_text is not None else json.dumps(payload),
                             check=check, extra_env=env, timeout=180)
 
+    def _mark_running(self, *boxes: str) -> None:
+        """The shared base's setup deep check leaves every sandbox STOPPED;
+        the apply never starts a stopped box, so tests that expect transport
+        provisioning must mark their workspaces running first."""
+        state = self.env.state()
+        for box in boxes:
+            state["sandboxes"][box]["running"] = True
+        (self.env.home / ".microsandbox" / "state.json").write_text(
+            json.dumps(state, indent=2, sort_keys=True))
+
+    def _spawn_stale_shuttle(self, box: str) -> subprocess.Popen[str]:
+        """Spawn a REAL shuttle process for a workspace, exactly as transport
+        provisioning would, to model stale OWNED shuttle state (pidfile plus
+        live child) that a later apply must clean up."""
+        env = self.env.env.copy()
+        env["MSW_GITHUB_CIRCUIT_POLL_SECS"] = "1"
+        log = (self.env.root / f"stale-shuttle-{box}.log").open("w")
+        self.addCleanup(log.close)
+        proc = subprocess.Popen(
+            [sys.executable, str(PACKAGE / "lib" / "msw-github-shuttle.py"), box],
+            env=env, stdout=log, stderr=log, text=True,
+        )
+        self.addCleanup(self._stop_stale_shuttle, proc)
+        return proc
+
+    def _stop_stale_shuttle(self, proc: subprocess.Popen[str]) -> None:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+
     def test_policy_apply_provisions_transport_and_commits_once(self) -> None:
+        self._mark_running("dev", "playgrounds")
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
             "playgrounds": {"repos": [{"canonical": "acme/toolkit", "mode": "read-only"}]},
@@ -8515,8 +8859,10 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
 
     def test_policy_apply_full_object_touches_only_changed_non_empty_and_restores_lifecycle(self) -> None:
         """The app sends all three keys, but that must not provision all
-        three. Empty changes are policy-only and a temporarily started VM is
-        restored to its prior stopped lifecycle before activation."""
+        three. A stopped changed workspace is NEVER started by the apply: its
+        transport reconcile is deferred to the next start (explicit marker).
+        Empty changes are policy-only and lose any owned shuttle state;
+        clearing a workspace also clears its deferred reconcile."""
         self.empty_policy()
         for box in ("dev", "playgrounds", "personal"):
             self.env.msw("stop", box)
@@ -8534,6 +8880,13 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertFalse(state["sandboxes"]["dev"]["running"])
         self.assertFalse(state["sandboxes"]["playgrounds"]["running"])
         self.assertFalse(state["sandboxes"]["personal"]["running"])
+        # dev is stopped with a non-empty desired policy: the apply records
+        # the deferred reconcile instead of starting it; the empty
+        # workspaces owe nothing.
+        marker = self.github_meta_dir / "reconcile-dev.deferred"
+        self.assertTrue(marker.exists(), "a stopped non-empty workspace must defer its reconcile")
+        self.assertFalse((self.github_meta_dir / "reconcile-playgrounds.deferred").exists())
+        self.assertFalse((self.github_meta_dir / "reconcile-personal.deferred").exists())
 
         # Clearing dev is a semantic change but has no non-empty transport to
         # provision. Injecting failure for dev therefore cannot affect it.
@@ -8544,10 +8897,284 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         }}
         proc = self._apply(cleared, extra_env={"MSW_FAKE_APPLY_PROVISION_FAIL": "dev"})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(marker.exists(), "an empty desired policy must clear the deferred reconcile")
+
+    def test_policy_apply_mixed_change_reconciles_unchanged_running_sibling_drift(self) -> None:
+        """Regression: a changed workspace must not let an UNCHANGED running
+        sibling keep drifted transport. The reconciliation phase covers every
+        workspace in the final desired policy, changed or not, so a full
+        apply can never report success while an eligible running sibling
+        remains drifted."""
+        self._mark_running("dev", "playgrounds")
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            "playgrounds": {"repos": [{"canonical": "acme/toolkit", "mode": "read-only"}]},
+        }}
+        proc = self._apply(desired)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        relay = self.guest_relay_path("playgrounds")
+        self.assertTrue(relay.exists())
+        # drift: the UNCHANGED sibling loses its guest relay artifact
+        relay.unlink()
+        changed = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"},
+                              {"canonical": "acme/other", "mode": "read-only"}]},
+            "playgrounds": {"repos": [{"canonical": "acme/toolkit", "mode": "read-only"}]},
+        }}
+        proc = self._apply(changed)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(relay.exists(),
+                        "a changed apply must repair an unchanged sibling's drifted relay")
+        for box in ("dev", "playgrounds"):
+            pidfile = self.env.home / ".local/state/msw" / f"shuttle-{box}.pid"
+            self.assertTrue(pidfile.exists(), f"{box} shuttle pidfile missing")
+            pid = pidfile.read_text().strip()
+            self.assertRegex(pid, r"^[0-9]+$")
+            os.kill(int(pid), 0)
+
+    def test_policy_apply_mixed_change_cleans_unchanged_empty_sibling_stale_state(self) -> None:
+        """Regression: a changed workspace must not let an UNCHANGED empty
+        sibling keep owned shuttle state. Every empty desired policy in the
+        final state is cleaned on every full apply, whether or not its bytes
+        changed."""
+        self._mark_running("dev")
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
+            "playgrounds": {"repos": []},
+        }}
+        proc = self._apply(desired)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # stale OWNED shuttle state for the empty sibling: a live shuttle
+        # process with its pid file, as if left behind by an older apply
+        stale_proc = self._spawn_stale_shuttle("playgrounds")
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-playgrounds.pid"
+        sigfile = self.env.home / ".local/state/msw" / "shuttle-playgrounds.signature"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not pidfile.exists():
+            time.sleep(0.05)
+        self.assertTrue(pidfile.exists(), "the stale shuttle never wrote its pidfile")
+        stale_pid = int(pidfile.read_text().strip())
+        changed = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            "playgrounds": {"repos": []},
+        }}
+        proc = self._apply(changed)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(pidfile.exists(),
+                         "a changed apply must clean an unchanged empty sibling's shuttle state")
+        self.assertFalse(sigfile.exists())
+        stale_proc.wait(timeout=5)
+        self.assertIsNotNone(
+            stale_proc.returncode,
+            "stale sibling shuttle process still alive after the changed apply",
+        )
+
+    def test_policy_apply_stopped_workspace_defers_and_start_consumes(self) -> None:
+        """Regression: the apply never starts a stopped box; it records an
+        explicit deferred reconcile that `msw start` consumes, so a stopped
+        workspace with transport drift becomes transport-healthy when
+        started."""
+        self.empty_policy()
+        self._mark_running("dev")
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            "playgrounds": {"repos": []},
+            "personal": {"repos": []},
+        }}
+        proc = self._apply(desired)  # dev running by default -> provisioned
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        relay = self.guest_relay_path("dev")
+        self.assertTrue(relay.exists())
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        self.assertTrue(pidfile.exists())
+        marker = self.github_meta_dir / "reconcile-dev.deferred"
+        self.assertFalse(marker.exists())
+        # stop dev and introduce transport drift while it is stopped
+        self.env.msw("stop", "dev")
+        relay.unlink()
+        # semantic no-op apply while dev is stopped: deferred, NOT started
+        proc = self._apply(desired)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"],
+                         "the apply must not start a stopped workspace")
+        self.assertTrue(marker.exists(), "the apply must defer the stopped workspace's reconcile")
+        self.assertFalse(relay.exists(),
+                         "deferred: drift is NOT repaired during the apply")
+        # `msw start` consumes the marker: relay reinstalled, shuttle running
+        start = self.env.msw("start", "dev", extra_env={"MSW_FAKE_TRANSPORT_PROBE": "403"})
+        self.assertEqual(start.returncode, 0, start.stdout + start.stderr)
+        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
+        self.assertTrue(relay.exists(), "start must repair the deferred relay drift")
+        self.assertTrue(pidfile.exists())
+        self.assertFalse(marker.exists(), "start must consume the deferred marker")
+
+    def test_policy_apply_rejects_unknown_and_transitional_lifecycle(self) -> None:
+        """Regression: a workspace with no stable lifecycle (Unknown,
+        Starting, Stopping, Restarting) cannot be claimed provisioned: the
+        full apply fails with MSW_STATE_UNAVAILABLE and changes nothing —
+        for semantic no-ops as well as changed policies."""
+        self.empty_policy()
+        self._mark_running("dev")
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+            "playgrounds": {"repos": []},
+            "personal": {"repos": []},
+        }}
+        proc = self._apply(desired)  # establish the policy (dev running)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for status in ("Starting", "Stopping", "Restarting", "Unknown"):
+            before = self.policy_path.read_bytes()
+            proc = self._apply(
+                desired,  # semantic no-op: the rejection must come from lifecycle
+                check=False,
+                extra_env={"MSW_FAKE_STATUS_JSON": json.dumps([{"name": "dev", "status": status}])},
+            )
+            self.assertEqual(proc.returncode, 69, (status, proc.stdout, proc.stderr))
+            err = json.loads(proc.stdout)["error"]
+            self.assertEqual(err["code"], "MSW_STATE_UNAVAILABLE", status)
+            self.assertTrue(err["retryable"])
+            self.assertEqual(self.policy_path.read_bytes(), before, status)
+            journal = (self.github_meta_dir / "policy-journal.jsonl").read_text()
+            self.assertIn('"status":"failed"', journal, status)
+
+    def test_policy_apply_semantic_noop_repairs_missing_relay_drift(self) -> None:
+        """Root cause 1: a semantic no-op (unchanged non-empty policy) still
+        reconciles the transport — a deleted guest relay is reinstalled and
+        exactly one owned shuttle keeps running, verified by the bounded
+        end-to-end probe — without rewriting the effective policy."""
+        state = self.env.state()
+        state["sandboxes"]["dev"]["running"] = True
+        (self.env.home / ".microsandbox" / "state.json").write_text(
+            json.dumps(state, indent=2, sort_keys=True))
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+        }}
+        proc = self._apply(desired)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        relay = self.guest_relay_path("dev")
+        self.assertTrue(relay.exists(), "the first apply must install the relay")
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        self.assertTrue(pidfile.exists())
+        policy_before = self.policy_path.read_bytes()
+        # drift: the guest relay artifact disappears while the policy is unchanged
+        relay.unlink()
+        proc = self._apply(desired)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(relay.exists(), "semantic no-op must reinstall the drifted relay")
+        self.assertEqual(self.policy_path.read_bytes(), policy_before,
+                         "semantic no-op must not rewrite the policy")
+        self.assertTrue(pidfile.exists())
+        pid = pidfile.read_text().strip()
+        self.assertRegex(pid, r"^[0-9]+$")
+        os.kill(int(pid), 0)  # exactly one owned shuttle is running
+        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        self.assertTrue(sigfile.exists(), "the reconciled shuttle must record its signature")
+
+    def test_policy_apply_empty_policy_removes_owned_stale_shuttle_state(self) -> None:
+        """Root cause 1: applying an empty (cleared) policy removes the OWNED
+        shuttle — child stopped, PID and signature files gone — and a
+        follow-up semantic no-op empty apply stays clean."""
+        self._mark_running("dev")
+        desired = {"schemaVersion": 1, "workspaces": {
+            "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
+        }}
+        proc = self._apply(desired)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        self.assertTrue(pidfile.exists())
+        self.assertTrue(sigfile.exists())
+        pid = pidfile.read_text().strip()
+        self.assertRegex(pid, r"^[0-9]+$")
+        cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
+        proc = self._apply(cleared)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(pidfile.exists())
+        self.assertFalse(sigfile.exists())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(int(pid), 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("owned shuttle process still alive after the empty-policy apply")
+    def test_policy_apply_cleanup_never_signals_foreign_pid(self) -> None:
+        """A stale pidfile pointing at an UNRELATED process must never be
+        signaled: cleanup removes the stale evidence and succeeds while the
+        foreign process is untouched."""
+        self.set_policy({"schemaVersion": 1, "workspaces": {
+            "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+        }})
+        foreign = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(self._stop_stale_shuttle, foreign)
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(f"{foreign.pid}\n")
+        cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
+        proc = self._apply(cleared)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(pidfile.exists())
+        self.assertIsNone(foreign.poll(), "the unrelated process must never be signaled")
+
+    def test_policy_apply_cleanup_escalates_stubborn_owned_shuttle(self) -> None:
+        """An owned shuttle that ignores SIGTERM is escalated to SIGKILL; the
+        PID/signature evidence is deleted only after termination is proven."""
+        self.set_policy({"schemaVersion": 1, "workspaces": {
+            "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+        }})
+        stubborn = subprocess.Popen(
+            ["bash", "-c", 'trap "" TERM; sleep 300', "msw-github-shuttle-stubborn"])
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text(f"{stubborn.pid}\n")
+        sigfile.write_text("stale-signature\n")
+        cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
+        proc = self._apply(cleared)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(pidfile.exists())
+        self.assertFalse(sigfile.exists())
+        stubborn.wait(timeout=5)  # reap the SIGKILLed zombie
+        self.assertIsNotNone(stubborn.returncode)
+
+    def test_policy_apply_cleanup_fails_when_launchd_label_still_loaded(self) -> None:
+        """If the LaunchAgent label cannot be proven gone after the bootout
+        attempt, cleanup refuses to delete shuttle evidence and the apply
+        fails with a typed error, leaving the policy untouched."""
+        self.set_policy({"schemaVersion": 1, "workspaces": {
+            "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
+        }})
+        plist = self.env.home / "Library/LaunchAgents/org.microsandbox.MSWMonitor.github-shuttle.dev.plist"
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text("stale-plist\n")
+        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        pidfile.parent.mkdir(parents=True, exist_ok=True)
+        pidfile.write_text("999999\n")
+        sigfile.write_text("stale-signature\n")
+        before = self.policy_path.read_bytes()
+        cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
+        proc = self._apply(cleared, check=False, extra_env={
+            "MSW_FAKE_LAUNCHCTL_LABEL": "org.microsandbox.MSWMonitor.github-shuttle.dev",
+        })
+        self.assertEqual(proc.returncode, 77, proc.stdout + proc.stderr)
+        err = json.loads(proc.stdout)["error"]
+        self.assertEqual(err["code"], "MSW_SHUTTLE_CLEANUP_FAILED")
+        self.assertTrue(plist.exists(), "evidence must be kept while the label is still loaded")
+        self.assertTrue(pidfile.exists(), "evidence must be kept while the label is still loaded")
+        self.assertTrue(sigfile.exists(), "evidence must be kept while the label is still loaded")
+        self.assertEqual(self.policy_path.read_bytes(), before,
+                         "the failed cleanup must not change the policy")
 
     def test_policy_apply_cancellation_restores_lifecycle_preserves_policy_and_releases_locks(self) -> None:
+        """Cancelling a full apply mid-provision restores the observed
+        lifecycle (a running workspace stays running — the apply never starts
+        a box it observed stopped), preserves the policy byte-exactly, and
+        releases every workspace lock so a follow-up apply succeeds."""
         self.empty_policy()
-        self.env.msw("stop", "dev")
+        self._mark_running("dev")
         before = self.policy_path.read_bytes()
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
@@ -8577,7 +9204,8 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             os.killpg(proc.pid, signal.SIGTERM)
             proc.wait(timeout=90)
             self.assertNotEqual(proc.returncode, 0)
-            self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
+            self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"],
+                            "cancellation must restore the observed running lifecycle")
             self.assertEqual(self.policy_path.read_bytes(), before)
             journal = (self.github_meta_dir / "policy-journal.jsonl").read_text()
             self.assertIn('"status":"cancelled"', journal)
@@ -8601,6 +9229,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         before = "BEFORE_POLICY"
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
         self.policy_path.write_text(before)
+        self._mark_running("dev", "playgrounds")
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
             "playgrounds": {"repos": [{"canonical": "acme/toolkit", "mode": "read-only"}]},
@@ -8630,6 +9259,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         before = "BEFORE_POLICY"
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
         self.policy_path.write_text(before)
+        self._mark_running("dev")
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
         }}
@@ -8646,6 +9276,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         `info/refs` probe request (no `service=`). A `403` response for that
         request shape is expected; 200/404/500/503 or any other non-403 response
         fails as `MSW_TRANSPORT_VERIFY_FAILED`, leaving policy untouched."""
+        self._mark_running("dev")
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
         }}
@@ -8704,6 +9335,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
                     port = int(m.group(1))
                     break
             self.assertIsNotNone(port, "real proxy fixture did not become ready")
+            self._mark_running("dev")
             desired = {"schemaVersion": 1, "workspaces": {
                 "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
             }}
@@ -8737,6 +9369,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         snapshot, so a concurrent per-repo edit of an OMITTED workspace is
         serialized (rejected) and can never be resurrected into the final
         policy."""
+        self._mark_running("dev")
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
         }}
@@ -8792,6 +9425,13 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             if proc.stderr is not None:
                 proc.stderr.close()
 
+    def test_policy_apply_connect_mode_mismatch(self) -> None:
+        desired = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
+        proc = self._apply(desired, check=False, extra_env={"MSW_GITHUB_MODE": "connect"})
+        self.assertEqual(proc.returncode, 69)
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_GITHUB_MODE_MISMATCH")
+        self.assertFalse(self.policy_path.exists())
+
     def test_policy_apply_invalid_request_typed_error(self) -> None:
         for bad in (
             "not json",
@@ -8811,12 +9451,224 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_INVALID_REQUEST", bad)
         self.assertFalse(self.policy_path.exists())
 
-    def test_policy_apply_connect_mode_mismatch(self) -> None:
-        desired = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
-        proc = self._apply(desired, check=False, extra_env={"MSW_GITHUB_MODE": "connect"})
-        self.assertEqual(proc.returncode, 69)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_GITHUB_MODE_MISMATCH")
-        self.assertFalse(self.policy_path.exists())
+class GitHubShuttleRetryTests(_LocalModeGitHubBase):
+    """Root cause 1 regression: the shuttle must circuit-break on permanent
+    missing-relay preconditions (exactly one actionable failure, no respawn
+    storm, recovery without a restart) and keep bounded backoff for transient
+    transport failures. fake_msb stubs the relay exec with faithful failure
+    modes: rc 2 + ENOENT when the artifact is absent, plain rc 1 while
+    MSW_FAKE_RELAY_FAIL_FILE exists."""
+
+    SHUTTLE = PACKAGE / "lib" / "msw-github-shuttle.py"
+
+    def tearDown(self) -> None:
+        # Direct-shuttle tests and the proxy-configure lock test spawn real
+        # shuttle processes; stop them so the suite leaves no strays.
+        for box in ("dev", "playgrounds", "personal"):
+            pidfile = self.env.home / ".local/state/msw" / f"shuttle-{box}.pid"
+            if pidfile.exists():
+                pid = pidfile.read_text().strip()
+                if pid.isdigit():
+                    try:
+                        os.kill(int(pid), signal.SIGTERM)
+                    except ProcessLookupError:
+                        continue
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        try:
+                            os.kill(int(pid), 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+        super().tearDown()
+
+    def _mark_dev_running(self) -> None:
+        state = self.env.state()
+        state["sandboxes"]["dev"]["running"] = True
+        (self.env.home / ".microsandbox" / "state.json").write_text(
+            json.dumps(state, indent=2, sort_keys=True))
+
+    def _start_shuttle(self, box: str, *, extra_env: dict[str, str] | None = None,
+                       log_path: Path | None = None) -> subprocess.Popen[str]:
+        env = self.env.env.copy()
+        env["MSW_GITHUB_CIRCUIT_POLL_SECS"] = "1"
+        if extra_env:
+            env.update(extra_env)
+        log = (log_path or (self.env.root / f"shuttle-{box}.log")).open("w")
+        self.addCleanup(log.close)
+        proc = subprocess.Popen(
+            [sys.executable, str(self.SHUTTLE), box],
+            env=env, stdout=log, stderr=log, text=True,
+        )
+        self.addCleanup(self._stop_shuttle, proc)
+        return proc
+
+    def _stop_shuttle(self, proc: subprocess.Popen[str]) -> None:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    def _wait_for(self, path: Path, needle: str, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists() and needle in path.read_text(errors="replace"):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def test_shuttle_missing_relay_opens_circuit_once_and_recovers(self) -> None:
+        """A missing guest relay is PERMANENT: exactly one actionable
+        MSW_RELAY_NOT_INSTALLED failure, no respawn backoff storm, the
+        shuttle stays alive (launchd-friendly), and the circuit closes
+        without a shuttle restart once the artifact reappears."""
+        self._mark_dev_running()
+        relay = self.guest_relay_path("dev")
+        relay.parent.mkdir(parents=True, exist_ok=True)
+        relay.unlink(missing_ok=True)
+        log = self.env.root / "shuttle-permanent.log"
+        proc = self._start_shuttle("dev", log_path=log)
+        self.assertTrue(self._wait_for(log, "MSW_RELAY_NOT_INSTALLED", 15),
+                        log.read_text(errors="replace") if log.exists() else "no shuttle log")
+        text = log.read_text(errors="replace")
+        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertNotIn("respawn in", text, "permanent failure must not respawn")
+        self.assertIsNone(proc.poll(), "the shuttle must stay alive with the circuit open")
+        # the circuit stays open: no new spawn attempts while the artifact is absent
+        time.sleep(2.5)
+        text = log.read_text(errors="replace")
+        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertNotIn("respawn in", text)
+        tail = text.split("MSW_RELAY_NOT_INSTALLED", 1)[1]
+        self.assertNotIn("relay spawned (pid", tail, "no spawn may happen after the circuit opens")
+        # repair WITHOUT a shuttle restart: the artifact reappears. The
+        # probe blocks every spawn while the relay is absent, so the FIRST
+        # spawn line can only appear after the circuit closes.
+        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        self.assertTrue(self._wait_for(log, "retry circuit closed", 10),
+                        log.read_text(errors="replace"))
+        self.assertTrue(self._wait_for(log, "relay spawned (pid", 10),
+                        log.read_text(errors="replace"))
+        text = log.read_text(errors="replace")
+        self.assertGreaterEqual(text.count("relay spawned (pid"), 1,
+                                "the circuit recovery must spawn a fresh relay")
+        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertIsNone(proc.poll(), "the shuttle must survive the circuit recovery")
+
+    def test_shuttle_transient_failures_retry_bounded_then_recover(self) -> None:
+        """Transient relay failures keep the bounded exponential backoff and
+        never open the permanent circuit; the tunnel comes up once the
+        transient window ends."""
+        self._mark_dev_running()
+        relay = self.guest_relay_path("dev")
+        relay.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        fail_file = self.env.root / "relay-fail"
+        fail_file.write_text("fail")
+        log = self.env.root / "shuttle-transient.log"
+        proc = self._start_shuttle("dev", log_path=log,
+                                   extra_env={"MSW_FAKE_RELAY_FAIL_FILE": str(fail_file)})
+        # two transient failures already imply the 0.5s then 1.0s backoff steps
+        self.assertTrue(self._wait_for(log, "respawn in 1.0s", 20),
+                        log.read_text(errors="replace") if log.exists() else "no shuttle log")
+        text = log.read_text(errors="replace")
+        self.assertIn("relay exited rc=1", text)
+        self.assertIn("respawn in 0.5s", text)
+        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text,
+                         "transient failures must never open the permanent circuit")
+        # end the transient window: the next bounded retry must bring the relay up
+        fail_file.unlink()
+        before = text.count("relay spawned (pid")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            text = log.read_text(errors="replace")
+            if text.count("relay spawned (pid") > before:
+                break
+            time.sleep(0.1)
+        text = log.read_text(errors="replace")
+        self.assertGreater(text.count("relay spawned (pid"), before, text)
+        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text)
+        self.assertIsNone(proc.poll(), "the shuttle must keep running after recovery")
+
+    def test_shuttle_missing_interpreter_opens_circuit_once(self) -> None:
+        """A guest without python3 is a PERMANENT precondition failure even
+        when the relay artifact exists: the authoritative probe (relay file +
+        interpreter) opens the circuit with exactly one actionable failure
+        and never spawns."""
+        self._mark_dev_running()
+        relay = self.guest_relay_path("dev")
+        relay.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        log = self.env.root / "shuttle-no-python.log"
+        proc = self._start_shuttle("dev", log_path=log,
+                                   extra_env={"MSW_FAKE_GUEST_PYTHON_MISSING": "1"})
+        self.assertTrue(self._wait_for(log, "MSW_RELAY_NOT_INSTALLED", 15),
+                        log.read_text(errors="replace") if log.exists() else "no shuttle log")
+        text = log.read_text(errors="replace")
+        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertNotIn("relay spawned (pid", text,
+                         "no spawn may happen while the interpreter is missing")
+        self.assertIsNone(proc.poll(), "the shuttle must stay alive with the circuit open")
+
+    def test_shuttle_unrelated_enoent_after_probe_stays_transient(self) -> None:
+        """ENOENT text AFTER a passing precondition probe is an unrelated
+        runtime failure, not a missing relay: classification is probe-based,
+        so the shuttle keeps the bounded backoff and never opens the
+        circuit."""
+        self._mark_dev_running()
+        relay = self.guest_relay_path("dev")
+        relay.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        fail_file = self.env.root / "relay-fail"
+        fail_file.write_text("enoent")
+        log = self.env.root / "shuttle-late-enoent.log"
+        proc = self._start_shuttle("dev", log_path=log,
+                                   extra_env={"MSW_FAKE_RELAY_FAIL_FILE": str(fail_file)})
+        self.assertTrue(self._wait_for(log, "respawn in 1.0s", 20),
+                        log.read_text(errors="replace") if log.exists() else "no shuttle log")
+        text = log.read_text(errors="replace")
+        self.assertIn("relay exited rc=2", text)
+        self.assertIn("respawn in 0.5s", text)
+        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text,
+                         "an unrelated ENOENT must not open the permanent circuit")
+        # end the failure window: the next bounded retry brings the relay up
+        fail_file.unlink()
+        before = text.count("relay spawned (pid")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            text = log.read_text(errors="replace")
+            if text.count("relay spawned (pid") > before:
+                break
+            time.sleep(0.1)
+        text = log.read_text(errors="replace")
+        self.assertGreater(text.count("relay spawned (pid"), before, text)
+        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text)
+
+    def test_proxy_configure_spawn_does_not_pin_workspace_lock(self) -> None:
+        """The long-lived shuttle spawned by proxy-configure must not inherit
+        the workspace GitHub lock (fd 9): the very next lock-holding
+        operation reacquires it immediately instead of waiting out the lockf
+        timeout."""
+        state = self.env.state()
+        state["sandboxes"]["dev"]["running"] = True
+        (self.env.home / ".microsandbox" / "state.json").write_text(
+            json.dumps(state, indent=2, sort_keys=True))
+        proc = self.env.msw("github", "proxy-configure", "dev",
+                            extra_env={"MSW_FAKE_TRANSPORT_PROBE": "403"})
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        started = time.monotonic()
+        rotate = self.env.msw("github", "capability", "rotate", "dev", timeout=60)
+        elapsed = time.monotonic() - started
+        self.assertEqual(rotate.returncode, 0, rotate.stdout + rotate.stderr)
+        self.assertLess(elapsed, 20, "lock reacquire must not wait on the shuttle")
 
 
 if __name__ == "__main__":

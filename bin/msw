@@ -1262,6 +1262,24 @@ snapshot_exists() { "$MSB_BIN" snapshot inspect "$1" >/dev/null 2>&1; }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
 WORKSPACE_STORAGE_ERROR=""
 WORKSPACE_STORAGE_FAILURE_KIND=""
+# Typed failure state raised by app_create_configured_workspace when guest
+# setup cannot complete (readiness timeout). app_cmd_bootstrap emits the
+# FIRST typed error after a failed reconcile, so these carry the specific
+# failure; the generic MSW_WORKSPACE_CONFIGURATION_FAILED remains the
+# fallback for every other setup failure.
+WORKSPACE_CONFIGURATION_FAILURE_CODE=""
+WORKSPACE_CONFIGURATION_FAILURE_MESSAGE=""
+WORKSPACE_CONFIGURATION_FAILURE_RECOVERY=""
+WORKSPACE_CONFIGURATION_FAILURE_WORKSPACE=""
+WORKSPACE_CONFIGURATION_FAILURE_RETRYABLE=false
+WORKSPACE_CONFIGURATION_FAILURE_EXIT=1
+# Workspaces whose VM was created/recreated by the current reconcile; their
+# guest configuration is verified by the bootstrap deep check before the
+# configured journal is recorded and the staged configuration is committed.
+WORKSPACE_CONFIGURATION_TOUCHED_BOXES=()
+# Staged desired configuration (app_reconcile_workspace_configuration input)
+# awaiting the deep verification that gates the atomic commit.
+WORKSPACE_CONFIGURATION_STAGED_FILE=""
 VOLUME_INSPECT_OUTPUT=""
 VOLUME_EXT4_DETAIL=""
 
@@ -1659,11 +1677,49 @@ start_sandbox() {
 
 wait_for_guest_systemd() {
   local box="$1" attempt=0
-  until workspace_msb "$box" exec --no-tty "$box" -- systemctl daemon-reload >/dev/null 2>&1; do
+  # The probe is a control-plane exec: emit the reserved internal-session
+  # marker so the structured log adapter never surfaces its stderr as
+  # workload output while systemd is still coming up.
+  until workspace_msb "$box" exec --no-tty "$box" -- \
+    bash -c 'printf '\''\x00\x00\x00\x00\x01H\n'\'' >&2; exec "$@"' _ systemctl daemon-reload >/dev/null 2>&1; do
     attempt=$((attempt + 1))
     (( attempt < 120 )) || fatal "$box systemd bus did not become ready"
     sleep 1
   done
+}
+
+guest_exec() {
+  local box="$1"; shift
+  ensure_running "$box"
+  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
+}
+
+# Run a guest command as an internal control-plane session (directory,
+# repository, setup, storage, health, and relay operations). The reserved
+# internal-session marker — control conn-id 0, length 1, payload "H", the
+# same bytes as INTERNAL_LOG_SESSION_SIGNATURE in lib/msw-github-relay.py —
+# is written to the session's stderr before the real command starts, so the
+# whole exec session is classified internal by the structured log adapter
+# even when the command fails immediately or writes nothing. User commands
+# (guest_exec/guest_exec_w/guest_script without this wrapper) never carry
+# the marker and stay visible in workload logs.
+guest_control_exec() {
+  local box="$1"; shift
+  ensure_running "$box"
+  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- \
+    bash -c 'printf '\''\x00\x00\x00\x00\x01H\n'\'' >&2; exec "$@"' _ "$@"
+}
+
+# Internal provisioning helper for callers that already completed the single
+# bounded ensure_running/systemd readiness stage. Keeping this separate makes
+# the precondition explicit and avoids repeating the 120-second readiness loop
+# for relay hash, Git config, and transport probes. Every caller is a
+# control-plane relay/config/probe operation, so each exec session carries
+# the reserved internal-session marker from its first write.
+guest_exec_ready() {
+  local box="$1"; shift
+  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- \
+    bash -c 'printf '\''\x00\x00\x00\x00\x01H\n'\'' >&2; exec "$@"' _ "$@"
 }
 
 ensure_running() {
@@ -1689,21 +1745,6 @@ ensure_running() {
     sleep 1
   done
   wait_for_guest_systemd "$box"
-}
-
-guest_exec() {
-  local box="$1"; shift
-  ensure_running "$box"
-  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
-}
-
-# Internal provisioning helper for callers that already completed the single
-# bounded ensure_running/systemd readiness stage. Keeping this separate makes
-# the precondition explicit and avoids repeating the 120-second readiness loop
-# for relay hash, Git config, and transport probes.
-guest_exec_ready() {
-  local box="$1"; shift
-  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
 }
 
 guest_exec_w() {
@@ -2042,6 +2083,16 @@ cmd_start() {
   local target="${1:-all}" box
   while IFS= read -r box; do
     ensure_running "$box"
+    # Deferred GitHub transport reconciliation: the policy apply never starts
+    # a stopped box, so a stable stopped workspace with a non-empty desired
+    # policy owes its relay/config/shuttle reconcile on the next start.
+    # Consume the marker now that the box is booted; on failure the marker is
+    # retained so the next start retries.
+    if [[ -f "$(app_apply_deferred_file "$box")" ]]; then
+      if ! app_apply_consume_deferred "$box"; then
+        warn "GitHub transport reconciliation deferred for $box failed; it will retry on the next start"
+      fi
+    fi
     # Published ports are forwarded host-side; kick the forwarder now that
     # the sandbox is booted. It never starts a stopped VM and never touches
     # the sandbox config (no recreate, ever).
@@ -2111,7 +2162,7 @@ cmd_disk() {
   while IFS= read -r box; do
     ensure_running "$box"
     printf '\n\033[1;36m[%s]\033[0m\n' "$box"
-    guest_exec "$box" bash -lc 'df -h / /workspace /var/lib/msw-runtime; echo; docker system df'
+    guest_control_exec "$box" bash -lc 'df -h / /workspace /var/lib/msw-runtime; echo; docker system df'
   done < <(for_targets "$target")
 }
 
@@ -3619,29 +3670,67 @@ shuttle_running() {
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   ps -p "$pid" -o command= 2>/dev/null | grep -q 'msw-github-shuttle' || return 1
+  # A zombie awaiting reap can no longer run the relay or hold locks; it is
+  # not a live shuttle.
+  ps -p "$pid" -o stat= 2>/dev/null | grep -q '^Z' && return 1
+  return 0
 }
 
+# Stop the owned shuttle recorded in the pidfile. Ownership is PROVEN before
+# any signal: the pid must belong to an msw-github-shuttle process, so a
+# stale pidfile can never signal an unrelated process. An owned process that
+# ignores SIGTERM is escalated to SIGKILL. Returns nonzero only when an owned
+# process could not be proven terminated; the stale pidfile is removed
+# regardless (it is evidence of nothing owned once the pid is dead or foreign).
 shuttle_stop() {
-  local box="$1" pidfile pid i
+  local box="$1" pidfile pid i state signaled=0
   pidfile="$(shuttle_pidfile "$box")"
-  if [[ -f "$pidfile" ]]; then
-    pid="$(cat "$pidfile" 2>/dev/null || true)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+  [[ -f "$pidfile" ]] || return 0
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    # Ownership proof: only an msw-github-shuttle process may be signaled.
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'msw-github-shuttle'; then
+      signaled=1
       kill "$pid" 2>/dev/null || true
       for i in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+        for i in 1 2 3; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+      fi
     fi
-    rm -f "$pidfile"
   fi
+  if (( signaled )); then
+    # Termination proof: the process is gone, or is a zombie awaiting reap
+    # (it can no longer run the relay or hold the tunnel).
+    state="$(ps -p "$pid" -o stat= 2>/dev/null || true)"
+    if [[ -n "$state" && "$state" != Z* ]]; then
+      warn "shuttle process $pid for $box could not be terminated"
+      return 1
+    fi
+  fi
+  rm -f "$pidfile"
+  return 0
 }
 
 proxy_shuttle_launchd_label() { printf 'org.microsandbox.MSWMonitor.github-shuttle.%s' "$1"; }
 proxy_shuttle_launchd_plist() { printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$(proxy_shuttle_launchd_label "$1")"; }
 
+# Stop the per-workspace shuttle LaunchAgent and PROVE the label is gone (or
+# was never loaded) before any shuttle state may be deleted. Returns nonzero
+# when the label is still loaded after the bootout attempt.
 proxy_shuttle_stop_launchd() {
   local box="$1" plist label
   plist="$(proxy_shuttle_launchd_plist "$box")"; label="$(proxy_shuttle_launchd_label "$box")"
+  # Test seam: model a bootout that cannot be proven (label still loaded)
+  # BEFORE any real launchctl mutation.
+  if [[ "${MSW_FAKE_LAUNCHCTL_LABEL:-}" == "$label" ]]; then
+    return 1
+  fi
   /bin/launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || /bin/launchctl unload -w "$plist" 2>/dev/null || true
+  # Proof: the label must be gone (or was never loaded) before any shuttle
+  # state may be treated as owned by nothing.
+  /bin/launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && return 1
+  return 0
 }
 
 proxy_shuttle_launchd_start() {
@@ -3682,14 +3771,19 @@ PLIST
 # Start the per-workspace shuttle idempotently. Production uses a launchd
 # LaunchAgent (KeepAlive); test mode and launchd failures fall back to a
 # detached background process with a pidfile. The shuttle itself respawns the
-# guest relay on every failure, so stopping/restarting the workspace heals the
-# tunnel automatically.
+# guest relay on transient failures and circuit-breaks on permanent ones, so
+# stopping/restarting the workspace heals the tunnel automatically.
 proxy_shuttle_start() {
   local box="$1" force="${2:-0}" pidfile logfile signature signature_file
   pidfile="$(shuttle_pidfile "$box")"; logfile="$(shuttle_logfile "$box")"
   signature_file="$(shuttle_signature_file "$box")"
   signature="$(shuttle_signature "$box")" || return 1
   mkdir -p "$(dirname "$pidfile")" || return 1
+  # A live shuttle is only accepted after the guest relay artifact is present
+  # and hash-identical: the signature proves the binary and launch config, not
+  # the guest. Drift (missing/stale relay) is repaired here first, so the
+  # early return never blesses a shuttle whose relay vanished.
+  proxy_install_relay "$box" || return 1
   # Healthy transport is already reconciled. Do not bounce a shuttle merely
   # because the same effective policy was submitted again.
   if [[ "$force" != 1 ]] && shuttle_running "$box" &&
@@ -3708,8 +3802,16 @@ proxy_shuttle_start() {
     fi
     warn "launchd shuttle unavailable; falling back to a direct background shuttle for $box"
   fi
-  MSW_MSB_BIN="$MSB_BIN" MSW_GITHUB_PROXY_PORT="$MSW_GITHUB_PROXY_PORT" \
-    nohup "$MSW_PYTHON_BIN" "$SHUTTLE_BIN" "$box" >>"$logfile" 2>&1 &
+  # The shuttle is long-lived; it must not inherit lock fds (fd 9 = the
+  # per-workspace GitHub lock; 10+ = policy-apply locks). An inherited lock
+  # would stay pinned for the shuttle's lifetime and deadlock the next
+  # GitHub operation on this workspace.
+  (
+    eval "exec 9>&-"
+    eval "exec 10>&- 11>&- 12>&- 13>&- 14>&- 15>&- 16>&- 17>&- 18>&- 19>&-" 2>/dev/null || true
+    MSW_MSB_BIN="$MSB_BIN" MSW_GITHUB_PROXY_PORT="$MSW_GITHUB_PROXY_PORT" \
+      exec "$MSW_PYTHON_BIN" "$SHUTTLE_BIN" "$box"
+  ) >>"$logfile" 2>&1 &
   printf '%s\n' "$!" >"$pidfile"
   sleep 1
   if ! shuttle_running "$box"; then
@@ -3717,6 +3819,32 @@ proxy_shuttle_start() {
     return 1
   fi
   shuttle_record_signature "$box" "$signature" || return 1
+  return 0
+}
+
+# Remove every OWNED artifact of a per-workspace shuttle (empty-policy
+# cleanup): boot out and delete its LaunchAgent, stop the child, and remove
+# the stale PID and signature state so the next reconcile starts clean.
+# Host-only (no guest exec, no VM lifecycle change) and idempotent. Evidence
+# (pidfile, signature, plist) is deleted only after BOTH proofs: the
+# LaunchAgent label is gone and the owned child is terminated.
+proxy_shuttle_cleanup() {
+  local box="$1"
+  # Proof 1: the LaunchAgent label is gone. A stuck agent still owns the
+  # shuttle; deleting state underneath it would orphan a live process.
+  proxy_shuttle_stop_launchd "$box" || {
+    warn "LaunchAgent $(proxy_shuttle_launchd_label "$box") for $box is still loaded; shuttle state kept"
+    return 1
+  }
+  # Proof 2: the owned child is terminated (ownership-validated, SIGTERM then
+  # SIGKILL escalation). Only then is the stale evidence deleted.
+  shuttle_stop "$box" || return 1
+  rm -f "$(shuttle_pidfile "$box")" "$(shuttle_signature_file "$box")" \
+        "$(proxy_shuttle_launchd_plist "$box")"
+  if shuttle_running "$box"; then
+    warn "shuttle for $box survived cleanup; see $(shuttle_logfile "$box")"
+    return 1
+  fi
   return 0
 }
 
@@ -3866,12 +3994,26 @@ proxy_policy_ensure_workspace() {
   printf '%s\n' "$cap"
 }
 
-proxy_install_relay() {
+# True only when the guest relay artifact exists AND is hash-identical to the
+# installed relay. This is the single drift check every reconcile path
+# (proxy-configure, policy apply, semantic no-ops) uses; it is a read-only
+# guest exec and never mutates anything.
+proxy_relay_matches() {
   local box="$1" host_hash guest_hash
   host_hash="$(/usr/bin/shasum -a 256 "$RELAY_BIN" 2>/dev/null | awk '{print $1}')"
+  [[ -n "$host_hash" ]] || return 1
   guest_hash="$(guest_exec_ready "$box" sh -c 'test -f /var/lib/msw-runtime/msw-github-relay.py && sha256sum /var/lib/msw-runtime/msw-github-relay.py | awk '\''{print $1}'\''' 2>/dev/null || true)"
-  [[ -n "$host_hash" && "$guest_hash" == "$host_hash" ]] && return 0
-  workspace_msb "$box" copy -q "$RELAY_BIN" "$box:/var/lib/msw-runtime/msw-github-relay.py"
+  [[ "$guest_hash" == "$host_hash" ]]
+}
+
+# Idempotent relay install: verify the artifact+hash, copy atomically only on
+# drift, and prove the repair — an unverifiable install is a failure, not a
+# success.
+proxy_install_relay() {
+  local box="$1"
+  proxy_relay_matches "$box" && return 0
+  workspace_msb "$box" copy -q "$RELAY_BIN" "$box:/var/lib/msw-runtime/msw-github-relay.py" || return 1
+  proxy_relay_matches "$box"
 }
 
 proxy_guest_config_matches() {
@@ -3943,6 +4085,16 @@ proxy_configure_one() {
   if ! proxy_install_relay "$box"; then github_lock_release; fatal "could not install the relay inside $box"; fi
   if ! proxy_guest_configure "$box" "$capability"; then github_lock_release; fatal "could not configure git inside $box"; fi
   if ! proxy_shuttle_start "$box"; then github_lock_release; fatal "could not start the GitHub shuttle for $box"; fi
+  # A live pid is not sufficient health evidence: require the bounded
+  # end-to-end relay/proxy routing probe (heartbeat) before reporting
+  # configured. Restart once on probe failure, then require it to pass.
+  if ! app_apply_verify_transport "$box" "$capability"; then
+    proxy_shuttle_start "$box" 1 || { github_lock_release; fatal "could not restart the GitHub shuttle for $box"; }
+    if ! app_apply_verify_transport "$box" "$capability"; then
+      github_lock_release
+      fatal "GitHub transport readiness could not be verified for $box; the tunnel did not pass the end-to-end probe"
+    fi
+  fi
   github_lock_release
   ok "GitHub proxy transport configured for $box"
 }
@@ -4382,6 +4534,7 @@ check_one_deep() {
   note "Deep-checking $box"
   local script
   read -r -d '' script <<'SCRIPT' || true
+printf '\x00\x00\x00\x00\x01H\n' >&2
 set -Eeuo pipefail
 [ "$(uname -m)" = aarch64 ]
 [ "$(cat /proc/1/comm)" = systemd ]
@@ -4414,40 +4567,40 @@ SCRIPT
 
   "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=20 "$(workspace_ssh_host "$box")" true || failed=1
 
-  guest_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
-  guest_exec "$box" bash -lc "printf '%s\\n' '$box-direct-ok' >/tmp/msw-health.txt && systemd-run --quiet --unit='$direct_unit' --collect python3 -m http.server 24678 --bind 0.0.0.0 --directory /tmp" || failed=1
+  guest_control_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
+  guest_control_exec "$box" bash -lc "printf '%s\\n' '$box-direct-ok' >/tmp/msw-health.txt && systemd-run --quiet --unit='$direct_unit' --collect python3 -m http.server 24678 --bind 0.0.0.0 --directory /tmp" || failed=1
   local attempt=0 body=""
   until body="$("$CURL_BIN" -fsS --max-time 2 "$direct_url" 2>/dev/null)"; do
     attempt=$((attempt + 1)); (( attempt < 30 )) || break; sleep 0.2
   done
   [[ "$body" == "$box-direct-ok" ]] || { echo "$box: direct published port failed" >&2; failed=1; }
-  guest_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
+  guest_control_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
 
-  guest_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
-  guest_exec "$box" docker run -d --name "$docker_name" -p 24679:80 nginx:alpine >/dev/null || failed=1
+  guest_control_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
+  guest_control_exec "$box" docker run -d --name "$docker_name" -p 24679:80 nginx:alpine >/dev/null || failed=1
   attempt=0; body=""
   until body="$("$CURL_BIN" -fsS --max-time 2 "$docker_url" 2>/dev/null)"; do
     attempt=$((attempt + 1)); (( attempt < 60 )) || break; sleep 0.5
   done
   [[ "$body" == *"Welcome to nginx"* ]] || { echo "$box: Docker published port failed" >&2; failed=1; }
-  guest_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
+  guest_control_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
 
   # Path C §7/§9: local mode asserts the guest carries NO GH_TOKEN at all and
   # probes proxy reachability through the endpoint. Connect mode keeps the
   # legacy placeholder assertion.
   if [[ "$MSW_GITHUB_MODE" == local ]]; then
-    guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in "") exit 0;; *) exit 1;; esac' || {
+    guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in "") exit 0;; *) exit 1;; esac' || {
       echo "$box: local mode must not expose GH_TOKEN inside the guest" >&2; failed=1;
     }
     if [[ -f "$(policy_file)" ]]; then
       probe_repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
       if [[ -n "$probe_repo" ]]; then
         if host_credential_available; then
-          guest_exec "$box" env GIT_TERMINAL_PROMPT=0 git ls-remote "http://127.0.0.1:18446/github.com/$probe_repo.git" >/dev/null 2>&1 || {
+          guest_control_exec "$box" env GIT_TERMINAL_PROMPT=0 git ls-remote "http://127.0.0.1:18446/github.com/$probe_repo.git" >/dev/null 2>&1 || {
             echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
           }
         else
-          probe_code="$(guest_exec "$box" curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18446/github.com/$probe_repo.git/info/refs?service=git-upload-pack" 2>/dev/null || true)"
+          probe_code="$(guest_control_exec "$box" curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18446/github.com/$probe_repo.git/info/refs?service=git-upload-pack" 2>/dev/null || true)"
           if [[ ! "$probe_code" =~ ^[0-9]{3}$ ]]; then
             echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
           else
@@ -4461,7 +4614,7 @@ SCRIPT
       note "$box: no GitHub policy; skipping proxy reachability"
     fi
   elif keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
-    guest_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
+    guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
       echo "$box: GitHub secret is not represented by a guest placeholder" >&2; failed=1;
     }
   fi
@@ -6127,6 +6280,10 @@ app_valid_directory_query() {
 app_guest_directory_query() {
   local box="$1" mode="$2" path="$3" query="$4" limit="$5" script
   script='import json, os, sys
+# Control-plane session: declare this exec internal to the structured log
+# adapter with the reserved marker before producing any output.
+sys.stderr.write("\x00\x00\x00\x00\x01H\n")
+sys.stderr.flush()
 root_arg, mode, relative, query, raw_limit = sys.argv[1:]
 root = os.path.realpath(root_arg)
 limit = int(raw_limit)
@@ -6900,6 +7057,7 @@ app_listening_ports_for_workspace() {
   local box="$1"; shift
   local script
   read -r -d '' script <<'SCRIPT' || true
+printf '\x00\x00\x00\x00\x01H\n' >&2
 # MSW app listening-port probe
 set -Eeuo pipefail
 command -v ss >/dev/null 2>&1 || exit 69
@@ -7349,24 +7507,69 @@ app_apply_verify_transport() {
   [[ "$code" == 403 && "$body" == *"msw-proxy:"* ]]
 }
 
-# Provision + verify the transport for one workspace with its FINAL
-# capability. Runs inside a command substitution so any fatal() (quarantine /
-# start failure) converts to a typed error instead of aborting the envelope.
-app_apply_provision_transport() {
+# Map a provision/reconcile failure's MSW_APPLY_STAGE= marker to the typed
+# error fields shared by the changed-apply and semantic-no-op paths. Prints
+# three lines: failure_code, failure_message, failure_recovery.
+app_apply_stage_failure() {
+  local box="$1" output="$2"
+  case "$output" in
+    *MSW_APPLY_STAGE=starting*)
+      printf '%s\n' "MSW_WORKSPACE_START_FAILED" \
+        "Workspace $box could not be started for GitHub reconciliation; the policy was NOT changed." \
+        "Check the workspace runtime and retry when its lifecycle is stable."
+      ;;
+    *MSW_APPLY_STAGE=relay*)
+      printf '%s\n' "MSW_RELAY_INSTALL_FAILED" \
+        "The GitHub relay could not be installed in workspace $box; the policy was NOT changed." \
+        "Repair workspace file access, then retry GitHub reconciliation."
+      ;;
+    *MSW_APPLY_STAGE=configuring*)
+      printf '%s\n' "MSW_GIT_CONFIG_FAILED" \
+        "Git transport configuration could not be verified in workspace $box; the policy was NOT changed." \
+        "Check Git configuration access in the workspace, then retry."
+      ;;
+    *MSW_APPLY_STAGE=shuttle*)
+      printf '%s\n' "MSW_SHUTTLE_START_FAILED" \
+        "The GitHub shuttle could not be started for workspace $box; the policy was NOT changed." \
+        "Check the local shuttle runtime and retry GitHub reconciliation."
+      ;;
+    *MSW_APPLY_STAGE=verifying*)
+      printf '%s\n' "MSW_TRANSPORT_VERIFY_FAILED" \
+        "GitHub transport readiness could not be verified for workspace $box; the policy was NOT changed." \
+        "Check the local proxy and workspace network, then retry."
+      ;;
+    *)
+      printf '%s\n' "MSW_TRANSPORT_PROVISION_FAILED" \
+        "GitHub proxy transport could not be provisioned for workspace $box; the policy was NOT changed." \
+        "Check the workspace runtime and retry the policy apply."
+      ;;
+  esac
+}
+
+# Idempotent transport reconciliation for an ACTIVE (non-empty) policy:
+# verify/install the relay artifact (hash-verified, atomic copy on drift),
+# verify/repair the guest git config, own exactly one shuttle, and prove
+# end-to-end routing with a bounded probe before reporting provisioned.
+# Every step verifies first and mutates only on drift, so this is safe to run
+# on semantic no-ops and unchanged policies. Runs inside a command
+# substitution so any fatal() (quarantine / start failure) converts to a
+# typed error instead of aborting the envelope. Callers hold the apply locks;
+# the shuttle spawned here must NOT inherit them (an inherited fd would pin
+# the flock for the shuttle's lifetime and deadlock the next apply), so the
+# locked fds are closed here before any shuttle is spawned.
+app_apply_reconcile_transport() {
   local box="$1" capability="$2" lock_entry lock_fd
-  # The parent holds every configured workspace lock. The shuttle spawned here
-  # must NOT inherit them: an inherited fd would pin the flock for the
-  # shuttle's lifetime and deadlock the next apply.
-  for lock_entry in "${MSW_APPLY_LOCKED[@]}"; do
-    lock_fd="${lock_entry##*:}"
-    eval "exec ${lock_fd}>&-" 2>/dev/null || true
-  done
+  # bash 3.2 + set -u: expanding a DECLARED-BUT-EMPTY array errors, so check
+  # the length first. The apply path always fills the array (locks held);
+  # cmd_start's deferred-reconcile consume calls this with no locks held.
+  if (( ${#MSW_APPLY_LOCKED[@]} > 0 )); then
+    for lock_entry in "${MSW_APPLY_LOCKED[@]}"; do
+      lock_fd="${lock_entry##*:}"
+      eval "exec ${lock_fd}>&-" 2>/dev/null || true
+    done
+  fi
   if app_workspace_quarantined "$box"; then
     printf 'msw: workspace %s is quarantined\n' "$box" >&2
-    return 1
-  fi
-  if [[ "${MSW_FAKE_APPLY_PROVISION_FAIL:-}" == "$box" ]]; then
-    printf 'msw: transport provisioning failure injected for %s\n' "$box" >&2
     return 1
   fi
   if ! sandbox_exists "$box"; then
@@ -7374,13 +7577,6 @@ app_apply_provision_transport() {
     return 1
   fi
   ensure_running "$box" || { printf 'MSW_APPLY_STAGE=starting\n' >&2; return 1; }
-  # Test-only cancellation seam: production has no pause. The parent command
-  # already recorded the prior lifecycle and holds the apply locks here.
-  if [[ -n "${MSW_FAKE_APPLY_PROVISION_PAUSE_FILE:-}" ]]; then
-    [[ -n "${MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED:-}" ]] &&
-      : >"$MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED"
-    while [[ -e "$MSW_FAKE_APPLY_PROVISION_PAUSE_FILE" ]]; do sleep 0.1; done
-  fi
   proxy_install_relay "$box" || { printf 'MSW_APPLY_STAGE=relay\n' >&2; return 1; }
   proxy_guest_configure "$box" "$capability" || { printf 'MSW_APPLY_STAGE=configuring\n' >&2; return 1; }
   proxy_shuttle_start "$box" || { printf 'MSW_APPLY_STAGE=shuttle\n' >&2; return 1; }
@@ -7396,6 +7592,86 @@ app_apply_provision_transport() {
     app_apply_verify_transport "$box" "$capability" || { printf 'MSW_APPLY_STAGE=verifying\n' >&2; return 1; }
   fi
   return 0
+}
+
+# Provision + verify the transport for one workspace with its FINAL
+# capability: test-only seams (injected failure, cancellation pause) around
+# the shared idempotent reconciliation.
+app_apply_provision_transport() {
+  local box="$1" capability="$2"
+  if [[ "${MSW_FAKE_APPLY_PROVISION_FAIL:-}" == "$box" ]]; then
+    printf 'msw: transport provisioning failure injected for %s\n' "$box" >&2
+    return 1
+  fi
+  # Test-only cancellation seam: production has no pause. The parent command
+  # already recorded the prior lifecycle and holds the apply locks here.
+  if [[ -n "${MSW_FAKE_APPLY_PROVISION_PAUSE_FILE:-}" ]]; then
+    [[ -n "${MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED:-}" ]] &&
+      : >"$MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED"
+    while [[ -e "$MSW_FAKE_APPLY_PROVISION_PAUSE_FILE" ]]; do sleep 0.1; done
+  fi
+  app_apply_reconcile_transport "$box" "$capability"
+}
+
+# ---------------------------------------------------------------------------
+# Deferred stopped-workspace reconciliation. The policy apply NEVER starts a
+# stopped box, so a stable stopped workspace with a non-empty desired policy
+# owes its transport reconciliation on the next start. The apply records an
+# explicit marker (atomic write, 0600, under the apply locks); cmd_start
+# consumes it against the CURRENT policy (verify-first, idempotent), so a
+# stopped workspace becomes transport-healthy when started without the apply
+# ever changing VM lifecycle.
+# ---------------------------------------------------------------------------
+app_apply_deferred_file() { printf '%s/reconcile-%s.deferred\n' "$GITHUB_META_DIR" "$1"; }
+
+app_apply_defer_reconcile() {
+  local box="$1" capability="$2" file tmp
+  file="$(app_apply_deferred_file "$box")"
+  mkdir -p "$(dirname "$file")" || return 1
+  chmod 700 "$(dirname "$file")" 2>/dev/null || true
+  umask 077
+  tmp="$file.tmp.$$"
+  if ! printf 'workspace=%s\ncapability=%s\ncreated=%s\n' \
+      "$box" "$capability" "$(date +%s)" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  if ! mv "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+app_apply_clear_deferred() {
+  local box="$1"
+  rm -f "$(app_apply_deferred_file "$box")"
+}
+
+# Consume one workspace's deferred reconcile on its next start. The marker
+# only records the OBLIGATION; the reconcile itself always runs against the
+# CURRENT policy (an intervening apply either rewrote the marker for a still
+# non-empty policy or removed it for an empty one, and per-repo edits never
+# change the deferred obligation). Returns success when the reconcile
+# completes or when the current policy no longer owes one; on failure the
+# marker is rewritten so the next start retries.
+app_apply_consume_deferred() {
+  local box="$1" cap=""
+  if ! "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos | length > 0' "$(policy_file)" >/dev/null 2>&1; then
+    # The current policy has no non-empty repos for this box: the empty
+    # apply already removed the owned shuttle state, so nothing is owed.
+    app_apply_clear_deferred "$box"
+    return 0
+  fi
+  cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
+  [[ -n "$cap" ]] || return 1
+  if app_apply_reconcile_transport "$box" "$cap" >/dev/null 2>&1; then
+    app_apply_clear_deferred "$box"
+    return 0
+  fi
+  app_apply_defer_reconcile "$box" "$cap" >/dev/null 2>&1 || true
+  return 1
 }
 
 app_cmd_github_policy_apply() {
@@ -7524,92 +7800,96 @@ app_cmd_github_policy_apply() {
     fi
   done
 
-  # Exact semantic no-op: do not start a VM, copy a relay, rewrite Git config,
-  # restart a shuttle, or rewrite the effective policy.
-  if [[ -z "$changed_boxes" ]]; then
-    policy_journal all apply completed
-    app_apply_release_all
-    trap - EXIT INT TERM HUP
-    items=""
-    for box in "${WORKSPACES[@]}"; do
-      cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
-      [[ -n "$items" ]] && items+=","
-      items+="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_optional "$cap"),\"repos\":$(policy_repo_json "$box")}"
-    done
-    app_emit_success github-policy-apply \
-      "{\"applied\":true,\"provisioned\":true,\"committed\":true,\"workspaces\":[$items]}"
-    return
-  fi
-
-  # Provision + verify only semantically changed, non-empty workspaces BEFORE the
-  # single atomic policy commit. A provisioning/readiness failure changes NO
-  # policy — so the pre-apply snapshot is NEVER restored (nothing to restore);
-  # the typed error is returned with the policy file untouched.
-  for box in $provision_boxes; do
-    lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
-    if [[ "$lifecycle" == Unknown || "$lifecycle" == Starting || "$lifecycle" == Stopping || "$lifecycle" == Restarting ]]; then
-      app_apply_restore_lifecycles >/dev/null 2>&1 || true
-      app_apply_release_all
-      policy_journal all apply failed
-      app_emit_error github-policy-apply "MSW_STATE_UNAVAILABLE" \
-        "Workspace $box has no stable lifecycle to snapshot before GitHub reconciliation." \
-        "Wait for the workspace lifecycle to settle, then retry." "$box" true 69
-      return
-    fi
-    app_apply_remember_lifecycle "$box" "$lifecycle"
-    cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
-    if ! output="$(app_apply_provision_transport "$box" "$cap" 2>&1)"; then
-      if ! app_apply_restore_lifecycles >/dev/null 2>&1; then
-        app_apply_release_all
-        policy_journal all apply failed
-        app_emit_error github-policy-apply "MSW_LIFECYCLE_RESTORE_FAILED" \
-          "GitHub transport failed and workspace $MSW_APPLY_RESTORE_FAILED_WORKSPACE could not return to its prior lifecycle; the policy was NOT changed." \
-          "Repair the affected workspace lifecycle, then retry reconciliation." "$MSW_APPLY_RESTORE_FAILED_WORKSPACE" true 77
-        return
-      fi
-      app_apply_release_all
-      policy_journal all apply failed
-      case "$output" in
-        *MSW_APPLY_STAGE=starting*)
-          failure_code="MSW_WORKSPACE_START_FAILED"
-          failure_message="Workspace $box could not be started for GitHub reconciliation; the policy was NOT changed."
-          failure_recovery="Check the workspace runtime and retry when its lifecycle is stable."
+  # SEPARATE the policy delta from transport reconciliation: every workspace
+  # in the final desired policy is inspected on every successful full apply,
+  # whether or not its policy bytes changed. Empty desired policies lose
+  # their owned shuttle state (the child is stopped and the PID, signature,
+  # plist, and LaunchAgent state removed) and any deferred reconcile is
+  # cleared; active non-empty policies are reconciled with the FINAL
+  # capability (verify-first and idempotent, so drift — a deleted or stale
+  # guest relay, a dead shuttle — is repaired on changed AND unchanged
+  # workspaces alike) and must pass the bounded end-to-end probe; stable
+  # stopped workspaces defer their reconcile to the next start (the apply
+  # never starts a stopped box); unknown/transitional lifecycles are
+  # rejected because their transport cannot be claimed provisioned. A
+  # failure anywhere changes NO policy: the single atomic commit still
+  # happens last.
+  for box in "${WORKSPACES[@]}"; do
+    if "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos | length > 0' <<<"$request" >/dev/null 2>&1; then
+      lifecycle="$(app_status_for_workspace "$box" 2>/dev/null || printf Unknown)"
+      case "$lifecycle" in
+        Running)
+          app_apply_remember_lifecycle "$box" "$lifecycle"
+          cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
+          failed=0
+          if [[ " $provision_boxes " == *" $box "* ]]; then
+            # Semantically changed: provision through the testable seam.
+            output="$(app_apply_provision_transport "$box" "$cap" 2>&1)" || failed=1
+          else
+            # Unchanged sibling: reconcile anyway so a full apply can never
+            # skip its drift.
+            output="$(app_apply_reconcile_transport "$box" "$cap" 2>&1)" || failed=1
+          fi
+          if (( failed )); then
+            app_apply_restore_lifecycles >/dev/null 2>&1 || true
+            { read -r failure_code; read -r failure_message; read -r failure_recovery; } \
+              <<<"$(app_apply_stage_failure "$box" "$output")"
+            app_apply_release_all
+            policy_journal all apply failed
+            app_emit_error github-policy-apply "$failure_code" \
+              "$failure_message" "$failure_recovery" "$box" true 77
+            return
+          fi
           ;;
-        *MSW_APPLY_STAGE=relay*)
-          failure_code="MSW_RELAY_INSTALL_FAILED"
-          failure_message="The GitHub relay could not be installed in workspace $box; the policy was NOT changed."
-          failure_recovery="Repair workspace file access, then retry GitHub reconciliation."
-          ;;
-        *MSW_APPLY_STAGE=configuring*)
-          failure_code="MSW_GIT_CONFIG_FAILED"
-          failure_message="Git transport configuration could not be verified in workspace $box; the policy was NOT changed."
-          failure_recovery="Check Git configuration access in the workspace, then retry."
-          ;;
-        *MSW_APPLY_STAGE=shuttle*)
-          failure_code="MSW_SHUTTLE_START_FAILED"
-          failure_message="The GitHub shuttle could not be started for workspace $box; the policy was NOT changed."
-          failure_recovery="Check the local shuttle runtime and retry GitHub reconciliation."
-          ;;
-        *MSW_APPLY_STAGE=verifying*)
-          failure_code="MSW_TRANSPORT_VERIFY_FAILED"
-          failure_message="GitHub transport readiness could not be verified for workspace $box; the policy was NOT changed."
-          failure_recovery="Check the local proxy and workspace network, then retry."
+        Stopped|Exited)
+          # Never start a stopped box during the apply; record the explicit
+          # deferred reconcile for cmd_start to consume on the next start.
+          cap="$(printf '%s' "$caps_json" | "$JQ_BIN" -r --arg w "$box" '.[$w]')"
+          if ! app_apply_defer_reconcile "$box" "$cap"; then
+            app_apply_restore_lifecycles >/dev/null 2>&1 || true
+            app_apply_release_all
+            policy_journal all apply failed
+            app_emit_error github-policy-apply "MSW_TRANSPORT_PROVISION_FAILED" \
+              "GitHub reconciliation for stopped workspace $box could not be deferred to its next start; the policy was NOT changed." \
+              "Check the MSW metadata directory, then retry the policy apply." "$box" true 77
+            return
+          fi
           ;;
         *)
-          failure_code="MSW_TRANSPORT_PROVISION_FAILED"
-          failure_message="GitHub proxy transport could not be provisioned for workspace $box; the policy was NOT changed."
-          failure_recovery="Check the workspace runtime and retry the policy apply."
+          # Unknown/Starting/Stopping/Restarting: no stable lifecycle, so the
+          # transport can neither be reconciled nor deferred; the apply must
+          # not report this workspace provisioned.
+          app_apply_restore_lifecycles >/dev/null 2>&1 || true
+          app_apply_release_all
+          policy_journal all apply failed
+          app_emit_error github-policy-apply "MSW_STATE_UNAVAILABLE" \
+            "Workspace $box has no stable lifecycle to snapshot before GitHub reconciliation." \
+            "Wait for the workspace lifecycle to settle, then retry." "$box" true 69
+          return
           ;;
       esac
-      app_emit_error github-policy-apply "$failure_code" \
-        "$failure_message" "$failure_recovery" "$box" true 77
-      return
+    else
+      # Desired repos empty (key omitted or cleared): the owned shuttle
+      # state must disappear — stop the child and remove the PID, signature,
+      # plist, and LaunchAgent state — and no reconcile is owed on the next
+      # start. No VM lifecycle impact.
+      app_apply_clear_deferred "$box"
+      if ! proxy_shuttle_cleanup "$box"; then
+        app_apply_restore_lifecycles >/dev/null 2>&1 || true
+        app_apply_release_all
+        policy_journal all apply failed
+        app_emit_error github-policy-apply "MSW_SHUTTLE_CLEANUP_FAILED" \
+          "GitHub policy is empty for $box but an owned shuttle could not be stopped; the policy was NOT changed." \
+          "Stop the stale shuttle manually, then retry reconciliation." "$box" true 77
+        return
+      fi
     fi
   done
 
-  # Provisioning may have started stopped/exited workspaces. Restore the
-  # exact running-vs-not-running lifecycle before activating access.
-  if ! app_apply_restore_lifecycles; then
+  # Reconcile may have (re)started a workspace that raced to stopped while
+  # observed Running; restore the exact observed lifecycle (the apply never
+  # starts a box it observed stopped).
+  if ! app_apply_restore_lifecycles >/dev/null 2>&1; then
     app_apply_release_all
     policy_journal all apply failed
     app_emit_error github-policy-apply "MSW_LIFECYCLE_RESTORE_FAILED" \
@@ -7627,64 +7907,71 @@ app_cmd_github_policy_apply() {
     while [[ -e "$MSW_FAKE_APPLY_PAUSE_FILE" ]]; do sleep 0.1; done
   fi
 
-  # ONE atomic policy commit (tmp + fsync + rename, 0600). -n: the full
-  # request/caps come from --argjson; stdin was already consumed by `cat`.
-  final_policy="$("$JQ_BIN" -nc --argjson req "$request" --argjson caps "$caps_json" '
-    {schemaVersion: 1,
-     workspaces: (($req.workspaces // {}) | with_entries(
-       .value = {capability: ($caps[.key] // ""), repos: (.value.repos // [])}
-     ))}
-  ')" || {
-    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
-    app_apply_release_all
-    policy_journal all apply failed
-    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The final desired policy could not be composed." "Retry the policy apply." "" true 69
-    return
-  }
-  if ! policy_json_valid "$final_policy"; then
-    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
-    app_apply_release_all
-    policy_journal all apply failed
-    app_emit_error github-policy-apply "MSW_INVALID_REQUEST" "The composed final policy failed strict validation." "Retry the policy apply with a valid request." "" false 64
-    return
+  # ONE atomic policy commit (tmp + fsync + rename, 0600) — and ONLY when
+  # the policy bytes changed: a semantic no-op rewrites nothing but still
+  # reports the reconciled transport with the same response shape. -n: the
+  # full request/caps come from --argjson; stdin was already consumed by
+  # `cat`.
+  if [[ -n "$changed_boxes" ]]; then
+    final_policy="$("$JQ_BIN" -nc --argjson req "$request" --argjson caps "$caps_json" '
+      {schemaVersion: 1,
+       workspaces: (($req.workspaces // {}) | with_entries(
+         .value = {capability: ($caps[.key] // ""), repos: (.value.repos // [])}
+       ))}
+    ')" || {
+      app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The final desired policy could not be composed." "Retry the policy apply." "" true 69
+      return
+    }
+    if ! policy_json_valid "$final_policy"; then
+      app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_INVALID_REQUEST" "The composed final policy failed strict validation." "Retry the policy apply with a valid request." "" false 64
+      return
+    fi
+    tmp="$file.tmp.$$"
+    if ! mkdir -p "$(dirname "$file")"; then
+      app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy directory could not be created." "Repair the policy directory permissions and retry." "" true 69
+      return
+    fi
+    chmod 700 "$(dirname "$file")" 2>/dev/null || true
+    umask 077
+    if ! printf '%s\n' "$final_policy" >"$tmp" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null || true
+      app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be written." "Repair the policy directory permissions and retry." "" true 69
+      return
+    fi
+    chmod 600 "$tmp" 2>/dev/null || true
+    if ! fsync_path "$tmp" file; then
+      rm -f "$tmp" 2>/dev/null || true
+      app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be made durable." "Retry the policy apply." "" true 69
+      return
+    fi
+    if ! mv "$tmp" "$file" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null || true
+      app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
+      app_apply_release_all
+      policy_journal all apply failed
+      app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be committed atomically." "Retry the policy apply." "" true 69
+      return
+    fi
+    fsync_path "$(dirname "$file")" dir || true
+    policy_journal all apply committed
+  else
+    policy_journal all apply completed
   fi
-  tmp="$file.tmp.$$"
-  if ! mkdir -p "$(dirname "$file")"; then
-    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
-    app_apply_release_all
-    policy_journal all apply failed
-    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy directory could not be created." "Repair the policy directory permissions and retry." "" true 69
-    return
-  fi
-  chmod 700 "$(dirname "$file")" 2>/dev/null || true
-  umask 077
-  if ! printf '%s\n' "$final_policy" >"$tmp" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
-    app_apply_release_all
-    policy_journal all apply failed
-    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be written." "Repair the policy directory permissions and retry." "" true 69
-    return
-  fi
-  chmod 600 "$tmp" 2>/dev/null || true
-  if ! fsync_path "$tmp" file; then
-    rm -f "$tmp" 2>/dev/null || true
-    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
-    app_apply_release_all
-    policy_journal all apply failed
-    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be made durable." "Retry the policy apply." "" true 69
-    return
-  fi
-  if ! mv "$tmp" "$file" 2>/dev/null; then
-    rm -f "$tmp" 2>/dev/null || true
-    app_apply_rollback_policy "$file" "$old_exists" >/dev/null 2>&1 || true
-    app_apply_release_all
-    policy_journal all apply failed
-    app_emit_error github-policy-apply "MSW_POLICY_WRITE_FAILED" "The GitHub policy could not be committed atomically." "Retry the policy apply." "" true 69
-    return
-  fi
-  fsync_path "$(dirname "$file")" dir || true
-  policy_journal all apply committed
   app_apply_release_all
   trap - EXIT INT TERM HUP
 
@@ -7856,6 +8143,7 @@ app_guest_repository_scan() {
 
   local box="$1" include_status="$2" credential_state="$3" quarantine_state="$4" requested_path="${5-}" script
   read -r -d '' script <<'SCRIPT' || true
+printf '\x00\x00\x00\x00\x01H\n' >&2
 set -Eeuo pipefail
 include_status="$1"
 credential_state="$2"
@@ -8098,22 +8386,36 @@ app_cmd_logs() {
   if ! status="$(app_status_for_workspace "$box" 2>/dev/null)"; then
     app_emit_error logs "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the MSW runtime." "$box" true 69
   fi
+  # The runtime retains a bounded rotated log, so request a classification
+  # window far larger than any plausible retention: a session's origin
+  # marker is its FIRST write, and classifying before the presentation cap
+  # below means a control session with more than 200 records (for example a
+  # relay tunnel or a long repository scan) can never leak its trailing
+  # records — the marker is always inside this window whenever any of the
+  # session's records are. Presentation stays capped at the newest 200
+  # workload records.
   if [[ "$status" == Running ]]; then
-    if ! raw="$(workspace_msb "$box" logs "$box" --json --tail 200 2>/dev/null)"; then
+    if ! raw="$(workspace_msb "$box" logs "$box" --json --tail 200000 2>/dev/null)"; then
       app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide structured bounded logs." "Install a MicroSandbox version that supports structured logs, then retry." "$box" true 69
     fi
   else
     reason_json="$(app_json_string "Showing system logs for a workspace that is $status.")"
-    if ! raw="$(workspace_msb "$box" logs "$box" --source system --json --tail 200 2>/dev/null)"; then
+    if ! raw="$(workspace_msb "$box" logs "$box" --source system --json --tail 200000 2>/dev/null)"; then
       app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime did not provide structured stopped-workspace system logs." "Install a MicroSandbox version that supports structured logs, then inspect the named volume and sandbox runtime." "$box" true 69
     fi
   fi
 
-  # MicroSandbox 0.6.8 records one compact JSON object per captured write:
-  # timestamp (t), source (s), session id (id), encoding (e), and data (d).
-  # The GitHub relay's reserved framed heartbeat identifies its exec session;
-  # every record for that structured session is internal transport and must be
-  # removed together, including stderr, open/close, and arbitrary data frames.
+  # The reserved internal-session marker (control conn-id 0, length 1,
+  # payload "H" — the GitHub relay heartbeat frame) declares an exec
+  # session's ORIGIN. Every MSW control-plane session — directory,
+  # repository, setup, storage, health, and relay — emits it as its first
+  # write; user workload never does. Every record for a marked session,
+  # including stderr, open/close, and arbitrary data frames, is internal
+  # transport and must be removed together, even when the session failed
+  # before completing (for example a relay that never started). Sessions
+  # without the marker are user workload and stay visible verbatim; the
+  # marker may be recorded with or without a trailing newline depending on
+  # the write the runtime captured.
   if ! records_json="$(printf '%s\n' "$raw" | "$JQ_BIN" -cs '
     def valid_timestamp:
       type == "string" and
@@ -8131,10 +8433,14 @@ app_cmd_logs() {
     if all(.[]; valid_record) then . else error("invalid MicroSandbox log record") end |
     . as $records |
     ([$records[] |
-      select(.s == "stdout" and .e == null and (.id | type) == "number" and
-        .d == "\u0000\u0000\u0000\u0000\u0001H") |
+      select(.e == null and (.id | type) == "number" and
+        (.d == "\u0000\u0000\u0000\u0000\u0001H" or
+         .d == "\u0000\u0000\u0000\u0000\u0001H\n")) |
       .id] | unique) as $internal_sessions |
-    [$records[] | select((.id as $id | $internal_sessions | index($id)) == null)]
+    # Classification is complete over the whole window; only the newest 200
+    # workload records are presented (the runtime emits in chronological
+    # order, so the tail slice is the newest records).
+    [$records[] | select((.id as $id | $internal_sessions | index($id)) == null)] | .[-200:]
   ' 2>/dev/null)"; then
     app_emit_error logs "MSW_LOGS_UNAVAILABLE" "The runtime returned malformed structured logs." "Update or repair the MicroSandbox logs adapter, then retry." "$box" true 69
   fi
@@ -8490,14 +8796,76 @@ app_workspace_configuration_changed() {
   ' "$old_file" >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# Per-workspace guest configuration journal. A workspace is recorded
+# configured ONLY after guest setup and verification succeed; a failed
+# bootstrap leaves an explicit needs-configuration state so a later retry
+# recreates the partially configured VM instead of treating it as complete.
+# A missing or symlinked journal is UNKNOWN, never complete: only a verified
+# configured journal counts, and only an explicit needs-configuration journal
+# forces a recreate. Unknown boxes are resolved by the bootstrap deep check,
+# which records configured on success and needs-configuration on failure.
+# File: ~/.config/msw/workspace-config/<box>.json
+#   {"schemaVersion":1,"state":"configured","updatedAt":"<iso>"}
+#   {"schemaVersion":1,"state":"needs-configuration","updatedAt":"<iso>","error":"<last failure>"}
+# ---------------------------------------------------------------------------
+workspace_config_state_dir() { printf '%s/.config/msw/workspace-config\n' "$HOME"; }
+workspace_config_state_file() { printf '%s/%s.json\n' "$(workspace_config_state_dir)" "$1"; }
+
+workspace_config_state_write() {
+  local box="$1" state="$2" error="${3-}" dir file tmp
+  dir="$(workspace_config_state_dir)"; file="$(workspace_config_state_file "$box")"
+  mkdir -p "$dir" || return 1
+  chmod 700 "$dir" 2>/dev/null || true
+  tmp="$file.tmp.$$"
+  printf '{"schemaVersion":1,"state":%s,"updatedAt":%s%s}\n' \
+    "$(app_json_string "$state")" "$(app_json_string "$(app_now)")" \
+    "${error:+,\"error\":$(app_json_string "$error")}" >"$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
+workspace_configuration_needs_setup() {
+  local box="$1" file
+  file="$(workspace_config_state_file "$box")"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  "$JQ_BIN" -e '.schemaVersion == 1 and .state == "needs-configuration"' "$file" >/dev/null 2>&1
+}
+
+# Bounded silent wait for the guest systemd bus, mirroring the proven seam in
+# setup.sh wait_for_guest_systemd (same predicate and deadline). The probe is
+# a control-plane exec: it carries the reserved internal-session marker (and
+# its "_" sentinel) so its output is never surfaced as workload logs, and the
+# poll itself discards output: until the bus is up, systemd clients print
+# misleading "systemd is not PID 1" style errors that are transient, not
+# workload output. On timeout the caller reports a typed, retryable startup
+# error instead of leaking raw guest stderr. Test mode may shrink the bound
+# and sleep so the timeout contract is exercised quickly.
+app_wait_guest_systemd_ready() {
+  local box="$1" attempt=0 attempts=120 sleep_seconds=1
+  if [[ "${MSW_TEST_MODE:-0}" == 1 ]]; then
+    [[ -n "${MSW_FAKE_GUEST_READY_BOUND:-}" ]] && attempts="$MSW_FAKE_GUEST_READY_BOUND"
+    [[ -n "${MSW_FAKE_GUEST_READY_SLEEP:-}" ]] && sleep_seconds="$MSW_FAKE_GUEST_READY_SLEEP"
+  fi
+  until workspace_msb "$box" exec --no-tty "$box" -- \
+    bash -c 'printf '\''\x00\x00\x00\x00\x01H\n'\'' >&2; exec "$@"' _ systemctl daemon-reload >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    (( attempt < attempts )) || return 1
+    sleep "$sleep_seconds"
+  done
+}
 app_create_configured_workspace() {
-  local box="$1" cpu cpu_ceiling memory memory_ceiling workspace_storage runtime_storage host
-  cpu="$(workspace_configuration_value "$box" cpu)"
-  cpu_ceiling="$(workspace_configuration_value "$box" cpuCeiling)"
-  memory="$(workspace_configuration_value "$box" memoryGiB)G"
-  memory_ceiling="$(workspace_configuration_value "$box" memoryCeilingGiB)G"
-  workspace_storage="$(workspace_configuration_value "$box" workspaceStorageGiB)G"
-  runtime_storage="$(workspace_configuration_value "$box" runtimeStorageGiB)G"
+  # The desired configuration is not committed to workspaces.json until guest
+  # setup succeeds, so resource limits are read from the requested file
+  # (app_reconcile_workspace_configuration's input), never from the committed
+  # configuration.
+  local box="$1" desired_file="$2" cpu cpu_ceiling memory memory_ceiling workspace_storage runtime_storage host
+  cpu="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .cpu' "$desired_file")" || return 1
+  cpu_ceiling="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .cpuCeiling' "$desired_file")" || return 1
+  memory="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .memoryGiB' "$desired_file")G" || return 1
+  memory_ceiling="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .memoryCeilingGiB' "$desired_file")G" || return 1
+  workspace_storage="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .workspaceStorageGiB' "$desired_file")G" || return 1
+  runtime_storage="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .runtimeStorageGiB' "$desired_file")G" || return 1
   host="$(workspace_host "$box")"
   workspace_storage_check "$box" || { warn "$WORKSPACE_STORAGE_ERROR"; return 1; }
   workspace_msb "$box" run --detach \
@@ -8510,9 +8878,28 @@ app_create_configured_workspace() {
     --env "MSW_WORKSPACE=${box}" --env "MSW_BROWSER_HOST=${host}" \
     --env 'PATH=/root/.local/bin:/root/.local/share/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' \
     --env SHELL=/usr/bin/zsh --env LANG=en_US.UTF-8 --env HOST=0.0.0.0 --env BIND_ADDRESS=0.0.0.0 \
-    --env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${host}" -- sleep infinity >/dev/null || return
-  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$host" <<'GUEST' || return
+    --env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${host}" -- sleep infinity >/dev/null || {
+    workspace_config_state_write "$box" needs-configuration "workspace VM could not be started" || true
+    return 1
+  }
+  # Guest configuration below runs hostnamectl/systemctl, so the systemd bus
+  # must be up first. The wait is silent and bounded; a timeout removes the
+  # half-started VM and reports a typed retryable error so a later bootstrap
+  # retries from a clean snapshot instead of trusting a broken guest.
+  if ! app_wait_guest_systemd_ready "$box"; then
+    workspace_config_state_write "$box" needs-configuration "systemd bus did not become ready" || true
+    workspace_msb "$box" rm -f "$box" >/dev/null 2>&1 || true
+    WORKSPACE_CONFIGURATION_FAILURE_CODE="MSW_WORKSPACE_STARTUP_TIMEOUT"
+    WORKSPACE_CONFIGURATION_FAILURE_MESSAGE="Workspace '$box' started but its systemd bus did not become ready in time."
+    WORKSPACE_CONFIGURATION_FAILURE_RECOVERY="Retry Setup; the partially configured workspace will be recreated."
+    WORKSPACE_CONFIGURATION_FAILURE_WORKSPACE="$box"
+    WORKSPACE_CONFIGURATION_FAILURE_RETRYABLE=true
+    WORKSPACE_CONFIGURATION_FAILURE_EXIT=69
+    return 1
+  fi
+  if ! workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$host" <<'GUEST'
 set -Eeuo pipefail
+printf '\x00\x00\x00\x00\x01H\n' >&2
 workspace="$1"; browser_host="$2"
 mkdir -p /workspace /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
 printf 'export MSW_WORKSPACE=%q\nexport MSW_BROWSER_HOST=%q\nexport HOST=%q\nexport BIND_ADDRESS=%q\nexport __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=%q\n' \
@@ -8526,8 +8913,16 @@ systemctl restart containerd.service docker.service
 mkdir -p /workspace/.msw-docker-smoke
 rm -rf /workspace/.msw-docker-smoke
 GUEST
+  then
+    workspace_config_state_write "$box" needs-configuration "guest configuration failed" || true
+    workspace_msb "$box" rm -f "$box" >/dev/null 2>&1 || true
+    return 1
+  fi
   __workspace_state_init "$box" || true
-  workspace_msb "$box" stop -q -t 90 "$box" >/dev/null
+  workspace_msb "$box" stop -q -t 90 "$box" >/dev/null || {
+    workspace_config_state_write "$box" needs-configuration "workspace could not be stopped after configuration" || true
+    return 1
+  }
 }
 
 app_workspace_volume_requires_reconcile() {
@@ -8553,6 +8948,7 @@ app_copy_named_volume() {
     --mount-named "$destination:/destination:kind=disk" \
     --init auto --security default --net public -- sleep infinity >/dev/null || return 1
   if ! "$MSB_BIN" exec --no-tty "$helper" -- bash -s <<'GUEST'
+printf '\x00\x00\x00\x00\x01H\n' >&2
 set -Eeuo pipefail
 # MSW named-volume migration: copy dotfiles, metadata, links, and empty trees.
 cp -a /source/. /destination/
@@ -8599,6 +8995,13 @@ app_reconcile_workspace_configuration() {
   local workspace_volume_name runtime_volume_name workspace_size runtime_size
   WORKSPACE_STORAGE_ERROR=""
   WORKSPACE_STORAGE_FAILURE_KIND=""
+  WORKSPACE_CONFIGURATION_FAILURE_CODE=""
+  WORKSPACE_CONFIGURATION_FAILURE_MESSAGE=""
+  WORKSPACE_CONFIGURATION_FAILURE_RECOVERY=""
+  WORKSPACE_CONFIGURATION_FAILURE_WORKSPACE=""
+  WORKSPACE_CONFIGURATION_FAILURE_RETRYABLE=false
+  WORKSPACE_CONFIGURATION_FAILURE_EXIT=1
+  WORKSPACE_CONFIGURATION_TOUCHED_BOXES=()
   config_dir="$(dirname "$MSW_WORKSPACES_FILE")"
   mkdir -p "$config_dir" || return
   chmod 700 "$config_dir" || return
@@ -8648,9 +9051,8 @@ app_reconcile_workspace_configuration() {
   fi
 
   chmod 600 "$input" || return
-  mv "$input" "$MSW_WORKSPACES_FILE" || return
   WORKSPACES=()
-  while IFS= read -r box; do WORKSPACES+=("$box"); done < <("$JQ_BIN" -r '.workspaces[].name' "$MSW_WORKSPACES_FILE")
+  while IFS= read -r box; do WORKSPACES+=("$box"); done < <("$JQ_BIN" -r '.workspaces[].name' "$input")
 
   # A full policy may still contain a removed workspace. Prune only those
   # keys atomically so remaining grants stay usable; malformed policy remains
@@ -8687,33 +9089,43 @@ app_reconcile_workspace_configuration() {
   fi
 
   for box in "${WORKSPACES[@]}"; do
-    if sandbox_exists "$box" && app_workspace_configuration_changed "$old_copy" "$MSW_WORKSPACES_FILE" "$box"; then
+    if sandbox_exists "$box" && { app_workspace_configuration_changed "$old_copy" "$input" "$box" || workspace_configuration_needs_setup "$box"; }; then
       port_forwarder_stop "$box"
       port_forwarder_stop_launchd "$box"
       workspace_msb "$box" rm -f "$box" >/dev/null || return
     fi
     workspace_volume_name="$(workspace_volume "$box" workspace)"
     runtime_volume_name="$(workspace_volume "$box" runtime)"
-    workspace_size="$(workspace_configuration_value "$box" workspaceStorageGiB)" || return
-    runtime_size="$(workspace_configuration_value "$box" runtimeStorageGiB)" || return
+    workspace_size="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .workspaceStorageGiB' "$input")" || return
+    runtime_size="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .runtimeStorageGiB' "$input")" || return
     existed=false
     if [[ -s "$old_copy" ]]; then
       existed="$($JQ_BIN -r --arg box "$box" '[.workspaces[].name] | index($box) != null' "$old_copy")" || return
     fi
     if [[ "$existed" == true ]]; then
       if app_workspace_volume_requires_reconcile \
-        "$old_copy" "$MSW_WORKSPACES_FILE" "$box" workspaceStorageGiB "$workspace_volume_name"; then
+        "$old_copy" "$input" "$box" workspaceStorageGiB "$workspace_volume_name"; then
         app_reconcile_named_volume_capacity "$workspace_volume_name" "$workspace_size" || return
       fi
       if app_workspace_volume_requires_reconcile \
-        "$old_copy" "$MSW_WORKSPACES_FILE" "$box" runtimeStorageGiB "$runtime_volume_name"; then
+        "$old_copy" "$input" "$box" runtimeStorageGiB "$runtime_volume_name"; then
         app_reconcile_named_volume_capacity "$runtime_volume_name" "$runtime_size" || return
       fi
     fi
-    sandbox_exists "$box" || app_create_configured_workspace "$box" || return
+    if ! sandbox_exists "$box"; then
+      app_create_configured_workspace "$box" "$input" || return
+      WORKSPACE_CONFIGURATION_TOUCHED_BOXES+=("$box")
+    fi
     port_forwarder_start "$box" || return
   done
-  rm -f "$input" "$old_copy"
+
+  # The desired configuration stays STAGED: workspaces.json is replaced only
+  # after the bootstrap deep verification passes, and configured journals are
+  # written only for boxes the verification covered. A failure above leaves
+  # workspaces.json untouched, and every box created or recreated this run is
+  # journaled needs-configuration so the next bootstrap recreates it.
+  WORKSPACE_CONFIGURATION_STAGED_FILE="$input"
+  rm -f "$old_copy"
 }
 
 app_cmd_bootstrap() {
@@ -8736,6 +9148,14 @@ app_cmd_bootstrap() {
   app_require_runtime bootstrap
 
   if ! app_reconcile_workspace_configuration "$workspace_config_fd"; then
+    if [[ -n "$WORKSPACE_CONFIGURATION_FAILURE_CODE" ]]; then
+      app_emit_error bootstrap "$WORKSPACE_CONFIGURATION_FAILURE_CODE" \
+        "$WORKSPACE_CONFIGURATION_FAILURE_MESSAGE" \
+        "$WORKSPACE_CONFIGURATION_FAILURE_RECOVERY" \
+        "$WORKSPACE_CONFIGURATION_FAILURE_WORKSPACE" \
+        "$WORKSPACE_CONFIGURATION_FAILURE_RETRYABLE" \
+        "$WORKSPACE_CONFIGURATION_FAILURE_EXIT"
+    fi
     if [[ "$WORKSPACE_STORAGE_FAILURE_KIND" == invalid ]]; then
       app_emit_error bootstrap "MSW_WORKSPACE_DISK_INVALID" \
         "Workspace storage is not a verified ext4 filesystem." \
@@ -8779,6 +9199,17 @@ app_cmd_bootstrap() {
       "$(app_json_string "$request_id")" >&"$events_fd"
   fi
   if ! output="$(cmd_check --deep 2>&1)"; then
+    # Deep verification failed: keep the previously committed configuration
+    # byte-identical and mark this run's new/recreated boxes
+    # needs-configuration so a retry recreates their unverified VMs instead
+    # of trusting them. (bash 3.2 + set -u: an empty array must not be
+    # expanded; check the length first, like app_apply_release_all.)
+    if (( ${#WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]} > 0 )); then
+      for box in "${WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]}"; do
+        workspace_config_state_write "$box" needs-configuration "deep verification failed" || true
+      done
+    fi
+    rm -f "$WORKSPACE_CONFIGURATION_STAGED_FILE"
     recovery="Repair the reported MSW configuration or runtime issue, then resume Setup."
     if [[ -n "$output" ]]; then
       detail="$(app_redact "$output" | /usr/bin/tail -n 12 | /usr/bin/tr '\n' ' ')"
@@ -8790,6 +9221,18 @@ app_cmd_bootstrap() {
     printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":1,"message":"Deep verification passed and the previous running set was restored.","safeForDisplay":true}\n' \
       "$(app_json_string "$request_id")" >&"$events_fd"
   fi
+
+  # Deep verification passed: record configured journals for every verified
+  # workspace (this also upgrades legacy workspaces that predate the journal)
+  # and only then atomically commit the staged configuration.
+  for box in "${WORKSPACES[@]}"; do
+    workspace_config_state_write "$box" configured || true
+  done
+  mv "$WORKSPACE_CONFIGURATION_STAGED_FILE" "$MSW_WORKSPACES_FILE" || {
+    app_emit_error bootstrap "MSW_WORKSPACE_CONFIGURATION_FAILED" \
+      "Workspace verification passed but the configuration could not be committed." \
+      "Review workspace names and limits, then retry Setup." "" true 78
+  }
   app_emit_success bootstrap '{"resumed":true,"phase":"complete","requiresApproval":false,"vmsStarted":true,"message":"Workspace bootstrap and deep verification completed; the previous running set was restored."}'
 }
 

@@ -20,6 +20,18 @@ dead relay and the child is killed and respawned. The shuttle itself is
 respawned by launchd KeepAlive (installed by `msw github proxy-configure`) or
 by the app; on SIGTERM/SIGINT it tears the relay down and exits 0.
 
+Retry circuit: before every spawn the shuttle runs ONE authoritative
+precondition probe — the guest relay artifact exists AND the guest can
+execute it (`command -v python3`) — with an explicit absent/present/unknown
+result. ABSENT (missing relay or missing interpreter) is a PERMANENT
+precondition failure: the shuttle emits exactly ONE actionable failure line
+(MSW_RELAY_NOT_INSTALLED) and stops spawning, re-checking the precondition
+every CIRCUIT_POLL_SECS so a repair (`msw github proxy-configure <box>` or a
+policy apply) resumes the tunnel without a shuttle restart. UNKNOWN (the
+probe itself failed) and every post-spawn failure — including a relay that
+dies later with an unrelated ENOENT — stay transient and keep the bounded
+exponential backoff.
+
 Gotchas (verified in the GuestPlumbingPlan spike): the host side must use
 os.read()/os.write() on the child pipes — BufferedReader.read(n) blocks until
 n bytes or EOF and wedges the tunnel on sparse frames. The relay dies with
@@ -38,6 +50,7 @@ import sys
 import threading
 import time
 import faulthandler
+from typing import Optional
 
 CONTROL = 0
 OP_OPEN = b"O"
@@ -51,11 +64,11 @@ INTERNAL_LOG_SESSION_SIGNATURE = (
 PROXY_HOST = os.environ.get("MSW_GITHUB_PROXY_HOST", "127.0.0.1")
 PROXY_PORT = int(os.environ.get("MSW_GITHUB_PROXY_PORT", "18446"))
 GUEST_RELAY = os.environ.get("MSW_GUEST_RELAY_PATH", "/var/lib/msw-runtime/msw-github-relay.py")
-# The relay heartbeats every HEARTBEAT_SECS; if nothing arrives for longer
-# than HEARTBEAT_TIMEOUT the relay (or the msb exec bridge carrying it) is
-# wedged — msb exec can hang without exiting when the sandbox stops
-# mid-stream — so the shuttle kills the child and respawns.
 HEARTBEAT_TIMEOUT = float(os.environ.get("MSW_GITHUB_HEARTBEAT_TIMEOUT", "30"))
+# CIRCUIT_POLL_SECS is how often an open retry circuit re-checks the relay
+# precondition so an external repair resumes the tunnel without a shuttle
+# restart (see the module docstring).
+CIRCUIT_POLL_SECS = float(os.environ.get("MSW_GITHUB_CIRCUIT_POLL_SECS", "60"))
 # Hostile-interface hardening: the relay is the untrusted side of this pipe.
 # Frames are produced by chunking socket reads of at most 65536 bytes, so no
 # legitimate frame is ever larger. Any declared length above this cap is a
@@ -87,6 +100,7 @@ class Shuttle:
         self._relay_uptime: float | None = None
         self._last_activity = 0.0
         self._stream_dead = False
+        self._circuit_open = False
         self._pidfile = os.environ.get("MSW_SHUTTLE_PID_FILE") or os.path.join(
             os.path.expanduser("~"), ".local", "state", "msw", "shuttle-%s.pid" % box
         )
@@ -113,10 +127,22 @@ class Shuttle:
             log("msb binary not found (MSW_MSB_BIN unset and no msb on PATH); exiting")
             self._running = False
             return
-        log("spawning relay: %s exec %s --stream -- python3 %s" % (self._msb, self._box, GUEST_RELAY))
+        log("spawning relay: %s exec %s --stream -- (internal marker) python3 %s"
+            % (self._msb, self._box, GUEST_RELAY))
         try:
+            # The wrapper prints the reserved internal-session marker frame
+            # before exec'ing the relay, so the MicroSandbox log adapter
+            # classifies this whole exec session as control-plane even when
+            # the relay can never start (missing file, interpreter error)
+            # and therefore never emits its own heartbeat. The marker is a
+            # byte-exact heartbeat control frame the shuttle already treats
+            # as benign. The real command follows $0 ("msw-shuttle"); the
+            # MicroSandbox test simulator strips the wrapper and restores
+            # the `python3 <relay>` form it would run.
             self._child = subprocess.Popen(
-                [self._msb, "exec", self._box, "--stream", "--", "python3", GUEST_RELAY],
+                [self._msb, "exec", self._box, "--stream", "--",
+                 "bash", "-c", "printf '\\x00\\x00\\x00\\x00\\x01H'; exec python3 \"$1\"",
+                 "msw-shuttle", GUEST_RELAY],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 bufsize=0,
@@ -151,6 +177,43 @@ class Shuttle:
         except (OSError, subprocess.SubprocessError):
             return False
         return proc.returncode == 0
+
+    def relay_precondition(self) -> str:
+        """The ONE authoritative relay precondition, checked before every
+        spawn and while the retry circuit is open:
+
+        'present' — the guest relay artifact exists AND the guest can execute
+        it (`command -v python3`), so a spawn attempt is justified;
+        'absent' — the artifact or interpreter is missing, a PERMANENT
+        condition no respawn can fix;
+        'unknown' — the probe itself failed (transient; callers must keep
+        bounded backoff and never open the circuit on this result)."""
+        if not self._msb:
+            return "absent"
+        try:
+            proc = subprocess.run(
+                [self._msb, "exec", "--no-tty", self._box, "--", "sh", "-c",
+                 "test -f %s && command -v python3 >/dev/null" % GUEST_RELAY],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        return "present" if proc.returncode == 0 else "absent"
+
+    def open_circuit(self) -> None:
+        """Stop respawning after a permanent precondition failure. Emits the
+        single actionable failure; the run loop re-checks the artifact every
+        CIRCUIT_POLL_SECS and closes the circuit once it reappears."""
+        if self._circuit_open:
+            return
+        self._circuit_open = True
+        log(
+            "relay failure for %s: MSW_RELAY_NOT_INSTALLED guest relay %s is missing or cannot be executed; "
+            "retry circuit opened, relay respawns stopped. Repair: run 'msw github proxy-configure %s' "
+            "or re-apply the GitHub policy." % (self._box, GUEST_RELAY, self._box)
+        )
 
     def kill_child(self) -> None:
         child = self._child
@@ -390,6 +453,30 @@ class Shuttle:
                 # auto-boot it and silently undo a user's `msw stop`.
                 time.sleep(2)
                 continue
+            if self._circuit_open:
+                # Permanent precondition failure: do not respawn. Re-check the
+                # precondition slowly; a repair (`msw github proxy-configure`
+                # or a policy apply) closes the circuit without a restart.
+                if self.relay_precondition() == "present":
+                    log("guest relay %s present again; retry circuit closed" % GUEST_RELAY)
+                    self._circuit_open = False
+                    self._backoff = 0.5
+                else:
+                    time.sleep(CIRCUIT_POLL_SECS)
+                    continue
+            state = self.relay_precondition()
+            if state == "absent":
+                # Permanent: the relay artifact or interpreter is missing; no
+                # respawn can fix it. Exactly one actionable failure line.
+                self.open_circuit()
+                continue
+            if state == "unknown":
+                # The probe itself failed: transient, bounded backoff. Never
+                # opens the permanent circuit.
+                delay = self.next_backoff()
+                log("relay precondition check failed; retrying in %.1fs" % delay)
+                time.sleep(delay)
+                continue
             self.spawn_relay()
             while self._running:
                 child = self._child
@@ -408,14 +495,15 @@ class Shuttle:
                     self.kill_child()
                     break
                 time.sleep(0.5)
-            if self._running:
-                self.teardown_conns()
-                self.close_child()
-                if self._relay_uptime and (time.monotonic() - self._relay_uptime) >= 10:
-                    self._backoff = 0.5
-                delay = self.next_backoff()
-                log("respawn in %.1fs" % delay)
-                time.sleep(delay)
+            if not self._running:
+                break
+            self.teardown_conns()
+            self.close_child()
+            if self._relay_uptime and (time.monotonic() - self._relay_uptime) >= 10:
+                self._backoff = 0.5
+            delay = self.next_backoff()
+            log("respawn in %.1fs" % delay)
+            time.sleep(delay)
         self.teardown_conns()
         self.close_child()
         self.remove_pidfile()
