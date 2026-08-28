@@ -390,6 +390,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--ui-test-secrets") {
             model.installSecretsUITestFixture()
         }
+        if arguments.contains("--ui-test-workspace-repair") {
+            model.installWorkspaceRepairUITestFixture()
+        }
         if fixtureMode {
             let backupDestination = arguments.compactMap { argument -> URL? in
                 let prefix = "--ui-test-backup-destination="

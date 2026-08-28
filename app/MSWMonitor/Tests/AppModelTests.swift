@@ -713,6 +713,13 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(activity.workspace, .dev)
         XCTAssertEqual(activity.workspaceSection, .activity)
 
+        let maintenance = try XCTUnwrap(AppRoute(
+            deepLink: URL(string: "msw-monitor://workspace/dev?section=maintenance")!
+        ))
+        XCTAssertEqual(maintenance.tab, .workspaces)
+        XCTAssertEqual(maintenance.workspace, .dev)
+        XCTAssertEqual(maintenance.workspaceSection, .maintenance)
+
         let overview = try XCTUnwrap(AppRoute(
             deepLink: URL(string: "msw-monitor://overview")!
         ))

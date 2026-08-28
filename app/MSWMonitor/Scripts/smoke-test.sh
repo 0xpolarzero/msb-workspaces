@@ -18,6 +18,9 @@ case "${1:-}" in
   --repair-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation"
     ;;
+  --workspace-repair-only)
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testWorkspaceRepairRoutesAuthoritativeStorageGuidance"
+    ;;
   --picker-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDirectFolderPickerFromStatusPopover"
     ;;
@@ -52,7 +55,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testOperationFailureOpensDetailedLogs"
     ;;
   *)
-    print -u2 "usage: $0 [--monitor-only|--repair-only|--picker-only|--preferences-only|--navigation-only|--secrets-only|--lifecycle-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
+    print -u2 "usage: $0 [--monitor-only|--repair-only|--workspace-repair-only|--picker-only|--preferences-only|--navigation-only|--secrets-only|--lifecycle-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
     exit 64
     ;;
 esac

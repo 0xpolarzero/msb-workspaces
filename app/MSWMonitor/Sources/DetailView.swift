@@ -8,6 +8,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case activity = "Activity"
     case ports = "Network"
+    case maintenance = "Maintenance"
 
     var id: String { rawValue }
 
@@ -18,6 +19,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .logs: return "text.alignleft"
         case .activity: return "clock"
         case .ports: return "network"
+        case .maintenance: return "wrench.and.screwdriver"
         }
     }
 
@@ -27,6 +29,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case "activity": self = .activity
         case "ports", "network": self = .ports
         case "files", "folders", "repositories": self = .files
+        case "maintenance", "repair": self = .maintenance
         default: self = .files
         }
     }
@@ -165,11 +168,13 @@ struct DetailView: View {
 
     private var workspacePane: some View {
         VStack(spacing: 0) {
-            workspaceFilterBar
-                .padding(.horizontal, 28)
-                .padding(.vertical, 12)
+            if navigation.workspaceSection != .maintenance {
+                workspaceFilterBar
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 12)
 
-            Divider()
+                Divider()
+            }
 
             sectionContent
                 .padding(.horizontal, 28)
@@ -208,14 +213,14 @@ struct DetailView: View {
     private var routeIdentity: String {
         let hidden = hiddenWorkspaces.map(\.rawValue).sorted().joined(separator: ",")
         let follow = navigation.workspaceSection == .logs ? followsLogs.description : ""
-        return "\(navigation.workspaceSection.rawValue):\(hidden):\(follow)"
+        return "\(navigation.workspaceSection.rawValue):\(navigation.workspace?.rawValue ?? ""):\(hidden):\(follow)"
     }
 
     private var automaticallyRefreshesSelectedSection: Bool {
         switch navigation.workspaceSection {
         case .files, .ports: return true
         case .logs: return followsLogs
-        case .activity: return false
+        case .activity, .maintenance: return false
         }
     }
 
@@ -242,6 +247,7 @@ struct DetailView: View {
         case .logs: logs
         case .activity: activity
         case .ports: ports
+        case .maintenance: workspaceMaintenance
         }
     }
 
@@ -256,7 +262,7 @@ struct DetailView: View {
             model.loadLogs(for: visibleWorkspaces.map(\.id), clearsError: false)
         case .ports:
             model.loadPorts(clearsError: false)
-        case .activity:
+        case .activity, .maintenance:
             break
         }
     }
@@ -320,7 +326,15 @@ struct DetailView: View {
                         navigation.tab = .workspaces
                         navigation.workspaceSection = .logs
                     },
-                    openAttention: openAttention
+                    openAttention: { destination in
+                        openAttention(destination, workspace: workspace.id)
+                    },
+                    openRepair: {
+                        navigation.workspace = workspace.id
+                        model.selectedWorkspace = workspace.id
+                        navigation.tab = .workspaces
+                        navigation.workspaceSection = .maintenance
+                    }
                 )
             }
         }
@@ -345,7 +359,10 @@ struct DetailView: View {
         }.flatMap { $0.detail ?? $0.title }
     }
 
-    private func openAttention(_ destination: WorkspaceAttentionDestination) {
+    private func openAttention(
+        _ destination: WorkspaceAttentionDestination,
+        workspace: Workspace.ID
+    ) {
         switch destination {
         case .network:
             navigation.tab = .workspaces
@@ -353,7 +370,57 @@ struct DetailView: View {
         case .github:
             navigation.tab = .github
         case .maintenance:
-            navigation.tab = .overview
+            navigation.workspace = workspace
+            model.selectedWorkspace = workspace
+            navigation.tab = .workspaces
+            navigation.workspaceSection = .maintenance
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceMaintenance: some View {
+        if let workspace = model.workspaces.first(where: {
+            $0.id == (navigation.workspace ?? model.selectedWorkspace)
+        }) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("\(workspace.id.rawValue) maintenance")
+                        .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                    if let requirement = workspace.repairRequirement {
+                        Label("Requires repair", systemImage: "wrench.and.screwdriver.fill")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier(
+                                "workspace.\(workspace.id.rawValue).repair.status"
+                            )
+                        Text(requirement.reason)
+                            .accessibilityIdentifier(
+                                "workspace.\(workspace.id.rawValue).repair.reason"
+                            )
+                        Text(requirement.recovery)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier(
+                                "workspace.\(workspace.id.rawValue).repair.recovery"
+                            )
+                    } else {
+                        ContentUnavailableView(
+                            "No repair required",
+                            systemImage: "checkmark.circle",
+                            description: Text("The latest authoritative state does not require workspace repair.")
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("workspace.repair.page")
+        } else {
+            ContentUnavailableView(
+                "Workspace unavailable",
+                systemImage: "questionmark.folder",
+                description: Text("Refresh workspace state and select a valid workspace.")
+            )
         }
     }
 
@@ -2188,6 +2255,7 @@ private struct WorkspaceSummaryRow: View {
     let latestError: String?
     let openLogs: () -> Void
     let openAttention: (WorkspaceAttentionDestination) -> Void
+    let openRepair: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2245,7 +2313,23 @@ private struct WorkspaceSummaryRow: View {
                     )
             }
 
-            if let indicator = secretIndicatorText {
+            if let requirement = workspace.repairRequirement {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label("Requires repair", systemImage: "wrench.and.screwdriver.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(
+                            "workspace.\(workspace.id.rawValue).repair.status"
+                        )
+                    Spacer()
+                    Button("Repair", action: openRepair)
+                        .buttonStyle(.link)
+                        .accessibilityHint(requirement.reason)
+                        .accessibilityIdentifier(
+                            "workspace.\(workspace.id.rawValue).repair.action"
+                        )
+                }
+            } else if let indicator = workspace.secrets.indicatorText {
                 Label(indicator, systemImage: "key")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.orange)
@@ -2276,15 +2360,6 @@ private struct WorkspaceSummaryRow: View {
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 9))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-row")
-    }
-
-    private var secretIndicatorText: String? {
-        guard workspace.secrets.restartRequired, workspace.state == .running else {
-            return workspace.secrets.indicatorText
-        }
-        let availability = workspace.actionAvailability(for: .restart)
-        guard !availability.isAllowed else { return workspace.secrets.indicatorText }
-        return "Requires repair"
     }
 
     private var attention: Attention? {

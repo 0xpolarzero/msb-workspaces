@@ -607,6 +607,13 @@ final class SecretsTests: XCTestCase {
         // The GitHub credential state must remain untouched by secret state.
         XCTAssertEqual(dev.credential, .ready)
         XCTAssertFalse(dev.actionAvailability(for: .restart).isAllowed)
+        XCTAssertEqual(
+            dev.repairRequirement,
+            WorkspaceRepairRequirement(
+                reason: "Workspace storage must be repaired before restarting dev.",
+                recovery: "Restore a verified ext4 workspace disk."
+            )
+        )
         XCTAssertEqual(model.secretsRestartRequiredWorkspaces.map(\.id), [])
         XCTAssertEqual(model.secretsRestartBlockedWorkspaces.map(\.id), [.dev])
         XCTAssertEqual(

@@ -58,6 +58,8 @@ struct AppRoute: Equatable {
             self.init(tab: .backup, workspace: workspace)
         case "activity":
             self.init(tab: .workspaces, workspace: workspace, workspaceSection: .activity)
+        case "maintenance" where workspace != nil:
+            self.init(tab: .workspaces, workspace: workspace, workspaceSection: .maintenance)
         case "overview", "summary", "metrics", "diagnostics", "maintenance":
             self.init(tab: .overview, workspace: workspace)
         case "notifications", "notification":

@@ -214,7 +214,31 @@ struct WorkspaceActionAvailability: Equatable, Sendable {
     let recovery: String?
 }
 
+struct WorkspaceRepairRequirement: Equatable, Sendable {
+    let reason: String
+    let recovery: String
+}
+
 extension Workspace {
+    var repairRequirement: WorkspaceRepairRequirement? {
+        guard freshness == .fresh,
+              state != .unknown,
+              state != .unavailable,
+              state != .quarantined,
+              credential != .quarantined,
+              let reason = serverCapabilities.reason,
+              !reason.isEmpty,
+              let recovery = serverCapabilities.recovery,
+              !recovery.isEmpty else {
+            return nil
+        }
+        let lifecycleBlocked = state == .running
+            ? !serverCapabilities.canRestart
+            : (state == .stopped || state == .exited) && !serverCapabilities.canStart
+        guard lifecycleBlocked else { return nil }
+        return WorkspaceRepairRequirement(reason: reason, recovery: recovery)
+    }
+
     func actionAvailability(
         for action: WorkspaceAction,
         title: String? = nil
@@ -2440,6 +2464,30 @@ final class AppModel {
             )
         ]
         applySecretsFixtureToWorkspaces()
+    }
+
+    func installWorkspaceRepairUITestFixture() {
+        guard let index = workspaces.firstIndex(where: { $0.id == .dev }) else { return }
+        let reason = "Workspace storage must be repaired before restarting dev."
+        let recovery = "Restore a verified ext4 workspace disk."
+        workspaces[index].state = .running
+        workspaces[index].freshness = .fresh
+        workspaces[index].statusReason = reason
+        workspaces[index].recoveryAction = recovery
+        workspaces[index].canStart = false
+        workspaces[index].canStop = true
+        workspaces[index].canRestart = false
+        workspaces[index].canOpenTerminal = true
+        workspaces[index].canPush = true
+        workspaces[index].serverCapabilities = MSWActionCapabilities(
+            canStart: false,
+            canStop: true,
+            canRestart: false,
+            canOpenTerminal: true,
+            canPush: true,
+            reason: reason,
+            recovery: recovery
+        )
     }
 
     /// Test seam for batch-restart coverage: personal is also running with
