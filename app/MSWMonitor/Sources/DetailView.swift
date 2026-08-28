@@ -606,7 +606,7 @@ struct DetailView: View {
             .disabled(selectedRows.isEmpty)
             .accessibilityIdentifier("logs.copy.selected")
 
-            Button("Copy Visible") {
+            Button("Copy All") {
                 copyToPasteboard(Self.formattedLogText(rows))
             }
             .disabled(rows.isEmpty)

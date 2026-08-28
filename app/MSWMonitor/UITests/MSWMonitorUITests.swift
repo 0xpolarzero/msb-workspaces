@@ -769,9 +769,10 @@ final class MSWMonitorUITests: XCTestCase {
         let copySelectedLogs = app.descendants(matching: .any)["logs.copy.selected"]
         XCTAssertTrue(copySelectedLogs.waitForExistence(timeout: 2))
         XCTAssertFalse(copySelectedLogs.isEnabled)
-        let copyVisibleLogs = app.descendants(matching: .any)["logs.copy.visible"]
-        XCTAssertTrue(copyVisibleLogs.waitForExistence(timeout: 2))
-        XCTAssertTrue(copyVisibleLogs.isEnabled)
+        let copyAllLogs = app.descendants(matching: .any)["logs.copy.visible"]
+        XCTAssertTrue(copyAllLogs.waitForExistence(timeout: 2))
+        XCTAssertEqual(copyAllLogs.label, "Copy All")
+        XCTAssertTrue(copyAllLogs.isEnabled)
 
         let playgroundLog = app.descendants(matching: .any)["logs.row.playgrounds.0.message"]
         let personalLog = app.descendants(matching: .any)["logs.row.personal.0.message"]
@@ -814,7 +815,7 @@ final class MSWMonitorUITests: XCTestCase {
         followLogs.click()
         XCTAssertEqual(followLogs.label, "Pause")
         wrapLogs.click()
-        copyVisibleLogs.click()
+        copyAllLogs.click()
 
         let workspacesWindow = app.windows["Workspaces"]
         XCTAssertLessThan(logTable.frame.minX - workspacesWindow.frame.minX, 120)
