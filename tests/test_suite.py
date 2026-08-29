@@ -3115,16 +3115,13 @@ class PackagedBehaviorTests(MSWTestCase):
             "memoryGiB": 16, "memoryCeilingGiB": 32,
             "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
         })
-        failing_truncate = self.env.root / "tools" / "failing-truncate"
-        failing_truncate.write_text("#!/bin/sh\nexit 1\n")
-        failing_truncate.chmod(0o755)
         rejected = self.env.msw(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(failed), check=False, timeout=90,
             extra_env={
                 "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
                 "MSW_TEST_VALIDATE_RAW_DISKS": "1",
-                "MSW_TRUNCATE_BIN": str(failing_truncate),
+                "MSW_FAKE_FRESH_EXT4_FINALIZE_FAIL": "1",
             },
         )
         self.assertEqual(rejected.returncode, 69, rejected.stdout + rejected.stderr)

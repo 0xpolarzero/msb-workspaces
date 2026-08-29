@@ -80,7 +80,8 @@ fi
 
 MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 [[ -n "$MSB_BIN" && -x "$MSB_BIN" ]] || fatal "msb is unavailable"
-TRUNCATE_BIN="${MSW_TRUNCATE_BIN:-/usr/bin/truncate}"
+PYTHON_BIN="${MSW_PYTHON_BIN:-/usr/bin/python3}"
+[[ -x "$PYTHON_BIN" ]] || fatal "python3 is unavailable"
 
 log "Installing the MSW CLI and documentation"
 if [[ "$RESET_CONFIG" == 1 || ! -f "$HOME/.config/msw/config.sh" ]]; then
@@ -378,12 +379,84 @@ ext4_geometry_is_valid() {
   fi
 }
 
+fresh_ext4_image_finalize_fd() {
+  local path="$1" requested_size="$2"
+  [[ "${MSW_FAKE_FRESH_EXT4_FINALIZE_FAIL:-0}" != 1 ]] || return 1
+  "$PYTHON_BIN" - "$path" "$requested_size" <<'PY'
+import fcntl
+import os
+import re
+import stat
+import struct
+import sys
+
+path, requested = sys.argv[1:]
+match = re.fullmatch(r"([1-9][0-9]*)G", requested)
+if match is None:
+    raise SystemExit(1)
+expected_bytes = int(match.group(1)) * 1024 * 1024 * 1024
+flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    before = os.fstat(fd)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_nlink != 1
+    ):
+        raise SystemExit(1)
+
+    def u32(offset: int) -> int:
+        raw = os.pread(fd, 4, offset)
+        if len(raw) != 4:
+            raise SystemExit(1)
+        return struct.unpack("<I", raw)[0]
+
+    if os.pread(fd, 2, 1080) != b"\x53\xef":
+        raise SystemExit(1)
+    blocks_lo = u32(1028)
+    log_block_size = u32(1048)
+    blocks_hi = u32(1360)
+    if blocks_lo == 0 or log_block_size > 6:
+        raise SystemExit(1)
+    block_size = 1024 << log_block_size
+    declared_bytes = ((blocks_hi << 32) | blocks_lo) * block_size
+    if declared_bytes != expected_bytes or before.st_size > declared_bytes:
+        raise SystemExit(1)
+    if before.st_size < declared_bytes:
+        os.ftruncate(fd, declared_bytes)
+        os.fsync(fd)
+    after = os.fstat(fd)
+    if (
+        after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+        or after.st_size != declared_bytes
+        or os.pread(fd, 2, 1080) != b"\x53\xef"
+        or u32(1028) != blocks_lo
+        or u32(1048) != log_block_size
+        or u32(1360) != blocks_hi
+    ):
+        raise SystemExit(1)
+finally:
+    os.close(fd)
+PY
+}
+
+remove_owned_volume() {
+  local name="$1" status
+  "$MSB_BIN" volume rm "$name" >/dev/null 2>&1 || return 1
+  if volume_probe "$name"; then return 1; else status=$?; fi
+  (( status == 1 ))
+}
+
 finalize_fresh_ext4_volume() {
-  local name="$1" kind filesystem path expected magic file_bytes declared_bytes
+  local name="$1" requested_size="$2" kind format filesystem path expected magic
   volume_probe "$name" || return 1
   kind="$(volume_inspect_field Kind)"
+  format="$(volume_inspect_field Format)"
   filesystem="$(volume_inspect_field Filesystem)"
-  [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 1
+  [[ "$kind" == disk && "$format" == raw && "$filesystem" == ext4 ]] || return 1
   if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
     magic="$(volume_inspect_field Magic)"
     [[ -z "$magic" || "$magic" == 53ef ]]
@@ -392,13 +465,7 @@ finalize_fresh_ext4_volume() {
   path="$(volume_inspect_field Path)"
   expected="$HOME/.microsandbox/volumes/$name/disk.raw"
   [[ "$path" == "$expected" && -f "$path" && ! -L "$path" ]] || return 1
-  magic="$(dd if="$path" bs=1 skip=1080 count=2 2>/dev/null | od -An -t x1 | tr -d '[:space:]')"
-  [[ "$magic" == 53ef ]] || return 1
-  file_bytes="$(file_size_bytes "$path")" || return 1
-  declared_bytes="$(ext4_declared_bytes "$path")" || return 1
-  if (( file_bytes < declared_bytes )); then
-    "$TRUNCATE_BIN" -s "$declared_bytes" "$path" || return 1
-  fi
+  fresh_ext4_image_finalize_fd "$path" "$requested_size" || return 1
   ext4_volume_status "$name"
 }
 
@@ -432,9 +499,11 @@ ensure_ext4_volume() {
   # the name exists, so a newly allocated blank image is formatted once.
   "$MSB_BIN" volume create "$name" --kind disk --size "$size" -q >/dev/null ||
     fatal "could not create workspace storage '$name'"
-  if ! finalize_fresh_ext4_volume "$name"; then
-    "$MSB_BIN" volume rm "$name" >/dev/null 2>&1 || true
-    fatal "new workspace storage '$name' was invalid; the fresh artifact was removed before any VM used it"
+  if ! finalize_fresh_ext4_volume "$name" "$size"; then
+    if remove_owned_volume "$name"; then
+      fatal "new workspace storage '$name' was invalid; the fresh artifact was removed before any VM used it"
+    fi
+    fatal "new workspace storage '$name' was invalid and could not be removed safely; no VM used it, so remove that named volume before retrying"
   fi
 }
 
