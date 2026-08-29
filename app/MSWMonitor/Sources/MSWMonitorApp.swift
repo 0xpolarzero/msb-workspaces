@@ -477,7 +477,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.pendingAppRoute = nil
             controller.showMain(route: pendingAppRoute)
         }
-        model.setPollingVisible(false)
+        let startupWorkspaceIDs = WorkspaceStartupPreferences.selectedWorkspaceIDs(
+            from: model.workspaces.map(\.id)
+        )
+        if !fixtureMode,
+           credentialAccessAllowed,
+           UserDefaults.standard.bool(forKey: WorkspaceStartupPreferences.enabledKey),
+           !startupWorkspaceIDs.isEmpty {
+            Task { @MainActor [weak model] in
+                guard let model else { return }
+                await model.startWorkspacesAtLaunch(startupWorkspaceIDs)
+                model.setPollingVisible(false)
+            }
+        } else {
+            model.setPollingVisible(false)
+        }
         UNUserNotificationCenter.current().delegate = self
         observeNotificationEvents(from: model)
         let uiTestGitHubFlow = arguments.contains(where: { $0.hasPrefix("--ui-test-github-") })

@@ -174,6 +174,30 @@ struct Workspace: Identifiable, Equatable, Sendable {
     }
 }
 
+enum WorkspaceStartupPreferences {
+    static let enabledKey = "startup.workspaces.enabled"
+    static let selectedWorkspaceIDsKey = "startup.workspaces.selected"
+
+    static func selectedWorkspaceIDs(
+        from configuredWorkspaceIDs: [Workspace.ID],
+        defaults: UserDefaults = .standard
+    ) -> Set<Workspace.ID> {
+        let configured = Set(configuredWorkspaceIDs)
+        guard let stored = defaults.stringArray(forKey: selectedWorkspaceIDsKey) else {
+            return configured
+        }
+        return Set(stored.compactMap(Workspace.ID.init(rawValue:))).intersection(configured)
+    }
+
+    static func setSelectedWorkspaceIDs(
+        _ workspaceIDs: Set<Workspace.ID>,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(workspaceIDs.map(\.rawValue).sorted(), forKey: selectedWorkspaceIDsKey)
+    }
+}
+
+
 enum WorkspaceAction: Equatable, Sendable {
     case start
     case stop
@@ -1766,6 +1790,21 @@ final class AppModel {
     func refreshRemote() async {
         _ = await refreshRemoteResult()
     }
+
+    func startWorkspacesAtLaunch(_ selectedWorkspaceIDs: Set<Workspace.ID>) async {
+        guard !selectedWorkspaceIDs.isEmpty,
+              client != nil,
+              startupRecoveryBlockedReason == nil else { return }
+        await refreshRuntimeRepairState()
+        guard !runtimeRepairRequired,
+              case .applied = await refreshRemoteResult() else { return }
+
+        for workspace in workspaces
+            where selectedWorkspaceIDs.contains(workspace.id) && workspace.canStart {
+            start(workspace.id)
+        }
+    }
+
 
     private func refreshRemoteResult() async -> RefreshResult {
         if lifecycleUITestAction != nil {

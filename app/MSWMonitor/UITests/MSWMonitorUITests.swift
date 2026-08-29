@@ -1098,6 +1098,31 @@ final class MSWMonitorUITests: XCTestCase {
         generalTab.click()
 
         XCTAssertTrue(app.windows["General"].waitForExistence(timeout: 2))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.startup.workspaces.enabled"]
+                .waitForExistence(timeout: 2)
+        )
+        for workspace in ["dev", "playgrounds", "personal"] {
+            XCTAssertTrue(
+                app.descendants(matching: .any)["settings.startup.workspace.\(workspace)"]
+                    .waitForExistence(timeout: 2)
+            )
+        }
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.accessibility.reduce-motion"].exists
+        )
+        XCTAssertFalse(app.buttons["Retry status check"].exists)
+        XCTAssertFalse(
+            app.staticTexts[
+                "Launching at login observes MSW state. It never starts a workspace."
+            ].exists
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)["settings.applications.help"].exists
+        )
+        XCTAssertFalse(
+            app.staticTexts["The macOS Reduce Motion setting always takes precedence."].exists
+        )
 
         app.typeKey("w", modifierFlags: .command)
         let statusItem = app.statusItems["statusItem.button"]

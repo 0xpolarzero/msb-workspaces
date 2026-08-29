@@ -1074,6 +1074,33 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(restored.resolvedSourceEditor?.displayName, "Xcode")
     }
 
+    func testWorkspaceStartupPreferencesDefaultToAllAndPersistSelections() throws {
+        let suiteName = "WorkspaceStartupPreferencesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            WorkspaceStartupPreferences.selectedWorkspaceIDs(
+                from: Workspace.ID.fixtureDefaults,
+                defaults: defaults
+            ),
+            Set(Workspace.ID.fixtureDefaults)
+        )
+
+        WorkspaceStartupPreferences.setSelectedWorkspaceIDs(
+            [.dev, .personal],
+            defaults: defaults
+        )
+        XCTAssertEqual(
+            WorkspaceStartupPreferences.selectedWorkspaceIDs(
+                from: [.dev, .playgrounds],
+                defaults: defaults
+            ),
+            [.dev]
+        )
+    }
+
+
     func testMissingApplicationOverrideIsClearedAndFallsBackToSystemDefault() throws {
         let suiteName = "ApplicationPreferenceMissingTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1745,6 +1772,93 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(stale.serverCapabilities.canPush)
         XCTAssertEqual(stale.statusReason, "The latest observation failed; this is the last known snapshot.")
         XCTAssertEqual(stale.recoveryAction, "Run diagnostics.")
+    }
+
+    func testStartupStartsOnlySelectedWorkspaceAfterFreshObservation() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("msw-startup-workspaces-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let stoppedURL = temporary.appendingPathComponent("stopped.json")
+        let runningURL = temporary.appendingPathComponent("running.json")
+        let planURL = temporary.appendingPathComponent("plan.json")
+        let applyURL = temporary.appendingPathComponent("apply.json")
+        let started = temporary.appendingPathComponent("started")
+        let commandLog = temporary.appendingPathComponent("commands.log")
+        try encoder.encode(makeTestStateEnvelope(
+            devLifecycle: .stopped,
+            devQuarantine: .clear
+        )).write(to: stoppedURL)
+        try encoder.encode(makeTestStateEnvelope(
+            devLifecycle: .running,
+            devQuarantine: .clear,
+            observedAt: Date().addingTimeInterval(1)
+        )).write(to: runningURL)
+        try encoder.encode(MSWEnvelope(
+            schemaVersion: 1, requestId: "startup-plan", ok: true, command: "plan", observedAt: Date(),
+            result: MSWLifecyclePlan(
+                planId: "startup-plan", action: "start", workspace: "dev",
+                expiresAt: Date().addingTimeInterval(300), confirmationPhrase: "START dev",
+                effects: "Starting dev."
+            )
+        )).write(to: planURL)
+        try encoder.encode(MSWEnvelope(
+            schemaVersion: 1, requestId: "startup-apply", ok: true, command: "apply", observedAt: Date(),
+            result: MSWApplyResult(
+                workspace: "dev", action: "start", reconciled: true, outcome: "Start applied."
+            )
+        )).write(to: applyURL)
+
+        let executable = temporary.appendingPathComponent("msw")
+        let script = """
+        #!/bin/sh
+        printf '%s %s %s\n' "$1" "$2" "$3" >> "\(commandLog.path)"
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\n' '\(protocolCompatibleHandshake)'
+        elif [ "$1" = "app" ] && [ "$2" = "state" ]; then
+            if [ -e "\(started.path)" ]; then
+                /bin/cat "\(runningURL.path)"
+            else
+                /bin/cat "\(stoppedURL.path)"
+            fi
+        elif [ "$1" = "app" ] && [ "$2" = "plan" ]; then
+            /bin/cat "\(planURL.path)"
+        elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
+            : > "\(started.path)"
+            /bin/cat "\(applyURL.path)"
+        else
+            exit 64
+        fi
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+
+        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            testMSWExecutable: executable
+        )))
+        let model = AppModel(
+            client: client,
+            operationCoordinator: MSWOperationCoordinator(client: client)
+        )
+
+        await model.startWorkspacesAtLaunch([.dev])
+        for _ in 0..<80 {
+            if FileManager.default.fileExists(atPath: started.path) { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: started.path))
+        let commands = try String(contentsOf: commandLog, encoding: .utf8)
+        XCTAssertTrue(commands.contains("app apply"))
+        XCTAssertFalse(commands.contains("playgrounds"))
+        XCTAssertFalse(commands.contains("personal"))
     }
 
     func testLifecycleOperationStaysVerifyingUntilFreshMatchingObservation() async throws {

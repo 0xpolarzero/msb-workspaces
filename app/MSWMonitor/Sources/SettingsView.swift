@@ -374,11 +374,6 @@ struct ApplicationPreferenceFields: View {
             .accessibilityIdentifier("\(accessibilityPrefix).applications.editor.picker")
 
 
-            Text("System Default follows the app macOS currently chooses. An override applies only in MSW Monitor; choosing System Default clears it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("\(accessibilityPrefix).applications.help")
         }
     }
 }
@@ -422,6 +417,9 @@ struct SettingsView: View {
 
     @State private var loginItemStatus: SMAppService.Status = .notRegistered
     @State private var loginItemError: String?
+    @AppStorage(WorkspaceStartupPreferences.enabledKey)
+    private var startsWorkspacesAtLaunch = false
+    @State private var startupWorkspaceIDs: Set<Workspace.ID> = []
     @State private var isUpdatingGitHub = false
     @State private var isConnectingAccount = false
     @State private var deviceFlowSession: GitHubDeviceFlowSession?
@@ -708,14 +706,22 @@ struct SettingsView: View {
                         setLaunchAtLogin(loginItemStatus != .enabled)
                     }
                 }
+                Toggle("Start workspaces at launch", isOn: $startsWorkspacesAtLaunch)
+                    .accessibilityIdentifier("settings.startup.workspaces.enabled")
+                ForEach(applicationState.model?.workspaces ?? []) { workspace in
+                    Toggle(
+                        workspace.id.rawValue,
+                        isOn: startupWorkspaceBinding(for: workspace.id)
+                    )
+                    .disabled(!startsWorkspacesAtLaunch)
+                    .padding(.leading, 20)
+                    .accessibilityIdentifier(
+                        "settings.startup.workspace.\(workspace.id.rawValue)"
+                    )
+                }
                 if loginItemStatus == .requiresApproval {
                     Button("Open Login Items Settings", action: openLoginItemsSettings)
-                } else if loginItemStatus == .notFound {
-                    Button("Retry status check", action: refreshLoginItemStatus)
                 }
-                Text("Launching at login observes MSW state. It never starts a workspace.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Section("Observation") {
@@ -735,13 +741,15 @@ struct SettingsView: View {
 
             Section("Accessibility") {
                 Toggle("Reduce motion in Settings", isOn: $reducedMotion)
-                Text("The macOS Reduce Motion setting always takes precedence.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings.accessibility.reduce-motion")
             }
+
         }
         .formStyle(.grouped)
-        .task { refreshLoginItemStatus() }
+        .task {
+            refreshLoginItemStatus()
+            loadStartupWorkspaceSelection()
+        }
     }
 
 
@@ -1410,6 +1418,31 @@ struct SettingsView: View {
             .textSelection(.enabled)
     }
 
+    private func loadStartupWorkspaceSelection() {
+        let configured = applicationState.model?.workspaces.map(\.id) ?? []
+        startupWorkspaceIDs = WorkspaceStartupPreferences.selectedWorkspaceIDs(
+            from: configured
+        )
+    }
+
+    private func startupWorkspaceBinding(for workspaceID: Workspace.ID) -> Binding<Bool> {
+        Binding(
+            get: { startupWorkspaceIDs.contains(workspaceID) },
+            set: { isSelected in
+                if isSelected {
+                    startupWorkspaceIDs.insert(workspaceID)
+                } else {
+                    startupWorkspaceIDs.remove(workspaceID)
+                }
+                WorkspaceStartupPreferences.setSelectedWorkspaceIDs(startupWorkspaceIDs)
+            }
+        )
+    }
+
+    private var effectiveReducedMotion: Bool {
+        reducedMotion || systemReduceMotion
+    }
+
     private var groupedMetadata: [WorkspaceGrantGroup] {
         Dictionary(grouping: metadata, by: \.workspace)
             .map { workspace, entries in
@@ -1422,9 +1455,6 @@ struct SettingsView: View {
             .sorted { $0.workspace < $1.workspace }
     }
 
-    private var effectiveReducedMotion: Bool {
-        reducedMotion || systemReduceMotion
-    }
 
 
     private var githubStatusText: String {
