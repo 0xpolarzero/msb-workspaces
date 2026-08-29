@@ -19,7 +19,7 @@ case "${1:-}" in
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation"
     ;;
   --workspace-repair-only)
-    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testWorkspaceRepairRoutesAuthoritativeStorageGuidance"
+    TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testWorkspaceRepairRoutesToRestore"
     ;;
   --picker-only)
     TEST_TARGET="MSWMonitorUITests/MSWMonitorUITests/testDirectFolderPickerFromStatusPopover"

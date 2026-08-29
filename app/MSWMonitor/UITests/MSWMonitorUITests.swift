@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class MSWMonitorUITests: XCTestCase {
-    func testWorkspaceRepairRoutesAuthoritativeStorageGuidance() {
+    func testWorkspaceRepairRoutesToRestore() {
         let app = launchFixture([
             "--ui-test-open-popover",
             "--ui-test-workspace-repair"
@@ -19,31 +19,14 @@ final class MSWMonitorUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 3))
         XCTAssertEqual(status.value as? String, "Requires repair")
         XCTAssertFalse((status.value as? String)?.localizedCaseInsensitiveContains("secret") ?? true)
-        let repair = app.links["workspace.dev.repair.action"]
-        XCTAssertTrue(repair.waitForExistence(timeout: 2))
-        XCTAssertEqual(repair.label, "Repair")
-        repair.click()
+        let restore = app.links["workspace.dev.repair.action"]
+        XCTAssertTrue(restore.waitForExistence(timeout: 2))
+        XCTAssertEqual(restore.label, "Restore…")
+        restore.click()
 
-        XCTAssertTrue(app.windows["Workspaces"].waitForExistence(timeout: 3))
-        XCTAssertEqual(
-            app.buttons["workspace.section.Maintenance"].value as? String,
-            "Selected"
-        )
-        assertText(
-            "Workspace storage must be repaired before restarting dev.",
-            identifier: "workspace.dev.repair.reason",
-            in: app
-        )
-        assertText(
-            "Restore a verified ext4 workspace disk.",
-            identifier: "workspace.dev.repair.recovery",
-            in: app
-        )
-        assertText(
-            "Requires repair",
-            identifier: "workspace.dev.repair.status",
-            in: app
-        )
+        XCTAssertTrue(app.windows["Backup"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Choose Restore Archive…"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.buttons["workspace.section.Maintenance"].exists)
 
         app.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
@@ -925,7 +908,7 @@ final class MSWMonitorUITests: XCTestCase {
         add(navigationScreenshot)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Summary"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Repositories"].exists)
-        XCTAssertTrue(app.descendants(matching: .any)["workspace.section.Maintenance"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["workspace.section.Maintenance"].exists)
         XCTAssertFalse(app.popUpButtons["details.workspace-picker"].exists)
         assertText("Repositories", identifier: "files.repositories.title", in: app)
         assertText("File tree", identifier: "files.tree.title", in: app)

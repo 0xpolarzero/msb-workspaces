@@ -8,10 +8,8 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case activity = "Activity"
     case ports = "Network"
-    case maintenance = "Maintenance"
 
     var id: String { rawValue }
-
 
     var symbol: String {
         switch self {
@@ -19,7 +17,6 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case .logs: return "text.alignleft"
         case .activity: return "clock"
         case .ports: return "network"
-        case .maintenance: return "wrench.and.screwdriver"
         }
     }
 
@@ -29,7 +26,6 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case "activity": self = .activity
         case "ports", "network": self = .ports
         case "files", "folders", "repositories": self = .files
-        case "maintenance", "repair": self = .maintenance
         default: self = .files
         }
     }
@@ -58,7 +54,6 @@ enum BackupDestinationPicker {
 private enum WorkspaceAttentionDestination {
     case network
     case github
-    case maintenance
 }
 
 struct DetailView: View {
@@ -168,13 +163,11 @@ struct DetailView: View {
 
     private var workspacePane: some View {
         VStack(spacing: 0) {
-            if navigation.workspaceSection != .maintenance {
-                workspaceFilterBar
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 12)
+            workspaceFilterBar
+                .padding(.horizontal, 28)
+                .padding(.vertical, 12)
 
-                Divider()
-            }
+            Divider()
 
             sectionContent
                 .padding(.horizontal, 28)
@@ -220,7 +213,7 @@ struct DetailView: View {
         switch navigation.workspaceSection {
         case .files, .ports: return true
         case .logs: return followsLogs
-        case .activity, .maintenance: return false
+        case .activity: return false
         }
     }
 
@@ -247,7 +240,6 @@ struct DetailView: View {
         case .logs: logs
         case .activity: activity
         case .ports: ports
-        case .maintenance: workspaceMaintenance
         }
     }
 
@@ -262,7 +254,7 @@ struct DetailView: View {
             model.loadLogs(for: visibleWorkspaces.map(\.id), clearsError: false)
         case .ports:
             model.loadPorts(clearsError: false)
-        case .activity, .maintenance:
+        case .activity:
             break
         }
     }
@@ -327,13 +319,10 @@ struct DetailView: View {
                         navigation.workspaceSection = .logs
                     },
                     openAttention: { destination in
-                        openAttention(destination, workspace: workspace.id)
+                        openAttention(destination)
                     },
                     openRepair: {
-                        navigation.workspace = workspace.id
-                        model.selectedWorkspace = workspace.id
-                        navigation.tab = .workspaces
-                        navigation.workspaceSection = .maintenance
+                        navigation.tab = .backup
                     }
                 )
             }
@@ -359,70 +348,16 @@ struct DetailView: View {
         }.flatMap { $0.detail ?? $0.title }
     }
 
-    private func openAttention(
-        _ destination: WorkspaceAttentionDestination,
-        workspace: Workspace.ID
-    ) {
+    private func openAttention(_ destination: WorkspaceAttentionDestination) {
         switch destination {
         case .network:
             navigation.tab = .workspaces
             navigation.workspaceSection = .ports
         case .github:
             navigation.tab = .github
-        case .maintenance:
-            navigation.workspace = workspace
-            model.selectedWorkspace = workspace
-            navigation.tab = .workspaces
-            navigation.workspaceSection = .maintenance
         }
     }
 
-    @ViewBuilder
-    private var workspaceMaintenance: some View {
-        if let workspace = model.workspaces.first(where: {
-            $0.id == (navigation.workspace ?? model.selectedWorkspace)
-        }) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("\(workspace.id.rawValue) maintenance")
-                        .font(.headline)
-                        .accessibilityAddTraits(.isHeader)
-                    if let guidance = workspace.maintenanceGuidance {
-                        Label(guidance.title, systemImage: "wrench.and.screwdriver.fill")
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(.orange)
-                            .accessibilityIdentifier(
-                                "workspace.\(workspace.id.rawValue).repair.status"
-                            )
-                        Text(guidance.reason)
-                            .accessibilityIdentifier(
-                                "workspace.\(workspace.id.rawValue).repair.reason"
-                            )
-                        Text(guidance.recovery)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier(
-                                "workspace.\(workspace.id.rawValue).repair.recovery"
-                            )
-                    } else {
-                        ContentUnavailableView(
-                            "No repair required",
-                            systemImage: "checkmark.circle",
-                            description: Text("The latest authoritative state does not require workspace repair.")
-                        )
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("workspace.repair.page")
-        } else {
-            ContentUnavailableView(
-                "Workspace unavailable",
-                systemImage: "questionmark.folder",
-                description: Text("Refresh workspace state and select a valid workspace.")
-            )
-        }
-    }
 
     @ViewBuilder
     private var filesAndRepositories: some View {
@@ -2246,7 +2181,7 @@ private extension DetailView {
 private struct WorkspaceSummaryRow: View {
     private struct Attention {
         let message: String
-        let destination: WorkspaceAttentionDestination
+        let destination: WorkspaceAttentionDestination?
         let isCritical: Bool
     }
 
@@ -2322,9 +2257,9 @@ private struct WorkspaceSummaryRow: View {
                             "workspace.\(workspace.id.rawValue).repair.status"
                         )
                     Spacer()
-                    Button("Repair", action: openRepair)
+                    Button("Restore…", action: openRepair)
                         .buttonStyle(.link)
-                        .accessibilityHint(requirement.reason)
+                        .accessibilityHint("\(requirement.reason) \(requirement.recovery)")
                         .accessibilityIdentifier(
                             "workspace.\(workspace.id.rawValue).repair.action"
                         )
@@ -2350,9 +2285,11 @@ private struct WorkspaceSummaryRow: View {
                     .lineLimit(2)
                     .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-warning")
                     Spacer()
-                    Button("View") { openAttention(attention.destination) }
-                        .buttonStyle(.link)
-                        .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-warning-link")
+                    if let destination = attention.destination {
+                        Button("View") { openAttention(destination) }
+                            .buttonStyle(.link)
+                            .accessibilityIdentifier("workspace.\(workspace.id.rawValue).summary-warning-link")
+                    }
                 }
             }
         }
@@ -2364,7 +2301,7 @@ private struct WorkspaceSummaryRow: View {
 
     private var attention: Attention? {
         if let reason = workspace.quarantineReason {
-            return Attention(message: reason, destination: .maintenance, isCritical: true)
+            return Attention(message: reason, destination: nil, isCritical: true)
         }
         if let warning = workspace.portWarning, !warning.isEmpty {
             return Attention(message: warning, destination: .network, isCritical: false)
@@ -2379,7 +2316,7 @@ private struct WorkspaceSummaryRow: View {
         if workspace.freshness != .fresh {
             return Attention(
                 message: workspace.statusReason ?? "Workspace information is \(workspace.freshness.rawValue.lowercased()).",
-                destination: .maintenance,
+                destination: nil,
                 isCritical: false
             )
         }
