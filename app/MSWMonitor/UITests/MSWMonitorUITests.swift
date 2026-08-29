@@ -450,8 +450,8 @@ final class MSWMonitorUITests: XCTestCase {
         app.buttons["secrets.editor.submit"].click()
 
         XCTAssertFalse(
-            app.descendants(matching: .any)["secrets.review.sheet"].exists,
-            "Adding a secret should apply without a second confirmation screen"
+            app.alerts.firstMatch.exists,
+            "Adding a secret should not require a second confirmation"
         )
         XCTAssertTrue(
             app.descendants(matching: .any)["secrets.entry.CI_TOKEN.row"]
@@ -482,8 +482,8 @@ final class MSWMonitorUITests: XCTestCase {
         app.descendants(matching: .any)["secrets.editor.workspace.dev"].click()
         app.buttons["secrets.editor.submit"].click()
         XCTAssertFalse(
-            app.descendants(matching: .any)["secrets.review.sheet"].exists,
-            "Editing a secret should apply without a second confirmation screen"
+            app.alerts.firstMatch.exists,
+            "Editing a secret should not require a second confirmation"
         )
         XCTAssertTrue(
             app.descendants(matching: .any)["secrets.entry.SERVICE_TOKEN.row"]
@@ -495,16 +495,17 @@ final class MSWMonitorUITests: XCTestCase {
         )
         XCTAssertEqual(editLeak.count, 0, "The replacement value must never be rendered")
 
-        let review = app.descendants(matching: .any)["secrets.review.sheet"]
-        let phrase = app.textFields["secrets.review.phrase"]
-
-        // Remove: destructive typed-phrase confirmation.
+        // Remove: one compact native confirmation without a typed phrase.
         app.buttons["secrets.entry.CI_TOKEN.remove"].click()
-        XCTAssertTrue(review.waitForExistence(timeout: 2))
-        phrase.click()
-        phrase.typeText("REMOVE CI_TOKEN")
-        XCTAssertTrue(app.buttons["secrets.review.apply"].isEnabled)
-        app.buttons["secrets.review.apply"].click()
+        let removeAlert = app.alerts["Remove CI_TOKEN?"]
+        XCTAssertTrue(removeAlert.waitForExistence(timeout: 2))
+        XCTAssertTrue(
+            removeAlert.staticTexts[
+                "This will remove the secret from playgrounds, personal."
+            ].exists
+        )
+        XCTAssertFalse(app.textFields["secrets.review.phrase"].exists)
+        removeAlert.buttons["Remove"].click()
         XCTAssertTrue(
             app.staticTexts["secrets.entry.CI_TOKEN.status"].waitForExistence(timeout: 3)
         )

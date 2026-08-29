@@ -123,8 +123,7 @@ struct SecretsView: View {
     @Bindable var model: AppModel
 
     @State private var editorTarget: SecretEditorTarget?
-    @State private var reviewValue: String?
-    @State private var reviewConfirmation = ""
+    @State private var pendingRemovalPlan: MSWSecretPlanResult?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -165,42 +164,42 @@ struct SecretsView: View {
                     target: target,
                                        availableWorkspaces: model.workspaces,
                     onCancel: {
-                        reviewValue = nil
                         editorTarget = nil
                     },
                     onSubmit: submitEditor
                 )
             }
         }
-        .sheet(isPresented: Binding(
-            get: { model.pendingSecretPlan != nil },
-            set: { presented in
-                if !presented {
-                    reviewConfirmation = ""
-                    reviewValue = nil
-                    model.cancelSecretPlan()
+        .alert(
+            pendingRemovalPlan.map { "Remove \($0.name)?" } ?? "Remove secret?",
+            isPresented: Binding(
+                get: { pendingRemovalPlan != nil },
+                set: { presented in
+                    if !presented, pendingRemovalPlan != nil {
+                        cancelRemoval()
+                    }
+                }
+            ),
+            presenting: pendingRemovalPlan
+        ) { plan in
+            Button("Cancel", role: .cancel) {
+                cancelRemoval()
+            }
+            Button("Remove", role: .destructive) {
+                pendingRemovalPlan = nil
+                Task {
+                    await model.confirmSecretPlan(
+                        confirmation: plan.confirmationPhrase,
+                        value: nil
+                    )
                 }
             }
-        )) {
-            if let plan = model.pendingSecretPlan {
-                SecretPlanReviewView(
-                    plan: plan,
-                    value: reviewValue,
-                    confirmation: $reviewConfirmation,
-                    cancel: {
-                        reviewConfirmation = ""
-                        reviewValue = nil
-                        model.cancelSecretPlan()
-                    },
-                    apply: {
-                        let phrase = reviewConfirmation
-                        let value = reviewValue
-                        reviewConfirmation = ""
-                        reviewValue = nil
-                        Task { await model.confirmSecretPlan(confirmation: phrase, value: value) }
-                    }
-                )
-            }
+            .accessibilityIdentifier("secrets.remove.confirm")
+        } message: { plan in
+            Text(
+                "This will remove the secret from " +
+                    "\(plan.affectedWorkspaces.joined(separator: ", "))."
+            )
         }
     }
 
@@ -313,31 +312,33 @@ struct SecretsView: View {
         case .edit:
             editorTarget = .edit(entry)
         case .remove:
-            reviewValue = nil
-            Task {
-                await model.prepareSecretPlan(
-                    operation: .remove,
-                    name: entry.name,
-                    workspaces: entry.workspaces,
-                    allowedDomains: entry.allowedDomains
-                )
-                reviewConfirmation = ""
-            }
+            prepareRemoval(entry)
         case .retry:
             if entry.pendingOperation == .remove {
-                Task {
-                    await model.prepareSecretPlan(
-                        operation: .remove,
-                        name: entry.name,
-                        workspaces: entry.workspaces,
-                        allowedDomains: entry.allowedDomains
-                    )
-                    reviewConfirmation = ""
-                }
+                prepareRemoval(entry)
             } else {
                 editorTarget = .edit(entry)
             }
         }
+    }
+
+    private func prepareRemoval(_ entry: SecretEntry) {
+        Task {
+            let staged = await model.prepareSecretPlan(
+                operation: .remove,
+                name: entry.name,
+                workspaces: entry.workspaces,
+                allowedDomains: entry.allowedDomains
+            )
+            if staged {
+                pendingRemovalPlan = model.pendingSecretPlan
+            }
+        }
+    }
+
+    private func cancelRemoval() {
+        pendingRemovalPlan = nil
+        model.cancelSecretPlan()
     }
 
     private func submitEditor(
@@ -354,14 +355,11 @@ struct SecretsView: View {
             allowedDomains: allowedDomains
         )
         if staged {
-            if operation != .remove, let plan = model.pendingSecretPlan {
+            if let plan = model.pendingSecretPlan {
                 await model.confirmSecretPlan(
                     confirmation: plan.confirmationPhrase,
                     value: value
                 )
-            } else {
-                reviewValue = value
-                reviewConfirmation = ""
             }
             editorTarget = nil
         }
@@ -722,73 +720,6 @@ private struct SecretEditorSheet: View {
     }
 }
 
-private struct SecretPlanReviewView: View {
-    let plan: MSWSecretPlanResult
-    let value: String?
-    @Binding var confirmation: String
-    let cancel: () -> Void
-    let apply: () -> Void
-    @FocusState private var cancelFocused: Bool
-
-    private var isRemove: Bool {
-        plan.operation == "remove"
-    }
-
-    private var title: String {
-        let label = plan.operation.capitalized
-        return isRemove ? "Remove \(plan.name)?" : "\(label) \(plan.name)?"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title)
-                .font(.title2.weight(.semibold))
-                .accessibilityIdentifier("secrets.review.title")
-            Text(plan.effects)
-                .accessibilityIdentifier("secrets.review.effects")
-            LabeledContent("Affected workspaces", value: plan.affectedWorkspaces.joined(separator: ", "))
-                .accessibilityIdentifier("secrets.review.workspaces")
-            if plan.requiresSecret {
-                Text(value == nil
-                    ? "The current value will be kept."
-                    : "The replacement value is included in this change.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("secrets.review.value-note")
-            }
-            LabeledContent("Plan expires", value: plan.expiresAt.formatted(date: .abbreviated, time: .standard))
-            if isRemove {
-                Text("Removal disables the live binding immediately and fails closed.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("secrets.review.removal-note")
-            }
-            TextField("Type \(plan.confirmationPhrase) exactly", text: $confirmation)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("Type \(plan.confirmationPhrase) exactly to confirm")
-                .accessibilityHint(confirmation == plan.confirmationPhrase
-                    ? "Confirmation is valid"
-                    : "The change stays disabled until the exact phrase is entered")
-                .accessibilityIdentifier("secrets.review.phrase")
-            HStack {
-                Spacer()
-                Button("Cancel", role: .cancel, action: cancel)
-                    .keyboardShortcut(.cancelAction)
-                    .focused($cancelFocused)
-                    .accessibilityIdentifier("secrets.review.cancel")
-                Button(isRemove ? "Remove" : "Apply", role: isRemove ? .destructive : nil, action: apply)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(confirmation != plan.confirmationPhrase)
-                    .accessibilityIdentifier("secrets.review.apply")
-            }
-        }
-        .padding(24)
-        .frame(minWidth: 460, idealWidth: 520, maxWidth: 620)
-        .onAppear { cancelFocused = true }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("secrets.review.sheet")
-    }
-}
 
 // MARK: - Chip flow layout
 
