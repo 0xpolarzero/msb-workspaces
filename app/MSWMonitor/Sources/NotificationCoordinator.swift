@@ -6,7 +6,6 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
     case workspaceHealth
     case actionFailures
     case backupFailures
-    case credentialReminders
 
     var id: String { rawValue }
 
@@ -15,7 +14,6 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
         case .workspaceHealth: return "Workspace health"
         case .actionFailures: return "Action failures"
         case .backupFailures: return "Backup failures"
-        case .credentialReminders: return "Credential reminders"
         }
     }
 
@@ -27,8 +25,6 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
             return "Alerts when a workspace action fails."
         case .backupFailures:
             return "Alerts when a requested backup does not complete."
-        case .credentialReminders:
-            return "Reminders when workspace credentials need attention."
         }
     }
 
@@ -44,8 +40,6 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
             return .actionFailures
         case .backupFailure:
             return .backupFailures
-        case .credentialDeadline:
-            return .credentialReminders
         }
     }
 }
@@ -341,7 +335,6 @@ final class NotificationCoordinator {
         case .lifecycleLoss: return "Workspace stopped unexpectedly"
         case .operationFailure: return "Workspace operation failed"
         case .backupFailure: return "Backup failed"
-        case .credentialDeadline: return "GitHub access needs attention"
         }
     }
 
@@ -358,8 +351,6 @@ final class NotificationCoordinator {
             return "A reviewed operation for \(scope.lowercased()) failed. Open Activity for recovery."
         case .backupFailure:
             return "The requested backup did not complete. Open Backups to retry safely."
-        case .credentialDeadline:
-            return "\(scope) needs GitHub reauthorization soon. Open GitHub Settings to review access."
         }
     }
 }

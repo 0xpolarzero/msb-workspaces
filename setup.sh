@@ -567,6 +567,150 @@ else
   [[ -f "$BASE_STAMP" ]] || printf '%s\n' "$MSW_VERSION" >"$BASE_STAMP"
 fi
 
+# Raw-disk tail-discard compatibility gate.
+#
+# MicroSandbox v0.6.8's pinned runtime (msb-imago 0.1.1,
+# File::try_discard_by_truncate) can shorten a raw disk image at the first
+# free block of the final ext4 group when the guest issues an EOF-reaching
+# DISCARD or WRITE_ZEROES (observed as fstrim). The image then no longer
+# matches the length its ext4 superblock declares, and every later attach
+# fails. No managed workspace volume is created or attached until the exact
+# installed msb binary (SHA-256) has attested once, on a unique disposable
+# 2 GiB disk and sandbox created from the base snapshot, that guest fstrim
+# leaves the raw length equal to both the requested capacity and the
+# ext4-declared length and that the disk mounts again after a restart. A
+# failed probe removes its disposable state and stops setup before any
+# managed workspace volume exists.
+MSW_COMPAT_PROBE_PREFIX="msw-compat-probe"
+MSW_COMPAT_PROBE_SB=""
+MSW_COMPAT_PROBE_VOL=""
+MSW_COMPAT_PROBE_MOUNT="/mnt/msw-compat-probe"
+MSW_COMPAT_PROBE_SIZE="2G"
+MSW_COMPAT_CACHE="$HOME/.config/msw/runtime-compat-cache"
+
+COMPAT_PROBE_FAILURE=""
+COMPAT_PROBE_SB_CREATED=""
+COMPAT_PROBE_VOL_CREATED=""
+
+compat_probe_cleanup() {
+  local failed=0
+  if [[ -n "$COMPAT_PROBE_SB_CREATED" ]]; then
+    "$MSB_BIN" rm -f "$MSW_COMPAT_PROBE_SB" >/dev/null 2>&1 || failed=1
+  fi
+  if [[ -n "$COMPAT_PROBE_VOL_CREATED" ]]; then
+    remove_owned_volume "$MSW_COMPAT_PROBE_VOL" >/dev/null 2>&1 || failed=1
+  fi
+  return "$failed"
+}
+
+compat_probe_fail() {
+  COMPAT_PROBE_FAILURE="$1"
+}
+
+run_compat_probe() {
+  local attempt=0 path="" raw_len="" declared_len="" output="" validate_geometry=1
+  local probe_bytes=$((2 * 1024 * 1024 * 1024))
+  if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_COMPAT_PROBE:-0}" != 1 ]]; then
+    validate_geometry=0
+  fi
+  COMPAT_PROBE_FAILURE=""
+  COMPAT_PROBE_SB_CREATED=""
+  COMPAT_PROBE_VOL_CREATED=""
+  ensure_ext4_volume "$MSW_COMPAT_PROBE_VOL" "$MSW_COMPAT_PROBE_SIZE"
+  COMPAT_PROBE_VOL_CREATED=1
+  "$MSB_BIN" run --detach \
+    --name "$MSW_COMPAT_PROBE_SB" --from-snapshot "$MSW_BASE_SNAPSHOT" \
+    --cpus "$(cap_cpu 2)" --max-cpus "$(cap_cpu 2)" \
+    --memory 4G --max-memory 4G \
+    --mount-named "$MSW_COMPAT_PROBE_VOL:${MSW_COMPAT_PROBE_MOUNT}:kind=disk,size=${MSW_COMPAT_PROBE_SIZE}" \
+    --workdir / --init auto --security default --net public \
+    --label msw.role=compat-probe \
+    -- sleep infinity \
+    || { compat_probe_fail "the disposable probe sandbox could not be created"; return 1; }
+  COMPAT_PROBE_SB_CREATED=1
+  # wait_for_guest_systemd aborts via fatal without probe cleanup, so the
+  # readiness wait is inlined here with cleanup on failure.
+  until workspace_msb "$MSW_COMPAT_PROBE_SB" exec --no-tty "$MSW_COMPAT_PROBE_SB" -- systemctl daemon-reload >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    (( attempt < 120 )) \
+      || { compat_probe_fail "the disposable probe guest systemd did not become ready"; return 1; }
+    sleep 1
+  done
+  if (( validate_geometry == 0 )); then
+    # Fake-harness shortcut, mirroring finalize_fresh_ext4_volume: the
+    # simulator models volumes as directories, so raw geometry cannot be
+    # read; the disposable probe still exercises the full command sequence.
+    :
+  else
+    volume_probe "$MSW_COMPAT_PROBE_VOL" \
+      || { compat_probe_fail "the disposable probe disk could not be inspected"; return 1; }
+    path="$(volume_inspect_field Path)"
+    [[ "$path" == "$HOME/.microsandbox/volumes/$MSW_COMPAT_PROBE_VOL/disk.raw" && -f "$path" && ! -L "$path" ]] \
+      || { compat_probe_fail "the disposable probe disk is not a regular raw image at the expected path"; return 1; }
+    raw_len="$(file_size_bytes "$path")" \
+      || { compat_probe_fail "the disposable probe disk length could not be read"; return 1; }
+    declared_len="$(ext4_declared_bytes "$path")" \
+      || { compat_probe_fail "the disposable probe disk geometry could not be read: ${VOLUME_EXT4_DETAIL}"; return 1; }
+    (( raw_len == probe_bytes && declared_len == probe_bytes )) \
+      || { compat_probe_fail "the disposable probe disk was not created at the requested geometry (raw ${raw_len}, ext4 ${declared_len}, requested ${probe_bytes})"; return 1; }
+  fi
+  "$MSB_BIN" exec --no-tty "$MSW_COMPAT_PROBE_SB" -- fstrim -v "$MSW_COMPAT_PROBE_MOUNT" \
+    || { compat_probe_fail "guest fstrim on the disposable probe disk failed"; return 1; }
+  "$MSB_BIN" stop -t 90 "$MSW_COMPAT_PROBE_SB" \
+    || { compat_probe_fail "the disposable probe sandbox could not be stopped"; return 1; }
+  if (( validate_geometry == 0 )); then
+    :
+  else
+    raw_len="$(file_size_bytes "$path")" \
+      || { compat_probe_fail "the disposable probe disk length could not be read"; return 1; }
+    declared_len="$(ext4_declared_bytes "$path")" \
+      || { compat_probe_fail "the disposable probe disk geometry could not be read: ${VOLUME_EXT4_DETAIL}"; return 1; }
+    (( raw_len == probe_bytes && declared_len == probe_bytes )) \
+      || { compat_probe_fail "the disposable probe disk changed length after guest fstrim (raw ${raw_len}, ext4 ${declared_len}, requested ${probe_bytes}); the runtime truncated the raw image"; return 1; }
+  fi
+  "$MSB_BIN" start "$MSW_COMPAT_PROBE_SB" \
+    || { compat_probe_fail "the disposable probe sandbox could not be restarted"; return 1; }
+  if ! output="$("$MSB_BIN" exec --no-tty "$MSW_COMPAT_PROBE_SB" -- findmnt -n -o FSTYPE "$MSW_COMPAT_PROBE_MOUNT" 2>/dev/null)" || [[ "$output" != ext4 ]]; then
+    compat_probe_fail "the disposable probe disk did not mount as ext4 after restart"
+    return 1
+  fi
+  return 0
+}
+
+verify_runtime_discard_safety() {
+  local box sha="" cache_tmp="" probe_id=""
+  for box in "${WORKSPACES[@]}"; do
+    if [[ "$box" == msw-compat-probe* || "$box" == compat-probe* ]]; then
+      fatal "workspace name '$box' collides with the disposable runtime-probe prefix '$MSW_COMPAT_PROBE_PREFIX'; rename the workspace before running setup"
+    fi
+  done
+  sha="$(/usr/bin/shasum -a 256 "$MSB_BIN" | awk '{print $1}')" || fatal "could not hash the installed msb binary"
+  probe_id="${MSW_COMPAT_PROBE_PREFIX}-$$-${sha:0:8}"
+  MSW_COMPAT_PROBE_SB="${probe_id}-sb"
+  MSW_COMPAT_PROBE_VOL="${probe_id}-vol"
+  if [[ -f "$MSW_COMPAT_CACHE" && ! -L "$MSW_COMPAT_CACHE" && "$(<"$MSW_COMPAT_CACHE")" == "$sha" ]]; then
+    echo "Raw-disk discard safety already attested for this msb binary; skipping the disposable probe"
+    return 0
+  fi
+  log "Attesting the installed MicroSandbox runtime against raw-disk tail discards"
+  trap 'compat_probe_cleanup >/dev/null 2>&1 || true; exit 130' INT
+  trap 'compat_probe_cleanup >/dev/null 2>&1 || true; exit 143' TERM HUP
+  if ! run_compat_probe; then
+    compat_probe_cleanup || COMPAT_PROBE_FAILURE+="; the disposable probe state could not be removed"
+    fatal "the MicroSandbox runtime failed the raw-disk discard attestation (${COMPAT_PROBE_FAILURE:-unknown probe failure}); setup stopped before any managed workspace volume was created"
+  fi
+  compat_probe_cleanup || fatal "the disposable probe state could not be removed after a successful attestation"
+  trap - INT TERM HUP
+  cache_tmp="$(mktemp "$HOME/.config/msw/.runtime-compat-cache.XXXXXX")" || fatal "could not stage the runtime attestation cache"
+  printf '%s\n' "$sha" >"$cache_tmp" && chmod 0600 "$cache_tmp" || { rm -f "$cache_tmp" || true; fatal "could not write the runtime attestation cache"; }
+  mv "$cache_tmp" "$MSW_COMPAT_CACHE" || { rm -f "$cache_tmp" || true; fatal "could not persist the runtime attestation cache"; }
+  log "Raw-disk discard safety attested for $(basename "$MSB_BIN")"
+}
+
+if [[ "$SKIP_WORKSPACES" != 1 ]]; then
+  verify_runtime_discard_safety
+fi
+
 # Published ports are NOT passed to msb (see create_workspace): they are
 # forwarded host-side over SSH by lib/msw-port-forwarder.py, which probes the
 # bind address at runtime and skips occupied ports with a warning instead of

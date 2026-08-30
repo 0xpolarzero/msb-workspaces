@@ -1402,7 +1402,6 @@ struct MSWNotificationEvent: Identifiable, Codable, Sendable, Equatable {
         case lifecycleLoss = "lifecycle-loss"
         case operationFailure = "operation-failure"
         case backupFailure = "backup-failure"
-        case credentialDeadline = "credential-deadline"
     }
 
     let id: UUID

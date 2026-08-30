@@ -3902,19 +3902,6 @@ final class AppModel {
                     deepLink: workspaceDeepLink(workspace.id.rawValue, section: "overview")
                 )
             }
-            if hadAuthoritativeObservation,
-               previous != nil,
-               credentialDeadlineIsVisible(workspace: workspace, snapshot: snapshots[workspace.id.rawValue]),
-               previous?.credential != workspace.credential {
-                emitNotification(
-                    kind: .credentialDeadline,
-                    workspace: workspace.id.rawValue,
-                    title: "\(workspace.id.rawValue) credentials need attention",
-                    message: "The current credential state is \(workspace.credential.rawValue).",
-                    recovery: workspace.recoveryAction ?? "Review GitHub access for this workspace.",
-                    deepLink: workspaceDeepLink(workspace.id.rawValue, section: "github")
-                )
-            }
         }
         invalidatePendingPlansIfUnsafe()
         return reconcileLifecycleOperations(
@@ -4404,16 +4391,6 @@ final class AppModel {
         )
     }
 
-    private func credentialDeadlineIsVisible(
-        workspace: Workspace,
-        snapshot: MSWWorkspaceSnapshot?
-    ) -> Bool {
-        if workspace.credential == .expiring { return true }
-        let deadline = [snapshot?.credential.accessExpiresAt, snapshot?.credential.refreshExpiresAt]
-            .compactMap { $0 }
-            .min()
-        return deadline.map { $0 <= Date().addingTimeInterval(7 * 24 * 60 * 60) } ?? false
-    }
 
     private func emitNotification(
         kind: MSWNotificationEvent.Kind,

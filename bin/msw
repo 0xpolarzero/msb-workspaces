@@ -100,6 +100,24 @@ LOCKF_BIN="${MSW_LOCKF_BIN:-$(command -v lockf 2>/dev/null || true)}"
 GH_BIN="${MSW_GH_BIN:-$(command -v gh 2>/dev/null || true)}"
 
 fatal() { printf 'msw: %s\n' "$*" >&2; exit 1; }
+readonly MSW_RUNTIME_COMPAT_CACHE="$HOME/.config/msw/runtime-compat-cache"
+
+runtime_discard_safety_attested() {
+  local sha
+  [[ -n "$MSB_BIN" && -x "$MSB_BIN" ]] || return 1
+  [[ -f "$MSW_RUNTIME_COMPAT_CACHE" && ! -L "$MSW_RUNTIME_COMPAT_CACHE" ]] || return 1
+  sha="$(/usr/bin/shasum -a 256 "$MSB_BIN" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
+  [[ -n "$sha" && "$(<"$MSW_RUNTIME_COMPAT_CACHE")" == "$sha" ]]
+}
+
+require_runtime_discard_safety() {
+  runtime_discard_safety_attested ||
+    fatal "the installed MicroSandbox runtime has not passed the raw-disk discard safety check; run this repository's setup.sh before starting or attaching workspace disks"
+}
+
+invalidate_runtime_discard_attestation() {
+  rm -f "$MSW_RUNTIME_COMPAT_CACHE"
+}
 
 load_workspace_configuration() {
   local value
@@ -1850,6 +1868,7 @@ workspace_msb_with_read_token_for_cleanup() {
 
 start_sandbox() {
   local box="$1"
+  require_runtime_discard_safety
   # §11 trigger: any local-mode operation that starts a workspace first
   # retires legacy GitHub state so the fail-closed checks below can pass.
   migrate_local_if_needed "$box"
@@ -2403,6 +2422,8 @@ cmd_update() {
     "$MSB_BIN" self update
   fi
   "$MSB_BIN" doctor
+  invalidate_runtime_discard_attestation
+  note "Run this repository's setup.sh before starting workspace disks with the updated runtime"
   verify_vendored_h11_if_enforced
 }
 
@@ -9084,6 +9105,7 @@ app_create_configured_workspace() {
   # (app_reconcile_workspace_configuration's input), never from the committed
   # configuration.
   local box="$1" desired_file="$2" cpu cpu_ceiling memory memory_ceiling workspace_storage runtime_storage host
+  require_runtime_discard_safety
   cpu="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .cpu' "$desired_file")" || return 1
   cpu_ceiling="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .cpuCeiling' "$desired_file")" || return 1
   memory="$($JQ_BIN -er --arg box "$box" '.workspaces[] | select(.name == $box) | .memoryGiB' "$desired_file")G" || return 1
@@ -9167,6 +9189,7 @@ app_workspace_volume_requires_reconcile() {
 # data can never be overwritten silently.
 app_copy_named_volume() {
   local source="$1" destination="$2" helper="$3"
+  require_runtime_discard_safety
   "$MSB_BIN" run --detach --name "$helper" --from-snapshot "$MSW_BASE_SNAPSHOT" \
     --mount-named "$source:/source:kind=disk" \
     --mount-named "$destination:/destination:kind=disk" \

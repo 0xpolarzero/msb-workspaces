@@ -11,10 +11,21 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-
 STATE_ROOT = Path(os.environ.get("MSW_FAKE_STATE", "/tmp/msw-fake-state")).resolve()
 STATE_FILE = STATE_ROOT / "state.json"
 REMOTE_ROOT = os.environ.get("MSW_TEST_GITHUB_REMOTE_ROOT", "")
+
+
+# Raw-disk tail-discard seam: MSW_FAKE_TAIL_DISCARD=safe|unsafe selects how
+# the simulated runtime answers a guest FITRIM that reaches the end of a
+# mounted raw disk. safe preserves the raw image length; unsafe reproduces
+# msb-imago 0.1.1's File::try_discard_by_truncate defect, which shortens the
+# raw file at the first free block of the final ext4 group (the exact
+# 132,112,384-byte deficit observed on 2 GiB images). While the seam is
+# active, `volume create` materializes real raw images (instead of
+# directories) so setup.sh's geometry checks can observe the truncation.
+TAIL_DISCARD = os.environ.get("MSW_FAKE_TAIL_DISCARD", "")
+TAIL_DISCARD_DEFICIT = 132_112_384
 
 
 def initial_state() -> dict[str, Any]:
@@ -89,6 +100,38 @@ def ensure_sandbox_dirs(state: dict[str, Any], box: str) -> dict[str, Any]:
     (root / "rootfs").mkdir(parents=True, exist_ok=True)
     sb["root"] = str(root)
     return sb
+
+
+def ext4_declared_bytes(path: Path) -> int | None:
+    """Bytes declared by the ext4 superblock at byte 1024, or None."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(1028)
+            blocks_lo_raw = handle.read(4)
+            handle.seek(1048)
+            log_block_size_raw = handle.read(4)
+    except OSError:
+        return None
+    if len(blocks_lo_raw) != 4 or len(log_block_size_raw) != 4:
+        return None
+    blocks_lo = int.from_bytes(blocks_lo_raw, "little")
+    log_block_size = int.from_bytes(log_block_size_raw, "little")
+    if blocks_lo == 0 or log_block_size > 6:
+        return None
+    return blocks_lo * (1024 << log_block_size)
+
+
+def write_raw_ext4_image(path: Path, declared_bytes: int, length_bytes: int) -> None:
+    """Materialize a raw ext4 image (4 KiB blocks, magic 0x53ef) at length_bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        handle.truncate(length_bytes)
+        handle.seek(1028)
+        handle.write((declared_bytes // 4096).to_bytes(4, "little"))
+        handle.seek(1048)
+        handle.write((2).to_bytes(4, "little"))
+        handle.seek(1080)
+        handle.write(b"\x53\xef")
 
 
 def volume_path(state: dict[str, Any], name: str) -> Path:
@@ -484,9 +527,42 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
         return subprocess.run(["python3", "-c", "import time; time.sleep(600)"],
                               cwd=mapped_workdir, env=env).returncode
 
-    if command[0] in {"sync", "hostnamectl", "findmnt", "uname"}:
+    if command[0] == "fstrim":
+        # Model the runtime's discard path: an EOF-reaching guest FITRIM on
+        # a mounted raw disk either preserves the image length (safe) or
+        # truncates it at the first free block of the final ext4 group
+        # (unsafe, the msb-imago 0.1.1 defect).
+        target = next((arg for arg in command[1:] if arg.startswith("/")), None)
+        vol = (sb.get("mounts") or {}).get(target) if target else None
+        if vol and TAIL_DISCARD == "unsafe":
+            entry = state["volumes"].get(vol)
+            raw = Path(entry["path"]) if entry else None
+            declared = ext4_declared_bytes(raw) if raw and raw.is_file() else None
+            if declared:
+                with raw.open("r+b") as handle:
+                    handle.truncate(declared - TAIL_DISCARD_DEFICIT)
+        log_event(state, "guest-fstrim", box=box, target=target or "",
+                  tail_discard=TAIL_DISCARD or "none")
+        save(state)
+        return 0
+
+    if command[0] == "findmnt":
+        # Attaching a raw image that is shorter than its ext4 superblock
+        # fails (mount EINVAL): model the restart-mount probe against the
+        # mounted volume's raw image.
+        target = next((arg for arg in command[1:] if arg.startswith("/")), None)
+        vol = (sb.get("mounts") or {}).get(target) if target else None
+        entry = state["volumes"].get(vol) if vol else None
+        raw = Path(entry["path"]) if entry else None
+        declared = ext4_declared_bytes(raw) if raw and raw.is_file() else None
+        if declared and raw.stat().st_size < declared:
+            print(f"mount: {target}: the backing image is shorter than the filesystem it declares", file=sys.stderr)
+            return 1
+        print("ext4")
+        return 0
+
+    if command[0] in {"sync", "hostnamectl", "uname"}:
         if command[0] == "uname": print("aarch64")
-        elif command[0] == "findmnt": print("ext4")
         return 0
 
     # Map guest absolute paths passed as normal arguments.
@@ -743,14 +819,17 @@ def main() -> int:
                     Path(os.environ["HOME"]) / ".microsandbox" /
                     "volumes" / name / "disk.raw"
                 )
-                with volume_path.open("wb") as handle:
-                    handle.truncate(declared_bytes - 132_112_384)
-                    handle.seek(1028)
-                    handle.write((declared_bytes // 4096).to_bytes(4, "little"))
-                    handle.seek(1048)
-                    handle.write((2).to_bytes(4, "little"))
-                    handle.seek(1080)
-                    handle.write(b"\x53\xef")
+                write_raw_ext4_image(volume_path, declared_bytes, declared_bytes - TAIL_DISCARD_DEFICIT)
+            elif TAIL_DISCARD:
+                size_match = re.fullmatch(r"([0-9]+)G", size)
+                if not size_match:
+                    return fail("tail-discard fixture requires a GiB size")
+                declared_bytes = int(size_match.group(1)) * 1024 * 1024 * 1024
+                volume_path = (
+                    Path(os.environ["HOME"]) / ".microsandbox" /
+                    "volumes" / name / "disk.raw"
+                )
+                write_raw_ext4_image(volume_path, declared_bytes, declared_bytes)
             state["volumes"][name] = {
                 "path": str(volume_path), "size": size, "kind": "disk",
                 "filesystem": "ext4", "magic": "53ef", "formatCount": 1,

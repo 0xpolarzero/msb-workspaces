@@ -1085,7 +1085,6 @@ final class MSWMonitorUITests: XCTestCase {
             ("workspaceHealth", "Workspace health"),
             ("actionFailures", "Action failures"),
             ("backupFailures", "Backup failures"),
-            ("credentialReminders", "Credential reminders"),
         ] {
             let category = app.descendants(matching: .any)["notifications.category.\(identifier)"]
             XCTAssertTrue(category.waitForExistence(timeout: 2))

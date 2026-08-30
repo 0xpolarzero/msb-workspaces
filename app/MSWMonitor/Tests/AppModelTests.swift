@@ -1607,7 +1607,7 @@ final class AppModelTests: XCTestCase {
     func testNotificationCategoriesUseApprovedLabelsAndMapEveryEventOnce() {
         XCTAssertEqual(
             MSWNotificationCategory.allCases.map(\.title),
-            ["Workspace health", "Action failures", "Backup failures", "Credential reminders"]
+            ["Workspace health", "Action failures", "Backup failures"]
         )
         XCTAssertEqual(
             MSWNotificationCategory.allCases.map(\.detail),
@@ -1615,7 +1615,6 @@ final class AppModelTests: XCTestCase {
                 "Alerts when a workspace remains unavailable, stops unexpectedly, or is quarantined.",
                 "Alerts when a workspace action fails.",
                 "Alerts when a requested backup does not complete.",
-                "Reminders when workspace credentials need attention.",
             ]
         )
         XCTAssertEqual(MSWNotificationCategory.category(for: .sustainedUnavailability), .workspaceHealth)
@@ -1623,7 +1622,6 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(MSWNotificationCategory.category(for: .lifecycleLoss), .workspaceHealth)
         XCTAssertEqual(MSWNotificationCategory.category(for: .operationFailure), .actionFailures)
         XCTAssertEqual(MSWNotificationCategory.category(for: .backupFailure), .backupFailures)
-        XCTAssertEqual(MSWNotificationCategory.category(for: .credentialDeadline), .credentialReminders)
     }
 
     func testClientBackedColdLaunchAndFailedObservationsRemainTruthful() async throws {

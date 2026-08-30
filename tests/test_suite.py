@@ -751,6 +751,135 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertEqual(before_create, after_create)
         self.assertEqual(set(before["volumes"]), set(after["volumes"]))
 
+    def test_setup_unsafe_tail_discard_blocks_before_managed_workspaces(self) -> None:
+        # A runtime whose discard path shortens a raw image at EOF (the
+        # msb-imago 0.1.1 defect) must fail the attestation, remove the
+        # disposable probe state, and stop setup before any managed
+        # workspace volume is created or attached.
+        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        cache.unlink(missing_ok=True)
+        before = self.env.state()
+        before_events = len(before["events"])
+        before_volumes = set(before["volumes"])
+        before_sandboxes = set(before["sandboxes"])
+
+        proc = self.env.setup(check=False, extra_env={
+            "MSW_TEST_VALIDATE_COMPAT_PROBE": "1",
+            "MSW_FAKE_TAIL_DISCARD": "unsafe",
+        })
+        self.assertFailed(proc, "truncated the raw image")
+        self.assertIn("2015371264", proc.stdout + proc.stderr)
+
+        after = self.env.state()
+        probe_events = after["events"][before_events:]
+        fstrim = [e for e in probe_events if e.get("event") == "guest-fstrim"]
+        self.assertEqual(len(fstrim), 1)
+        self.assertEqual(fstrim[0]["tail_discard"], "unsafe")
+        # No attestation was cached and all disposable probe state is gone.
+        self.assertFalse(cache.exists())
+        self.assertEqual(set(after["volumes"]), before_volumes)
+        self.assertEqual(set(after["sandboxes"]), before_sandboxes)
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["volumes"]))
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["sandboxes"]))
+        self.assertEqual(
+            [
+                e for e in probe_events
+                if e.get("event") == "create"
+                and not e.get("box", "").startswith("msw-compat-probe-")
+            ],
+            [],
+        )
+        probe_root = self.env.home / ".microsandbox/volumes"
+        self.assertEqual(list(probe_root.glob("msw-compat-probe-*")), [])
+
+    def test_setup_safe_runtime_attests_once_and_removes_probe_state(self) -> None:
+        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        cache.unlink(missing_ok=True)
+        expected_sha = hashlib.sha256(FAKE_MSB.read_bytes()).hexdigest()
+        before = self.env.state()
+        before_events = len(before["events"])
+
+        proc = self.env.setup(extra_env={
+            "MSW_TEST_VALIDATE_COMPAT_PROBE": "1",
+            "MSW_FAKE_TAIL_DISCARD": "safe",
+        })
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("Raw-disk discard safety attested", proc.stdout)
+
+        # The attestation is cached, keyed to the exact msb binary hash.
+        self.assertTrue(cache.is_file())
+        self.assertEqual(cache.read_text().strip(), expected_sha)
+
+        after = self.env.state()
+        probe_events = after["events"][before_events:]
+        fstrim = [e for e in probe_events if e.get("event") == "guest-fstrim"]
+        self.assertEqual(len(fstrim), 1)
+        self.assertEqual(fstrim[0]["tail_discard"], "safe")
+        probe_creates = [
+            e for e in probe_events
+            if e.get("event") == "volume-create"
+            and e.get("volume", "").startswith("msw-compat-probe-")
+        ]
+        self.assertEqual(len(probe_creates), 1)
+        # The probe ran before any managed workspace work and left nothing
+        # behind: no probe artifact remains in state or on disk.
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["volumes"]))
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["sandboxes"]))
+        probe_root = self.env.home / ".microsandbox/volumes"
+        self.assertEqual(list(probe_root.glob("msw-compat-probe-*")), [])
+        # No managed workspace was created or attached (the probe's own
+        # disposable sandbox create is expected).
+        self.assertEqual(
+            [
+                e for e in probe_events
+                if e.get("event") == "create"
+                and not e.get("box", "").startswith("msw-compat-probe-")
+            ],
+            [],
+        )
+
+    def test_setup_cached_attestation_skips_the_probe(self) -> None:
+        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        self.assertTrue(cache.is_file())
+        expected_sha = hashlib.sha256(FAKE_MSB.read_bytes()).hexdigest()
+        self.assertEqual(cache.read_text().strip(), expected_sha)
+        before = self.env.state()
+        before_events = len(before["events"])
+
+        proc = self.env.setup()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("already attested", proc.stdout)
+
+        after = self.env.state()
+        new_events = after["events"][before_events:]
+        self.assertEqual(
+            [e for e in new_events if "msw-compat-probe" in json.dumps(e)],
+            [],
+        )
+        self.assertEqual(cache.read_text().strip(), expected_sha)
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["volumes"]))
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["sandboxes"]))
+
+    def test_setup_rejects_workspace_names_that_collide_with_the_probe_prefix(self) -> None:
+        # No managed name may match the disposable probe prefix: a workspace
+        # named compat-probe-* would own volumes named msw-compat-probe-*
+        # and a sandbox under the probe prefix.
+        config = self.env.home / ".config/msw" / "workspaces.json"
+        desired = json.loads(config.read_text())
+        desired["workspaces"].append({
+            "name": "compat-probe-x", "cpu": 4, "cpuCeiling": 8,
+            "memoryGiB": 16, "memoryCeilingGiB": 32,
+            "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
+        })
+        config.write_text(json.dumps(desired))
+
+        proc = self.env.setup(check=False)
+        self.assertFailed(proc, "collides with the disposable runtime-probe")
+        state = self.env.state()
+        self.assertNotIn("compat-probe-x", state["sandboxes"])
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in state["volumes"]))
+        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in state["sandboxes"]))
+
     def test_recreate_github_workspace_rebinds_secret_from_keychain(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
@@ -822,11 +951,31 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertFailed(self.env.msw("clean", "dev", "personal", check=False), "only one cleanup target")
 
     def test_update_uses_supported_self_update_flow(self) -> None:
+        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        self.assertTrue(cache.is_file())
         before = len(self.env.state().get("events", []))
         proc = self.env.msw("update")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         events = self.env.state().get("events", [])[before:]
         self.assertTrue(any(event.get("event") == "self-update" for event in events), events)
+        self.assertFalse(cache.exists())
+        start = self.env.msw("start", "dev", check=False)
+        self.assertFailed(start, "has not passed the raw-disk discard safety check")
+
+    def test_start_rejects_unattested_runtime_binary(self) -> None:
+        changed_msb = self.env.root / "tools/unattested-msb"
+        shutil.copy2(FAKE_MSB, changed_msb)
+        with changed_msb.open("a") as handle:
+            handle.write("\n")
+        changed_msb.chmod(0o755)
+
+        start = self.env.msw(
+            "start",
+            "dev",
+            check=False,
+            extra_env={"MSW_MSB_BIN": str(changed_msb)},
+        )
+        self.assertFailed(start, "has not passed the raw-disk discard safety check")
 
     def test_app_bootstrap_runs_deep_verification_and_restores_running_set(self) -> None:
         self.env.msw("start", "dev")
