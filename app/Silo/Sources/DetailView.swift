@@ -2478,6 +2478,7 @@ private struct BackupReviewView: View {
             Text("Create new backup")
                 .font(.title2.weight(.semibold))
                 .accessibilityIdentifier("backup.confirmation.title")
+                .padding(.top, 8)
             LabeledContent("Destination", value: preview.destination.path(percentEncoded: false))
             Text("Includes managed code and data, VM state, databases, Docker images and volumes, guest-side credentials, and bounded diagnostics. Mac Keychain records are excluded.")
             let running = preview.runningWorkspaces
