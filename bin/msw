@@ -30,7 +30,7 @@ WORKSPACES=()
 readonly READ_KEYCHAIN_SERVICE="msw.github.read"
 readonly WRITE_KEYCHAIN_SERVICE="msw.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/msw/github"
-readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/MSW Monitor/credentials.json"
+readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/Silo/credentials.json"
 readonly MSW_SECRETS_FILE="${MSW_SECRETS_FILE:-$HOME/.config/msw/secrets.json}"
 # Generic host-held secrets lifecycle state: MSW_SECRET_BINDINGS carries
 # "name=value ..." pairs (values are validated graph-only, so space-delimited
@@ -502,7 +502,7 @@ write_metadata() {
 # serialize on the existing per-workspace GitHub lock (github_lock_acquire)
 # and are always atomic tmp+rename with mode 0600 (directory 0700).
 # ---------------------------------------------------------------------------
-policy_file() { printf '%s' "${MSW_POLICY_FILE:-$HOME/Library/Application Support/MSW Monitor/github-policy.json}"; }
+policy_file() { printf '%s' "${MSW_POLICY_FILE:-$HOME/Library/Application Support/Silo/github-policy.json}"; }
 
 # Path C §2 / high-risk / closure: ONE strict policy validator shared by every
 # host gate (push, verify, host-credential checks, app reads). A malformed
@@ -619,13 +619,11 @@ canonicalize_github_repo() {
 # fail-closed. The token bytes never appear in argv, logs, journals, or files.
 # ---------------------------------------------------------------------------
 # §5 re-review: the bridge-owned item lives under the .v2 service namespace.
-# The legacy item at org.microsandbox.MSWMonitor.github-host was created by
-# security(1) with the security-CLI ACL; the bridge (Security.framework via
-# python) must NEVER SecItemUpdate/CopyMatching/Delete it (a foreign-ACL
-# prompt would hang the CLI). The legacy item stays dormant and unread.
-host_credential_service() { printf '%s' "${MSW_HOST_KEYCHAIN_SERVICE:-org.microsandbox.MSWMonitor.github-host.v2}"; }
+# Security.framework owns all access to this item so CLI ACL differences cannot
+# trigger an interactive Keychain prompt.
+host_credential_service() { printf '%s' "${MSW_HOST_KEYCHAIN_SERVICE:-org.microsandbox.Silo.github-host.v2}"; }
 host_credential_account() { printf '%s' "${MSW_HOST_KEYCHAIN_ACCOUNT:-user}"; }
-host_meta_file() { printf '%s' "${MSW_HOST_META_FILE:-$HOME/Library/Application Support/MSW Monitor/github-host.json}"; }
+host_meta_file() { printf '%s' "${MSW_HOST_META_FILE:-$HOME/Library/Application Support/Silo/github-host.json}"; }
 
 host_credential_token_valid() {
   local token="$1"
@@ -935,7 +933,7 @@ host_credential_disable_proxy_global() {
 # a present deny item OR any deny-query error denies globally (fail-closed).
 # The revocation must prove at least one durable deny gate (file marker OR
 # this item) BEFORE any mutation.
-host_credential_deny_service() { printf '%s' "${MSW_HOST_KEYCHAIN_DENY_SERVICE:-org.microsandbox.MSWMonitor.github-host.v2.deny}"; }
+host_credential_deny_service() { printf '%s' "${MSW_HOST_KEYCHAIN_DENY_SERVICE:-org.microsandbox.Silo.github-host.v2.deny}"; }
 host_credential_deny_account() { printf '%s' "${MSW_HOST_KEYCHAIN_DENY_ACCOUNT:-user}"; }
 host_credential_deny_item_present() {
   local service account rc
@@ -995,7 +993,7 @@ host_github_api() {
   base="${MSW_PROXY_UPSTREAM_ROOT:-https://api.github.com}"
   base="${base%/}"
   local args=(-sS --max-time 30 --connect-timeout 10 -X "$method")
-  args+=(-H "Accept: application/vnd.github+json" -H "User-Agent: MSWMonitor")
+  args+=(-H "Accept: application/vnd.github+json" -H "User-Agent: Silo")
   if [[ -n "$token" ]]; then
     output="$(printf 'Authorization: Bearer %s\n' "$token" | "$CURL_BIN" "${args[@]}" -H @- "$base$path" 2>/dev/null)" || status=$?
   else
@@ -1641,7 +1639,7 @@ assert_not_quarantined() {
   [[ "${MSW_ALLOW_QUARANTINED:-0}" == 1 ]] && return 0
   file="$(quarantine_file "$box")"
   if [[ -e "$file" || -L "$file" ]]; then
-    fatal "workspace '$box' is quarantined; repair it from MSW Monitor's Connect GitHub flow"
+    fatal "workspace '$box' is quarantined; repair it from Silo's Connect GitHub flow"
   fi
   for role in guest host; do
     if app_metadata_profile_present "$box" "$role" &&
@@ -1650,7 +1648,7 @@ assert_not_quarantined() {
     fi
   done
   (( app_quarantined == 0 )) ||
-    fatal "workspace '$box' is quarantined; repair it from MSW Monitor setup"
+    fatal "workspace '$box' is quarantined; repair it from Silo setup"
 }
 
 sandbox_running() {
@@ -1876,7 +1874,7 @@ start_sandbox() {
   workspace_storage_require "$box"
   if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
     { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
-    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
+    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
   fi
   # Generic host-held secrets: reconcile pending add/edit/remove operations
   # and resolve every bound value ONLY inside the direct msb child's
@@ -2128,7 +2126,7 @@ __workspace_state_init() {
 # touches the sandbox config. `msw start`/`msw restart` only kick it after a
 # successful boot.
 # ---------------------------------------------------------------------------
-port_forwarder_label() { printf 'org.microsandbox.MSWMonitor.port-forwarder.%s' "$1"; }
+port_forwarder_label() { printf 'org.microsandbox.Silo.port-forwarder.%s' "$1"; }
 port_forwarder_plist() { printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$(port_forwarder_label "$1")"; }
 port_forwarder_pidfile() { printf '%s/port-forwarder-%s.pid\n' "$HOME/.local/state/msw" "$1"; }
 port_forwarder_logfile() { printf '%s/port-forwarder-%s.log\n' "$HOME/.local/state/msw" "$1"; }
@@ -2343,7 +2341,7 @@ cmd_restart() {
     note "Restarting $box"
     if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
       { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
     fi
     # Generic host-held secrets: reconcile pending operations and resolve
     # bound values ONLY inside the direct msb child's environment.
@@ -2514,18 +2512,18 @@ PLIST
   sudo /bin/launchctl bootstrap system /Library/LaunchDaemons/dev.msw.loopback-aliases.plist
 
   hosts_tmp="$(mktemp "${TMPDIR:-/tmp}/msw-hosts.XXXXXX")"
-  /usr/bin/awk '/^# BEGIN MSW WORKSPACES$|^# BEGIN MSW MONITOR MANAGED HOSTS$/{skip=1;next}/^# END MSW WORKSPACES$|^# END MSW MONITOR MANAGED HOSTS$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
-  printf '\n# BEGIN MSW MONITOR MANAGED HOSTS\n' >>"$hosts_tmp"
+  /usr/bin/awk '/^# BEGIN MSW WORKSPACES$|^# BEGIN SILO MANAGED HOSTS$/{skip=1;next}/^# END MSW WORKSPACES$|^# END SILO MANAGED HOSTS$/{skip=0;next}!skip{print}' /etc/hosts >"$hosts_tmp"
+  printf '\n# BEGIN SILO MANAGED HOSTS\n' >>"$hosts_tmp"
   for box in "${WORKSPACES[@]}"; do
     printf '%s %s\n' "$(workspace_ip "$box")" "$(workspace_host "$box")" >>"$hosts_tmp"
   done
-  printf '# END MSW MONITOR MANAGED HOSTS\n' >>"$hosts_tmp"
+  printf '# END SILO MANAGED HOSTS\n' >>"$hosts_tmp"
   sudo /usr/bin/install -o root -g wheel -m 0644 "$hosts_tmp" /etc/hosts
   rm -f "$hosts_tmp"
   sudo /usr/bin/dscacheutil -flushcache
   sudo /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
   else
-    note "Deferring privileged host repair to MSW Monitor"
+    note "Deferring privileged host repair to Silo"
   fi
 
   note "Configuring SSH for Ghostty and Zed"
@@ -3214,7 +3212,7 @@ cmd_github_setup() {
   fi
 
   if [[ "${MSW_TEST_MODE:-0}" != 1 ]]; then
-    fatal "legacy GitHub token setup was removed; use MSW Monitor's Connect GitHub flow"
+    fatal "legacy GitHub token setup was removed; use Silo's Connect GitHub flow"
   fi
 
   local box="$1" repo="$2" mode="${3:-host-write}" read_token="" write_token="" host_write=1
@@ -3468,7 +3466,7 @@ cmd_github_remove() {
     return
   fi
   if app_metadata_profile_present "$box" guest || app_metadata_profile_present "$box" host; then
-    fatal "schema-3 GitHub App grants must be revoked from MSW Monitor so the service grant is revoked; no local credentials were changed"
+    fatal "schema-3 GitHub App grants must be revoked from Silo so the service grant is revoked; no local credentials were changed"
   fi
   if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
   meta_file="$(metadata_file "$box")"
@@ -3712,7 +3710,7 @@ cmd_github_auth() {
   done
   if [[ "$MSW_GITHUB_MODE" != local ]]; then
     host_auth_error_exit MSW_GITHUB_MODE_MISMATCH 69 \
-      "msw github auth is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow" \
+      "msw github auth is a local-mode command; in connect mode use Silo's Connect GitHub flow" \
       "Switch MSW_GITHUB_MODE=local"
   fi
   require_command_path jq "$JQ_BIN"
@@ -3945,7 +3943,7 @@ shuttle_stop() {
   return 0
 }
 
-proxy_shuttle_launchd_label() { printf 'org.microsandbox.MSWMonitor.github-shuttle.%s' "$1"; }
+proxy_shuttle_launchd_label() { printf 'org.microsandbox.Silo.github-shuttle.%s' "$1"; }
 proxy_shuttle_launchd_plist() { printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$(proxy_shuttle_launchd_label "$1")"; }
 
 # Stop the per-workspace shuttle LaunchAgent and PROVE the label is gone (or
@@ -4087,18 +4085,18 @@ proxy_shuttle_cleanup() {
 # plutil -lint, then bootstrap gui/$UID. Uninstall bootouts BEFORE deleting
 # the plist. The rendered port comes from MSW_GITHUB_PROXY_PORT.
 # ---------------------------------------------------------------------------
-github_proxy_launchd_label() { printf 'org.microsandbox.MSWMonitor.github-proxy'; }
-github_proxy_plist_file() { printf '%s/Library/LaunchAgents/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$HOME"; }
+github_proxy_launchd_label() { printf 'org.microsandbox.Silo.github-proxy'; }
+github_proxy_plist_file() { printf '%s/Library/LaunchAgents/org.microsandbox.Silo.github-proxy.plist\n' "$HOME"; }
 github_proxy_plist_template() {
-  if [[ -f "$MSW_SCRIPT_ROOT/../launchd/org.microsandbox.MSWMonitor.github-proxy.plist" ]]; then
-    printf '%s/../launchd/org.microsandbox.MSWMonitor.github-proxy.plist\n' "$MSW_SCRIPT_ROOT"
+  if [[ -f "$MSW_SCRIPT_ROOT/../launchd/org.microsandbox.Silo.github-proxy.plist" ]]; then
+    printf '%s/../launchd/org.microsandbox.Silo.github-proxy.plist\n' "$MSW_SCRIPT_ROOT"
   elif [[ -f "$HOME/.local/share/msw/github-proxy.plist" ]]; then
     printf '%s\n' "$HOME/.local/share/msw/github-proxy.plist"
   else
     return 1
   fi
 }
-github_proxy_log_file() { printf '%s/Library/Logs/MSWMonitor/github-proxy.log\n' "$HOME"; }
+github_proxy_log_file() { printf '%s/Library/Logs/Silo/github-proxy.log\n' "$HOME"; }
 
 github_proxy_render_plist() {
   # Renders the launch agent. Production uses the defaults; tests inject
@@ -4128,7 +4126,7 @@ github_proxy_render_plist() {
       -e "s|__MSW_ROOT__|$root|g" \
       -e "s|/tmp/msw-github-proxy.stderr.log|$log_file|g" \
       -e "s|<string>18446</string>|<string>$port</string>|g" \
-      -e "s|org.microsandbox.MSWMonitor.github-proxy|$label|g" \
+      -e "s|org.microsandbox.Silo.github-proxy|$label|g" \
       "$template" >"$plist.tmp.$$" || { rm -f "$plist.tmp.$$"; return 1; }
   # Test seam: inject extra EnvironmentVariables entries (one KEY=VALUE per
   # line, e.g. the policy/upstream/keychain paths a socket-activated test
@@ -4335,7 +4333,7 @@ proxy_configure_one() {
 cmd_github_proxy_configure() {
   local target="${1:-all}" box
   if [[ "$MSW_GITHUB_MODE" != local ]]; then
-    fatal "msw github proxy-configure is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow"
+    fatal "msw github proxy-configure is a local-mode command; in connect mode use Silo's Connect GitHub flow"
   fi
   [[ "$target" == all ]] || is_workspace "$target" || fatal "usage: msw github proxy-configure [WORKSPACE]"
   require_command_path jq "$JQ_BIN"
@@ -4353,7 +4351,7 @@ cmd_github_capability_rotate() {
   local box="$1" new_cap
   validate_workspace "$box"
   if [[ "$MSW_GITHUB_MODE" != local ]]; then
-    fatal "msw github capability rotate is a local-mode command; in connect mode use MSW Monitor's Connect GitHub flow"
+    fatal "msw github capability rotate is a local-mode command; in connect mode use Silo's Connect GitHub flow"
   fi
   require_command_path jq "$JQ_BIN"
   require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
@@ -6052,7 +6050,7 @@ Repositories
   msw identity "NAME" EMAIL [TARGET]    Set commit identity
 
 GitHub permissions
-  Connect GitHub                           Use MSW Monitor's Connect GitHub flow
+  Connect GitHub                           Use Silo's Connect GitHub flow
   msw github auth [--force] [--json]       Provision/rotate the host credential
   msw github auth --device [--json]        Start OAuth Device Flow (prints code once)
   msw github auth --device-complete CODE   One device-flow exchange attempt
@@ -6098,7 +6096,7 @@ Machine-readable app integration
 HELP
 }
 
-# Machine-readable integration boundary for MSW Monitor. Observation commands
+# Machine-readable integration boundary for Silo. Observation commands
 # never call ensure_running; only explicit, confirmed mutation commands may start.
 app_json_escape() {
   local value="${1-}" escaped="" char code index
@@ -6194,20 +6192,20 @@ app_unexpected_error() {
 app_usage_error() {
   local command="$1"
   app_emit_error "$command" "MSW_INVALID_REQUEST" \
-    "The requested MSW Monitor command has invalid arguments." \
+    "The requested 'msw app' command has invalid arguments." \
     "See 'msw app help' for the typed command contract." "" false 64
 }
 
 app_require_config() {
   local command="$1"
   (( MSW_CONFIG_AVAILABLE == 1 )) || app_emit_error "$command" "MSW_CONFIG_MISSING" \
-    "MSW configuration is not installed." "Run Setup in MSW Monitor." "" false 78
+    "MSW configuration is not installed." "Run Setup in Silo." "" false 78
 }
 
 app_require_runtime() {
   local command="$1"
   [[ -n "${MSB_BIN:-}" && -x "${MSB_BIN:-}" ]] || app_emit_error "$command" "MSW_RUNTIME_UNAVAILABLE" \
-    "The MicroSandbox runtime is unavailable." "Repair the MSW toolchain in MSW Monitor." "" true 69
+    "The MicroSandbox runtime is unavailable." "Repair the MSW toolchain in Silo." "" true 69
 }
 
 app_workspace_purpose() {
@@ -8260,14 +8258,14 @@ app_cmd_github_bind() {
     require_repository_access "$box" "$repo" host
   fi
   app_metadata_profile_present "$box" guest ||
-    app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Guest GitHub authorization is not committed." "Authorize guest access in MSW Monitor first." "$box" false 77
+    app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Guest GitHub authorization is not committed." "Authorize guest access in Silo first." "$box" false 77
   app_credential_available "$box" guest ||
-    app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "The guest GitHub credential is unavailable." "Authorize guest access again in MSW Monitor." "$box" false 77
+    app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "The guest GitHub credential is unavailable." "Authorize guest access again in Silo." "$box" false 77
   if [[ "$mode" == host-write ]]; then
     app_metadata_profile_present "$box" host ||
-      app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Host GitHub authorization is not committed." "Authorize host write access in MSW Monitor first." "$box" false 77
+      app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "Host GitHub authorization is not committed." "Authorize host write access in Silo first." "$box" false 77
     app_credential_available "$box" host ||
-      app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "The host GitHub credential is unavailable." "Authorize host write access again in MSW Monitor." "$box" false 77
+      app_emit_error github-bind "MSW_GITHUB_CREDENTIAL_MISSING" "The host GitHub credential is unavailable." "Authorize host write access again in Silo." "$box" false 77
   fi
   before="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
   [[ "$before" != Unknown ]] || app_emit_error github-bind "MSW_STATE_UNAVAILABLE" "Workspace state could not be observed before credential binding." "Repair state observation and authorize again." "$box" true 69
@@ -8890,7 +8888,7 @@ app_cmd_apply() {
     *) app_emit_error apply "MSW_PLAN_INVALID" "The plan contains an unsupported action." "Create a fresh plan." "$box" false 78 ;;
   esac
   if ! IFS= read -r supplied <&"$fd"; then
-    app_emit_error apply "MSW_CONFIRMATION_REQUIRED" "The action confirmation was not supplied." "Confirm the exact phrase shown by MSW Monitor." "$box" false 77
+    app_emit_error apply "MSW_CONFIRMATION_REQUIRED" "The action confirmation was not supplied." "Confirm the exact phrase shown by Silo." "$box" false 77
   fi
   [[ "$supplied" == "$phrase" ]] || app_emit_error apply "MSW_CONFIRMATION_MISMATCH" "The confirmation did not match the reviewed action." "Review the plan and confirm again." "$box" false 77
 
@@ -9444,7 +9442,7 @@ app_cmd_bootstrap() {
       ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
       app_emit_error bootstrap "MSW_GITHUB_RECONNECT_REQUIRED" \
         "GitHub is configured for '$box', but its credential is unavailable." \
-        "Connect GitHub for '$box' in MSW Monitor, then resume Setup." "$box" true 69
+        "Connect GitHub for '$box' in Silo, then resume Setup." "$box" true 69
     fi
   done
 
@@ -9492,7 +9490,7 @@ app_cmd_bootstrap() {
 
 # ---------------------------------------------------------------------------
 # Generic host-held secrets. Values live ONLY in the macOS Keychain at the
-# versioned service org.microsandbox.MSWMonitor.secret.v1 (account = the
+# versioned service org.microsandbox.Silo.secret.v1 (account = the
 # validated secret name) and travel over real pipes only — never argv, env
 # (except transiently inside the direct msb lifecycle child), tempfiles,
 # metadata, logs, or backups. The metadata file below is NONsecret and
@@ -9509,7 +9507,7 @@ app_cmd_bootstrap() {
 # item only after the binding is verified absent.
 # ---------------------------------------------------------------------------
 secrets_meta_file() { printf '%s' "$MSW_SECRETS_FILE"; }
-secret_keychain_service() { printf '%s' "${MSW_SECRET_KEYCHAIN_SERVICE:-org.microsandbox.MSWMonitor.secret.v1}"; }
+secret_keychain_service() { printf '%s' "${MSW_SECRET_KEYCHAIN_SERVICE:-org.microsandbox.Silo.secret.v1}"; }
 app_secret_plan_file() { printf '%s/secret-plans/%s.plan\n' "$GITHUB_META_DIR" "$1"; }
 
 # Domain grammar: exact DNS host, *.example.com (two or more labels after the
@@ -9919,7 +9917,7 @@ secret_prepare_start() {
   # A failed unbind locks the workspace down until a retried apply proves
   # the bindings are gone; starts/restarts refuse while the marker exists.
   if [[ -e "$(secrets_lockdown_file "$box")" || -L "$(secrets_lockdown_file "$box")" ]]; then
-    SECRET_PREPARE_ERROR="workspace '$box' is locked down after a failed secret change; retry the change from MSW Monitor to clear the lockdown"
+    SECRET_PREPARE_ERROR="workspace '$box' is locked down after a failed secret change; retry the change from Silo to clear the lockdown"
     return 1
   fi
   # Serialize against concurrent applies and other lifecycle boundaries.
@@ -10325,7 +10323,7 @@ app_cmd_secret_apply() {
     app_emit_error secret-apply "MSW_INVALID_REQUEST" "The apply input could not be read." "Send {\"confirmation\":\"...\",\"value\":\"...\"?} JSON on the requested file descriptor." "" false 64
   fi
   confirmation="$(printf '%s\n' "$request" | "$JQ_BIN" -r '.confirmation // empty' 2>/dev/null || true)"
-  [[ -n "$confirmation" ]] || app_emit_error secret-apply "MSW_CONFIRMATION_REQUIRED" "The action confirmation was not supplied." "Confirm the exact phrase shown by MSW Monitor." "" false 77
+  [[ -n "$confirmation" ]] || app_emit_error secret-apply "MSW_CONFIRMATION_REQUIRED" "The action confirmation was not supplied." "Confirm the exact phrase shown by Silo." "" false 77
   [[ "$confirmation" == "$phrase" ]] || app_emit_error secret-apply "MSW_CONFIRMATION_MISMATCH" "The confirmation did not match the reviewed secret action." "Review the plan and confirm again." "" false 77
   # An existing but unreadable metadata file is a typed fail-closed error
   # BEFORE the plan is consumed or any side effect runs.
@@ -10537,7 +10535,7 @@ app_cmd_secret_apply() {
     fi
     secrets_lock_release
     if [[ -n "$cleanup_failed" ]]; then
-      app_emit_error secret-apply "MSW_SECRET_RECOVERY_UNCERTAIN" "The pending secret state could not be recorded and cleanup could not be proven." "Keep the affected workspaces stopped and retry from MSW Monitor." "" true 77
+      app_emit_error secret-apply "MSW_SECRET_RECOVERY_UNCERTAIN" "The pending secret state could not be recorded and cleanup could not be proven." "Keep the affected workspaces stopped and retry from Silo." "" true 77
     fi
     app_emit_error secret-apply "MSW_SECRETS_META_WRITE_FAILED" "The pending secret state could not be recorded durably." "Retry the secret change." "" true 69
   fi
@@ -10552,7 +10550,7 @@ app_cmd_secret_apply() {
 
 app_cmd_help() {
   cat <<'APPHELP'
-Machine-readable MSW Monitor commands:
+Machine-readable `msw app` commands:
   msw app handshake --format json
   msw app state [--workspace WORKSPACE] --format json
   msw app metrics --workspace WORKSPACE --format json --once

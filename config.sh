@@ -10,7 +10,7 @@ MSW_BASE_BUILDER="msw-base-builder"
 MSW_BASE_SNAPSHOT="msw-base-v1"
 MSW_ROOT_DISK="48G"
 
-# Typed workspace configuration. MSW Monitor and setup.sh persist the validated
+# Typed workspace configuration. Silo and setup.sh persist the validated
 # JSON document at this path. setup.sh creates the three legacy defaults below
 # only when no typed document exists yet.
 MSW_WORKSPACES_FILE="${MSW_WORKSPACES_FILE:-$HOME/.config/msw/workspaces.json}"

@@ -25,13 +25,13 @@
 # leaves a global deny.
 #
 # Env (all optional, for tests and launchd):
-#   MSW_HOST_KEYCHAIN_SERVICE  Keychain service (default org.microsandbox.MSWMonitor.github-host)
+#   MSW_HOST_KEYCHAIN_SERVICE  Keychain service (default org.microsandbox.Silo.github-host.v2)
 #   MSW_HOST_KEYCHAIN_ACCOUNT  Keychain account (default user)
 #   MSW_TEST_KEYCHAIN_DIR      File-backed keychain seam (tests)
 #   MSW_SECURITY_BIN           security(1) path
 #   MSW_HOST_KEYCHAIN_HOME     HOME passed to security(1) (login keychain)
 #   MSW_HOST_META_FILE         nonsecret activation metadata path (default:
-#                              $HOME/Library/Application Support/MSW Monitor/github-host.json)
+#                              $HOME/Library/Application Support/Silo/github-host.json)
 #   MSW_CREDENTIAL_DENY_MARKER global deny marker path (default:
 #                              $HOME/.config/msw/credential-disabled)
 #   MSW_PYTHON_BIN             python3 path (default /usr/bin/python3)
@@ -232,7 +232,7 @@ def _deny_item_present() -> bool:
     error (including a timeout) denies globally (fail-closed). Honors the
     MSW_TEST_KEYCHAIN_DIR file seam for tests."""
     deny_service = os.environ.get(
-        "MSW_HOST_KEYCHAIN_DENY_SERVICE", "org.microsandbox.MSWMonitor.github-host.v2.deny")
+        "MSW_HOST_KEYCHAIN_DENY_SERVICE", "org.microsandbox.Silo.github-host.v2.deny")
     deny_account = os.environ.get("MSW_HOST_KEYCHAIN_DENY_ACCOUNT", "user")
     test_keychain_dir = os.environ.get("MSW_TEST_KEYCHAIN_DIR", "")
     if test_keychain_dir:
@@ -282,14 +282,14 @@ def main() -> int:
         return _fail("credential revoked (global deny marker present)")
 
     service = os.environ.get("MSW_HOST_KEYCHAIN_SERVICE",
-                             "org.microsandbox.MSWMonitor.github-host.v2")
+                             "org.microsandbox.Silo.github-host.v2")
     account = os.environ.get("MSW_HOST_KEYCHAIN_ACCOUNT", "user")
     security_bin = os.environ.get("MSW_SECURITY_BIN", "/usr/bin/security")
     keychain_home = os.environ.get("MSW_HOST_KEYCHAIN_HOME", "")
     test_keychain_dir = os.environ.get("MSW_TEST_KEYCHAIN_DIR", "")
     meta_file = os.environ.get("MSW_HOST_META_FILE", "") or os.path.join(
         os.path.expanduser("~"), "Library", "Application Support",
-        "MSW Monitor", "github-host.json")
+        "Silo", "github-host.json")
 
     raw = _read_keychain(service, account, security_bin, keychain_home,
                          test_keychain_dir)

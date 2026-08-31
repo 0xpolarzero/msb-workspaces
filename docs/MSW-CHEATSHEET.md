@@ -66,13 +66,13 @@ msw app github-policy-set --workspace W --repository OWNER/REPO --mode read-only
 
 `msw github remove` in local mode revokes the host credential (metadata first,
 fail-closed). In connect mode it refuses current Connect grants because
-revocation must be performed by MSW Monitor; use the app's workspace removal or
+revocation must be performed by Silo; use the app's workspace removal or
 account disconnect action so the service grant and local credential state are
 updated together.
 
 ## Host-held API secrets
 
-Use **MSW Monitor → Secrets**. Configure a name, workspace scope, and allowed
+Use **Silo → Secrets**. Configure a name, workspace scope, and allowed
 HTTPS destinations (`api.example.com`, `*.example.com`, or `*`). Values remain
 in macOS Keychain; guests receive placeholders. `*` requires explicit
 confirmation. Add/edit/remove changes show **Restart required** for running

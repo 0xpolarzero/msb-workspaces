@@ -70,7 +70,7 @@ on the Mac and a workspace cannot mutate repositories it was not given.
 
 ### Set up access (app)
 
-Open **MSW Monitor** → **Settings** → **GitHub**:
+Open **Silo** → **Settings** → **GitHub**:
 
 1. **Connect the account on this Mac.** The installer includes the GitHub CLI
    (`gh`); if it is not already signed in, run `gh auth login` once (web
@@ -79,7 +79,7 @@ Open **MSW Monitor** → **Settings** → **GitHub**:
    for VM push; a Device Flow fallback is available when a client ID is
    configured. The credential is stored as one versioned record in the
    login Keychain
-   (`org.microsandbox.MSWMonitor.github-host.v2`); the token never appears in
+   (`org.microsandbox.Silo.github-host.v2`); the token never appears in
    command arguments, logs, journals, or backups. Any pre-v2 item remains
    dormant and unread.
 2. **Tick repositories per workspace.** The policy starts empty: until a
@@ -137,7 +137,7 @@ grants.
 
 ### Host-held API secrets
 
-Open **MSW Monitor → Secrets** to manage non-GitHub API keys. For each key,
+Open **Silo → Secrets** to manage non-GitHub API keys. For each key,
 choose its workspaces and HTTPS destinations: an exact host, `*.example.com`,
 or `*`. The real value stays in macOS Keychain. The VM receives only a
 placeholder, and MicroSandbox substitutes the value at the allowed destination.

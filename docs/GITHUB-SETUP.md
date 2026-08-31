@@ -1,15 +1,15 @@
-# GitHub access in MSW Monitor
+# GitHub access in Silo
 
 GitHub is optional. The default local mode (`MSW_GITHUB_MODE=local`) keeps the
 GitHub credential on this Mac: git inside a workspace reaches GitHub through a
 host-side proxy on `127.0.0.1:18446` that enforces a per-workspace capability
 (`X-MSW-Capability`) against the policy file
-(`~/Library/Application Support/MSW Monitor/github-policy.json`). No GitHub
+(`~/Library/Application Support/Silo/github-policy.json`). No GitHub
 token is ever bound into a VM.
 
 ## First run
 
-Open **MSW Monitor** → **Settings** → **GitHub** and connect the account on
+Open **Silo** → **Settings** → **GitHub** and connect the account on
 this Mac:
 
 - The app reuses an authenticated `gh` CLI when one is present (verifying
@@ -18,7 +18,7 @@ this Mac:
 - When configured for it, the app falls back to the OAuth Device Flow and
   prints the code on screen.
 - The credential is stored as one versioned record in the login Keychain
-  (`org.microsandbox.MSWMonitor.github-host.v2`); the token never appears in
+  (`org.microsandbox.Silo.github-host.v2`); the token never appears in
   argv, logs, journals, or backups. A pre-v2 item is left dormant and unread.
 
 The policy starts empty: until you tick repositories, no workspace can reach

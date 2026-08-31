@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Stateful fake GitHub server for the MSW Monitor Path C proxy tests.
+"""Stateful fake GitHub server for the Silo Path C proxy tests.
 
 Phase 0 fixture: a stdlib-only, DUMB recording upstream that speaks the git
 smart-HTTP protocol, a small GitHub REST surface, and Git LFS basic transfer.

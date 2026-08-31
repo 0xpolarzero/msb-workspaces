@@ -63,7 +63,7 @@ keychain_read() {
   fi
 }
 
-app_credentials="${MSW_APP_CREDENTIALS_FILE:-$HOME/Library/Application Support/MSW Monitor/credentials.json}"
+app_credentials="${MSW_APP_CREDENTIALS_FILE:-$HOME/Library/Application Support/Silo/credentials.json}"
 
 metadata_value() {
   role="$1"
@@ -137,11 +137,11 @@ case "$mode" in
     # remedy instead of a live token; quarantined workspaces fail closed.
     quarantine="$HOME/.config/msw/github/$box.quarantine"
     if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
-      echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+      echo "msw: workspace '$box' is quarantined; repair GitHub access in Silo" >&2
       exit 1
     fi
     if [ -f "$HOME/.config/msw/github/$box.conf" ] || [ -L "$HOME/.config/msw/github/$box.conf" ]; then
-      echo "msw: workspace '$box' still has legacy GitHub token metadata; run: msw github migrate $box (or complete MSW Monitor setup) to retire it" >&2
+      echo "msw: workspace '$box' still has legacy GitHub token metadata; run: msw github migrate $box (or complete Silo setup) to retire it" >&2
       exit 1
     fi
     # token-free local path: no GH_TOKEN is exported.
@@ -154,30 +154,30 @@ case "$mode" in
 
     if [ "$app_mode" -eq 1 ]; then
       if [ -z "$jq_bin" ] || [ ! -x "$jq_bin" ]; then
-        echo "msw: jq is required to read MSW Monitor's scoped GitHub grant" >&2
+        echo "msw: jq is required to read Silo's scoped GitHub grant" >&2
         exit 1
       fi
       if app_profile_present; then
         recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
         quarantined="$(metadata_value guest quarantined 2>/dev/null || true)"
         if [ "$quarantined" = true ] || [ "$recovery_state" = quarantined ]; then
-          echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+          echo "msw: workspace '$box' is quarantined; repair GitHub access in Silo" >&2
           exit 1
         fi
         if ! token="$(app_token 2>/dev/null)"; then
-          echo "msw: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in MSW Monitor" >&2
+          echo "msw: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in Silo" >&2
           exit 1
         fi
         export GH_TOKEN="$token"
         unset token
       else
-        echo "msw: workspace '$box' has no scoped GitHub grant; connect GitHub in MSW Monitor" >&2
+        echo "msw: workspace '$box' has no scoped GitHub grant; connect GitHub in Silo" >&2
         exit 1
       fi
     else
       quarantine="$HOME/.config/msw/github/$box.quarantine"
       if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
-        echo "msw: workspace '$box' is quarantined; repair GitHub access in MSW Monitor" >&2
+        echo "msw: workspace '$box' is quarantined; repair GitHub access in Silo" >&2
         exit 1
       fi
       if [ "${MSW_TEST_MODE:-0}" = 1 ]; then
@@ -192,7 +192,7 @@ case "$mode" in
         fi
       elif [ -f "$HOME/.config/msw/github/$box.conf" ] ||
         [ -L "$HOME/.config/msw/github/$box.conf" ]; then
-        echo "msw: legacy GitHub token metadata for '$box' requires migration in MSW Monitor" >&2
+        echo "msw: legacy GitHub token metadata for '$box' requires migration in Silo" >&2
         exit 1
       fi
     fi

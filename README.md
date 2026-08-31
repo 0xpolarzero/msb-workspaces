@@ -1,5 +1,9 @@
 # MicroSandbox Workspaces (`msw`) 3.1.0
 
+<img src="assets/silo-logo.svg" alt="Silo" width="96">
+
+**Silo** is the native macOS control surface for these MicroSandbox workspaces.
+
 A ready-to-run development setup for an Apple Silicon Mac with configurable, isolated, persistent Linux microVM workspaces. A fresh setup starts with these defaults:
 
 | Workspace | Purpose | Normal live limit | Resize ceiling | Browser name |
@@ -19,7 +23,7 @@ cd microsandbox-workspaces
 exec zsh -l
 ```
 
-`setup.sh` installs the host tools, builds the common development image, creates every workspace in the validated schema-v1 `~/.config/msw/workspaces.json`, publishes the configured localhost ports, configures SSH/Zed integration, and finishes with a live deep check. MSW Monitor supplies that JSON through `msw app bootstrap --resume --workspace-config-fd FD --format json`; names and numeric limits are decoded as data rather than shell syntax.
+`setup.sh` installs the host tools, builds the common development image, creates every workspace in the validated schema-v1 `~/.config/msw/workspaces.json`, publishes the configured localhost ports, configures SSH/Zed integration, and finishes with a live deep check. Silo supplies that JSON through `msw app bootstrap --resume --workspace-config-fd FD --format json`; names and numeric limits are decoded as data rather than shell syntax.
 
 Then set your commit identity:
 
@@ -37,7 +41,7 @@ request and whether that grant is read-only or read-write. The Mac holds ONE
 host credential (reusing an authenticated `gh` CLI, or OAuth Device Flow when
 configured); no GitHub credential ever enters a VM.
 
-Set up authenticated access in **MSW Monitor** → **Settings** → **GitHub**:
+Set up authenticated access in **Silo** → **Settings** → **GitHub**:
 connect the account on this Mac, then grant repositories to each workspace and
 pick a mode per repository — **Clone/pull (push from Mac)** or **Clone/pull +
 Push from VM**. Selections grant the host credential to those repositories;
@@ -52,7 +56,7 @@ surface: `msw github auth|repos|status|verify|remove`. See
 
 ### Host-held API secrets
 
-Use **MSW Monitor → Secrets** to add, edit, remove, and scope API keys to
+Use **Silo → Secrets** to add, edit, remove, and scope API keys to
 workspaces and exact domains, `*.example.com`, or all HTTPS hosts (`*`). Values
 stay in macOS Keychain; VMs receive placeholders that MicroSandbox substitutes
 only at the configured HTTPS destinations. Every change is staged and shows

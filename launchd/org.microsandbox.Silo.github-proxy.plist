@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MSW GitHub proxy LaunchAgent (Path C, section 4).
+
+  Socket-activated per-connection spawn: launchd owns the 127.0.0.1:18446
+  listener, ACCEPTS each connection itself (inetdCompatibility Wait:false —
+  the proxy never accept()s), and hands the connected socket to a fresh
+  msw-github-proxy process as stdin/stdout. The proxy handles exactly one
+  request per connection (one request, then `Connection: close`) and exits;
+  launchd spawns the next instance on the following connection. Host loopback
+  ONLY -- no LAN listener anywhere (section 3/4).
+
+  Install with the absolute path substituted for __MSW_ROOT__ (the installer
+  owns the actual install/teardown):
+    launchctl bootstrap gui/$(id -u) launchd/org.microsandbox.Silo.github-proxy.plist
+
+  MSW_GITHUB_MODE=local is the single source of truth (section 1). The proxy
+  itself is mode-agnostic; local mode is asserted here so the agent can never
+  accidentally serve in connect mode. PYTHONDONTWRITEBYTECODE=1 keeps the
+  vendored tree bytecode-clean so reinstalls stay idempotent.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.microsandbox.Silo.github-proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__MSW_ROOT__/bin/msw-github-proxy</string>
+    </array>
+    <key>Sockets</key>
+    <dict>
+        <key>Listeners</key>
+        <dict>
+            <key>SockType</key>
+            <string>stream</string>
+            <key>SockFamily</key>
+            <string>IPv4</string>
+            <key>SockNodeName</key>
+            <string>127.0.0.1</string>
+            <key>SockServiceName</key>
+            <string>18446</string>
+        </dict>
+    </dict>
+    <key>inetdCompatibility</key>
+    <dict>
+        <key>Wait</key>
+        <false/>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MSW_GITHUB_MODE</key>
+        <string>local</string>
+        <key>MSW_GITHUB_PROXY_PORT</key>
+        <string>18446</string>
+        <key>PYTHONDONTWRITEBYTECODE</key>
+        <string>1</string>
+        <key>MSW_HOST_TOKEN_BIN</key>
+        <string>__MSW_ROOT__/libexec/msw-github-host-token</string>
+        <key>MSW_KEYCHAIN_BRIDGE</key>
+        <string>__MSW_ROOT__/libexec/msw-keychain-bridge</string>
+        <!-- MSW_PROXY_EXTRA_ENV -->
+    </dict>
+    <key>StandardErrorPath</key>
+    <string>/tmp/msw-github-proxy.stderr.log</string>
+</dict>
+</plist>

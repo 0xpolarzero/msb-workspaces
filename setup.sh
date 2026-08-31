@@ -124,7 +124,7 @@ if [[ -d "$SCRIPT_DIR/lib/vendor/h11" ]]; then
   mkdir -p "$HOME/.local/lib/vendor" || { rm -rf "$h11_tmp"; fatal "could not install the vendored h11 tree"; }
   mv "$h11_tmp" "$HOME/.local/lib/vendor/h11" || { rm -rf "$h11_tmp"; fatal "could not install the vendored h11 tree"; }
 fi
-install -m 0644 "$SCRIPT_DIR/launchd/org.microsandbox.MSWMonitor.github-proxy.plist" "$HOME/.local/share/msw/github-proxy.plist"
+install -m 0644 "$SCRIPT_DIR/launchd/org.microsandbox.Silo.github-proxy.plist" "$HOME/.local/share/msw/github-proxy.plist"
 install -m 0644 "$SCRIPT_DIR/docs/"*.md "$HOME/.local/share/msw/docs/"
 install -m 0644 "$SCRIPT_DIR/README.md" "$HOME/.local/share/msw/README.md"
 
@@ -246,8 +246,8 @@ if [[ "$TEST_MODE" != 1 && "$MSW_GITHUB_MODE" == local ]]; then
   "$HOME/.local/bin/msw" github proxy install || fatal "could not install the GitHub proxy launch agent"
   # Socket-activated agent (Wait=false): a loaded, registered job owns the
   # 127.0.0.1:18446 listener, so loaded == idle-valid and live.
-  verify_launchd_job_alive org.microsandbox.MSWMonitor.github-proxy socket \
-    || fatal "the GitHub proxy launch agent is not loaded; check ~/Library/Logs/MSWMonitor/github-proxy.log"
+  verify_launchd_job_alive org.microsandbox.Silo.github-proxy socket \
+    || fatal "the GitHub proxy launch agent is not loaded; check ~/Library/Logs/Silo/github-proxy.log"
 fi
 
 log "Checking MicroSandbox"
@@ -278,9 +278,9 @@ workspace_msb() {
   fi
   if [[ -f "$HOME/.config/msw/github/${box}.conf" || -f "$HOME/.config/msw/github/${box}.quarantine" ]]; then
     if [[ "$MSW_GITHUB_MODE" == local ]]; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github migrate $box, then msw github auth (or connect GitHub in MSW Monitor)"
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github migrate $box, then msw github auth (or connect GitHub in Silo)"
     else
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in MSW Monitor"
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
     fi
   fi
   "$MSB_BIN" "$@"
@@ -840,7 +840,7 @@ if [[ "$TEST_MODE" != 1 && "$SKIP_WORKSPACES" != 1 ]]; then
   done
   log "Verifying the host-managed published-port forwarders"
   for box in "${WORKSPACES[@]}"; do
-    verify_launchd_job_alive "org.microsandbox.MSWMonitor.port-forwarder.$box" \
+    verify_launchd_job_alive "org.microsandbox.Silo.port-forwarder.$box" \
       || fatal "the published-port forwarder for $box did not stay loaded and running; inspect $HOME/.local/state/msw/port-forwarder-$box.log"
   done
 fi
@@ -857,7 +857,7 @@ Setup complete. The installer has already run the full local end-to-end test.
 Next:
   1. exec zsh -l
   2. msw identity "YOUR NAME" YOUR_EMAIL@example.com
-  3. Connect GitHub per workspace: open MSW Monitor -> GitHub -> Connect,
+  3. Connect GitHub per workspace: open Silo -> GitHub -> Connect,
      then tick the repositories each workspace may access. The installer
      installs the `gh` CLI (Homebrew), so a clean Mac signs in with gh's web
      OAuth flow and msw reuses the authenticated session automatically.

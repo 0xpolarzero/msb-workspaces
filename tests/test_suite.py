@@ -464,7 +464,7 @@ class SyntaxAndStaticTests(MSWTestCase):
                  PACKAGE / "bin/msw-keychain-bridge",
                  PACKAGE / "lib/proxycore.py", PACKAGE / "lib/proxy-upstream.py",
                  PACKAGE / "lib/msw-port-forwarder.py"])
-        plist = PACKAGE / "launchd" / "org.microsandbox.MSWMonitor.github-proxy.plist"
+        plist = PACKAGE / "launchd" / "org.microsandbox.Silo.github-proxy.plist"
         run_cmd(["/usr/bin/plutil", "-lint", plist])
         config = (PACKAGE / "config.sh").read_text()
         self.assertIn("24678-24679", config)
@@ -485,7 +485,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         for stale in ("msw auth", "msw selftest", "--skip-update", "msw github setup dev"):
             self.assertNotIn(stale, docs)
         self.assertIn("Connect GitHub", docs)
-        self.assertIn("MSW Monitor", docs)
+        self.assertIn("Silo", docs)
         self.assertIn("msw push dev", docs)
         self.assertIn("msw backup", docs)
 
@@ -522,7 +522,7 @@ class SyntaxAndStaticTests(MSWTestCase):
         self.assertIn('chmod 0700 "$HOME/.local/state/msw"', setup)
         self.assertIn("verify_launchd_job_alive", setup)
         self.assertIn("did not stay loaded and running", setup)
-        self.assertIn("verify_launchd_job_alive org.microsandbox.MSWMonitor.github-proxy socket", setup)
+        self.assertIn("verify_launchd_job_alive org.microsandbox.Silo.github-proxy socket", setup)
         # Host prerequisite: the GitHub CLI is installed with the other
         # Homebrew tools so a clean Mac can sign in via gh web OAuth; no
         # OAuth client ID is invented in the installer or config.
@@ -1030,7 +1030,7 @@ class InstallerAndDailyTests(MSWTestCase):
         )
         self.assertFalse(marker.exists())
 
-        policy_file = self.env.home / "Library/Application Support/MSW Monitor/github-policy.json"
+        policy_file = self.env.home / "Library/Application Support/Silo/github-policy.json"
         policy_file.parent.mkdir(parents=True, exist_ok=True)
         policy_file.write_text(json.dumps({
             "schemaVersion": 1,
@@ -1042,7 +1042,7 @@ class InstallerAndDailyTests(MSWTestCase):
         }))
         stale_forwarder = (
             self.env.home / "Library/LaunchAgents/"
-            "org.microsandbox.MSWMonitor.port-forwarder.playgrounds.plist"
+            "org.microsandbox.Silo.port-forwarder.playgrounds.plist"
         )
         stale_forwarder.parent.mkdir(parents=True, exist_ok=True)
         stale_forwarder.write_text("stale fixture")
@@ -1269,7 +1269,7 @@ class InstallerAndDailyTests(MSWTestCase):
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")  # read token for guest exec
         # Connect-style guest grant that does NOT include acme/demo.
-        credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
+        credentials = self.env.home / "Library/Application Support/Silo/credentials.json"
         credentials.parent.mkdir(parents=True, exist_ok=True)
         credentials.write_text(json.dumps({
             "schemaVersion": 2,
@@ -1803,7 +1803,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         self._stop_proxy()
 
     def _seed_policy_and_keychain(self, root: Path, home: Path) -> Path:
-        policy = home / "Library/Application Support/MSW Monitor/github-policy.json"
+        policy = home / "Library/Application Support/Silo/github-policy.json"
         policy.parent.mkdir(parents=True, exist_ok=True)
         policy.write_text(json.dumps({
             "schemaVersion": 1,
@@ -1832,7 +1832,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         # §5 nonsecret activation metadata: the helper denies unless this
         # file exists with state "active" and generation/accountLogin matching
         # the Keychain record (missing metadata => 503 from the proxy).
-        meta = home / "Library/Application Support/MSW Monitor/github-host.json"
+        meta = home / "Library/Application Support/Silo/github-host.json"
         meta.write_text(json.dumps({
             "schemaVersion": 1,
             "state": "active",
@@ -1853,13 +1853,13 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             "PATH": "/usr/bin:/bin",
             "PYTHONPATH": "",
             "MSW_GITHUB_MODE": "local",
-            "MSW_POLICY_FILE": str(home / "Library/Application Support/MSW Monitor/github-policy.json"),
+            "MSW_POLICY_FILE": str(home / "Library/Application Support/Silo/github-policy.json"),
             "MSW_PROXY_UPSTREAM_ROOT": fake_base_url,
             "MSW_PROXY_LOG_FILE": str(root / "proxy.log"),
             "MSW_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
             "MSW_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
             "MSW_TEST_KEYCHAIN_DIR": str(root / "keychain"),
-            "MSW_HOST_META_FILE": str(home / "Library/Application Support/MSW Monitor/github-host.json"),
+            "MSW_HOST_META_FILE": str(home / "Library/Application Support/Silo/github-host.json"),
         }
 
     def _clone_through_installed_proxy(self, fake, installed: Path, root: Path, home: Path,
@@ -1890,7 +1890,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         launchd-owned socket — no --listen. The installed proxy must handle
         it. Bootout + cleanup happen in finally."""
         uid = os.getuid()
-        label = f"org.microsandbox.MSWMonitor.github-proxy.test{os.getpid()}"
+        label = f"org.microsandbox.Silo.github-proxy.test{os.getpid()}"
         plist = root / f"test-proxy-{os.getpid()}.plist"
         # A free port for the socket-activated listener.
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1898,14 +1898,14 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         launchd_port = probe.getsockname()[1]
         probe.close()
         extra_env = "\n".join([
-            f"MSW_POLICY_FILE={home / 'Library/Application Support/MSW Monitor/github-policy.json'}",
+            f"MSW_POLICY_FILE={home / 'Library/Application Support/Silo/github-policy.json'}",
             f"MSW_PROXY_UPSTREAM_ROOT={fake_base_url}",
             f"MSW_HOST_KEYCHAIN_SERVICE={HOST_KEYCHAIN_SERVICE}",
             f"MSW_HOST_KEYCHAIN_ACCOUNT={HOST_KEYCHAIN_ACCOUNT}",
             f"MSW_TEST_KEYCHAIN_DIR={root / 'keychain'}",
             # launchd's HOME is the real home, not the test home: the
             # activation-metadata path must be explicit.
-            f"MSW_HOST_META_FILE={home / 'Library/Application Support/MSW Monitor/github-host.json'}",
+            f"MSW_HOST_META_FILE={home / 'Library/Application Support/Silo/github-host.json'}",
             f"MSW_PROXY_LOG_FILE={root / 'proxy-launchd.log'}",
         ])
         render_env = {
@@ -2046,9 +2046,9 @@ class InstalledProxyPackagingTests(unittest.TestCase):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         pid_suffix = os.getpid()
-        alive = f"org.microsandbox.MSWMonitor.port-forwarder.test-alive-{pid_suffix}"
-        crashing = f"org.microsandbox.MSWMonitor.port-forwarder.test-crash-{pid_suffix}"
-        socket_label = f"org.microsandbox.MSWMonitor.github-proxy.test-socket-{pid_suffix}"
+        alive = f"org.microsandbox.Silo.port-forwarder.test-alive-{pid_suffix}"
+        crashing = f"org.microsandbox.Silo.port-forwarder.test-crash-{pid_suffix}"
+        socket_label = f"org.microsandbox.Silo.github-proxy.test-socket-{pid_suffix}"
         try:
             # Live KeepAlive job (what a healthy port forwarder looks like):
             # loaded AND stays alive (stable pid across the grace period).
@@ -2099,11 +2099,11 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             self.assertEqual(oct(state_dir.stat().st_mode & 0o777), "0o700")
 
             # Rendered launch agent: no placeholder, absolute paths, port, lint.
-            plist = home / "Library/LaunchAgents/org.microsandbox.MSWMonitor.github-proxy.plist"
+            plist = home / "Library/LaunchAgents/org.microsandbox.Silo.github-proxy.plist"
             text = plist.read_text()
             self.assertNotIn("__MSW_ROOT__", text)
             self.assertIn(f"{installed}/bin/msw-github-proxy", text)
-            self.assertIn(str(home / "Library/Logs/MSWMonitor/github-proxy.log"), text)
+            self.assertIn(str(home / "Library/Logs/Silo/github-proxy.log"), text)
             self.assertIn("<string>18446</string>", text)
             run_cmd(["/usr/bin/plutil", "-lint", str(plist)], env={"PATH": "/usr/bin:/bin"})
 
@@ -2148,8 +2148,8 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             # credential are removed first so setup's deep check skips the
             # live proxy-reachability probe (no launchd agent in test mode);
             # they are re-seeded for the post-install clone.
-            policy_path = home / "Library/Application Support/MSW Monitor/github-policy.json"
-            meta_path = home / "Library/Application Support/MSW Monitor/github-host.json"
+            policy_path = home / "Library/Application Support/Silo/github-policy.json"
+            meta_path = home / "Library/Application Support/Silo/github-host.json"
             keychain_file = root / "keychain" / (
                 re.sub(r"[^A-Za-z0-9_.-]", "_", HOST_KEYCHAIN_SERVICE)
                 + "__" + re.sub(r"[^A-Za-z0-9_.-]", "_", HOST_KEYCHAIN_ACCOUNT)
@@ -3015,7 +3015,7 @@ class BackupRestoreTests(MSWTestCase):
         self.env.key_file("msw.github.read", "dev").write_text("super-secret-token")
         # §9: the §5 host credential record lives only in the keychain (or the
         # MSW_TEST_KEYCHAIN_DIR seam) and must never appear in a backup.
-        self.env.key_file("org.microsandbox.MSWMonitor.github-host", "user").write_text(
+        self.env.key_file("org.microsandbox.Silo.github-host.v2", "user").write_text(
             json.dumps({"schemaVersion": 1, "accessToken": "gho_backup_secret_token",
                         "accountLogin": "fake-user"}))
         archive = self._backup()
@@ -3657,7 +3657,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn("24679", state["sandboxes"]["dev"].get("port_content", {}))
 
     def test_app_github_state_emits_guest_metadata_as_valid_json(self) -> None:
-        credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
+        credentials = self.env.home / "Library/Application Support/Silo/credentials.json"
         credentials.parent.mkdir(parents=True, exist_ok=True)
         credentials.write_text(json.dumps({
             "schemaVersion": 2,
@@ -4427,7 +4427,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_app_oauth_host_profile_enables_aggregate_host_write_capability(self) -> None:
-        credentials = self.env.home / "Library/Application Support/MSW Monitor/credentials.json"
+        credentials = self.env.home / "Library/Application Support/Silo/credentials.json"
         credentials.parent.mkdir(parents=True, exist_ok=True)
         common = {
             "workspace": "dev",
@@ -4915,7 +4915,7 @@ class PackagedBehaviorTests(MSWTestCase):
 
 
 PROXY_BIN = PACKAGE / "bin" / "msw-github-proxy"
-HOST_KEYCHAIN_SERVICE = "org.microsandbox.MSWMonitor.github-host.v2"
+HOST_KEYCHAIN_SERVICE = "org.microsandbox.Silo.github-host.v2"
 HOST_KEYCHAIN_ACCOUNT = "user"
 DEV_CAP = "a" * 48
 PLAY_CAP = "b" * 48
@@ -4990,7 +4990,7 @@ class GitHubProxyContractTests(MSWTestCase):
         # §5 nonsecret activation metadata beside the policy file, matching the
         # keychain record (generation/accountLogin) so the token helper accepts
         # the credential; the proxy forwards the seam to the helper.
-        meta_file = self.env.home / "Library/Application Support/MSW Monitor" / "github-host.json"
+        meta_file = self.env.home / "Library/Application Support/Silo" / "github-host.json"
         meta_file.parent.mkdir(parents=True, exist_ok=True)
         meta_file.write_text(json.dumps({
             "schemaVersion": 1,
@@ -7050,7 +7050,7 @@ class GitHubProxyContractTests(MSWTestCase):
 class _LocalModeGitHubBase(MSWTestCase):
     """Shared fixtures for Path C §5/§8/§11 local-mode CLI tests."""
 
-    POLICY_DIR_NAME = "Library/Application Support/MSW Monitor"
+    POLICY_DIR_NAME = "Library/Application Support/Silo"
 
     def setUp(self) -> None:
         super().setUp()
@@ -8320,7 +8320,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # the primary file marker was NOT recorded (impossible path)...
         self.assertFalse((self.env.home / ".config/msw/credential-disabled").exists())
         # ...but the Keychain deny item was (file seam) and denies the helper
-        deny_file = self.env.key_file("org.microsandbox.MSWMonitor.github-host.v2.deny", "user")
+        deny_file = self.env.key_file("org.microsandbox.Silo.github-host.v2.deny", "user")
         self.assertTrue(deny_file.exists())
         helper = PACKAGE / "bin/msw-github-host-token"
         helper_env = self.host_tool_env()
@@ -8915,7 +8915,7 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
     def test_ssh_proxy_local_never_reads_connect_credentials_or_exports_token(self) -> None:
         # Plant dormant Connect state (credentials.json + schema-3 keychain
         # record) exactly like an upgraded machine.
-        cred = self.env.home / "Library/Application Support/MSW Monitor"
+        cred = self.env.home / "Library/Application Support/Silo"
         cred.mkdir(parents=True, exist_ok=True)
         (cred / "credentials.json").write_text(json.dumps({
             "entries": {
@@ -9439,7 +9439,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.set_policy({"schemaVersion": 1, "workspaces": {
             "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
         }})
-        plist = self.env.home / "Library/LaunchAgents/org.microsandbox.MSWMonitor.github-shuttle.dev.plist"
+        plist = self.env.home / "Library/LaunchAgents/org.microsandbox.Silo.github-shuttle.dev.plist"
         plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_text("stale-plist\n")
         pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
@@ -9450,7 +9450,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         before = self.policy_path.read_bytes()
         cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
         proc = self._apply(cleared, check=False, extra_env={
-            "MSW_FAKE_LAUNCHCTL_LABEL": "org.microsandbox.MSWMonitor.github-shuttle.dev",
+            "MSW_FAKE_LAUNCHCTL_LABEL": "org.microsandbox.Silo.github-shuttle.dev",
         })
         self.assertEqual(proc.returncode, 77, proc.stdout + proc.stderr)
         err = json.loads(proc.stdout)["error"]
@@ -9969,7 +9969,7 @@ class GenericSecretsTests(MSWTestCase):
     fail-closed unbind, lifecycle reconciliation on start/restart, restart
     summaries, and Keychain deletion only after verified removal."""
 
-    SECRET_SERVICE = "org.microsandbox.MSWMonitor.secret.v1"
+    SECRET_SERVICE = "org.microsandbox.Silo.secret.v1"
 
     def _key_file(self, name: str) -> Path:
         return self.env.key_file(self.SECRET_SERVICE, name)

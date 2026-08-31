@@ -293,7 +293,7 @@ class UpstreamTruncated(AbortError):
 
 def _default_policy_path() -> str:
     return os.path.join(
-        os.path.expanduser("~"), "Library", "Application Support", "MSW Monitor", "github-policy.json"
+        os.path.expanduser("~"), "Library", "Application Support", "Silo", "github-policy.json"
     )
 
 
@@ -333,7 +333,7 @@ class Config:
         self.stamp_ttl = int(os.environ.get("MSW_PROXY_STAMP_TTL", "3600"))
 
         self.keychain_service = os.environ.get(
-            "MSW_HOST_KEYCHAIN_SERVICE", "org.microsandbox.MSWMonitor.github-host.v2"
+            "MSW_HOST_KEYCHAIN_SERVICE", "org.microsandbox.Silo.github-host.v2"
         )
         self.keychain_account = os.environ.get("MSW_HOST_KEYCHAIN_ACCOUNT", "user")
         td = os.environ.get("MSW_TEST_KEYCHAIN_DIR")

@@ -11,7 +11,7 @@ Rules:
 - The VM is NEVER auto-started: `msb ping -q` gates every cycle.
 - Desired ports come from the immutable config list (MSW_PUBLISHED_PORTS).
 - Occupied ports (or ports ssh refuses to bind) are omitted and persisted as
-  skippedPorts in ~/.config/msw/workspace-state/<box>.json so the MSW Monitor
+  skippedPorts in ~/.config/msw/workspace-state/<box>.json so the Silo
   app can surface a portWarning. State updates are fail-soft.
 - Every interval the forwarder reconciles: when a skipped port becomes free
   or an ssh bind fails, ONLY the ssh process is restarted — never the VM.

@@ -1,41 +1,46 @@
 # MSW 3.1.0 verification report
 
-Verification is split between the native MSW Monitor app and the portable `msw` release suite. Local mode (`MSW_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
+Verification is split between the native Silo app and the portable `msw` release suite. Local mode (`MSW_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
 
 The token-prompt GitHub setup scenarios described in older release reports are historical. The legacy `msw github setup` surface is removed and must not be treated as a supported setup or rotation path.
 
 Run the app checks after source changes:
 
 ```bash
-app/MSWMonitor/Scripts/build.sh
-app/MSWMonitor/Scripts/test.sh
-app/MSWMonitor/Scripts/smoke-test.sh
+app/Silo/Scripts/build.sh
+app/Silo/Scripts/test.sh
+app/Silo/Scripts/smoke-test.sh --monitor-only
+app/Silo/Scripts/smoke-test.sh --repair-only
 ```
 
-The smoke flow proves the app bundle and status-item/popover UI. The app's workspace state and observation counter remain deterministic fixture values; they are not live sandbox telemetry.
+The focused smoke flows prove the app bundle, status-item/popover UI, and runtime-repair cutover. The app's workspace states remain deterministic fixture values; they are not live sandbox telemetry.
 
 ## Native macOS app evidence
 
-- Bundle exercised: `app/MSWMonitor/build/MSWMonitor.app`.
-- UI smoke mode: `--ui-test-open-popover`; production mode remains `.transient`.
-- UI result bundle: `app/MSWMonitor/build/DerivedData/Smoke/Logs/Test/Test-MSWMonitor-2026.08.14_14-54-25-+0200.xcresult`.
-- Complete UI output: `app/MSWMonitor/build/logs/smoke-ui.log`.
-- Result: all 3 `MSWMonitorUITests` cases passed with zero failures (`testSetupCanReviewAndFinishInFixtureMode()`, `testSetupReviewExplainsCompletionState()`, and `testStatusItemPopoverRefreshAndQuit()`).
-  - Model suite: `app/MSWMonitor/Scripts/test.sh` passed 54 tests with zero failures. Result: `app/MSWMonitor/build/DerivedData/Tests/Logs/Test/Test-MSWMonitor-2026.08.14_14-53-55-+0200.xcresult`.
+- Verification date: 2026-08-30.
+- Bundle exercised: `app/Silo/build/Silo.app` with bundle identifier `org.microsandbox.Silo`.
+- UI launch mode: the focused tests used `--ui-test-open-popover`; the repair test also used `--ui-test-runtime-repair`. Production popover behavior remains `.transient`.
+- Build: `app/Silo/Scripts/build.sh` completed with `** BUILD SUCCEEDED **`; complete output is `app/Silo/build/logs/build.log`.
+- Model suite: `app/Silo/Scripts/test.sh` passed 276 tests with zero failures and one environment-dependent skip. Result: `app/Silo/build/DerivedData/Tests/Logs/Test/Test-Silo-2026.08.30_22-45-10-+0200.xcresult`; complete output is `app/Silo/build/logs/test.log`.
+- Monitor smoke: `app/Silo/Scripts/smoke-test.sh --monitor-only` passed `testStatusItemMinimalPopoverAndQuit()` with zero failures. Preserved result: `app/Silo/build/monitor-smoke-review.xcresult`; preserved output: `app/Silo/build/logs/monitor-smoke-review.log`.
+- Repair smoke: `app/Silo/Scripts/smoke-test.sh --repair-only` passed `testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation()` with zero failures. Preserved result: `app/Silo/build/repair-smoke-review.xcresult`; preserved output: `app/Silo/build/logs/repair-smoke-review.log`.
+- An earlier repair-smoke attempt timed out while launching the test application before any UI assertion. The isolated rerun above passed the complete flow; the failed launch evidence is preserved at `app/Silo/build/repair-smoke-review-failure.xcresult` and `app/Silo/build/logs/repair-smoke-review-failure.log`.
 - Observed semantic values:
-  - `statusItem.button`: accessibility label `MSW Monitor`.
-  - Application menu title: `MSW Monitor`.
-  - Application menu items: `About MSW Monitor`, `Settings…`, `Hide MSW Monitor`, and `Quit MSW Monitor`.
-  - `monitor.title`: `MSW Monitor`.
+  - `statusItem.button`: accessibility label `Silo`.
+  - Application menu title: `Silo`.
+  - Application menu items: `About Silo`, `Settings…`, `Hide Silo`, and `Quit Silo`.
+  - `monitor.title`: `Silo`.
   - `workspace.dev.name/state`: `dev` / `Stopped`.
   - `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`.
   - `workspace.personal.name/state`: `personal` / `Stopped`.
-  - `observation.value`: `Not yet refreshed`, then `Observation #1` after `refresh.button` (`Refresh`).
+  - `open-monitor.button`: `Open Silo…`; separate Overview, Settings, and Setup shortcuts were absent.
+  - Repair fixture: `statusItem.button` value `Silo. Repair needed. MSW installation needs repair.`, one `runtime-repair.popover.row`, message `MSW installation needs repair`, and one `Repair…` action.
+  - Repair window: one global repair banner and one `Repair…` action on Overview, Workspaces, GitHub, Secrets, Notifications, Backup, and General. The fixture's first repair attempt exposed bounded details; the retry reported `Installation repaired`, removed every repair surface, and restored status value `Not observed. No authoritative workspace state is available yet.`
   - `quit.button`: `Quit`; the app reached `notRunning`.
-- Cleanup: the app was quit through the UI, and the subsequent `pgrep -x MSWMonitor` check returned no remaining instance.
-- Unified-log queries actually run after the smoke test used `log show --last 3m --style compact --info --debug` (a three-minute window):
-  - `process == "MSWMonitor"`
-  - `process == "MSWMonitor" AND (messageType == error OR messageType == fault)`
+- Cleanup: the app was quit through the UI, and the subsequent `pgrep -x Silo` check returned no remaining instance.
+- Unified-log queries run after the smoke tests used `/usr/bin/log show --last 3m --style compact --info --debug` (a three-minute window):
+  - `process == "Silo"`
+  - `process == "Silo" AND (messageType == error OR messageType == fault)`
   No narrower wall-clock interval was recorded. These logs are framework diagnostics; the app has no intentional application-level logger.
 
 - Live-service limit: historical — the configured MSW Connect endpoint was unavailable from this machine during probing (DNS resolution failed), and Connect is dormant in the current build. Current GitHub verification is local mode: the proxy contract and integration suites run against `tests/fake_github.py`; no real GitHub account or credential was used.
@@ -168,7 +173,7 @@ all live VM, Docker, SSH, internet, and published-port checks passed
 
 ### 2. Configure GitHub in local mode
 
-Open **MSW Monitor** → **Settings** → **GitHub**, connect the account on this
+Open **Silo** → **Settings** → **GitHub**, connect the account on this
 Mac, tick the repositories each workspace may use (new assignments default to
 **Clone/pull (push from Mac)**), and toggle **Clone/pull + Push from VM** only
 where VM-initiated push is needed. Local editing and commits always work; host
