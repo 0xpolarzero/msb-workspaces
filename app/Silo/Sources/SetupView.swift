@@ -317,6 +317,9 @@ struct SetupView: View {
     @State private var isRefreshingGitHub = false
     @State private var githubRefreshTask: Task<Void, Never>?
     @State private var githubRefreshGeneration = 0
+    @State private var isResettingGitHub = false
+    @State private var githubResetTask: Task<Void, Never>?
+    @State private var githubResetAction: GitHubDestructiveAction?
     @State private var isApplyingGitHub = false
     @State private var githubApplyTask: Task<Void, Never>?
     @State private var githubProgressTask: Task<Void, Never>?
@@ -510,6 +513,14 @@ struct SetupView: View {
                 )
             }
         }
+        .sheet(item: $githubResetAction) { action in
+            GitHubImpactConfirmation(action: action, accessMode: accessMode) {
+                githubResetAction = nil
+            } onConfirm: {
+                githubResetAction = nil
+                resetGitHubAccess()
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.root")
     }
@@ -523,6 +534,8 @@ struct SetupView: View {
         githubRefreshGeneration &+= 1
         githubRefreshTask?.cancel()
         githubRefreshTask = nil
+        githubResetTask?.cancel()
+        githubResetTask = nil
         githubApplyGeneration &+= 1
         githubApplyTask?.cancel()
         githubApplyTask = nil
@@ -1542,10 +1555,12 @@ struct SetupView: View {
                 .font(.title3.weight(.semibold))
                 .accessibilityIdentifier("setup.github.title")
 
+            Text("Account")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+
             if let account {
-                Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityIdentifier("setup.github.account")
+                githubConnectedAccountRow("Connected as @\(account.login)")
             }
 
             HStack(spacing: 12) {
@@ -1566,7 +1581,7 @@ struct SetupView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isConnectingGitHub)
+                    .disabled(isConnectingGitHub || isResettingGitHub)
                     .accessibilityValue(isConnectingGitHub ? "Connecting" : "Ready")
                     .accessibilityIdentifier("setup.github.connect.button")
                 }
@@ -1578,6 +1593,7 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.github.cancel.button")
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
+
             if let githubSkipIssue {
                 Label(githubSkipIssue, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -1591,17 +1607,13 @@ struct SetupView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("No repositories are available yet.", systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
-                        Text("Manage the connected account below, or skip GitHub and continue without it. Public repositories remain cloneable without granting access.")
+                        Text("Reset the connected access below, or skip GitHub and continue without it. Public repositories remain cloneable without granting access.")
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
                     .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 }
-                if !repositoriesByInstallation.isEmpty {
-                    repositoryPolicyEditor
-                }
-                Button("Manage Connected Account") { openSettings(.github) }
-                    .accessibilityIdentifier("setup.github.manage-account.button")
+                repositoryAccessSection
             }
 
             if let authorizationIssue {
@@ -1629,13 +1641,11 @@ struct SetupView: View {
                 }
             }
 
-
             githubStatusSlot
 
             if !verificationResults.isEmpty {
                 verificationResultsCard
             }
-
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github-boundary")
@@ -1643,41 +1653,18 @@ struct SetupView: View {
 
     private var localGitHubBoundary: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("GitHub")
-                    .font(.title3.weight(.semibold))
-                    .accessibilityIdentifier("setup.github.title")
-                Spacer()
+            Text("GitHub")
+                .font(.title3.weight(.semibold))
+                .accessibilityIdentifier("setup.github.title")
 
-                if let account {
-                    Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityIdentifier("setup.github.account")
-                } else if githubHostCredentialPresent {
-                    Label("GitHub account connected on this Mac", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityIdentifier("setup.github.account")
-                }
+            Text("Account")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
 
-                if isGitHubConnected || isRefreshingGitHub {
-                    Button(action: { loadLocalCatalog(force: true) }) {
-                        ZStack {
-                            Image(systemName: "arrow.clockwise")
-                                .opacity(isRefreshingGitHub ? 0 : 1)
-                                .accessibilityHidden(true)
-                            ProgressView()
-                                .controlSize(.small)
-                                .opacity(isRefreshingGitHub ? 1 : 0)
-                                .accessibilityHidden(true)
-                        }
-                        .frame(width: 16, height: 16)
-                    }
-                    .controlSize(.small)
-                    .disabled(isRefreshingGitHub || isConnectingGitHub || provider == nil)
-                    .accessibilityLabel("Refresh")
-                    .accessibilityValue(isRefreshingGitHub ? "Refreshing repositories" : "Ready")
-                    .accessibilityIdentifier("setup.github.refresh.button")
-                }
+            if let account {
+                githubConnectedAccountRow("Connected as @\(account.login)")
+            } else if githubHostCredentialPresent {
+                githubConnectedAccountRow("GitHub account connected on this Mac")
             }
 
             if localCatalogAttempted && !isGitHubConnected && !isRefreshingGitHub {
@@ -1699,11 +1686,12 @@ struct SetupView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(isConnectingGitHub || provider == nil)
+                    .disabled(isConnectingGitHub || isResettingGitHub || provider == nil)
                     .accessibilityValue(isConnectingGitHub ? "Connecting" : "Ready")
                     .accessibilityIdentifier("setup.github.connect-account.button")
                 }
             }
+
             if let localCatalogIssue {
                 VStack(alignment: .leading, spacing: 7) {
                     Label(localCatalogIssueTitle(localCatalogIssue.kind), systemImage: "wifi.exclamationmark")
@@ -1721,11 +1709,7 @@ struct SetupView: View {
             }
 
             if isGitHubConnected {
-                if !repositoriesByInstallation.isEmpty {
-                    repositoryPolicyEditor
-                }
-                Button("Manage Connected Account") { openSettings(.github) }
-                    .accessibilityIdentifier("setup.github.manage-account.button")
+                repositoryAccessSection
             }
 
             githubStatusSlot
@@ -1733,6 +1717,38 @@ struct SetupView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("setup.github-boundary")
+    }
+
+    private func githubConnectedAccountRow(_ label: String) -> some View {
+        HStack(spacing: 10) {
+            Label(label, systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityLabel(label)
+                .accessibilityIdentifier("setup.github.account")
+            Spacer()
+            if isResettingGitHub {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Resetting GitHub access")
+            }
+            Button("Reset…", role: .destructive) {
+                githubResetAction = .disconnect([], account)
+            }
+            .disabled(isResettingGitHub || isConnectingGitHub || isApplyingGitHub)
+            .accessibilityIdentifier("setup.github.reset")
+        }
+        .controlSize(.small)
+    }
+
+    private var repositoryAccessSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Repository access")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("setup.github.repository-access.title")
+            repositoryPolicyEditor
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var githubStatusSlot: some View {
@@ -1836,13 +1852,16 @@ struct SetupView: View {
             accessMode: accessMode,
             drafts: $drafts,
             editedWorkspaces: $editedGitHubWorkspaces,
-            disabled: isApplyingGitHub,
+            disabled: isApplyingGitHub || isResettingGitHub,
             onEdit: {
                 repositoryPolicyApplied = false
                 if accessMode == .local || disabledGitHubWorkspaces.isEmpty {
                     githubSkipped = false
                 }
-            }
+            },
+            showsHeading: false,
+            highlightsEdits: true,
+            usesContainerBackground: false
         )
         .accessibilityIdentifier("setup.github.repository-policy")
     }
@@ -2397,7 +2416,7 @@ struct SetupView: View {
                     githubConnectionTask = nil
                     githubSkipped = false
                     githubStatus = discovery.installations.isEmpty
-                        ? "No repositories are available for this account. Manage your connected account, or skip GitHub. Public repositories remain cloneable without granting access."
+                        ? "No repositories are available for this account. Reset GitHub access, or skip GitHub. Public repositories remain cloneable without granting access."
                         : "Choose which repositories each workspace can use with your GitHub credentials."
                     prefillIdentity(from: discovery.account)
                 }
@@ -2485,7 +2504,7 @@ struct SetupView: View {
                     if !catalog.hostCredentialPresent {
                         githubStatus = "Connect GitHub to grant authenticated repository access, or skip it for now."
                     } else if catalog.installations.isEmpty && catalog.repositoriesByInstallation.isEmpty {
-                        githubStatus = "No repositories were found. Refresh, manage your connected account, or skip GitHub. Public repositories remain cloneable without granting access."
+                        githubStatus = "No repositories were found. Reset GitHub access, or skip GitHub. Public repositories remain cloneable without granting access."
                     } else {
                         githubStatus = "Choose which repositories each workspace can use with your GitHub credentials. Public repositories remain cloneable without granting access."
                     }
@@ -2516,6 +2535,101 @@ struct SetupView: View {
             }
         }
     }
+    private func resetGitHubAccess() {
+        guard !isResettingGitHub else { return }
+        if accessMode == .local, provider == nil {
+            localCatalogIssue = LocalCatalogIssue(
+                kind: .unavailable,
+                message: "GitHub local access is unavailable in this build."
+            )
+            return
+        }
+        if accessMode == .connect, authorizationCoordinator == nil {
+            authorizationIssue = AuthorizationIssue(
+                kind: .unavailable,
+                message: GitHubFeatureAvailability.unavailableNotice
+            )
+            return
+        }
+
+        isResettingGitHub = true
+        localCatalogIssue = nil
+        authorizationIssue = nil
+        githubStatus = "Resetting GitHub access…"
+
+        // Workspace registration and policy reset both mutate workspace
+        // runtime state. Stop the background registration, wait for its CLI
+        // operation to release the lock, reset access, then resume it.
+        let interruptedRegistration = registrationTask
+        interruptedRegistration?.cancel()
+        githubRefreshGeneration &+= 1
+        let interruptedRefresh = githubRefreshTask
+        interruptedRefresh?.cancel()
+        githubRefreshTask = nil
+        isRefreshingGitHub = false
+
+        githubResetTask = Task {
+            if let interruptedRegistration { await interruptedRegistration.value }
+            if let interruptedRefresh { await interruptedRefresh.value }
+            guard !Task.isCancelled else {
+                isResettingGitHub = false
+                githubResetTask = nil
+                return
+            }
+
+            do {
+                if accessMode == .local, let provider {
+                    try await provider.removeAllAccess()
+                    retainedRepositoryPolicy = []
+                    drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(
+                        for: workspaceConfigurations
+                    )
+                    editedGitHubWorkspaces.removeAll()
+                    repositoryPolicyApplied = false
+                    githubApplyProgress = nil
+                } else if let authorizationCoordinator {
+                    try await authorizationCoordinator.disconnectAccount()
+                    account = nil
+                    installations = []
+                    repositoriesByInstallation = [:]
+                    authorizationSessionID = nil
+                    existingMetadata = []
+                    repositoryPolicyApplied = false
+                }
+
+                registrationFailure = nil
+                isResettingGitHub = false
+                githubResetTask = nil
+                if interruptedRegistration != nil {
+                    startWorkspaceRegistration()
+                }
+                if accessMode == .local {
+                    loadLocalCatalog(force: true)
+                } else {
+                    githubStatus = "GitHub access was reset."
+                }
+            } catch is CancellationError {
+                isResettingGitHub = false
+                githubResetTask = nil
+            } catch {
+                isResettingGitHub = false
+                githubResetTask = nil
+                githubStatus = ""
+                if accessMode == .local {
+                    localCatalogIssue = LocalCatalogIssue(
+                        kind: .failed,
+                        message: "GitHub access could not be reset: \(error.localizedDescription)"
+                    )
+                } else {
+                    authorizationIssue = issue(for: error)
+                }
+                if interruptedRegistration != nil {
+                    startWorkspaceRegistration()
+                }
+            }
+        }
+    }
+
 
     /// Runs the CLI-owned host-credential flow. gh reuse completes
     /// in-process. When the CLI reports gh is unauthenticated with no
@@ -3316,6 +3430,11 @@ struct SetupView: View {
                         ? "Allow Silo in Login Items, then choose Retry."
                         : result.message)
                     : nil
+            } catch is CancellationError {
+                // Reset and teardown intentionally interrupt background registration.
+            } catch let clientError as MSWClientError where clientError == .cancelled {
+                // The command runner reports cooperative process cancellation
+                // through its typed error rather than Swift CancellationError.
             } catch let setupError {
                 let savedState = await coordinator.state()
                 state = savedState

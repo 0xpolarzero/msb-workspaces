@@ -104,7 +104,7 @@ final class AppNavigationState {
     }
 }
 
-private struct WorkspaceGrantGroup: Identifiable, Equatable {
+struct WorkspaceGrantGroup: Identifiable, Equatable {
     let workspace: String
     let entries: [WorkspaceCredentialMetadata]
     let repositoryNames: [String]
@@ -112,7 +112,7 @@ private struct WorkspaceGrantGroup: Identifiable, Equatable {
     var id: String { workspace }
 }
 
-private enum GitHubDestructiveAction: Identifiable {
+enum GitHubDestructiveAction: Identifiable {
     case remove(WorkspaceGrantGroup)
     case disconnect([WorkspaceGrantGroup], GitHubAccount?)
 
@@ -1596,7 +1596,10 @@ struct SettingsView: View {
             }
             isUpdatingGitHub = true
             githubError = nil
+            githubState.suspendPollingForMutation()
             Task {
+                await githubState.waitForRefreshToFinish()
+                await provider.cancelCurrentPolicyApply()
                 do {
                     try await provider.removeAllAccess()
                     isGitHubAccessTemporarilyDisabled = false
@@ -1611,6 +1614,7 @@ struct SettingsView: View {
                     githubError = "Removal could not be applied. Repository access remains unchanged: \(error.localizedDescription)"
                     await loadGitHubStatePreservingError()
                 }
+                githubState.resumePollingAfterMutation()
             }
             return
         }
@@ -1764,7 +1768,7 @@ private extension UNAuthorizationStatus {
     }
 }
 
-private struct GitHubImpactConfirmation: View {
+struct GitHubImpactConfirmation: View {
     let action: GitHubDestructiveAction
     let accessMode: GitHubAccessMode
     let onCancel: () -> Void
