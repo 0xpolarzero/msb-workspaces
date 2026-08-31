@@ -1678,7 +1678,7 @@ export function MarkdownPreview({ markdown, onLinkClick }: { markdown: string; o
 
 export function WorkflowSource({ workflowKey = "docs-driven-development" }: { workflowKey?: string }) {
   const entry =
-    workflowSources[workflowKey] ??
+    (workflowSources as Record<string, { path: string; source: string }>)[workflowKey] ??
     (workflowKey === "docs-driven-development" ? { path: workflowSourcePath, source: workflowSource } : undefined);
   if (!entry?.source) return null;
   const lineCount = entry.source.split("\n").length;

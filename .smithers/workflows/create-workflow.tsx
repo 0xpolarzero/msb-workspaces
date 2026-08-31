@@ -3,10 +3,10 @@
 // smithers-display-name: Create Workflow
 // smithers-description: Build a new Smithers workflow from a plain-English ask — clarify, provision docs & skills, design, scaffold, verify, and document.
 // smithers-tags: authoring, workflow-pack, scaffolding
-/** @jsxImportSource smithers-orchestrator */
-import { UI } from "smithers-orchestrator";
+/** @jsxImportSource smthrs */
+import { UI } from "smthrs";
 import { $ } from "bun";
-import { createSmithers } from "smithers-orchestrator";
+import { createSmithers } from "smthrs";
 import { z } from "zod/v4";
 import { parse as parseYaml } from "yaml";
 import { agents } from "../agents";
@@ -21,6 +21,27 @@ const WORKFLOWS_DIR = ".smithers/workflows";
 const PROMPTS_DIR = ".smithers/prompts";
 const SKILLS_DIR = ".smithers/skills";
 const UI_DIR = ".smithers/ui";
+const TESTS_DIR = ".smithers/tests";
+const PACK_PRELOAD = ".smithers/preload.ts";
+const PACK_PACKAGE_JSON = ".smithers/package.json";
+
+/**
+ * Is the new workflow's test registered in the pack's `test` script? That
+ * script is an explicit space-separated list, not a glob, so an unregistered
+ * test file is silently never run — green-looking in the repo while
+ * contributing zero coverage.
+ */
+async function packTestScriptIncludes(workflowName: string): Promise<boolean> {
+  try {
+    const raw = await Bun.file(PACK_PACKAGE_JSON).text();
+    const script = String(JSON.parse(raw)?.scripts?.test ?? "");
+    return script.split(/\s+/).includes(`./tests/${workflowName}.test.tsx`);
+  } catch {
+    // No pack package.json (or unreadable) means nothing registers the test.
+    return false;
+  }
+}
+const MONITOR_DIR = ".smithers/monitor";
 
 // Requires REAL YAML frontmatter (parsed, not line-matched) with `name` and
 // `workflow` fields that exactly equal the workflow id — a hand-rolled
@@ -56,6 +77,19 @@ const inputSchema = z.object({
 
 // 1. The freeform ask, turned into a structured, buildable spec.
 const clarifiedSpecSchema = z.looseObject({
+  route: z
+    .object({
+      tier: z.enum(["direct", "oneshot", "workflow"]),
+      reason: z.string().describe("One sentence: why this tier fits."),
+      oneshotCommand: z
+        .string()
+        .nullable()
+        .default(null)
+        .describe('For tier "oneshot": the exact smithers oneshot command to run instead of building a workflow.'),
+    })
+    .describe(
+      "Right-size the request BEFORE building anything. direct = a trivial edit the operator should just make; oneshot = one strong agent finishes it in one context window (route to `smithers oneshot`); workflow = the task genuinely needs ordered stages, durability, approvals, loops, or reuse. Only tier `workflow` proceeds to design.",
+    ),
   name: z.string().describe("Proposed kebab-case workflow id."),
   goal: z.string().describe("One sentence: what the finished workflow accomplishes."),
   trigger: z
@@ -169,7 +203,10 @@ const scaffoldSchema = z.looseObject({
     .array(
       z.object({
         path: z.string(),
-        kind: z.enum(["workflow", "prompt", "component", "agents", "skill", "ui", "other"]).default("other"),
+        // "test" is first-class: a workflow and its registered testing-library
+        // test are one indivisible change, so the scaffold must be able to
+        // declare the test file it wrote rather than bury it under "other".
+        kind: z.enum(["workflow", "test", "prompt", "component", "agents", "skill", "ui", "other"]).default("other"),
       }),
     )
     .default([]),
@@ -201,7 +238,9 @@ const skillVerificationSchema = z.object({
 const outputSchema = z.object({
   workflow: z.string().describe("Workflow id that was built (or attempted)."),
   workflowFile: z.string().describe("Path to the scaffolded workflow .tsx."),
-  status: z.string().describe("Terminal status: built | verify-failed | denied | designed | incomplete."),
+  status: z
+    .string()
+    .describe("Terminal status: built | verify-failed | denied | designed | routed-simple | incomplete."),
   summary: z.string().describe("One-line summary of what the run produced."),
   filesWritten: z.array(z.string()).default([]).describe("Paths the scaffolder wrote."),
   fileCount: z.number().default(0).describe("How many files were written."),
@@ -258,6 +297,18 @@ export default smithers((ctx) => {
     ctx.outputMaybe("skillVerification", { nodeId: "skill-verification" });
   const skillReady = skillVerification?.exists === true && skillVerification.containsWorkflowMetadata === true;
 
+  // Tier-0 routing: a request one strong agent can finish in one context
+  // window is a `smithers oneshot`, not a workflow — stop before provisioning
+  // instead of scaffolding gates, loops, and a UI around a simple task.
+  // Output rows store nested objects as JSON strings; unwrap defensively.
+  const rawRoute = clarify?.route;
+  const route =
+    typeof rawRoute === "string"
+      ? (JSON.parse(rawRoute) as { tier?: string; reason?: string; oneshotCommand?: string | null })
+      : rawRoute;
+  const routeTier = route?.tier === "oneshot" || route?.tier === "direct" ? route.tier : "workflow";
+  const routedSimple = clarify !== undefined && routeTier !== "workflow";
+
   const designed = design !== undefined;
   const approved = !review || approval?.approved === true;
   const proceed = designed && approved;
@@ -267,6 +318,7 @@ export default smithers((ctx) => {
     scaffold?.workflowName ?? design?.workflowName ?? clarify?.name ?? ctx.input.name ?? "new-workflow";
   const workflowFile = `${WORKFLOWS_DIR}/${workflowName}.tsx`;
   const uiFile = `${UI_DIR}/${workflowName}.tsx`;
+  const testFile = `${TESTS_DIR}/${workflowName}.test.tsx`;
 
   // Verify-loop bookkeeping: re-render `until` against the latest verify output.
   const verifyOutputs = ctx.outputs.verify ?? [];
@@ -279,8 +331,9 @@ export default smithers((ctx) => {
   // Terminal summary surfaced as the run's printed output. Pulled straight from
   // the steps above — never invented.
   const filesWritten = [...new Set(scaffoldRows.flatMap((row) => (row.filesWritten ?? []).map((file) => file.path)))];
-  const terminalStatus =
-    documentation && verifyPassed && skillVerification?.exists && skillVerification.containsWorkflowMetadata
+  const terminalStatus = routedSimple
+    ? "routed-simple"
+    : documentation && verifyPassed
       ? "built"
       : scaffold && verifyFailed
         ? "verify-failed"
@@ -289,8 +342,13 @@ export default smithers((ctx) => {
           : design
             ? "designed"
             : "incomplete";
-  const terminalSummary =
-    documentation?.summary ?? scaffold?.summary ?? design?.summary ?? clarify?.goal ?? `Workflow "${workflowName}".`;
+  const terminalSummary = routedSimple
+    ? `No workflow needed (${routeTier}): ${route?.reason ?? clarify?.goal ?? "the request fits a single agent."}`
+    : (documentation?.summary ??
+      scaffold?.summary ??
+      design?.summary ??
+      clarify?.goal ??
+      `Workflow "${workflowName}".`);
 
   return (
     <Workflow name="create-workflow">
@@ -305,8 +363,9 @@ export default smithers((ctx) => {
         </Task>
 
         {/* 2 — Docs & skills: decide and ACTUALLY install/gather what the new
-            workflow and its worker agents need before we design anything. */}
-        {clarify ? (
+            workflow and its worker agents need before we design anything.
+            Skipped entirely when clarify routed the request to a simpler tier. */}
+        {clarify && !routedSimple ? (
           <Task id="provision" output={outputs.provision} agent={agents.implement} heartbeatTimeoutMs={600_000}>
             <ProvisionPrompt spec={clarify} skillsDir={SKILLS_DIR} workflowsDir={WORKFLOWS_DIR} />
           </Task>
@@ -356,6 +415,10 @@ export default smithers((ctx) => {
               workflowsDir={WORKFLOWS_DIR}
               promptsDir={PROMPTS_DIR}
               uiDir={UI_DIR}
+              monitorDir={MONITOR_DIR}
+              testsDir={TESTS_DIR}
+              packageJson={PACK_PACKAGE_JSON}
+              preload={PACK_PRELOAD}
             />
           </Task>
         ) : null}
@@ -376,7 +439,10 @@ export default smithers((ctx) => {
                       workflowsDir={WORKFLOWS_DIR}
                       promptsDir={PROMPTS_DIR}
                       uiDir={UI_DIR}
+                      monitorDir={MONITOR_DIR}
                       uiFile={uiFile}
+                      testFile={testFile}
+                      packageJson={PACK_PACKAGE_JSON}
                     />
                   </Task>
                 }
@@ -391,31 +457,66 @@ export default smithers((ctx) => {
                   const bunx = process.env.SMITHERS_BUNX ?? "bunx";
                   const bun = process.env.SMITHERS_BUN ?? "bun";
 
+                  const activeTestFile = `${TESTS_DIR}/${activeWorkflowName}.test.tsx`;
+
                   const errors: string[] = [];
-                  const graphCmd = `${bunx} smithers-orchestrator graph ${activeWorkflowFile}`;
-                  const res = await $`${bunx} smithers-orchestrator graph ${activeWorkflowFile}`.nothrow().quiet();
+                  const graphCmd = `${bunx} smthrs graph ${activeWorkflowFile}`;
+                  const res = await $`${bunx} smthrs graph ${activeWorkflowFile}`.nothrow().quiet();
                   if (res.exitCode !== 0) {
                     const errText = `${res.stderr?.toString() ?? ""}\n${res.stdout?.toString() ?? ""}`.trim();
                     errors.push(`[graph] ${errText.slice(0, 6000)}`);
                   }
+                  // A workflow and its test are one indivisible change, so the
+                  // verification loop treats a missing or unregistered test as a
+                  // verification FAILURE — the fix agent is then told to write
+                  // it. `graph` renders one frame with no assertions, so it can
+                  // never stand in for the real renderWorkflow-based test.
+                  const parts = [graphCmd];
+                  const testExists = await Bun.file(activeTestFile).exists();
+                  if (!testExists) {
+                    errors.push(
+                      `[test-registration] missing ${activeTestFile}: every workflow ships a renderWorkflow-based test alongside it.`,
+                    );
+                  } else {
+                    const registered = await packTestScriptIncludes(activeWorkflowName);
+                    if (!registered) {
+                      errors.push(
+                        `[test-registration] ${PACK_PACKAGE_JSON} does not list ./tests/${activeWorkflowName}.test.tsx in its "test" script, so the test would never run.`,
+                      );
+                    }
+                    // `./`-prefixed: bun treats a bare argument as a name FILTER
+                    // and silently matches nothing, so the test would appear to
+                    // pass without ever running.
+                    const preloadArg = `./${PACK_PRELOAD}`;
+                    const testArg = `./${activeTestFile}`;
+                    const testCmd = `${bun} test --preload ${preloadArg} --max-concurrency=1 ${testArg}`;
+                    parts.push(testCmd);
+                    const testRes = await $`${bun} test --preload ${preloadArg} --max-concurrency=1 ${testArg}`
+                      .nothrow()
+                      .quiet();
+                    if (testRes.exitCode !== 0) {
+                      const testErr = `${testRes.stderr?.toString() ?? ""}\n${testRes.stdout?.toString() ?? ""}`.trim();
+                      errors.push(`[test] ${activeTestFile}: ${testErr.slice(0, 6000)}`);
+                    }
+                  }
                   // If a custom UI was scaffolded, it must at least transpile.
                   const uiExists = await Bun.file(activeUiFile).exists();
-                  let command = graphCmd;
                   if (uiExists) {
-                    command = `${graphCmd} && ${bun} build --no-bundle ${activeUiFile}`;
+                    parts.push(`${bun} build --no-bundle ${activeUiFile}`);
                     const uiRes = await $`${bun} build --no-bundle ${activeUiFile}`.nothrow().quiet();
                     if (uiRes.exitCode !== 0) {
                       const uiErr = `${uiRes.stderr?.toString() ?? ""}\n${uiRes.stdout?.toString() ?? ""}`.trim();
                       errors.push(`[ui] ${activeUiFile}: ${uiErr.slice(0, 6000)}`);
                     }
                   }
+                  const command = parts.join(" && ");
                   const passed = errors.length === 0;
                   return {
                     passed,
                     command,
                     errors,
                     notes: passed
-                      ? `${activeWorkflowName} loads, its graph renders without executing${uiExists ? `, and ${activeUiFile} transpiles` : ""}.`
+                      ? `${activeWorkflowName} loads, its graph renders, its registered test passes${uiExists ? `, and ${activeUiFile} transpiles` : ""}.`
                       : `verification failed for ${activeWorkflowName}; see errors.`,
                   };
                 }}
@@ -425,10 +526,11 @@ export default smithers((ctx) => {
         ) : null}
 
         {/* 7 — Document the new workflow so future agents know how to run it.
-            This is a bounded retry loop: a missing or malformed companion skill
-            keeps the workflow from reaching its terminal success summary. */}
+            Bounded retry, best-effort: a workflow that builds and verifies is
+            BUILT; a malformed companion skill downgrades skillPath to null
+            instead of failing the whole run. */}
         {proceed && verifyPassed ? (
-          <Loop id="skill:loop" until={skillReady} maxIterations={3} onMaxReached="fail">
+          <Loop id="skill:loop" until={skillReady} maxIterations={3} onMaxReached="return-last">
             <Sequence>
               <Task id="document" output={outputs.document} agent={agents.cheapFast}>
                 <DocumentPrompt
@@ -466,17 +568,26 @@ export default smithers((ctx) => {
             {() => {
               const uiWritten = filesWritten.includes(uiFile);
               const nextSteps =
-                terminalStatus === "built"
+                terminalStatus === "routed-simple"
                   ? [
-                      `smithers workflow run ${workflowName} --prompt "<your input>"  # or: smithers up ${workflowFile}`,
-                      `bunx smithers-orchestrator graph ${workflowFile}  # print the graph; add --interactive for the TUI`,
-                      ...(uiWritten ? [`smithers ui <runId>  # open the custom UI in ${uiFile} for a run`] : []),
-                      `smithers workflow run create-workflow --prompt "iterate on ${workflowName}: <what to change>"  # iterate`,
+                      routeTier === "oneshot"
+                        ? (route?.oneshotCommand ??
+                          `smithers oneshot "${clarify?.goal ?? "the task"}"  # one strong agent, no workflow file`)
+                        : `# ${route?.reason ?? "Trivial edit: just do it directly."}`,
+                      `smithers workflow run create-workflow --prompt "build it as a workflow anyway: ${clarify?.goal ?? ""}"  # override the routing`,
                     ]
-                  : [
-                      `smithers inspect <runId>  # review why the run stopped at status "${terminalStatus}"`,
-                      `smithers workflow run create-workflow --prompt "retry building ${workflowName}"`,
-                    ];
+                  : terminalStatus === "built"
+                    ? [
+                        `smithers workflow run ${workflowName} --prompt "<your input>"  # or: smithers up ${workflowFile}`,
+                        `pnpm -C .smithers test  # run the registered workflow tests`,
+                        `bunx smthrs graph ${workflowFile}  # print the graph; add --interactive for the TUI`,
+                        ...(uiWritten ? [`smithers ui <runId>  # open the custom UI in ${uiFile} for a run`] : []),
+                        `smithers workflow run create-workflow --prompt "iterate on ${workflowName}: <what to change>"  # iterate`,
+                      ]
+                    : [
+                        `smithers inspect <runId>  # review why the run stopped at status "${terminalStatus}"`,
+                        `smithers workflow run create-workflow --prompt "retry building ${workflowName}"`,
+                      ];
               return {
                 workflow: workflowName,
                 workflowFile,

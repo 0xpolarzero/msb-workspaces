@@ -11,23 +11,24 @@
     "workflow:skills": "smithers workflow skills"
   },
   "dependencies": {
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
-    "smithers-orchestrator": "^0.31.0",
-    "@smithers-orchestrator/cli": "^0.31.0",
-    "zod": "4.4.3",
-    "@milkdown/crepe": "7.21.2",
+    "@smthrs/cli": "^0.35.0",
+    "@xyflow/react": "12.11.3",
+    "dagre": "0.8.5",
     "mermaid": "11.16.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "smthrs": "^0.35.0",
     "yaml": "2.9.0",
-    "@xyflow/react": "12.11.2",
-    "dagre": "0.8.5"
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "typescript": "6.0.3",
+    "@types/bun": "^1.4.0",
+    "@types/d3-force": "^3.0.10",
+    "@types/dagre": "0.7.54",
+    "@types/mdx": "2.0.14",
+    "@types/node": "26.2.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
-    "@types/mdx": "2.0.14",
-    "@types/node": "16.9.1",
-    "@types/dagre": "0.7.54"
+    "typescript": "6.0.3"
   }
 }

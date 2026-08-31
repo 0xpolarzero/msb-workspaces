@@ -12,7 +12,7 @@ import {
   useGatewayRun,
   useGatewayRunEvents,
   useGatewayRuns,
-} from "smithers-orchestrator/gateway-react";
+} from "smthrs/gateway-react";
 import { themeCss } from "./cw-theme";
 import { crepeThemeCss } from "./crepeTheme.generated";
 import { xyflowThemeCss } from "./xyflowTheme.generated";
@@ -703,7 +703,7 @@ function App() {
   );
   const activeRunId = selectedRunId ?? runIdFromUrl() ?? runs[0]?.runId;
   const runQuery = useGatewayRun(activeRunId);
-  const stream = useGatewayRunEvents(activeRunId, { afterSeq: 0, maxEvents: 1000 });
+  const stream = useGatewayRunEvents(activeRunId, { afterSeq: undefined, maxEvents: 1000 });
   const approvalsQuery = useGatewayApprovals({ filter: { runId: activeRunId ?? "" } });
 
   const clarifyOut = useGatewayNodeOutput({ runId: activeRunId, nodeId: "clarify", iteration: 0 });
@@ -782,10 +782,13 @@ function App() {
   approvalsRef.current = approvalsQuery;
 
   useEffect(() => {
-    if (!activeRunId) return;
-    for (const query of outputRef.current) void query.refetch();
-    void approvalsRef.current.refetch();
-    void runsRef.current.refetch();
+    if (typeof window === "undefined" || !activeRunId) return;
+    const timeout = window.setTimeout(() => {
+      for (const query of outputRef.current) void query.refetch();
+      void approvalsRef.current.refetch();
+      void runsRef.current.refetch();
+    }, 100);
+    return () => window.clearTimeout(timeout);
   }, [activeRunId, eventCount, runStatus]);
   useEffect(() => {
     setDecision("idle");
