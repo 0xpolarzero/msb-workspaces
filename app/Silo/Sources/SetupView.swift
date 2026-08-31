@@ -480,7 +480,6 @@ struct SetupView: View {
             if !uiTestMode { persistResumeState() }
         }
         .onChange(of: activeStep) { _, step in
-            loadLocalCatalogWhenNeeded(for: step)
             if step == .workspaces { refreshWorkspaceNameApprovalHint() }
         }
         .sheet(isPresented: $deviceFlowShown) {
@@ -1973,7 +1972,10 @@ struct SetupView: View {
             githubApplyProgressView
             reviewStatusLine(
                 title: "Name for Git changes",
-                ready: identityDecisionMade
+                value: identityReviewMessage,
+                ready: identityDecisionMade,
+                pending: isSavingIdentity,
+                accessibilityIdentifier: "setup.final-review.identity"
             )
             reviewStatusLine(
                 title: "Terminal",
@@ -2025,16 +2027,39 @@ struct SetupView: View {
                 "\(configuration.runtimeStorageGiB) GB runtime storage"
         }.joined(separator: "; ")
     }
+    private var identityReviewMessage: String {
+        if identitySkipped {
+            return "Skipped by choice. Git keeps each workspace's existing author identity."
+        }
+        if isSavingIdentity {
+            return "Saving \(identityName.trimmingCharacters(in: .whitespacesAndNewlines)) " +
+                "<\(identityEmail.trimmingCharacters(in: .whitespacesAndNewlines))> to the selected workspaces."
+        }
+        if identityDecisionMade {
+            if !identityStatus.isEmpty { return identityStatus }
+            return "Saved to \(identityConfiguredWorkspaces.sorted().joined(separator: ", "))."
+        }
+        if !identityStatus.isEmpty { return identityStatus }
+        if identityHasUnverifiedEdits {
+            return "The entered name or email changed after the last save. Save the updated details before finishing."
+        }
+        if canSaveIdentity {
+            return "The name and email are entered but have not been saved to the workspaces."
+        }
+        return "Enter and save a name and valid email, or skip this optional step."
+    }
+
     @ViewBuilder
     private func reviewStatusLine(
         title: String,
         value: String? = nil,
         ready: Bool,
+        pending: Bool = false,
         accessibilityIdentifier: String? = nil
     ) -> some View {
         let line = HStack(alignment: .top, spacing: 9) {
-            Image(systemName: ready ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ready ? .green : .orange)
+            Image(systemName: ready ? "checkmark.circle.fill" : (pending ? "clock.fill" : "exclamationmark.triangle.fill"))
+                .foregroundStyle(ready ? Color.green : (pending ? Color.secondary : Color.orange))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.headline)
@@ -2422,12 +2447,6 @@ struct SetupView: View {
         }
     }
 
-    /// Local mode: loads the repo catalog (policy read-back via the CLI) into
-    /// the existing picker models and prefills drafts from the policy file.
-    private func loadLocalCatalogWhenNeeded(for step: SetupStep) {
-        guard accessMode == .local, step == .github, !localCatalogAttempted else { return }
-        loadLocalCatalog()
-    }
 
     private func loadLocalCatalog(force: Bool = false) {
         guard workspaceConfigurationAccepted, githubContextLoaded else { return }
@@ -3199,7 +3218,10 @@ struct SetupView: View {
         if accessMode == .local {
             githubContextLoaded = true
             localCatalogAttempted = false
-            loadLocalCatalogWhenNeeded(for: activeStep)
+            // Workspace Continue published the final workspace boundary.
+            // Start the account, repository, and policy read immediately;
+            // rendering the GitHub step must never be the trigger.
+            loadLocalCatalog()
             return true
         }
         await loadExistingMetadata(startupLifecycle: startupLifecycle)

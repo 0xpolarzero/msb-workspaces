@@ -1669,10 +1669,16 @@ final class SiloUITests: XCTestCase {
             app.descendants(matching: .any)["setup.final-review.editor"].value as? String,
             "Zed"
         )
+        let identityReview = app.descendants(matching: .any)["setup.final-review.identity"]
+        XCTAssertTrue(identityReview.waitForExistence(timeout: 2))
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertEqual(done.label, "Done")
-        XCTAssertTrue(done.isEnabled)
+        XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
+        XCTAssertEqual(
+            identityReview.value as? String,
+            "Saved Taylor Example <taylor@example.com> for development, playgrounds, personal."
+        )
         done.click()
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
         XCTAssertNotEqual(app.state, .notRunning)

@@ -6111,7 +6111,7 @@ app_json_escape() {
       $'\t') escaped="${escaped}\\t" ;;
       *)
         printf -v code '%d' "'$char"
-        if (( code < 32 )); then
+        if (( code >= 0 && code < 32 )); then
           printf -v char '\\u%04x' "$code"
         fi
         escaped="${escaped}${char}"
@@ -9382,6 +9382,7 @@ app_reconcile_workspace_configuration() {
 
 app_cmd_bootstrap() {
   local resume=0 events_fd="" workspace_config_fd="" format="" phase request_id output recovery detail
+  local secrets_file="" missing_secret="" box
   while (( $# > 0 )); do
     case "$1" in
       --resume) resume=1; shift ;;
@@ -9446,6 +9447,26 @@ app_cmd_bootstrap() {
     fi
   done
 
+  # Secret metadata is nonsecret, but every configured value must still exist
+  # in Keychain before deep verification starts a workspace. Report this as a
+  # typed, actionable setup failure instead of embedding terminal diagnostics
+  # from `msw check --deep` in the app protocol.
+  secrets_file="$(secrets_meta_file)"
+  if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
+    secrets_meta_valid "$secrets_file" || app_emit_error bootstrap \
+      "MSW_SECRETS_METADATA_INVALID" \
+      "The host-held secrets metadata is unreadable." \
+      "Open Silo Secrets, repair or remove the invalid secret configuration, then resume Setup." \
+      "" false 78
+    for box in "${WORKSPACES[@]}"; do
+      if missing_secret="$(secret_missing_value_for_workspace "$box")"; then
+        app_emit_error bootstrap "MSW_SECRET_VALUE_MISSING" \
+          "Secret '$missing_secret' cannot be applied to '$box' because its Keychain value is missing." \
+          "Open Silo Secrets, re-enter '$missing_secret' for '$box', then resume Setup." \
+          "$box" true 69
+      fi
+    done
+  fi
   if [[ -n "$events_fd" ]]; then
     printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":0,"message":"Starting the complete deep verification. Workspaces may start temporarily and the previous running set will be restored.","safeForDisplay":true}\n' \
       "$(app_json_string "$request_id")" >&"$events_fd"
@@ -9997,6 +10018,42 @@ secret_prepare_start() {
   MSW_SECRET_BINDINGS="$bindings"
   return 0
 }
+# Prints the first secret whose desired binding for a workspace cannot be
+# resolved from Keychain. A zero exit means a name was printed; one means every
+# required value is available. Pending removals deliberately require no value.
+secret_missing_value_for_workspace() {
+  local box="$1" file name value
+  file="$(secrets_meta_file)"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  secrets_meta_valid "$file" || return 1
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    value="$(secret_keychain_get "$name" 2>/dev/null || true)"
+    if ! secret_value_valid "$value"; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done < <("$JQ_BIN" -r --arg box "$box" '
+    .secrets | to_entries[] |
+    select(
+      (
+        (.value.workspaces | index($box)) != null and
+        (
+          .value.pending == null or
+          .value.pending.type != "remove" or
+          (.value.pending.workspaces[$box] // null) == null
+        )
+      ) or (
+        .value.pending != null and
+        .value.pending.type != "remove" and
+        (.value.pending.workspaces[$box] // null) != null
+      )
+    ) |
+    .key
+  ' "$file" 2>/dev/null || true)
+  return 1
+}
+
 
 # Lifecycle boundary finalization (after a successful start/restart): verify
 # each pending binding against the sandbox config and finalize it. A removal

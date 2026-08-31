@@ -10071,6 +10071,39 @@ class GenericSecretsTests(MSWTestCase):
                 self.assertEqual(event["secret_exported"], [], event)
                 self.assertFalse(any(event["bound_env_present"].values()), event)
 
+    def test_bootstrap_reports_missing_secret_value_without_terminal_dump(self) -> None:
+        self._add_secret(name="KEYYY", workspaces=["dev"])
+        self._key_file("KEYYY").unlink()
+
+        proc = self.env.app_bootstrap(check=False)
+
+        self.assertNotEqual(proc.returncode, 0)
+        envelope = json.loads(proc.stdout)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["error"]["code"], "MSW_SECRET_VALUE_MISSING")
+        self.assertEqual(envelope["error"]["workspace"], "dev")
+        self.assertEqual(
+            envelope["error"]["message"],
+            "Secret 'KEYYY' cannot be applied to 'dev' because its Keychain value is missing.",
+        )
+        self.assertIn("re-enter 'KEYYY' for 'dev'", envelope["error"]["recovery"])
+        self.assertTrue(envelope["error"]["retryable"])
+        self.assertNotIn("Verification reported:", proc.stdout)
+        self.assertNotIn("\x1b", proc.stdout)
+        self.assertNotIn("ffffff", proc.stdout)
+
+    def test_app_json_string_preserves_utf8_characters(self) -> None:
+        script = (
+            "set -e\n"
+            "export MSW_SOURCE_ONLY=1\n"
+            f'source "{PACKAGE / "bin" / "msw"}"\n'
+            "app_json_string '✓ café'\n"
+        )
+        proc = self.env.run("/bin/bash", "-c", script)
+
+        self.assertEqual(json.loads(proc.stdout), "✓ café")
+
+
     def test_secret_domain_and_name_grammar_validation(self) -> None:
         for domain in ["api.example.com", "*.example.com", "*"]:
             with self.subTest(domain=domain):
