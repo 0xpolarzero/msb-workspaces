@@ -235,6 +235,19 @@ private enum SetupStep: String, CaseIterable, Identifiable {
     }
 }
 
+enum SetupWorkspaceAdvanceEffect: Equatable {
+    case publishConfiguration
+    case startRegistration
+    case loadGitHubContext
+    case navigateToGitHub
+}
+
+enum SetupBootstrapVerification: Equatable {
+    case pending
+    case succeeded
+    case failed(String)
+}
+
 @MainActor
 final class SetupLifecycleGate {
     private(set) var generation = 0
@@ -270,6 +283,10 @@ struct SetupView: View {
     @State private var checks: [MSWPreflightCheck] = []
     @State private var state = MSWBootstrapState.initial
     @State private var isRunning = false
+    @State private var registrationTask: Task<Void, Never>?
+    @State private var registrationConfiguration: [SetupWorkspaceConfiguration]?
+    @State private var queuedRegistrationConfiguration: [SetupWorkspaceConfiguration]?
+    @State private var registrationFailure: String?
     @State private var isChecking = true
     @State private var workspaceNamesNeedApproval = false
     @State private var lastPreflightAt: Date?
@@ -331,6 +348,8 @@ struct SetupView: View {
     @State private var activeStep: SetupStep = .dependencies
     @State private var workspaceConfigurationAccepted = false
     @State private var githubContextLoaded = false
+    @State private var githubContextTask: Task<Void, Never>?
+    @State private var githubContextGeneration = 0
     /// Set once the setup context (resumed configuration, fixture state, or
     /// freshly streamed preflight) is loaded. Only actions that run real
     /// bootstrap work wait for it; pure navigation never does.
@@ -498,6 +517,7 @@ struct SetupView: View {
 
     private func invalidateSetupLifecycle() {
         setupLifecycle.invalidate()
+        cancelGitHubContextLoad()
         githubConnectionGeneration &+= 1
         githubConnectionTask?.cancel()
         githubConnectionTask = nil
@@ -544,8 +564,11 @@ struct SetupView: View {
         }
         return uiTestGitHubScenario != nil ||
             (authorizationCoordinator != nil &&
-             authorizationCoordinator?.isAvailable == true &&
-             !isRunning)
+             authorizationCoordinator?.isAvailable == true)
+    }
+
+    private var registrationOutstanding: Bool {
+        isRunning || queuedRegistrationConfiguration != nil
     }
 
     private var systemReady: Bool {
@@ -687,13 +710,38 @@ struct SetupView: View {
         systemReady: Bool,
         githubDecided: Bool,
         identityDecided: Bool,
-        verificationsAllowCompletion: Bool
+        verificationsAllowCompletion: Bool,
+        registrationOutstanding: Bool
     ) -> Bool {
         contextLoaded &&
             systemReady &&
             githubDecided &&
             identityDecided &&
-            verificationsAllowCompletion
+            verificationsAllowCompletion &&
+            !registrationOutstanding
+    }
+
+    static func workspaceAdvanceEffects(
+        validationMessage: String?,
+        bootstrapInputReady: Bool
+    ) -> [SetupWorkspaceAdvanceEffect] {
+        guard validationMessage == nil, bootstrapInputReady else { return [] }
+        return [
+            .publishConfiguration,
+            .startRegistration,
+            .loadGitHubContext,
+            .navigateToGitHub
+        ]
+    }
+
+    static func bootstrapVerification(
+        registrationOutstanding: Bool,
+        completed: Bool,
+        failure: String?
+    ) -> SetupBootstrapVerification {
+        if registrationOutstanding { return .pending }
+        if let failure { return .failed(failure) }
+        return completed ? .succeeded : .pending
     }
 
     private var canCompleteReview: Bool {
@@ -702,7 +750,8 @@ struct SetupView: View {
             systemReady: canFinishWithoutGitHub,
             githubDecided: githubDecisionMade,
             identityDecided: identityDecisionMade,
-            verificationsAllowCompletion: verificationAllowsCompletion
+            verificationsAllowCompletion: verificationAllowsCompletion,
+            registrationOutstanding: registrationOutstanding
         )
     }
 
@@ -804,7 +853,7 @@ struct SetupView: View {
     }
 
     private var githubStepComplete: Bool {
-        githubDecisionMade && verificationAllowsCompletion
+        githubContextLoaded && githubDecisionMade && verificationAllowsCompletion
     }
 
     private var identityStepComplete: Bool {
@@ -828,13 +877,11 @@ struct SetupView: View {
         case .workspaces:
             return true
         case .github:
-            return workspaceConfigurationAccepted && workspaceValidationMessage == nil &&
-                workspaceConfigurationIsApplied && githubContextLoaded &&
-                (canFinishWithoutGitHub || githubReconnectRequired)
+            return workspaceConfigurationAccepted && workspaceValidationMessage == nil
         case .identity:
-            return githubContextLoaded && canFinishWithoutGitHub && githubStepComplete
+            return githubStepComplete
         case .review:
-            return canCompleteReview
+            return githubStepComplete && identityStepComplete
         }
     }
     /// Greyed-out steps stay disabled until their prerequisites are proven;
@@ -857,9 +904,7 @@ struct SetupView: View {
         case .workspaces:
             return "the Workspaces step follows Dependencies"
         case .github:
-            return workspaceConfigurationAccepted && !workspaceConfigurationIsApplied
-                ? "the workspace configuration is not applied yet"
-                : "the Workspaces step must be saved and verified first"
+            return "the Workspaces step must publish a valid configuration first"
         case .identity:
             return githubStepComplete
                 ? "GitHub access must finish loading"
@@ -879,23 +924,24 @@ struct SetupView: View {
         activeStep = .workspaces
     }
     private func advanceFromWorkspaces() {
-        guard workspaceValidationMessage == nil, bootstrapInputReady else { return }
-        if uiTestMode, coordinator == nil {
-            // Explicit fixture-only seam. Production always crosses the real
-            // coordinator and operational read-back below.
-            workspaceConfigurationAccepted = true
-            state.workspaceConfigurations = workspaceConfigurations
-            rebuildWorkspaceScopedState()
-            githubContextLoaded = true
-            activeStep = .github
-            return
+        let effects = Self.workspaceAdvanceEffects(
+            validationMessage: workspaceValidationMessage,
+            bootstrapInputReady: bootstrapInputReady
+        )
+        guard !effects.isEmpty else { return }
+        for effect in effects {
+            switch effect {
+            case .publishConfiguration:
+                workspaceConfigurationAccepted = true
+                rebuildWorkspaceScopedState()
+            case .startRegistration:
+                startWorkspaceRegistration()
+            case .loadGitHubContext:
+                startGitHubContextLoad()
+            case .navigateToGitHub:
+                activeStep = .github
+            }
         }
-        // Production navigation never waits on the apply: the boundary proof,
-        // acceptance publication, and GitHub-context load continue in the
-        // background while the footer reports the phase. Review stays gated
-        // on the proven result, so a failed run can never look complete.
-        runSetup()
-        activeStep = .github
     }
     private func advanceFromGitHub() {
         guard githubStepComplete, !isSkippingGitHub, githubSkipIssue == nil else { return }
@@ -931,7 +977,7 @@ struct SetupView: View {
                         githubSkipIssue = nil
                         githubStatus = "GitHub credential grants skipped. Finishing workspace verification…"
                         activeStep = .identity
-                        runSetup()
+                        startWorkspaceRegistration()
                     } catch {
                         isSkippingGitHub = false
                         githubSkipTask = nil
@@ -1029,7 +1075,7 @@ struct SetupView: View {
             // manual "Verify workspaces now" step. A further reconnect error
             // routes back to the GitHub step for the next workspace.
             if resolvedReconnect, !Task.isCancelled {
-                runSetup()
+                startWorkspaceRegistration()
             }
         }
     }
@@ -1312,6 +1358,7 @@ struct SetupView: View {
                 }
                 workspaceConfigurations[index][keyPath: keyPath] = value
                 workspaceConfigurationAccepted = false
+                cancelGitHubContextLoad()
             }
         )
     }
@@ -1363,7 +1410,7 @@ struct SetupView: View {
     /// silently attached to a removed or renamed VM.
     private func resetWorkspaceDependentState() {
         workspaceConfigurationAccepted = false
-        githubContextLoaded = false
+        cancelGitHubContextLoad()
         drafts = SetupWorkspaceConfiguration.initialRepositoryDrafts(for: workspaceConfigurations)
         editedGitHubWorkspaces.removeAll()
         retainedRepositoryPolicy.removeAll()
@@ -1382,8 +1429,8 @@ struct SetupView: View {
         identityStatus = ""
     }
 
-    /// Rebuilds all downstream state from the configuration that bootstrap
-    /// just applied. Stale names from resume data or a prior provider
+    /// Rebuilds downstream state from the validated configuration published
+    /// by Workspaces Continue. Stale names from resume data or a prior provider
     /// generation are discarded rather than silently following a rename.
     private func rebuildWorkspaceScopedState() {
         let names = configuredWorkspaceNames
@@ -1472,7 +1519,18 @@ struct SetupView: View {
 
     @ViewBuilder
     private var githubBoundary: some View {
-        if accessMode == .local {
+        if !githubContextLoaded {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("GitHub")
+                    .font(.title3.weight(.semibold))
+                    .accessibilityIdentifier("setup.github.title")
+                Label("Loading GitHub access…", systemImage: "ellipsis.circle")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("setup.github.loading")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("setup.github-boundary")
+        } else if accessMode == .local {
             localGitHubBoundary
         } else {
             connectGitHubBoundary
@@ -1898,15 +1956,12 @@ struct SetupView: View {
                 ready: workspaceValidationMessage == nil,
                 accessibilityIdentifier: "setup.final-review.workspaces"
             )
-            reviewStatusLine(
-                title: "System and workspaces",
-                ready: canFinishWithoutGitHub
-            )
+            workspaceBootstrapReviewStatus
             if !canFinishWithoutGitHub && systemReady {
-                Button(isRunning ? "Finishing workspace setup…" : "Finish workspace setup") {
-                    runSetup()
+                Button(registrationOutstanding ? "Finishing workspace setup…" : "Finish workspace setup") {
+                    startWorkspaceRegistration()
                 }
-                .disabled(isRunning || coordinator == nil)
+                .disabled(registrationOutstanding || coordinator == nil)
                 .controlSize(.small)
                 .accessibilityIdentifier("setup.review.verify.button")
             }
@@ -1935,6 +1990,31 @@ struct SetupView: View {
         }
         .padding(14)
         .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private var workspaceBootstrapReviewStatus: some View {
+        switch Self.bootstrapVerification(
+            registrationOutstanding: registrationOutstanding,
+            completed: canFinishWithoutGitHub,
+            failure: registrationFailure
+        ) {
+        case .pending:
+            Label("Workspace bootstrap verification pending", systemImage: "clock.fill")
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("setup.review.registration.pending")
+        case .succeeded:
+            Label("System and workspaces verified", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityIdentifier("setup.review.registration.succeeded")
+        case .failed(let failure):
+            Label(
+                "Workspace bootstrap verification failed: \(failure)",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.red)
+            .accessibilityIdentifier("setup.review.registration.failure")
+        }
     }
 
     private var workspaceConfigurationReviewSummary: String {
@@ -1996,19 +2076,16 @@ struct SetupView: View {
 
     private var footerStatus: some View {
         Group {
-            if let error {
+            if let registrationFailure, activeStep != .review {
+                Label(
+                    "Workspace registration failed: \(registrationFailure)",
+                    systemImage: "exclamationmark.circle.fill"
+                )
+                .foregroundStyle(.red)
+            } else if let error {
                 Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
             } else if let notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            } else if isRunning {
-                // The apply is backgrounded after the Workspaces step; the
-                // phase stays visible from every step until it settles.
-                Label(
-                    "\(Self.bootstrapPhaseProgress(for: state.phase))…",
-                    systemImage: "ellipsis.circle"
-                )
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
             } else if isApplyingGitHub {
                 Label("Saving your GitHub choices…", systemImage: "ellipsis.circle")
                     .lineLimit(1)
@@ -2017,6 +2094,13 @@ struct SetupView: View {
                 Label("Saving your Git name and email…", systemImage: "ellipsis.circle")
                     .lineLimit(1)
                     .foregroundStyle(.secondary)
+            } else if registrationOutstanding && activeStep == .workspaces {
+                Label(
+                    "\(Self.bootstrapPhaseProgress(for: state.phase))…",
+                    systemImage: "ellipsis.circle"
+                )
+                .lineLimit(1)
+                .foregroundStyle(.secondary)
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed Silo build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
@@ -2060,7 +2144,7 @@ struct SetupView: View {
             case .dependencies:
                 Button("Retry", action: loadPreflight)
                     .buttonStyle(.bordered)
-                    .disabled(isChecking || isRunning || coordinator == nil)
+                    .disabled(isChecking || coordinator == nil)
                     .accessibilityIdentifier("setup.retry.button")
                 if hostIntegrationNeedsPackagedBuild {
                     Label("Install the complete Silo app", systemImage: "lock.circle")
@@ -2076,21 +2160,18 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .workspaces:
-                Button(action: advanceFromWorkspaces) {
-                    ZStack {
-                        Text("Continue")
-                            .opacity(isRunning ? 0 : 1)
-                        ProgressView()
-                            .controlSize(.small)
-                            .opacity(isRunning ? 1 : 0)
-                            .accessibilityHidden(true)
-                    }
-                }
+                Button("Continue", action: advanceFromWorkspaces)
                 .buttonStyle(.borderedProminent)
-                .disabled(workspaceValidationMessage != nil || isRunning || !bootstrapInputReady)
+                .disabled(Self.workspaceAdvanceEffects(
+                    validationMessage: workspaceValidationMessage,
+                    bootstrapInputReady: bootstrapInputReady
+                ).isEmpty)
                 .keyboardShortcut(.defaultAction)
-                .accessibilityLabel("Continue")
-                .accessibilityValue(isRunning ? "Applying" : "Ready")
+                .accessibilityValue(
+                    workspaceValidationMessage != nil
+                        ? "Invalid configuration"
+                        : (bootstrapInputReady ? "Ready" : "Loading setup")
+                )
                 .accessibilityIdentifier("setup.workspaces.continue.button")
             case .github:
                 if githubStepComplete {
@@ -2227,7 +2308,7 @@ struct SetupView: View {
 
 
     private func beginAuthorization() {
-        guard workspaceConfigurationIsApplied, githubContextLoaded else { return }
+        guard workspaceConfigurationAccepted, githubContextLoaded else { return }
         if accessMode == .local {
             // This path is now used only for explicit recovery actions. The
             // first load is automatic when the GitHub step appears, so a
@@ -2349,7 +2430,7 @@ struct SetupView: View {
     }
 
     private func loadLocalCatalog(force: Bool = false) {
-        guard workspaceConfigurationIsApplied, githubContextLoaded else { return }
+        guard workspaceConfigurationAccepted, githubContextLoaded else { return }
         guard force || !localCatalogAttempted else { return }
         guard !isRefreshingGitHub else { return }
         guard let provider else {
@@ -2425,7 +2506,7 @@ struct SetupView: View {
     /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
     /// in-app device sheet. Other typed remedies surface verbatim.
     private func connectGitHubAccount() {
-        guard workspaceConfigurationIsApplied, githubContextLoaded,
+        guard workspaceConfigurationAccepted, githubContextLoaded,
               let provider, !isConnectingGitHub else { return }
         githubConnectionGeneration &+= 1
         let generation = githubConnectionGeneration
@@ -2618,7 +2699,7 @@ struct SetupView: View {
     }
 
     private func commitPolicy() {
-        guard workspaceConfigurationIsApplied, githubContextLoaded else { return }
+        guard workspaceConfigurationAccepted, githubContextLoaded else { return }
         let workspacePolicies = workspacePolicy
         guard !workspacePolicies.isEmpty else {
             githubStatus = "Choose at least one repository, or skip GitHub."
@@ -2846,7 +2927,7 @@ struct SetupView: View {
     }
 
     private func refreshLocalApplyProgress() async {
-        guard workspaceConfigurationIsApplied, githubContextLoaded,
+        guard workspaceConfigurationAccepted, githubContextLoaded,
               accessMode == .local, provider != nil else { return }
         await syncLocalApplyProgress()
     }
@@ -3011,9 +3092,9 @@ struct SetupView: View {
         }
     }
 
-    /// Loads the non-GitHub startup boundary first. GitHub authorization,
-    /// repository state, and host Git identity remain untouched until the
-    /// selected workspace configuration is proven applied.
+    /// Restores a previously applied boundary. A fresh Workspaces Continue
+    /// publishes the same boundary directly and starts GitHub loading without
+    /// waiting for bootstrap verification.
     @discardableResult
     func loadSetupStartupState() async -> Bool {
         let startupLifecycle = setupLifecycle.generation
@@ -3026,37 +3107,74 @@ struct SetupView: View {
             return true
         }
         workspaceConfigurationAccepted = true
+        rebuildWorkspaceScopedState()
         githubReconnectRequired = state.phase == .github
-        let loaded = await loadAppliedWorkspaceContext()
+        let loaded = await loadPublishedWorkspaceContext(
+            workspaceConfigurations,
+            generation: githubContextGeneration
+        )
         if loaded, githubReconnectRequired {
             githubAttentionWorkspace = state.reconnectWorkspace ?? firstReconnectWorkspace
         }
         return loaded
     }
 
-    /// Recreates every workspace-scoped GitHub and Git target from the
-    /// validated, applied configuration before any provider/catalog,
-    /// authorization, or Git identity read is allowed.
+    private func startGitHubContextLoad() {
+        let submittedWorkspaceConfigurations = workspaceConfigurations
+        cancelGitHubContextLoad()
+        let generation = githubContextGeneration
+        githubContextTask = Task {
+            _ = await loadPublishedWorkspaceContext(
+                submittedWorkspaceConfigurations,
+                generation: generation
+            )
+            guard githubContextGeneration == generation else { return }
+            githubContextTask = nil
+        }
+    }
+
+    private func cancelGitHubContextLoad() {
+        githubContextGeneration &+= 1
+        githubContextTask?.cancel()
+        githubContextTask = nil
+        githubContextLoaded = false
+    }
+
+    /// Loads GitHub against the configuration published by Workspaces
+    /// Continue. Registration and its verification run in a separate task.
     @discardableResult
-    private func loadAppliedWorkspaceContext() async -> Bool {
-        guard workspaceConfigurationIsApplied else {
+    private func loadPublishedWorkspaceContext(
+        _ configurations: [SetupWorkspaceConfiguration],
+        generation: Int
+    ) async -> Bool {
+        guard workspaceConfigurationAccepted,
+              configurations == workspaceConfigurations,
+              githubContextGeneration == generation else {
             githubContextLoaded = false
             return false
         }
         do {
             if accessMode == .local, let provider {
-                try await provider.reloadWorkspaceConfiguration(workspaceConfigurations)
+                try await provider.reloadWorkspaceConfiguration(configurations)
             } else if let authorizationCoordinator {
-                try await authorizationCoordinator.reloadWorkspaceConfiguration(workspaceConfigurations)
+                try await authorizationCoordinator.reloadWorkspaceConfiguration(configurations)
             }
         } catch {
-            self.error = error.localizedDescription
+            guard githubContextGeneration == generation else { return false }
+            if accessMode == .local {
+                localCatalogIssue = LocalCatalogIssue(kind: .failed, message: error.localizedDescription)
+            } else {
+                authorizationIssue = issue(for: error)
+            }
             githubContextLoaded = false
             return false
         }
-        rebuildWorkspaceScopedState()
+        guard configurations == workspaceConfigurations,
+              githubContextGeneration == generation else { return false }
         await prefillIdentityFromLocalGit()
-        let loaded = await loadGitHubStartupContext()
+        guard configurations == workspaceConfigurations,
+              githubContextGeneration == generation else { return false }
+        let loaded = await loadGitHubStartupContext(generation: generation)
         if loaded {
             // The rebuild above resets repositoryPolicyApplied from the
             // per-session retained policy, which starts empty; re-read the
@@ -3068,11 +3186,12 @@ struct SetupView: View {
         return loaded
     }
 
-    /// The post-application GitHub-context chain. Every awaited publication
-    /// is guarded against setup teardown.
+    /// The GitHub-context chain. Every awaited publication is guarded against
+    /// setup teardown or a newer published workspace configuration.
     @discardableResult
-    private func loadGitHubStartupContext() async -> Bool {
-        guard workspaceConfigurationIsApplied else {
+    private func loadGitHubStartupContext(generation: Int) async -> Bool {
+        guard workspaceConfigurationAccepted,
+              githubContextGeneration == generation else {
             githubContextLoaded = false
             return false
         }
@@ -3084,9 +3203,11 @@ struct SetupView: View {
             return true
         }
         await loadExistingMetadata(startupLifecycle: startupLifecycle)
-        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        guard setupLifecycle.isCurrent(startupLifecycle),
+              githubContextGeneration == generation else { return false }
         await restoreCachedAuthorization(startupLifecycle: startupLifecycle)
-        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+        guard setupLifecycle.isCurrent(startupLifecycle),
+              githubContextGeneration == generation else { return false }
         githubContextLoaded = true
         return true
     }
@@ -3124,14 +3245,30 @@ struct SetupView: View {
         Task { await coordinator.openHostApprovalSettings() }
     }
 
-    private func runSetup() {
-        guard let coordinator, !isRunning else { return }
+    private func startWorkspaceRegistration() {
+        guard let coordinator else { return }
         guard workspaceValidationMessage == nil else { return }
         let submittedWorkspaceConfigurations = workspaceConfigurations
+        if registrationTask != nil {
+            if registrationConfiguration != submittedWorkspaceConfigurations {
+                queuedRegistrationConfiguration = submittedWorkspaceConfigurations
+            }
+            return
+        }
+        beginWorkspaceRegistration(
+            submittedWorkspaceConfigurations,
+            coordinator: coordinator
+        )
+    }
+
+    private func beginWorkspaceRegistration(
+        _ submittedWorkspaceConfigurations: [SetupWorkspaceConfiguration],
+        coordinator: any MSWBootstrapCoordinating
+    ) {
         isRunning = true
-        error = nil
+        registrationConfiguration = submittedWorkspaceConfigurations
         notice = nil
-        Task {
+        registrationTask = Task {
             let progressTask = Task {
                 while !Task.isCancelled {
                     let latest = await coordinator.state()
@@ -3149,7 +3286,7 @@ struct SetupView: View {
                 state = savedState
                 checks = refreshedChecks
                 lastPreflightAt = Date()
-                isRunning = false
+                registrationFailure = nil
                 // Only approval blockers persist in the footer slot; success
                 // messages would linger into later steps as stale captions.
                 notice = result.requiresApproval
@@ -3157,49 +3294,33 @@ struct SetupView: View {
                         ? "Allow Silo in Login Items, then choose Retry."
                         : result.message)
                     : nil
-                // Navigation is user-driven: the apply was backgrounded when
-                // the step advanced. Publish acceptance wherever the user is;
-                // only a still-matching configuration proves this run's
-                // boundary.
-                if result.phase == MSWBootstrapState.Phase.complete.rawValue,
-                   submittedWorkspaceConfigurations == workspaceConfigurations,
-                   workspaceConfigurationIsApplied {
-                    workspaceConfigurationAccepted = true
-                    // The GitHub context chain is built once per proven
-                    // boundary (first entry into the GitHub step). A later
-                    // completing run — a retry from Review or a reconnect
-                    // resume — must not rebuild it: rebuilding resets decided
-                    // state such as the applied-policy flag and the repository
-                    // catalog, which providers without durable apply progress
-                    // cannot restore.
-                    if !githubContextLoaded {
-                        await loadAppliedWorkspaceContext()
-                    }
-                }
             } catch let setupError {
-                isRunning = false
                 let savedState = await coordinator.state()
                 state = savedState
                 if let clientError = setupError as? MSWClientError,
                    case .protocolFailure(let protocolError) = clientError,
                    protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
-                   submittedWorkspaceConfigurations == workspaceConfigurations,
-                   workspaceConfigurationIsApplied,
-                   await loadAppliedWorkspaceContext() {
-                    // The coordinator publishes this boundary only after
-                    // reading back the exact configuration installed by the
-                    // CLI. Reconnect therefore follows the same ordering gate
-                    // as default setup and back/edit flows.
+                   submittedWorkspaceConfigurations == workspaceConfigurations {
                     githubReconnectRequired = true
                     githubAttentionWorkspace = protocolError.workspace
                     githubSkipped = false
-                    workspaceConfigurationAccepted = true
-                    activeStep = .github
                 } else {
-                    self.error = setupError.localizedDescription
+                    registrationFailure = setupError.localizedDescription
                 }
             }
+            finishWorkspaceRegistration(coordinator: coordinator)
         }
+    }
+
+    private func finishWorkspaceRegistration(
+        coordinator: any MSWBootstrapCoordinating
+    ) {
+        isRunning = false
+        registrationTask = nil
+        registrationConfiguration = nil
+        guard let queued = queuedRegistrationConfiguration else { return }
+        queuedRegistrationConfiguration = nil
+        beginWorkspaceRegistration(queued, coordinator: coordinator)
     }
 
     private func completeSetup() {
@@ -3274,7 +3395,7 @@ struct SetupView: View {
         identitySaveTask = Task {
             while !canFinishWithoutGitHub {
                 guard !Task.isCancelled else { return }
-                guard isRunning else {
+                guard registrationOutstanding else {
                     isSavingIdentity = false
                     identitySaveTask = nil
                     identityStatus = "Workspace setup did not finish, so your name and email were not saved. Finish workspace setup, then save again."

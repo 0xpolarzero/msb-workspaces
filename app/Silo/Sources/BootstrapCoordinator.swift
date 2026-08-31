@@ -1063,9 +1063,17 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
     private var current: MSWBootstrapState
     private var runCount = 0
     private let failureWorkspace: String
+    private let keepsFirstRunPending: Bool
+    private let completesFirstRun: Bool
 
-    init(failureWorkspace: String) {
+    init(
+        failureWorkspace: String,
+        keepsFirstRunPending: Bool = false,
+        completesFirstRun: Bool = false
+    ) {
         self.failureWorkspace = failureWorkspace
+        self.keepsFirstRunPending = keepsFirstRunPending
+        self.completesFirstRun = completesFirstRun
         let now = Date()
         self.current = MSWBootstrapState(
             phase: .workspaces,
@@ -1098,7 +1106,13 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
         }
         runCount += 1
-        if runCount == 1 {
+        if runCount == 1, keepsFirstRunPending {
+            let (pending, continuation) = AsyncStream<Void>.makeStream()
+            defer { continuation.finish() }
+            for await _ in pending {}
+            try Task.checkCancellation()
+        }
+        if runCount == 1, !completesFirstRun {
             current.workspaceConfigurations = workspaceConfigurations
             current.completedPhases.insert(.workspaces)
             current.phase = .github

@@ -4859,29 +4859,84 @@ final class AppModelTests: XCTestCase {
             systemReady: true,
             githubDecided: true,
             identityDecided: true,
-            verificationsAllowCompletion: true
+            verificationsAllowCompletion: true,
+            registrationOutstanding: false
         ), "Persisted completed choices must not enable Review/Done before the GitHub context loads.")
         XCTAssertTrue(SetupView.allowsReviewCompletion(
             contextLoaded: true,
             systemReady: true,
             githubDecided: true,
             identityDecided: true,
-            verificationsAllowCompletion: true
+            verificationsAllowCompletion: true,
+            registrationOutstanding: false
         ))
         XCTAssertFalse(SetupView.allowsReviewCompletion(
             contextLoaded: true,
             systemReady: true,
             githubDecided: false,
             identityDecided: true,
-            verificationsAllowCompletion: true
+            verificationsAllowCompletion: true,
+            registrationOutstanding: false
         ))
         XCTAssertFalse(SetupView.allowsReviewCompletion(
             contextLoaded: true,
             systemReady: false,
             githubDecided: true,
             identityDecided: true,
-            verificationsAllowCompletion: true
+            verificationsAllowCompletion: true,
+            registrationOutstanding: false
         ))
+        XCTAssertFalse(SetupView.allowsReviewCompletion(
+            contextLoaded: true,
+            systemReady: true,
+            githubDecided: true,
+            identityDecided: true,
+            verificationsAllowCompletion: true,
+            registrationOutstanding: true
+        ), "Review must block completion while workspace registration is queued or running.")
+    }
+
+    func testWorkspaceAdvanceStartsGitHubContextIndependentlyFromRegistration() {
+        XCTAssertEqual(SetupView.workspaceAdvanceEffects(
+            validationMessage: nil,
+            bootstrapInputReady: true
+        ), [
+            .publishConfiguration,
+            .startRegistration,
+            .loadGitHubContext,
+            .navigateToGitHub
+        ])
+        XCTAssertTrue(SetupView.workspaceAdvanceEffects(
+            validationMessage: "Workspace names must be unique.",
+            bootstrapInputReady: true
+        ).isEmpty)
+        XCTAssertTrue(SetupView.workspaceAdvanceEffects(
+            validationMessage: nil,
+            bootstrapInputReady: false
+        ).isEmpty)
+    }
+
+    func testBootstrapVerificationTreatsPendingAsPendingAndOnlyTerminalErrorAsFailure() {
+        XCTAssertEqual(SetupView.bootstrapVerification(
+            registrationOutstanding: true,
+            completed: false,
+            failure: "stale error"
+        ), .pending)
+        XCTAssertEqual(SetupView.bootstrapVerification(
+            registrationOutstanding: false,
+            completed: false,
+            failure: nil
+        ), .pending)
+        XCTAssertEqual(SetupView.bootstrapVerification(
+            registrationOutstanding: false,
+            completed: false,
+            failure: "registration rejected"
+        ), .failed("registration rejected"))
+        XCTAssertEqual(SetupView.bootstrapVerification(
+            registrationOutstanding: false,
+            completed: true,
+            failure: nil
+        ), .succeeded)
     }
 
     func testIdentityContinueRequiresClientAvailabilityAndValidIdentity() {

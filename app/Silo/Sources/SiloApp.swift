@@ -443,8 +443,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
         }
         let bootstrap: (any MSWBootstrapCoordinating)?
-        if ProcessInfo.processInfo.arguments.contains("--ui-test-setup-reconnect") {
-            bootstrap = MSWBootstrapUITestStub(failureWorkspace: "dev")
+        if arguments.contains("--ui-test-setup-reconnect") {
+            bootstrap = MSWBootstrapUITestStub(
+                failureWorkspace: "dev",
+                keepsFirstRunPending: arguments.contains("--ui-test-setup-registration-pending")
+            )
+        } else if setupFixtureOwnsGitHubLoading {
+            bootstrap = MSWBootstrapUITestStub(
+                failureWorkspace: "dev",
+                completesFirstRun: true
+            )
         } else if fixtureMode || !credentialAccessAllowed {
             bootstrap = nil
         } else {

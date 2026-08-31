@@ -43,8 +43,8 @@ protocol GitHubProviding: Sendable {
     func retryCurrentPolicyApply() async throws
     func cancelCurrentPolicyApply() async
     func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult
-    /// Rebuilds every workspace-scoped target after the selected bootstrap
-    /// configuration has been operationally applied and read back.
+    /// Rebuilds every workspace-scoped target from the validated configuration
+    /// published by Setup, independently of bootstrap registration.
     func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws
 }
 
