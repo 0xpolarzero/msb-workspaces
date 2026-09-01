@@ -9855,19 +9855,19 @@ secret_bindings_clear() {
 # the inspect payload, so these helpers emit nothing and compare only names,
 # host policy, and host-environment source metadata.
 secret_inspect_valid() {
-  "$JQ_BIN" -e '(.active_config.network.secrets.secrets | type) == "array"' >/dev/null 2>&1
+  "$JQ_BIN" -e '(((.active_config // .config).network.secrets.secrets) | type) == "array"' >/dev/null 2>&1
 }
 
 secret_inspect_contains() {
   local name="$1"
   "$JQ_BIN" -e --arg name "$name" \
-    'any(.active_config.network.secrets.secrets[]?; .env_var == $name)' >/dev/null 2>&1
+    'any((.active_config // .config).network.secrets.secrets[]?; .env_var == $name)' >/dev/null 2>&1
 }
 
 secret_inspect_absent() {
   local name="$1"
   "$JQ_BIN" -e --arg name "$name" \
-    'all(.active_config.network.secrets.secrets[]?; .env_var != $name)' >/dev/null 2>&1
+    'all((.active_config // .config).network.secrets.secrets[]?; .env_var != $name)' >/dev/null 2>&1
 }
 
 secret_inspect_binding_matches() {

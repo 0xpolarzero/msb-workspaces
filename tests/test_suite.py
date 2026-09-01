@@ -10326,6 +10326,20 @@ class GenericSecretsTests(MSWTestCase):
         self.assertFalse(self._key_file("API_KEY").exists())
         self.assertEqual(self._listing()["entries"], [])
 
+    def test_secret_remove_accepts_stopped_sandbox_config_without_active_config(self) -> None:
+        value = "sk_live_stopped_remove_gggggggggggggggg"
+        self._add_secret(workspaces=["playgrounds"], value=value)
+        self.assertNotIn("API_KEY", self._sandbox_secrets("playgrounds"))
+
+        plan = self._plan("remove", "API_KEY", ["playgrounds"], ["api.example.com"])
+        apply_result = self._apply_ok(plan)
+
+        self.assertEqual(
+            apply_result["pending"],
+            [{"workspace": "playgrounds", "state": "applies-on-next-start"}],
+        )
+        self.assertEqual(self._entry("API_KEY")["pendingOperation"]["type"], "remove")
+
     def test_secret_pending_add_applies_on_next_start_of_stopped_workspace(self) -> None:
         value = "sk_live_nextstart_dddddddddddddddd"
         self._add_secret(workspaces=["playgrounds"], value=value)
