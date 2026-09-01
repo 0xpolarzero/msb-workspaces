@@ -977,6 +977,19 @@ class InstallerAndDailyTests(SiloTestCase):
         )
         self.assertFailed(start, "has not passed the raw-disk discard safety check")
 
+    def test_app_handshake_allows_configuration_before_workspace_boundary(self) -> None:
+        workspaces = self.env.home / ".config/silo/workspaces.json"
+        workspaces.unlink()
+
+        handshake = self.env.silo("app", "handshake", "--format", "json")
+        result = json.loads(handshake.stdout)["result"]
+        self.assertTrue(result["configurationAvailable"])
+        self.assertEqual(result["capabilities"]["workspaceCount"], 0)
+
+        state = self.env.silo("app", "state", "--format", "json", check=False)
+        self.assertNotEqual(state.returncode, 0)
+        self.assertIn("missing workspace configuration", state.stderr)
+
     def test_app_bootstrap_runs_deep_verification_and_restores_running_set(self) -> None:
         self.env.silo("start", "dev")
         before = {

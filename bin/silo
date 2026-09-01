@@ -7,6 +7,7 @@ readonly SILO_CLI_VERSION
 CONFIG_FILE="${SILO_CONFIG_FILE:-$HOME/.config/silo/config.sh}"
 SILO_APP_MODE=0
 [[ "${1:-}" == app ]] && SILO_APP_MODE=1
+SILO_APP_SUBCOMMAND="${2:-}"
 SILO_APP_ROOT_SUBSHELL="${BASH_SUBSHELL:-0}"
 SILO_APP_RESPONSE_EMITTED=0
 SILO_APP_COMMAND="app"
@@ -122,6 +123,9 @@ invalidate_runtime_discard_attestation() {
 load_workspace_configuration() {
   local value
   if [[ ! -e "$SILO_WORKSPACES_FILE" && ! -L "$SILO_WORKSPACES_FILE" ]]; then
+    if (( SILO_APP_MODE == 1 )) && [[ "$SILO_APP_SUBCOMMAND" == handshake ]]; then
+      return 0
+    fi
     (( SILO_CONFIG_AVAILABLE == 0 )) && return 0
     fatal "missing workspace configuration: $SILO_WORKSPACES_FILE"
   fi

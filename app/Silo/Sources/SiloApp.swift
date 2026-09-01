@@ -1,5 +1,4 @@
 import AppKit
-import Observation
 import SwiftUI
 import UserNotifications
 
@@ -18,6 +17,7 @@ struct SiloApp: App {
         }
     }
 }
+
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -254,29 +254,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Do not expose the credential-backed model until every durable
-        // authorization journal has been reconciled.
         Task { @MainActor [weak self] in
             await self?.recoverAndInstall()
         }
     }
 
     private func recoverAndInstall() async {
-        var runtimeActivationFailed = false
-        if let bundledRoot = ToolchainLayout.bundledRoot() {
-            do {
-                let installer = ToolchainInstaller(
-                    bundledRoot: bundledRoot,
-                    installationRoot: ToolchainLayout.managedRoot()
-                )
-                _ = try await installer.activate()
-                await runner.invalidateSiloResolution()
-            } catch {
-                runtimeActivationFailed = true
-            }
-        } else {
-            runtimeActivationFailed = true
-        }
         let recoveryResult: Result<Void, Error>
         do {
             try LegacyDirectGitHubCredentialRetirement.remove()
@@ -296,15 +279,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .success:
             installApplication(
                 fixtureMode: false,
-                credentialAccessAllowed: true,
-                startupRuntimeRepairRequired: runtimeActivationFailed
+                credentialAccessAllowed: true
             )
         case .failure(let error):
             installApplication(
                 fixtureMode: false,
                 credentialAccessAllowed: false,
-                startupRecoveryBlockedReason: error.localizedDescription,
-                startupRuntimeRepairRequired: runtimeActivationFailed
+                startupRecoveryBlockedReason: error.localizedDescription
             )
         }
     }
@@ -318,8 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installApplication(
         fixtureMode: Bool,
         credentialAccessAllowed: Bool,
-        startupRecoveryBlockedReason: String? = nil,
-        startupRuntimeRepairRequired: Bool = false
+        startupRecoveryBlockedReason: String? = nil
     ) {
         let arguments = ProcessInfo.processInfo.arguments
         if fixtureMode {
@@ -362,7 +342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry,
                 initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil,
                 applicationPreferences: applicationPreferences,
-                initialRuntimeRepairRequired: runtimeRepairFixture || startupRuntimeRepairRequired
+                initialRuntimeRepairRequired: runtimeRepairFixture
             )
             operationCoordinator = nil
         } else {
@@ -377,8 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 provider: provider,
                 accessMode: accessMode,
                 workspaceConfigurations: configuredWorkspaces,
-                applicationPreferences: applicationPreferences,
-                initialRuntimeRepairRequired: startupRuntimeRepairRequired
+                applicationPreferences: applicationPreferences
             )
         }
         if folderBrowserFixture {
@@ -442,7 +421,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let setupFixtureOwnsGitHubLoading = arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
-            arguments.contains("--ui-test-setup-reconnect")
+            arguments.contains("--ui-test-setup-reconnect") ||
+            arguments.contains("--ui-test-setup-installing")
         githubSettingsState.setPollingVisible(false)
         if appNavigation.workspace == nil {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
@@ -456,7 +436,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if setupFixtureOwnsGitHubLoading {
             bootstrap = SiloBootstrapUITestStub(
                 failureWorkspace: "dev",
-                completesFirstRun: true
+                completesFirstRun: true,
+                simulatesRuntimeInstallation: arguments.contains("--ui-test-setup-installing")
             )
         } else if fixtureMode || !credentialAccessAllowed {
             bootstrap = nil

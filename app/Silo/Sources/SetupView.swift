@@ -296,10 +296,11 @@ struct SetupView: View {
     @State private var queuedRegistrationConfiguration: [SetupWorkspaceConfiguration]?
     @State private var registrationFailure: String?
     @State private var isChecking = true
+    @State private var runtimeSetupPhase = SiloRuntimeSetupPhase.installingRuntime
+    @State private var runtimeSetupError: String?
     @State private var workspaceNamesNeedApproval = false
     @State private var lastPreflightAt: Date?
     @State private var passedChecksExpanded = false
-    @State private var requirementsExpanded = false
     @State private var advisoriesExpanded = false
     @State private var error: String?
     @State private var notice: String?
@@ -453,10 +454,21 @@ struct SetupView: View {
         .task {
             guard !didLoadStartupState else { return }
             didLoadStartupState = true
-            if uiTestMode {
+            if uiTestMode && !uiTestInstallsDependencies {
                 loadUITestState()
             } else {
-                await loadSetupStartupState()
+                if uiTestMode {
+                    loadUITestState()
+                    runtimeSetupPhase = .installingRuntime
+                    runtimeSetupError = nil
+                    checks = []
+                    lastPreflightAt = nil
+                    isChecking = true
+                    bootstrapInputReady = false
+                }
+                if await prepareDependencies() {
+                    await loadSetupStartupState()
+                }
                 await refreshLocalApplyProgress()
             }
         }
@@ -603,7 +615,15 @@ struct SetupView: View {
     }
 
     private var systemReady: Bool {
-        !checks.isEmpty && blockingChecks.isEmpty
+        runtimeSetupPhase == .ready &&
+            runtimeSetupError == nil &&
+            !isChecking &&
+            !checks.isEmpty &&
+            blockingChecks.isEmpty
+    }
+
+    private var uiTestInstallsDependencies: Bool {
+        uiTestMode && ProcessInfo.processInfo.arguments.contains("--ui-test-setup-installing")
     }
 
     private var canFinishWithoutGitHub: Bool {
@@ -800,9 +820,8 @@ struct SetupView: View {
         } else {
             switch activeStep {
             case .dependencies:
-                requirementsCard
+                runtimeInstallationCard
                 applicationPreferencesCard
-                preflight
             case .workspaces:
                 workspaceConfigurationStep
             case .github:
@@ -909,7 +928,7 @@ struct SetupView: View {
         case .dependencies:
             return true
         case .workspaces:
-            return true
+            return systemReady
         case .github:
             return workspaceConfigurationAccepted && workspaceValidationMessage == nil
         case .identity:
@@ -951,10 +970,10 @@ struct SetupView: View {
         guard canSelectStep(step) else { return }
         activeStep = step
     }
-    /// Onboarding never blocks on dependency checking: results stream into
-    /// the checklist while the user moves ahead, and real blockers are
-    /// enforced where they matter (workspace apply and final verification).
+    /// Workspaces consume the runtime and configuration established here, so
+    /// navigation stays locked until installation and every blocking check pass.
     private func advanceFromDependencies() {
+        guard systemReady else { return }
         activeStep = .workspaces
     }
     private func advanceFromWorkspaces() {
@@ -1143,28 +1162,83 @@ struct SetupView: View {
         }
     }
 
-    private var requirementsCard: some View {
-        DisclosureGroup(isExpanded: $requirementsExpanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Apple Silicon Mac running macOS 26 or later.", systemImage: "desktopcomputer")
-                Label("macOS may ask you to allow Silo to run in the background.", systemImage: "lock.shield")
-                Label("GitHub is optional and uses your default browser.", systemImage: "safari")
+
+    private var runtimeInstallationCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Dependencies")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                if runtimeSetupPhase != .ready && runtimeSetupError == nil {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier("setup.runtime-installation.progress")
+                }
             }
-            .padding(.top, 8)
-        } label: {
-            Label("What you need", systemImage: "list.bullet.clipboard")
-                .font(.headline)
+            if let runtimeSetupError {
+                Text(runtimeSetupError)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if runtimeSetupPhase == .ready {
+                preflight
+            }
+            runtimeInstallationRow(
+                title: "Bundled Silo tools",
+                phase: .installingRuntime,
+                identifier: "setup.runtime-installation.tools"
+            )
+            runtimeInstallationRow(
+                title: "Default configuration",
+                phase: .installingConfiguration,
+                identifier: "setup.runtime-installation.configuration"
+            )
+            runtimeInstallationRow(
+                title: "Installation verification",
+                phase: .verifying,
+                identifier: "setup.runtime-installation.verification"
+            )
         }
-        .accessibilityIdentifier("setup.requirements")
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("setup.runtime-installation")
+    }
+
+
+    private func runtimeInstallationRow(
+        title: String,
+        phase: SiloRuntimeSetupPhase,
+        identifier: String
+    ) -> some View {
+        let isComplete = runtimeSetupPhase == .ready || runtimeSetupPhase.rawValue > phase.rawValue
+        let isActive = runtimeSetupError == nil && runtimeSetupPhase == phase
+        return HStack(spacing: 8) {
+            if isComplete {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else if isActive {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: runtimeSetupError == nil ? "circle" : "xmark.circle.fill")
+                    .foregroundStyle(runtimeSetupError == nil ? Color.secondary : Color.red)
+            }
+            Text(title)
+            Spacer()
+            Text(isComplete ? "Installed" : (isActive ? "Installing" : "Waiting"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(isComplete ? "Installed" : (isActive ? "Installing" : "Waiting"))
+        .accessibilityIdentifier(identifier)
     }
 
     private var applicationPreferencesCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Applications")
                 .font(.title3.weight(.semibold))
-            Text("Use the detected defaults, or choose applications just for Silo. You can change these later in General Settings.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             ApplicationPreferenceFields(
                 applicationPreferences: applicationPreferences,
                 accessibilityPrefix: "setup"
@@ -2274,7 +2348,7 @@ struct SetupView: View {
 
             switch activeStep {
             case .dependencies:
-                Button("Retry", action: loadPreflight)
+                Button("Retry", action: loadDependencies)
                     .buttonStyle(.bordered)
                     .disabled(isChecking || coordinator == nil)
                     .accessibilityIdentifier("setup.retry.button")
@@ -2288,7 +2362,9 @@ struct SetupView: View {
                         action: advanceFromDependencies
                     )
                     .buttonStyle(.borderedProminent)
+                    .disabled(!systemReady)
                     .keyboardShortcut(.defaultAction)
+                    .accessibilityValue(systemReady ? "Ready" : "Installing dependencies")
                     .accessibilityIdentifier("setup.primary-action")
                 }
             case .workspaces:
@@ -3344,8 +3420,6 @@ struct SetupView: View {
         let startupLifecycle = setupLifecycle.generation
         guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
         bootstrapInputReady = true
-        await refreshPreflightState()
-        guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
         guard workspaceConfigurationIsApplied else {
             githubContextLoaded = false
             return true
@@ -3459,8 +3533,46 @@ struct SetupView: View {
         return true
     }
 
-    private func loadPreflight() {
-        Task { await refreshPreflightState() }
+    private func loadDependencies() {
+        Task {
+            if await prepareDependencies() {
+                await loadSetupStartupState()
+            }
+        }
+    }
+
+    @discardableResult
+    private func prepareDependencies() async -> Bool {
+        guard let coordinator else {
+            runtimeSetupError = "Silo cannot install its dependencies because the setup service is unavailable."
+            isChecking = false
+            return false
+        }
+        let startupLifecycle = setupLifecycle.generation
+        runtimeSetupError = nil
+        runtimeSetupPhase = .installingRuntime
+        checks = []
+        lastPreflightAt = nil
+        isChecking = true
+        do {
+            try await coordinator.prepareRuntime { phase in
+                Task { @MainActor in
+                    guard setupLifecycle.isCurrent(startupLifecycle) else { return }
+                    runtimeSetupPhase = phase
+                }
+            }
+            guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+            runtimeSetupPhase = .ready
+            await refreshPreflightState()
+            return setupLifecycle.isCurrent(startupLifecycle)
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard setupLifecycle.isCurrent(startupLifecycle) else { return false }
+            runtimeSetupError = error.localizedDescription
+            isChecking = false
+            return false
+        }
     }
 
     private func refreshPreflightState() async {
@@ -4005,6 +4117,8 @@ struct SetupView: View {
             )
         lastPreflightAt = now
         isChecking = false
+        runtimeSetupPhase = .ready
+        runtimeSetupError = nil
         bootstrapInputReady = true
         if uiTestStartsInReview {
             workspaceConfigurationAccepted = true

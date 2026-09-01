@@ -372,12 +372,22 @@ actor BootstrapStateStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
+enum SiloRuntimeSetupPhase: Int, CaseIterable, Sendable, Equatable {
+    case installingRuntime
+    case installingConfiguration
+    case verifying
+    case ready
+}
+
 protocol SiloBootstrapCoordinating: AnyObject, Sendable {
     func state() async -> SiloBootstrapState
     /// Runs every dependency check. When `onCheck` is provided it is invoked
     /// once per finished check so callers can surface results progressively
     /// while the remaining checks are still running.
     func preflight(onCheck: (@Sendable (SiloPreflightCheck) -> Void)?) async -> [SiloPreflightCheck]
+    func prepareRuntime(
+        onProgress: (@Sendable (SiloRuntimeSetupPhase) -> Void)?
+    ) async throws
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
     ) async throws -> SiloBootstrapResult
@@ -727,85 +737,58 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
         }
     }
 
-    private func installDefaultConfigurationIfNeeded() async throws {
-        let homeDirectory = await runner.homeDirectory()
-        let configurationDirectory = homeDirectory.appending(
-            path: ".config/silo",
-            directoryHint: .isDirectory
-        )
-        let destination = configurationDirectory.appending(
-            path: "config.sh",
-            directoryHint: .notDirectory
-        )
-        guard !FileManager.default.fileExists(atPath: destination.path) else { return }
-
-        guard let source = ToolchainLayout.bundledRoot()?
-            .appendingPathComponent("payload/config.sh"),
-              let values = try? source.resourceValues(forKeys: [
-                  .fileSizeKey,
-                  .isRegularFileKey,
-                  .isSymbolicLinkKey
-              ]),
-              values.isRegularFile == true,
-              values.isSymbolicLink != true,
-              let fileSize = values.fileSize,
-              fileSize <= 64 * 1024 else {
-            throw BootstrapCoordinatorError.configurationUnavailable
-        }
-
-        let data: Data
-        do {
-            data = try Data(contentsOf: source)
-        } catch {
-            throw BootstrapCoordinatorError.configurationInstallationFailed(
-                "The bundled default configuration could not be read."
-            )
-        }
-        do {
-            try FileManager.default.createDirectory(
-                at: configurationDirectory,
-                withIntermediateDirectories: true
-            )
-            let temporary = configurationDirectory.appending(
-                path: ".config-\(UUID().uuidString)",
-                directoryHint: .notDirectory
-            )
-            defer { try? FileManager.default.removeItem(at: temporary) }
-            try data.write(to: temporary, options: .withoutOverwriting)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o644],
-                ofItemAtPath: temporary.path
-            )
-            do {
-                try FileManager.default.moveItem(at: temporary, to: destination)
-            } catch {
-                if !FileManager.default.fileExists(atPath: destination.path) {
-                    throw error
-                }
+    private func installDefaultConfigurationIfNeeded(
+        activatedRoot: URL? = nil
+    ) async throws {
+        let sourceRoot: URL
+        if let activatedRoot {
+            sourceRoot = activatedRoot
+        } else {
+            guard let bundledRoot = ToolchainLayout.bundledRoot() else {
+                throw BootstrapCoordinatorError.configurationUnavailable
             }
-        } catch let error as BootstrapCoordinatorError {
-            throw error
+            sourceRoot = bundledRoot.appending(
+                path: ToolchainLayout.payloadDirectoryName,
+                directoryHint: .isDirectory
+            )
+        }
+        do {
+            _ = try DefaultSiloConfigurationInstaller.installIfNeeded(
+                source: sourceRoot.appending(path: "config.sh", directoryHint: .notDirectory),
+                homeDirectory: await runner.homeDirectory()
+            )
         } catch {
             throw BootstrapCoordinatorError.configurationInstallationFailed(
-                "The app could not write \(destination.path)."
+                error.localizedDescription
             )
         }
     }
 
-    func repairRuntime() async throws {
+    func prepareRuntime(
+        onProgress: (@Sendable (SiloRuntimeSetupPhase) -> Void)? = nil
+    ) async throws {
         guard !running else { throw BootstrapCoordinatorError.busy }
         running = true
         defer { running = false }
+
+        onProgress?(.installingRuntime)
+        let activated = try await installBundledToolchain()
+        onProgress?(.installingConfiguration)
+        try await installDefaultConfigurationIfNeeded(activatedRoot: activated.root)
+        onProgress?(.verifying)
+        await runner.invalidateSiloResolution()
+        let expectedExecutable = activated.root
+            .appendingPathComponent("bin/silo")
+            .standardizedFileURL
+        guard await runtimeInstallationIsReady(expectedExecutable: expectedExecutable) else {
+            throw BootstrapCoordinatorError.unavailable
+        }
+        onProgress?(.ready)
+    }
+
+    func repairRuntime() async throws {
         do {
-            let activated = try await installBundledToolchain()
-            await runner.invalidateSiloResolution()
-            let resolution = await runner.siloResolution(forceRefresh: true)
-            let expectedExecutable = activated.root
-                .appendingPathComponent("bin/silo")
-                .standardizedFileURL
-            guard resolution.selected?.standardizedFileURL == expectedExecutable else {
-                throw BootstrapCoordinatorError.unavailable
-            }
+            try await prepareRuntime()
         } catch {
             throw RuntimeRepairFailure(error: error)
         }
@@ -832,14 +815,9 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
         let toolchainStartedAt = Date()
         do {
             try await installDefaultConfigurationIfNeeded()
-            let resolution = await runner.siloResolution(forceRefresh: true)
-            let runtimeReady: Bool
-            if resolution.selected != nil {
-                runtimeReady = await runtimeIsReady()
-            } else {
-                runtimeReady = false
+            guard await runtimeInstallationIsReady() else {
+                throw BootstrapCoordinatorError.unavailable
             }
-            guard runtimeReady else { throw BootstrapCoordinatorError.unavailable }
             current = await stateStore.load()
             current.completedPhases.insert(.toolchain)
             current.phase = .hostIntegration
@@ -1035,26 +1013,23 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
         }
     }
 
-    private func runtimeIsReady() async -> Bool {
-        do {
-            let handshake = try await client.handshake()
-            guard let value = handshake.result,
-                  value.protocolVersion == 1,
-                  value.configurationAvailable,
-                  value.runtimeAvailable,
-                  value.capabilities.isComplete,
-                  value.capabilities.jq else {
-                return false
-            }
-            for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
-                guard await runner.resolveExecutable(named: name) != nil else {
-                    return false
-                }
-            }
-            return true
-        } catch {
+    private func runtimeInstallationIsReady(
+        expectedExecutable: URL? = nil
+    ) async -> Bool {
+        let homeDirectory = await runner.homeDirectory()
+        let configuration = homeDirectory.appending(
+            path: ".config/silo/config.sh",
+            directoryHint: .notDirectory
+        )
+        guard DefaultSiloConfigurationInstaller.isValidConfiguration(at: configuration) else {
             return false
         }
+        let resolution = await runner.siloResolution(forceRefresh: true)
+        let expected = expectedExecutable ?? ToolchainLayout
+            .managedRoot(homeDirectory: homeDirectory)
+            .appending(path: "current/bin/silo", directoryHint: .notDirectory)
+            .standardizedFileURL
+        return resolution.selected?.standardizedFileURL == expected
     }
 }
 
@@ -1070,15 +1045,18 @@ final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
     private let failureWorkspace: String
     private let keepsFirstRunPending: Bool
     private let completesFirstRun: Bool
+    private let simulatesRuntimeInstallation: Bool
 
     init(
         failureWorkspace: String,
         keepsFirstRunPending: Bool = false,
-        completesFirstRun: Bool = false
+        completesFirstRun: Bool = false,
+        simulatesRuntimeInstallation: Bool = false
     ) {
         self.failureWorkspace = failureWorkspace
         self.keepsFirstRunPending = keepsFirstRunPending
         self.completesFirstRun = completesFirstRun
+        self.simulatesRuntimeInstallation = simulatesRuntimeInstallation
         let now = Date()
         self.current = SiloBootstrapState(
             phase: .workspaces,
@@ -1090,6 +1068,29 @@ final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
     }
 
     func state() async -> SiloBootstrapState { current }
+
+    func prepareRuntime(
+        onProgress: (@Sendable (SiloRuntimeSetupPhase) -> Void)?
+    ) async throws {
+        guard simulatesRuntimeInstallation else {
+            onProgress?(.ready)
+            return
+        }
+        for phase in [
+            SiloRuntimeSetupPhase.installingRuntime,
+            .installingConfiguration,
+            .verifying,
+            .ready
+        ] {
+            onProgress?(phase)
+            if phase != .ready {
+                let delay: Duration = phase == .installingRuntime
+                    ? .seconds(5)
+                    : .milliseconds(500)
+                try await Task.sleep(for: delay)
+            }
+        }
+    }
 
     func preflight(
         onCheck: (@Sendable (SiloPreflightCheck) -> Void)? = nil

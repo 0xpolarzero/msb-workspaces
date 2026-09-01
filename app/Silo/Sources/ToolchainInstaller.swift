@@ -99,6 +99,98 @@ enum ToolchainLayout {
     }
 }
 
+enum DefaultSiloConfigurationError: Error, LocalizedError, Sendable, Equatable {
+    case sourceUnavailable
+    case existingConfigurationInvalid
+    case installationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceUnavailable:
+            return "The bundled default Silo configuration is unavailable."
+        case .existingConfigurationInvalid:
+            return "The existing Silo configuration is not a safe regular file."
+        case .installationFailed:
+            return "The default Silo configuration could not be installed."
+        }
+    }
+}
+
+enum DefaultSiloConfigurationInstaller {
+    static func installIfNeeded(source: URL, homeDirectory: URL) throws -> URL {
+        let fileManager = FileManager.default
+        let configurationDirectory = homeDirectory.appending(
+            path: ".config/silo",
+            directoryHint: .isDirectory
+        )
+        let destination = configurationDirectory.appending(
+            path: "config.sh",
+            directoryHint: .notDirectory
+        )
+        if fileManager.fileExists(atPath: destination.path) {
+            guard isValidConfiguration(at: destination) else {
+                throw DefaultSiloConfigurationError.existingConfigurationInvalid
+            }
+            return destination
+        }
+        guard isValidConfiguration(at: source) else {
+            throw DefaultSiloConfigurationError.sourceUnavailable
+        }
+
+        do {
+            try fileManager.createDirectory(
+                at: configurationDirectory,
+                withIntermediateDirectories: true
+            )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: configurationDirectory.path
+            )
+            let data = try Data(contentsOf: source)
+            let temporary = configurationDirectory.appending(
+                path: ".config-\(UUID().uuidString)",
+                directoryHint: .notDirectory
+            )
+            defer { try? fileManager.removeItem(at: temporary) }
+            try data.write(to: temporary, options: .withoutOverwriting)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: temporary.path
+            )
+            do {
+                try fileManager.moveItem(at: temporary, to: destination)
+            } catch {
+                guard fileManager.fileExists(atPath: destination.path),
+                      isValidConfiguration(at: destination) else {
+                    throw error
+                }
+            }
+            guard isValidConfiguration(at: destination) else {
+                throw DefaultSiloConfigurationError.installationFailed
+            }
+            return destination
+        } catch let error as DefaultSiloConfigurationError {
+            throw error
+        } catch {
+            throw DefaultSiloConfigurationError.installationFailed
+        }
+    }
+
+    static func isValidConfiguration(at url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [
+            .fileSizeKey,
+            .isRegularFileKey,
+            .isSymbolicLinkKey
+        ]), values.isRegularFile == true,
+            values.isSymbolicLink != true,
+            let fileSize = values.fileSize,
+            fileSize <= 64 * 1024 else {
+            return false
+        }
+        return true
+    }
+}
+
 struct ValidatedToolchain: Sendable, Equatable {
     let manifest: ToolchainManifest
     let executable: URL

@@ -77,6 +77,13 @@ This writes `app/Silo/build/logs/test.log` and runs only the
 `SiloTests` target. It does not update the bundle at
 `app/Silo/build/Silo.app`.
 
+For runtime/configuration installation progress inside the first onboarding
+step and its disabled Continue gate, run only the focused startup flow:
+
+```bash
+app/Silo/Scripts/smoke-test.sh --startup-only
+```
+
 Run the real macOS accessibility/UI flow. For status-item and popover-only
 changes, use the focused flow so onboarding is not replayed:
 
@@ -399,8 +406,9 @@ unredacted system logs.
 - Do not guess the newest result with a glob. Use the exact
   `Test session results, code coverage, and logs:` path printed by that run.
 - The scripts use filtered targets: `test.sh` runs only `SiloTests`;
-  `smoke-test.sh` runs `SiloUITests`; `--monitor-only` runs
-  `testStatusItemMinimalPopoverAndQuit()`; `--repair-only` runs
+  `smoke-test.sh` runs `SiloUITests`; `--startup-only` runs
+  `testStartupInstallsDependenciesInsideFirstOnboardingStep()`; `--monitor-only`
+  runs `testStatusItemMinimalPopoverAndQuit()`; `--repair-only` runs
   `testDedicatedRuntimeRepairClearsEverySurfaceAfterVerifiedReactivation()`;
   `--picker-only` runs
   `testDirectFolderPickerFromStatusPopover()`; `--preferences-only` runs

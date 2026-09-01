@@ -4,6 +4,61 @@ import XCTest
 
 @MainActor
 final class SiloUITests: XCTestCase {
+    func testStartupInstallsDependenciesInsideFirstOnboardingStep() {
+        let app = launchFixture([
+            "--ui-test-setup",
+            "--ui-test-setup-installing"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.windows["setup.window"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.windows["startup-installation.window"].exists)
+        XCTAssertFalse(app.buttons["runtime-repair.window.action"].exists)
+        XCTAssertEqual(
+            app.buttons["setup.step.dependencies"].value as? String,
+            "Current step"
+        )
+
+        let continueButton = app.buttons["setup.primary-action"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 2))
+        XCTAssertEqual(continueButton.label, "Continue")
+        XCTAssertFalse(continueButton.isEnabled)
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["setup.runtime-installation.progress"].exists
+        )
+        XCTAssertTrue(waitUntilEnabled(continueButton, timeout: 8))
+        let dependencyChecks = app.staticTexts["Dependency checks"]
+        let tools = app.descendants(matching: .any)["setup.runtime-installation.tools"]
+        XCTAssertTrue(app.staticTexts["Dependencies"].exists)
+        XCTAssertTrue(dependencyChecks.exists)
+        XCTAssertLessThan(dependencyChecks.frame.minY, tools.frame.minY)
+        XCTAssertFalse(app.staticTexts["Dependencies ready"].exists)
+        XCTAssertFalse(app.staticTexts["Silo and its required configuration are installed."].exists)
+        XCTAssertFalse(app.staticTexts["What you need"].exists)
+        XCTAssertFalse(
+            app.staticTexts[
+                "Use the detected defaults, or choose applications just for Silo. You can change these later in General Settings."
+            ].exists
+        )
+
+        for identifier in [
+            "setup.runtime-installation.tools",
+            "setup.runtime-installation.configuration",
+            "setup.runtime-installation.verification"
+        ] {
+            XCTAssertEqual(
+                app.descendants(matching: .any)[identifier].value as? String,
+                "Installed"
+            )
+        }
+        continueButton.click()
+        XCTAssertEqual(
+            app.buttons["setup.step.workspaces"].value as? String,
+            "Current step"
+        )
+    }
+
     func testWorkspaceRepairRoutesToRestore() {
         let app = launchFixture([
             "--ui-test-open-popover",

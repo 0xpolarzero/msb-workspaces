@@ -4126,9 +4126,9 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(failure.diagnosticDetails?.hasSuffix(finalError) == true)
     }
 
-    func testRuntimeRepairVerifiesExactActivatedCLIWithoutRuntimePrerequisites() async throws {
+    func testRuntimePreparationInstallsCLIAndConfigurationWithoutWorkspaceState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silo-runtime-repair-exact-cli-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-preparation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -4140,15 +4140,18 @@ final class AppModelTests: XCTestCase {
             hostService: EnabledHostService()
         )
 
-        try await coordinator.repairRuntime()
+        try await coordinator.prepareRuntime()
 
         let selected = await runner.siloResolution().selected?.standardizedFileURL
         let expected = ToolchainLayout.managedRoot(homeDirectory: temporary)
             .appendingPathComponent("current/bin/silo")
             .standardizedFileURL
         XCTAssertEqual(selected, expected)
+        XCTAssertTrue(DefaultSiloConfigurationInstaller.isValidConfiguration(
+            at: temporary.appendingPathComponent(".config/silo/config.sh")
+        ))
         XCTAssertFalse(FileManager.default.fileExists(
-            atPath: temporary.appendingPathComponent(".config/silo/config.sh").path
+            atPath: temporary.appendingPathComponent(".config/silo/workspaces.json").path
         ))
     }
 
@@ -4252,6 +4255,34 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "bin/silo" }?.executable == true)
         XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "config.sh" }?.executable == true)
         XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "lib/proxycore.py" }?.executable == true)
+    }
+
+    func testDefaultConfigurationInstallerCreatesAndPreservesSafeConfiguration() throws {
+        let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
+        let source = bundledRoot.appending(path: "payload/config.sh", directoryHint: .notDirectory)
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silo-default-config-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        let destination = try DefaultSiloConfigurationInstaller.installIfNeeded(
+            source: source,
+            homeDirectory: temporary
+        )
+        XCTAssertEqual(try Data(contentsOf: destination), try Data(contentsOf: source))
+        XCTAssertTrue(DefaultSiloConfigurationInstaller.isValidConfiguration(at: destination))
+        let permissions = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: destination.path)[.posixPermissions]
+                as? NSNumber
+        )
+        XCTAssertEqual(permissions.intValue & 0o777, 0o644)
+
+        let customized = Data("# custom configuration\n".utf8)
+        try customized.write(to: destination)
+        let preserved = try DefaultSiloConfigurationInstaller.installIfNeeded(
+            source: source,
+            homeDirectory: temporary
+        )
+        XCTAssertEqual(try Data(contentsOf: preserved), customized)
     }
 
     func testBundledToolchainManifestRequiresEveryCoupledArtifact() throws {
