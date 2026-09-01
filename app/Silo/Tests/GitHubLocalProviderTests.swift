@@ -52,15 +52,18 @@ final class GitHubLocalProviderTests: XCTestCase {
         applyExit: Int32 = 0,
         applyDelay: TimeInterval = 0,
         applyConflictsBeforeSuccess: Int = 0,
-        identityJSON: String? = nil
+        identityJSON: String? = nil,
+        resetCommandsSucceed: Bool = false
     ) -> URL {
         let log = directory.appendingPathComponent("calls.log")
         let applyStdin = directory.appendingPathComponent("apply.stdin.json")
+        let policy = directory.appendingPathComponent("github-policy.json")
         let executable = directory.appendingPathComponent("msw")
         var lines = [
             "#!/bin/sh",
             "LOG=\"\(log.path)\"",
             "APPLY_STDIN=\"\(applyStdin.path)\"",
+            "POLICY=\"\(policy.path)\"",
             "APPLY_COUNT=\"\(directory.appendingPathComponent("apply.count").path)\"",
             "case \"$*\" in",
             "  \"app handshake\"*)",
@@ -94,6 +97,16 @@ final class GitHubLocalProviderTests: XCTestCase {
                 lines.append("    printf '%s\\n' \(Self.shellQuote(deviceJSON))")
             }
             lines.append("    ;;")
+        }
+        if resetCommandsSucceed {
+            lines += [
+                "  \"github migrate all\"*)",
+                "    echo \"reset-migrate $*\" >> \"$LOG\"",
+                "    ;;",
+                "  \"github remove\"*)",
+                "    echo \"reset-remove $*\" >> \"$LOG\"",
+                "    ;;",
+            ]
         }
         lines += [
             "  \"github auth\"*)",
@@ -138,6 +151,11 @@ final class GitHubLocalProviderTests: XCTestCase {
             }
             if applyDelay > 0 {
                 lines.append("    sleep \(applyDelay)")
+            }
+            if applyExit == 0, applyJSON == Self.policyApplyLine {
+                // A successful real CLI apply atomically publishes the
+                // effective policy before returning confirmation.
+                lines.append("    cp \"$APPLY_STDIN\" \"$POLICY\"")
             }
             lines.append("    echo \"policy-end $*\" >> \"$LOG\"")
             if applyExit != 0 {
@@ -221,6 +239,78 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testConciseLocalGitHubStrings() {
         XCTAssertEqual(GitHubLocalStrings.noReposCopy, "No repositories found.")
         XCTAssertEqual(GitHubLocalStrings.settingsNoCredential, "GitHub account not connected on this Mac")
+    }
+
+    func testPolicySyncPresentationUsesTruthfulStatesAndActions() {
+        let phases: [(GitHubApplyPhase, String, Bool)] = [
+            (.saved, "Saved", false),
+            (.applying, "Applying", false),
+            (.delayed, "Delayed", false),
+            (.applied, "Applied", false),
+            (.cancelled, "Cancelled", true)
+        ]
+        for (phase, label, canRetry) in phases {
+            let progress = GitHubApplyProgress(
+                generation: 1,
+                phase: phase,
+                workspace: "dev",
+                failure: nil
+            )
+            XCTAssertEqual(progress.label, label)
+            XCTAssertEqual(progress.canRetry, canRetry)
+            XCTAssertEqual(progress.canCancel, phase == .delayed)
+            XCTAssertFalse(progress.summary.localizedCaseInsensitiveContains("lock"))
+            XCTAssertFalse(progress.summary.localizedCaseInsensitiveContains("operation conflict"))
+            XCTAssertFalse(progress.summary.localizedCaseInsensitiveContains("another operation"))
+        }
+
+        let permanent = GitHubApplyProgress(
+            generation: 2,
+            phase: .failed,
+            workspace: "dev",
+            failure: GitHubApplyFailure(
+                code: "MSW_INVALID_REQUEST",
+                message: "The repository policy is invalid.",
+                recovery: "Review the repository selection.",
+                workspace: "dev",
+                retryable: false
+            )
+        )
+        XCTAssertEqual(permanent.label, "Couldn’t apply")
+        XCTAssertFalse(permanent.canRetry)
+        XCTAssertEqual(permanent.summary, "The repository policy is invalid.")
+
+        let retryable = GitHubApplyProgress(
+            generation: 3,
+            phase: .failed,
+            workspace: "dev",
+            failure: GitHubApplyFailure(
+                code: "MSW_TRANSPORT_PROVISION_FAILED",
+                message: "GitHub transport could not be configured.",
+                recovery: "Retry synchronization.",
+                workspace: "dev",
+                retryable: true
+            )
+        )
+        XCTAssertTrue(retryable.canRetry)
+
+        let internalFailure = GitHubApplyProgress(
+            generation: 4,
+            phase: .failed,
+            workspace: "dev",
+            failure: GitHubApplyFailure(
+                code: "MSW_OPERATION_CONFLICT",
+                message: "Another GitHub operation is already running.",
+                recovery: "Delete the stale lock and retry.",
+                workspace: "dev",
+                retryable: false
+            )
+        )
+        XCTAssertEqual(internalFailure.summary, "GitHub synchronization could not continue.")
+        XCTAssertEqual(
+            internalFailure.failure?.presentationRecovery,
+            "Review the saved GitHub choices and runtime status."
+        )
     }
 
     // MARK: - Canonicalization
@@ -308,7 +398,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         // watcher must observe it and notify consumers.
         let tmp = directory.appendingPathComponent("github-policy.json.tmp")
         try Data("{\"schemaVersion\":1,\"workspaces\":{\"dev\":{\"repos\":[{\"canonical\":\"acme/one\",\"mode\":\"read-write\"}]}}}".utf8).write(to: tmp)
-        try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
 
         wait(for: [changed], timeout: 5)
         // `current` always re-reads the file, so the fresh policy is visible
@@ -531,7 +621,8 @@ final class GitHubLocalProviderTests: XCTestCase {
             GitHubWorkspacePolicy(workspace: "playgrounds", repositories: [])
         ]
 
-        try await provider.commit(desiredPolicy)
+        _ = try await provider.savePolicy(desiredPolicy)
+        try await provider.waitForPolicySync()
 
         // ONE apply invocation; no sequential policy-set calls.
         let log = readLog(directory)
@@ -560,7 +651,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertTrue(personal.repos.isEmpty, "Untouched workspace with no prior entries stays empty")
     }
 
-    func testCommitRetriesTransientOperationConflict() async throws {
+    func testPolicySyncRetriesTransientContention() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: """
@@ -596,9 +687,290 @@ final class GitHubLocalProviderTests: XCTestCase {
             ])
         ]
 
-        try await provider.commit(policy)
+        _ = try await provider.savePolicy(policy)
+        try await provider.waitForPolicySync()
 
         XCTAssertEqual(applyCallCount(directory), 2)
+    }
+
+    func testContentionBeyondOldRetryWindowBecomesDelayedThenAppliesWithoutFailure() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyConflictsBeforeSuccess: 5
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL),
+            contentionBackoff: { _ in .milliseconds(80) }
+        )
+
+        let saved = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readWrite)
+            ])
+        ])
+        XCTAssertEqual(saved.label, "Saved")
+
+        var delayed: GitHubApplyProgress?
+        for _ in 0..<80 {
+            let progress = await provider.policySyncProgress()
+            if progress?.phase == .delayed {
+                delayed = progress
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let visible = try XCTUnwrap(delayed)
+        XCTAssertEqual(visible.label, "Delayed")
+        XCTAssertNil(visible.failure, "Routine contention must never become a visible failure")
+        XCTAssertFalse(visible.summary.localizedCaseInsensitiveContains("lock"))
+        XCTAssertFalse(visible.summary.localizedCaseInsensitiveContains("operation conflict"))
+        XCTAssertFalse(visible.summary.localizedCaseInsensitiveContains("another operation"))
+
+        try await provider.waitForPolicySync()
+        let finalProgress = await provider.policySyncProgress()
+        let applied = try XCTUnwrap(finalProgress)
+        XCTAssertEqual(applied.phase, .applied)
+        XCTAssertEqual(applyCallCount(directory), 6)
+    }
+
+    func testPendingIntentResumesAfterProviderRestart() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let desired = MSWGitHubPolicyApplyRequest(
+            schemaVersion: 1,
+            workspaces: [
+                "dev": GitHubPolicyWorkspace(
+                    capability: nil,
+                    repos: [GitHubPolicyRepository(canonical: "acme/one", mode: .readOnly)]
+                ),
+                "playgrounds": GitHubPolicyWorkspace(capability: nil, repos: []),
+                "personal": GitHubPolicyWorkspace(capability: nil, repos: [])
+            ]
+        )
+        try GitHubPolicyStore.writeIntent(
+            GitHubApplyPersistentState(
+                schemaVersion: 1,
+                generation: 41,
+                semanticHash: "restart-generation",
+                status: .pending,
+                desired: desired,
+                updatedAt: Date(),
+                failure: nil
+            ),
+            policyURL: policyURL
+        )
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine
+        )
+        let restarted = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+
+        let resumedProgress = await restarted.policySyncProgress()
+        let resumed = try XCTUnwrap(resumedProgress)
+        XCTAssertEqual(resumed.generation, 41)
+        XCTAssertTrue(resumed.isInFlight)
+        let restartedDesired = await restarted.desiredPolicy()
+        XCTAssertEqual(restartedDesired?.workspaces["dev"]?.repos.first?.canonical, "acme/one")
+        try await restarted.waitForPolicySync()
+        let finalRestartedProgress = await restarted.policySyncProgress()
+        XCTAssertEqual(finalRestartedProgress?.phase, .applied)
+        XCTAssertEqual(applyCallCount(directory), 1)
+    }
+
+    func testRestartScopesPendingIntentToCurrentWorkspaceConfiguration() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let staleDesired = MSWGitHubPolicyApplyRequest(
+            schemaVersion: 1,
+            workspaces: [
+                "dev": GitHubPolicyWorkspace(
+                    capability: nil,
+                    repos: [GitHubPolicyRepository(canonical: "acme/old", mode: .readOnly)]
+                )
+            ]
+        )
+        try GitHubPolicyStore.writeIntent(
+            GitHubApplyPersistentState(
+                schemaVersion: 1,
+                generation: 12,
+                semanticHash: "stale-workspace-set",
+                status: .pending,
+                desired: staleDesired,
+                updatedAt: Date(),
+                failure: nil
+            ),
+            policyURL: policyURL
+        )
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine
+        )
+        var renamedWorkspace = SetupWorkspaceConfiguration.defaults[0]
+        renamedWorkspace.name = "development"
+        let configured = [renamedWorkspace]
+        let restarted = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL),
+            workspaceConfigurations: configured
+        )
+
+        _ = await restarted.policySyncProgress()
+        try await restarted.waitForPolicySync()
+
+        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
+            MSWGitHubPolicyApplyRequest.self,
+            from: Data(readApplyStdin(directory).utf8)
+        )
+        XCTAssertEqual(Set(appliedRequest.workspaces.keys), ["development"])
+        XCTAssertTrue(appliedRequest.workspaces["development"]?.repos.isEmpty == true)
+        XCTAssertEqual(
+            Set(GitHubPolicyStore.readIntent(policyURL: policyURL)?.desired.workspaces.keys.map { $0 } ?? []),
+            ["development"]
+        )
+    }
+
+    func testAppliedProgressReconcilesEffectivePolicyDrift() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+
+        _ = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/desired", mode: .readOnly)
+            ])
+        ])
+        try await provider.waitForPolicySync()
+        XCTAssertEqual(applyCallCount(directory), 1)
+
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let drifted = await provider.policySyncProgress()
+        XCTAssertTrue(drifted?.isInFlight == true)
+        XCTAssertNil(drifted?.failure)
+
+        try await provider.waitForPolicySync()
+        let reconciled = await provider.policySyncProgress()
+        XCTAssertEqual(reconciled?.phase, .applied)
+        XCTAssertEqual(applyCallCount(directory), 2)
+    }
+
+    func testSaveWaitsForWorkspaceConfigurationReloadBeforeBuildingIntent() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyDelay: 0.4
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+        _ = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/old", mode: .readOnly)
+            ])
+        ])
+        try await Task.sleep(for: .milliseconds(60))
+
+        var development = SetupWorkspaceConfiguration.defaults[0]
+        development.name = "development"
+        let reload = Task {
+            try await provider.reloadWorkspaceConfiguration([development])
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        let save = Task {
+            try await provider.savePolicy([
+                GitHubWorkspacePolicy(workspace: "development", repositories: [
+                    self.repositoryPolicy(
+                        workspace: "development",
+                        fullName: "acme/new",
+                        mode: .readWrite
+                    )
+                ])
+            ])
+        }
+
+        try await reload.value
+        let newest = try await save.value
+        try await provider.waitForPolicySync()
+
+        let finalProgress = await provider.policySyncProgress()
+        XCTAssertEqual(finalProgress?.generation, newest.generation)
+        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
+            MSWGitHubPolicyApplyRequest.self,
+            from: Data(readApplyStdin(directory).utf8)
+        )
+        XCTAssertEqual(Set(appliedRequest.workspaces.keys), ["development"])
+        XCTAssertEqual(appliedRequest.workspaces["development"]?.repos.map(\.canonical), ["acme/new"])
+    }
+
+    func testSavedDesiredPolicyIsVisibleBeforeCLIConfirmation() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyDelay: 0.3
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+
+        let saved = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/instant", mode: .readOnly)
+            ])
+        ])
+        XCTAssertEqual(saved.phase, .saved)
+        let desiredPolicy = await provider.desiredPolicy()
+        XCTAssertEqual(desiredPolicy?.workspaces["dev"]?.repos.first?.canonical, "acme/instant")
+        XCTAssertTrue(GitHubPolicyStore.read(policyURL: policyURL)?.workspaces.isEmpty == true)
+        try await provider.waitForPolicySync()
     }
 
     func testCommitPreservesUntouchedWorkspaceEntries() async throws {
@@ -633,7 +1005,8 @@ final class GitHubLocalProviderTests: XCTestCase {
             ])
         ]
 
-        try await provider.commit(desiredPolicy)
+        _ = try await provider.savePolicy(desiredPolicy)
+        try await provider.waitForPolicySync()
 
         let stdin = readApplyStdin(directory)
         let payload = try XCTUnwrap(
@@ -664,11 +1037,12 @@ final class GitHubLocalProviderTests: XCTestCase {
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
         do {
-            try await provider.commit([
+            _ = try await provider.savePolicy([
                 GitHubWorkspacePolicy(workspace: "dev", repositories: [
                     repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
                 ])
             ])
+            try await provider.waitForPolicySync()
             XCTFail("Expected commit to throw when the CLI did not confirm provisioning")
         } catch let error as GitHubPolicyApplyError {
             guard case .failed(let failure) = error else {
@@ -696,11 +1070,12 @@ final class GitHubLocalProviderTests: XCTestCase {
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
         do {
-            try await provider.commit([
+            _ = try await provider.savePolicy([
                 GitHubWorkspacePolicy(workspace: "dev", repositories: [
                     repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
                 ])
             ])
+            try await provider.waitForPolicySync()
             XCTFail("Expected commit to throw on the CLI's typed failure")
         } catch let error as GitHubPolicyApplyError {
             guard case .failed(let failure) = error else {
@@ -708,6 +1083,44 @@ final class GitHubLocalProviderTests: XCTestCase {
             }
             XCTAssertEqual(failure.code, "MSW_TRANSPORT_PROVISION_FAILED")
             XCTAssertTrue(failure.message.contains("rolled back"))
+        }
+    }
+
+    func testNonRetryableContentionDetailsStayOutOfPresentation() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let failure = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":null,"result":null,"warnings":[],"error":{"code":"MSW_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Remove the stale lock and retry.","workspace":"dev","retryable":false}}"#
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: failure,
+            applyExit: 75
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+
+        _ = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
+            ])
+        ])
+        do {
+            try await provider.waitForPolicySync()
+            XCTFail("Expected terminal failure")
+        } catch let error as GitHubPolicyApplyError {
+            guard case .failed(let visible) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            let presentation = "\(visible.message) \(visible.recovery)"
+            XCTAssertFalse(presentation.localizedCaseInsensitiveContains("lock"))
+            XCTAssertFalse(presentation.localizedCaseInsensitiveContains("operation conflict"))
+            XCTAssertFalse(presentation.localizedCaseInsensitiveContains("another"))
         }
     }
 
@@ -730,16 +1143,16 @@ final class GitHubLocalProviderTests: XCTestCase {
             repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
         ])]
 
-        let started = try await provider.beginPolicyApply(desired)
-        XCTAssertEqual(started.phase, .saving, "Save must return before reconciliation finishes")
+        let started = try await provider.savePolicy(desired)
+        XCTAssertEqual(started.phase, .saved, "Save must return before reconciliation finishes")
         let pending = try XCTUnwrap(GitHubPolicyStore.readIntent(policyURL: policyURL))
         XCTAssertEqual(pending.generation, started.generation)
         XCTAssertEqual(pending.status, .pending)
 
-        try await provider.waitForCurrentPolicyApply()
-        let maybeCompleted = await provider.currentPolicyApplyProgress()
+        try await provider.waitForPolicySync()
+        let maybeCompleted = await provider.policySyncProgress()
         let completed = try XCTUnwrap(maybeCompleted)
-        XCTAssertEqual(completed.phase, .completed)
+        XCTAssertEqual(completed.phase, .applied)
         XCTAssertEqual(completed.generation, started.generation)
         XCTAssertEqual(GitHubPolicyStore.readIntent(policyURL: policyURL)?.status, .completed)
     }
@@ -757,13 +1170,13 @@ final class GitHubLocalProviderTests: XCTestCase {
         let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
-        let progress = try await provider.beginPolicyApply([
+        let progress = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
                 repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
             ])
         ])
 
-        XCTAssertEqual(progress.phase, .completed)
+        XCTAssertEqual(progress.phase, .applied)
         XCTAssertEqual(applyCallCount(directory), 0)
     }
 
@@ -781,23 +1194,23 @@ final class GitHubLocalProviderTests: XCTestCase {
         )
         let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
-        let first = try await provider.beginPolicyApply([
+        let first = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)])
         ])
         try await Task.sleep(for: .milliseconds(60))
-        let newest = try await provider.beginPolicyApply([
+        let newest = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [repositoryPolicy(workspace: "dev", fullName: "acme/two", mode: .readWrite)])
         ])
         XCTAssertGreaterThan(newest.generation, first.generation)
 
         async let identityResult = provider.setIdentity(name: "Ada", email: "ada@example.test", workspace: "dev")
-        try await provider.waitForCurrentPolicyApply()
+        try await provider.waitForPolicySync()
         let resolvedIdentity = try await identityResult
         XCTAssertEqual(resolvedIdentity.name, "Ada")
-        let maybeProgress = await provider.currentPolicyApplyProgress()
+        let maybeProgress = await provider.policySyncProgress()
         let progress = try XCTUnwrap(maybeProgress)
         XCTAssertEqual(progress.generation, newest.generation)
-        XCTAssertEqual(progress.phase, .completed)
+        XCTAssertEqual(progress.phase, .applied)
         let appliedRequest = try MSWProtocolDecoder.decoder().decode(
             MSWGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
@@ -809,6 +1222,150 @@ final class GitHubLocalProviderTests: XCTestCase {
             try XCTUnwrap(calls.range(of: "identity app identity")?.lowerBound),
             "Identity must enter the shared mutation queue only after GitHub reconciliation releases it"
         )
+    }
+
+    func testConcurrentRapidSavesApplyNewestAcceptedGeneration() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyDelay: 0.25
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+        let ownerID = GitHubLocalProvider.stableID("acme")
+
+        let accepted = try await withThrowingTaskGroup(
+            of: (generation: Int, repository: String).self
+        ) { group in
+            for index in 0..<8 {
+                group.addTask {
+                    let repository = "acme/rapid-\(index)"
+                    let progress = try await provider.savePolicy([
+                        GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                            GitHubRepositoryPolicy(
+                                workspace: "dev",
+                                repositoryID: GitHubLocalProvider.stableID(repository),
+                                fullName: repository,
+                                installationID: ownerID,
+                                ownerID: ownerID,
+                                ownerLogin: "acme",
+                                ownerType: nil,
+                                mode: .readOnly
+                            )
+                        ])
+                    ])
+                    return (progress.generation, repository)
+                }
+            }
+            var results: [(generation: Int, repository: String)] = []
+            while let result = try await group.next() {
+                results.append(result)
+            }
+            return results
+        }
+        let latest = try XCTUnwrap(accepted.max(by: { $0.generation < $1.generation }))
+
+        try await provider.waitForPolicySync()
+
+        let finalProgress = await provider.policySyncProgress()
+        XCTAssertEqual(finalProgress?.generation, latest.generation)
+        XCTAssertEqual(finalProgress?.phase, .applied)
+        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
+            MSWGitHubPolicyApplyRequest.self,
+            from: Data(readApplyStdin(directory).utf8)
+        )
+        XCTAssertEqual(appliedRequest.workspaces["dev"]?.repos.map(\.canonical), [latest.repository])
+    }
+
+    func testFailedIntentPersistenceDoesNotCancelAcceptedGeneration() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyDelay: 0.4
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+        let accepted = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/accepted", mode: .readOnly)
+            ])
+        ])
+        let intentURL = GitHubPolicyStore.intentURL(for: policyURL)
+        try FileManager.default.removeItem(at: intentURL)
+        try FileManager.default.createDirectory(at: intentURL, withIntermediateDirectories: false)
+
+        do {
+            _ = try await provider.savePolicy([
+                GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                    repositoryPolicy(workspace: "dev", fullName: "acme/rejected", mode: .readWrite)
+                ])
+            ])
+            XCTFail("Expected durable intent write to fail")
+        } catch {
+            // The already accepted generation must remain owned and running.
+        }
+        try FileManager.default.removeItem(at: intentURL)
+
+        try await provider.waitForPolicySync()
+        let finalProgress = await provider.policySyncProgress()
+        XCTAssertEqual(finalProgress?.generation, accepted.generation)
+        XCTAssertEqual(finalProgress?.phase, .applied)
+        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
+            MSWGitHubPolicyApplyRequest.self,
+            from: Data(readApplyStdin(directory).utf8)
+        )
+        XCTAssertEqual(appliedRequest.workspaces["dev"]?.repos.map(\.canonical), ["acme/accepted"])
+    }
+
+    func testConfirmedApplyStaysAppliedWhenCompletionMarkerCannotBeWritten() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            applyDelay: 0.3
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+
+        _ = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [
+                repositoryPolicy(workspace: "dev", fullName: "acme/confirmed", mode: .readOnly)
+            ])
+        ])
+        let intentURL = GitHubPolicyStore.intentURL(for: policyURL)
+        try FileManager.default.removeItem(at: intentURL)
+        try FileManager.default.createDirectory(at: intentURL, withIntermediateDirectories: false)
+
+        try await provider.waitForPolicySync()
+        let progress = await provider.policySyncProgress()
+        XCTAssertEqual(progress?.phase, .applied)
+        XCTAssertNil(progress?.failure)
     }
 
     func testSupersedingPartialEditPreservesPendingIntentAndWaitsForNewestGeneration() async throws {
@@ -824,24 +1381,24 @@ final class GitHubLocalProviderTests: XCTestCase {
         let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
-        _ = try await provider.beginPolicyApply([
+        _ = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
                 repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
             ])
         ])
-        let waiter = Task { try await provider.waitForCurrentPolicyApply() }
+        let waiter = Task { try await provider.waitForPolicySync() }
         try await Task.sleep(for: .milliseconds(60))
-        let newest = try await provider.beginPolicyApply([
+        let newest = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "playgrounds", repositories: [
                 repositoryPolicy(workspace: "playgrounds", fullName: "acme/two", mode: .readWrite)
             ])
         ])
 
         try await waiter.value
-        let maybeCompleted = await provider.currentPolicyApplyProgress()
+        let maybeCompleted = await provider.policySyncProgress()
         let completed = try XCTUnwrap(maybeCompleted)
         XCTAssertEqual(completed.generation, newest.generation)
-        XCTAssertEqual(completed.phase, .completed, "A waiter must follow a superseding generation through completion")
+        XCTAssertEqual(completed.phase, .applied, "A waiter must follow a superseding generation through completion")
         let appliedRequest = try MSWProtocolDecoder.decoder().decode(
             MSWGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
@@ -863,25 +1420,25 @@ final class GitHubLocalProviderTests: XCTestCase {
         let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
         let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
-        _ = try await provider.beginPolicyApply([
+        _ = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
                 repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)
             ])
         ])
-        let cancellation = Task { await provider.cancelCurrentPolicyApply() }
+        let cancellation = Task { await provider.cancelPolicySync() }
         try await Task.sleep(for: .milliseconds(20))
-        let newest = try await provider.beginPolicyApply([
+        let newest = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
                 repositoryPolicy(workspace: "dev", fullName: "acme/newest", mode: .readWrite)
             ])
         ])
         await cancellation.value
-        try await provider.waitForCurrentPolicyApply()
+        try await provider.waitForPolicySync()
 
-        let maybeCompleted = await provider.currentPolicyApplyProgress()
+        let maybeCompleted = await provider.policySyncProgress()
         let completed = try XCTUnwrap(maybeCompleted)
         XCTAssertEqual(completed.generation, newest.generation)
-        XCTAssertEqual(completed.phase, .completed)
+        XCTAssertEqual(completed.phase, .applied)
         XCTAssertEqual(GitHubPolicyStore.readIntent(policyURL: policyURL)?.status, .completed)
     }
 
@@ -901,7 +1458,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
-        try await provider.removeAllAccess()
+        _ = try await provider.clearPolicy()
+        try await provider.waitForPolicySync()
 
         let applyCalls = applyCallCount(directory)
         XCTAssertEqual(applyCalls, 1, "Removal must be a single apply invocation")
@@ -913,6 +1471,38 @@ final class GitHubLocalProviderTests: XCTestCase {
             let entry = try XCTUnwrap(payload.workspaces[workspace])
             XCTAssertTrue(entry.repos.isEmpty, "\(workspace) must be emptied")
         }
+    }
+
+    func testResetAccessWaitsForPolicyCleanupThenRetiresLegacyGitHubState() async throws {
+        let directory = makeTemporaryDirectory()
+        let policyURL = directory.appendingPathComponent("github-policy.json")
+        writePolicy(policyURL, json: """
+        {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]}}}
+        """)
+        let executable = makeFakeMSW(
+            directory: directory,
+            statusJSON: #"{"mode":"local","workspaces":[]}"#,
+            applyJSON: Self.policyApplyLine,
+            resetCommandsSucceed: true
+        )
+        let provider = GitHubLocalProvider(
+            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+                homeDirectory: directory,
+                testMSWExecutable: executable
+            ))),
+            policyStore: GitHubPolicyStore(policyURL: policyURL)
+        )
+
+        let progress = try await provider.resetAccess()
+
+        XCTAssertEqual(progress.phase, .applied)
+        let calls = readLog(directory).split(separator: "\n").map(String.init)
+        let applyEnd = try XCTUnwrap(calls.firstIndex { $0.contains("policy-end") })
+        let migration = try XCTUnwrap(calls.firstIndex { $0.contains("reset-migrate github migrate all") })
+        let removal = try XCTUnwrap(calls.firstIndex { $0.contains("reset-remove github remove dev") })
+        XCTAssertLessThan(applyEnd, migration)
+        XCTAssertLessThan(migration, removal)
+        XCTAssertFalse(calls.contains { $0.contains("secret-plan") || $0.contains("secret-apply") })
     }
 
     func testReloadedWorkspaceConfigurationScopesPolicyAndAllWorkspaceIdentity() async throws {
@@ -952,7 +1542,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         ]
 
         try await provider.reloadWorkspaceConfiguration(selected)
-        let currentPolicy = await provider.currentPolicy()
+        let currentPolicy = await provider.desiredPolicy()
         let scopedPolicy = try XCTUnwrap(currentPolicy)
         XCTAssertEqual(Set(scopedPolicy.workspaces.keys), ["development", "personal", "lab"])
         XCTAssertNil(scopedPolicy.workspaces["dev"])
@@ -962,7 +1552,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             scopedCatalog.hostCredentialPresent,
             "A credential belonging only to a removed workspace must not make the applied target set look connected."
         )
-        try await provider.commit([
+        _ = try await provider.savePolicy([
             GitHubWorkspacePolicy(
                 workspace: "development",
                 repositories: [repositoryPolicy(
@@ -974,6 +1564,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             GitHubWorkspacePolicy(workspace: "personal", repositories: []),
             GitHubWorkspacePolicy(workspace: "lab", repositories: [])
         ])
+        try await provider.waitForPolicySync()
 
         let request = try MSWProtocolDecoder.decoder().decode(
             MSWGitHubPolicyApplyRequest.self,

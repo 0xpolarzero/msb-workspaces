@@ -881,6 +881,37 @@ final class AppModelTests: XCTestCase {
         }
     }
 
+    func testGitHubSettingsLoadIfNeededReusesStartupCatalog() async {
+        let provider = GitHubFixtureProvider(scenario: "interaction-states")
+        let state = GitHubSettingsState(
+            authorizationCoordinator: nil,
+            provider: provider,
+            accessMode: .local
+        )
+
+        await state.refresh()
+        await state.loadIfNeeded()
+
+        let attempts = await provider.catalogLoadAttempts()
+        XCTAssertEqual(attempts, 1)
+    }
+
+    func testGitHubSettingsPublishesProgressObservedAfterCatalogLoad() async throws {
+        let provider = GitHubFixtureProvider(scenario: "sync-completes-during-load")
+        _ = try await provider.savePolicy([
+            GitHubWorkspacePolicy(workspace: "dev", repositories: [])
+        ])
+        let state = GitHubSettingsState(
+            authorizationCoordinator: nil,
+            provider: provider,
+            accessMode: .local
+        )
+
+        await state.refresh()
+
+        XCTAssertEqual(state.syncProgress?.phase, .applied)
+    }
+
     func testSystemHealthUsesSetupPreflightChecks() async throws {
         let model = AppModel()
         let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")

@@ -356,19 +356,85 @@ final class SiloUITests: XCTestCase {
         editorScreenshot.lifetime = .keepAlways
         add(editorScreenshot)
 
-        save.click()
+        activateAndClick(save, in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)["settings.github.unsaved"]
                 .waitForNonExistence(timeout: 3)
         )
         XCTAssertTrue(workspaceAccess.exists)
-        let disable = app.buttons["settings.github.disable-all"]
-        disable.click()
-        XCTAssertTrue(app.buttons["Enable Access"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["Access disabled"].exists)
-        app.buttons["Enable Access"].click()
-        XCTAssertTrue(app.buttons["Disable Access"].waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.github.sync.status"]
+                .waitForNonExistence(timeout: 2)
+        )
+        let reset = app.buttons["settings.github.reset"]
+        reset.click()
+        let confirmReset = app.buttons["github.reset.confirm"]
+        XCTAssertTrue(confirmReset.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Reset GitHub access?"].exists)
+        XCTAssertEqual(app.textFields.count, 0)
+        confirmReset.click()
+        XCTAssertTrue(confirmReset.waitForNonExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["settings.github.connect.button"].waitForExistence(timeout: 3))
+        XCTAssertFalse(reset.exists)
         XCTAssertFalse(app.windows["setup.window"].exists)
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
+    func testGitHubSettingsKeepsEditingResponsiveWhileSyncIsDelayed() {
+        let app = launchFixture([
+            "--ui-test-open-popover",
+            "--ui-test-github-sync-delayed"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        XCTAssertTrue(app.buttons["open-monitor.button"].waitForExistence(timeout: 2))
+        app.buttons["open-monitor.button"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["settings.tabs"].waitForExistence(timeout: 3))
+        app.toolbars.buttons["GitHub"].click()
+
+        let picker = app.buttons["github.workspace.dev.repository-picker.button"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 2))
+        picker.click()
+        let repository = app.checkBoxes["github.workspace.dev.repository.1001"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 4))
+        repository.click()
+        app.typeKey(.escape, modifierFlags: [])
+        activateAndClick(app.buttons["settings.github.editor.save"], in: app)
+
+        let status = app.descendants(matching: .any)["settings.github.sync.status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 3))
+        let value = visibleText(in: status)
+        XCTAssertTrue(value.contains("Delayed"), value)
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("lock"), value)
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("operation conflict"), value)
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("another operation"), value)
+        XCTAssertFalse(app.buttons["settings.github.sync.retry"].exists)
+        XCTAssertTrue(app.buttons["settings.github.sync.cancel"].exists)
+
+        // A delayed background write must not freeze the editor. A second
+        // local edit must remain immediately available for the next save.
+        let secondPicker = app.buttons["github.workspace.playgrounds.repository-picker.button"]
+        XCTAssertTrue(secondPicker.waitForExistence(timeout: 2))
+        XCTAssertTrue(secondPicker.isEnabled)
+        secondPicker.click()
+        let secondRepository = app.checkBoxes["github.workspace.playgrounds.repository.1002"]
+        XCTAssertTrue(secondRepository.waitForExistence(timeout: 2))
+        XCTAssertTrue(secondRepository.isEnabled)
+        secondRepository.click()
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(app.buttons["settings.github.editor.save"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["settings.github.editor.save"].isEnabled)
+
+        activateAndClick(app.buttons["settings.github.sync.cancel"], in: app)
+        XCTAssertTrue(status.staticTexts["Cancelled"].waitForExistence(timeout: 2))
+        let retry = app.buttons["settings.github.sync.retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 2))
+        activateAndClick(retry, in: app)
+        XCTAssertTrue(status.waitForNonExistence(timeout: 2))
+
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
 
     func testSecretsTabAddEditRemoveWildcardConfirmationAndRestartBadges() {
@@ -555,9 +621,36 @@ final class SiloUITests: XCTestCase {
         return app
     }
 
+    private func activateAndClick(
+        _ element: XCUIElement,
+        in app: XCUIApplication,
+        timeout: TimeInterval = 3,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        if app.state != .runningForeground {
+            app.activate()
+        }
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: element
+        )
+        let result = XCTWaiter.wait(for: [expectation], timeout: timeout)
+        XCTAssertEqual(
+            result,
+            .completed,
+            "Expected \(element) to become hittable after activating Silo.",
+            file: file,
+            line: line
+        )
+        guard result == .completed else { return }
+        element.click()
+    }
+
     private func terminateIfNeeded(_ app: XCUIApplication) {
         if app.state != .notRunning {
             app.terminate()
+            XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
         }
     }
 
@@ -1684,6 +1777,28 @@ final class SiloUITests: XCTestCase {
         XCTAssertNotEqual(app.state, .notRunning)
     }
 
+    func testGitHubSetupShowsSkeletonWhileStartupCatalogLoads() {
+        let appURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "build/Silo.app")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
+
+        let app = XCUIApplication(url: appURL)
+        app.launchArguments = ["--ui-test-setup", "--ui-test-github-setup-loading-skeleton"]
+        app.launch()
+
+        XCTAssertTrue(app.windows["setup.window"].waitForExistence(timeout: 3))
+        advanceFromDependenciesToGitHub(in: app)
+
+        let skeleton = app.descendants(matching: .any)["setup.github.catalog.loading"]
+        XCTAssertTrue(skeleton.waitForExistence(timeout: 3))
+        XCTAssertEqual(skeleton.label, "Loading GitHub account and repositories")
+        XCTAssertFalse(app.descendants(matching: .any)["setup.github.account"].exists)
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
     func testGitHubLocalSuccessAppliesPolicyAndFinishesSetup() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -1692,11 +1807,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
 
         let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
+        defer { terminateIfNeeded(app) }
         app.launchArguments = ["--ui-test-setup", "--ui-test-github-success"]
         app.launch()
 
@@ -1779,12 +1890,59 @@ final class SiloUITests: XCTestCase {
 
         let identitySkip = app.buttons["setup.identity.skip.button"]
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
-        identitySkip.click()
+        activateAndClick(identitySkip, in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["setup.github.apply.progress"]
+                .waitForNonExistence(timeout: 2)
+        )
+        XCTAssertTrue(app.staticTexts["Unsaved"].waitForNonExistence(timeout: 2))
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertTrue(done.isEnabled)
         done.click()
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
+    }
+
+    func testGitHubSetupShowsDelayedSavedIntentAndKeepsPolicyEditable() {
+        let app = launchFixture(["--ui-test-setup", "--ui-test-github-sync-delayed"])
+        defer { terminateIfNeeded(app) }
+        let setup = app.windows["setup.window"]
+        XCTAssertTrue(setup.waitForExistence(timeout: 3))
+        advanceFromDependenciesToGitHub(in: app)
+
+        let picker = app.buttons["github.workspace.dev.repository-picker.button"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 2))
+        picker.click()
+        let repository = app.checkBoxes["github.workspace.dev.repository.1001"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 2))
+        repository.click()
+        app.typeKey(.escape, modifierFlags: [])
+        app.buttons["setup.github.apply.button"].click()
+        XCTAssertTrue(app.buttons["setup.identity.skip.button"].waitForExistence(timeout: 2))
+        activateAndClick(app.buttons["setup.identity.skip.button"], in: app)
+
+        let status = app.descendants(matching: .any)["setup.github.apply.progress"]
+        XCTAssertTrue(status.waitForExistence(timeout: 3))
+        let value = visibleText(in: status)
+        XCTAssertTrue(value.contains("Delayed"), value)
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("lock"), value)
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("operation conflict"), value)
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("another operation"), value)
+        XCTAssertFalse(app.buttons["setup.github.apply.retry.button"].exists)
+        XCTAssertTrue(app.buttons["setup.github.apply.cancel.button"].exists)
+        let done = app.buttons["setup.done.button"]
+        XCTAssertTrue(done.waitForExistence(timeout: 2))
+        XCTAssertFalse(done.isEnabled, "Setup must not claim completion before CLI confirmation")
+
+        app.buttons["setup.back.button"].click()
+        app.buttons["setup.back.button"].click()
+        XCTAssertTrue(picker.waitForExistence(timeout: 2))
+        XCTAssertTrue(picker.isEnabled, "The GitHub editor must stay responsive while sync is delayed")
+
+        app.typeKey("q", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 3))
     }
 
     func testGitHubDisconnectedConnectsAndResetsInline() {
@@ -1829,18 +1987,16 @@ final class SiloUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["settings.tabs"].exists)
 
         reset.click()
-        let confirmation = app.sheets.firstMatch
-        XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
-        XCTAssertTrue(confirmation.staticTexts["Remove all GitHub access?"].exists)
-        let phrase = confirmation.textFields.firstMatch
-        XCTAssertTrue(phrase.waitForExistence(timeout: 2))
-        phrase.click()
-        phrase.typeText("REMOVE")
-        confirmation.buttons["Remove All Access"].click()
-        XCTAssertTrue(confirmation.waitForNonExistence(timeout: 2))
-        XCTAssertTrue(waitUntilEnabled(reset, timeout: 5))
+        let confirmReset = app.buttons["github.reset.confirm"]
+        XCTAssertTrue(confirmReset.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Reset GitHub access?"].exists)
+        XCTAssertEqual(app.textFields.count, 0)
+        confirmReset.click()
+        XCTAssertTrue(confirmReset.waitForNonExistence(timeout: 2))
         XCTAssertTrue(setup.waitForExistence(timeout: 2))
-        XCTAssertTrue(waitUntilHittable(app.buttons["github.workspace.dev.repository-picker.button"], timeout: 3))
+        XCTAssertTrue(connect.waitForExistence(timeout: 5))
+        XCTAssertFalse(reset.exists)
+        XCTAssertFalse(app.buttons["github.workspace.dev.repository-picker.button"].exists)
     }
 
     func testGitHubLocalEmptyCatalogShowsNoRepositories() {
@@ -1890,9 +2046,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
 
         let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning { app.terminate() }
-        }
+        defer { terminateIfNeeded(app) }
         app.launchArguments = [
             "--ui-test-setup",
             "--ui-test-setup-reconnect",
@@ -1919,19 +2073,17 @@ final class SiloUITests: XCTestCase {
         XCTAssertFalse(app.buttons["settings.github.disable-all"].exists)
         reset.click()
 
-        let confirmation = app.sheets.firstMatch
-        XCTAssertTrue(confirmation.waitForExistence(timeout: 2))
-        let phrase = confirmation.textFields.firstMatch
-        XCTAssertTrue(phrase.waitForExistence(timeout: 2))
-        phrase.click()
-        phrase.typeText("REMOVE")
-        confirmation.buttons["Remove All Access"].click()
+        let confirmReset = app.buttons["github.reset.confirm"]
+        XCTAssertTrue(confirmReset.waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Reset GitHub access?"].exists)
+        XCTAssertEqual(app.textFields.count, 0)
+        confirmReset.click()
 
-        XCTAssertTrue(confirmation.waitForNonExistence(timeout: 2))
-        XCTAssertTrue(waitUntilEnabled(reset, timeout: 5))
-        XCTAssertTrue(picker.waitForExistence(timeout: 3))
-        XCTAssertTrue(picker.isEnabled)
-        XCTAssertTrue(app.descendants(matching: .any)["setup.github.account"].exists)
+        XCTAssertTrue(confirmReset.waitForNonExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["setup.github.connect-account.button"].waitForExistence(timeout: 5))
+        XCTAssertFalse(reset.exists)
+        XCTAssertFalse(picker.exists)
+        XCTAssertFalse(app.descendants(matching: .any)["setup.github.account"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.issue.failed"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["settings.tabs"].exists)
     }
@@ -2114,7 +2266,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertFalse(done.isEnabled, "Review must wait for outstanding workspace registration.")
     }
 
-    func testGitHubLocalCatalogFailureThenRetrySucceeds() {
+    func testGitHubLocalCatalogTransientFailureRecoversAutomatically() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2122,11 +2274,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
 
         let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
+        defer { terminateIfNeeded(app) }
         app.launchArguments = ["--ui-test-setup", "--ui-test-github-cancel-retry"]
         app.launch()
 
@@ -2134,31 +2282,13 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
         advanceFromDependenciesToGitHub(in: app)
 
-        // The first catalog load reports a retryable unavailability; the retry
-        // uses the current attempt and succeeds.
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.issue.unavailable"]
-                .waitForExistence(timeout: 2)
-        )
-        assertText(
-            "GitHub could not be reached. Try again later.",
-            identifier: "setup.github.issue.unavailable",
-            in: app
-        )
-        let retry = app.buttons["setup.github.retry.button"]
-        XCTAssertTrue(retry.waitForExistence(timeout: 2))
-        XCTAssertTrue(retry.isEnabled)
-        retry.click()
-
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github.account"]
                 .waitForExistence(timeout: 2)
         )
         assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github.issue.unavailable"]
-                .waitForNonExistence(timeout: 2)
-        )
+        XCTAssertFalse(app.descendants(matching: .any)["setup.github.issue.unavailable"].exists)
+        XCTAssertFalse(app.buttons["setup.github.retry.button"].exists)
     }
 
 
@@ -2170,11 +2300,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: appURL.path))
 
         let app = XCUIApplication(url: appURL)
-        defer {
-            if app.state != .notRunning {
-                app.terminate()
-            }
-        }
+        defer { terminateIfNeeded(app) }
         app.launchArguments = ["--ui-test-setup", "--ui-test-github-unavailable"]
         app.launch()
 
@@ -2252,6 +2378,15 @@ final class SiloUITests: XCTestCase {
             object: element
         )
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func visibleText(in element: XCUIElement) -> String {
+        element.descendants(matching: .staticText).allElementsBoundByIndex
+            .flatMap { child in
+                [child.label, child.value as? String ?? ""]
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private func assertIdentifier(_ identifier: String, in app: XCUIApplication) {

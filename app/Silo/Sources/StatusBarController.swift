@@ -11,6 +11,7 @@ final class StatusBarController {
     private let authorizationCoordinator: GitHubAuthorizationCoordinator?
     private let githubInstallationURL: URL?
     private let provider: (any GitHubProviding)?
+    private let githubSettingsState: GitHubSettingsState
     private let accessMode: GitHubAccessMode
     private let commandRunner: MSWCommandRunner
     private let appNavigation: AppNavigationState
@@ -27,6 +28,7 @@ final class StatusBarController {
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         githubInstallationURL: URL? = nil,
         provider: (any GitHubProviding)? = nil,
+        githubSettingsState: GitHubSettingsState? = nil,
         accessMode: GitHubAccessMode = .local,
         commandRunner: MSWCommandRunner = MSWCommandRunner(),
         appNavigation: AppNavigationState = AppNavigationState(),
@@ -40,6 +42,11 @@ final class StatusBarController {
         self.authorizationCoordinator = authorizationCoordinator
         self.githubInstallationURL = githubInstallationURL
         self.provider = provider
+        self.githubSettingsState = githubSettingsState ?? GitHubSettingsState(
+            authorizationCoordinator: authorizationCoordinator,
+            provider: provider,
+            accessMode: accessMode
+        )
         self.accessMode = accessMode
         self.commandRunner = commandRunner
         self.appNavigation = appNavigation
@@ -178,6 +185,7 @@ final class StatusBarController {
                 authorizationCoordinator: authorizationCoordinator,
                 githubInstallationURL: githubInstallationURL,
                 provider: provider,
+                githubState: githubSettingsState,
                 accessMode: accessMode,
                 commandRunner: commandRunner,
                 applicationPreferences: applicationPreferences,

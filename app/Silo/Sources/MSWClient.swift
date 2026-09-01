@@ -476,6 +476,31 @@ actor MSWClient {
         try await githubAuth(force: false)
     }
 
+    /// Retires every legacy local GitHub binding before revoking the global
+    /// host credential. Generic Silo secrets use a separate metadata and
+    /// Keychain domain and are intentionally untouched.
+    func resetLocalGitHub(workspace: String) async throws {
+        guard WorkspaceID.isValid(workspace) else { throw MSWClientError.invalidArguments }
+        for (arguments, command) in [
+            (["github", "migrate", "all"], "github migrate all"),
+            (["github", "remove", workspace], "github remove")
+        ] {
+            let request = try await runner.makeMSWCommand(
+                arguments: arguments,
+                timeout: .seconds(180)
+            )
+            let output = try await runner.run(request)
+            guard output.status == 0 else {
+                let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw MSWClientError.processFailed(
+                    command: command,
+                    status: output.status,
+                    message: message.isEmpty ? nil : message
+                )
+            }
+        }
+    }
+
     /// Launches the installed gh CLI's web OAuth flow
     /// (`gh auth login --hostname github.com --git-protocol https --web
     /// --skip-ssh-key`), which opens the default browser and waits for the

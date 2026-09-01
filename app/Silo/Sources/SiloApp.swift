@@ -429,16 +429,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         applicationState.model = model
-        githubSettingsState.configure(provider: fixtureProvider ?? provider)
+        let activeGitHubProvider = fixtureProvider ?? provider
+        githubSettingsState.configure(provider: activeGitHubProvider)
+        // Resume a durable pending intent at application startup even when no
+        // GitHub view is opened. The provider coalesces this with any later
+        // Setup or Settings edit.
+        if accessMode == .local, let activeGitHubProvider {
+            Task { _ = await activeGitHubProvider.policySyncProgress() }
+        }
         if runtimeRepairFixture {
             githubSettingsState.installRuntimeRepairUITestFixture()
         }
         let setupFixtureOwnsGitHubLoading = arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
             arguments.contains("--ui-test-setup-reconnect")
-        if !setupFixtureOwnsGitHubLoading {
-            githubSettingsState.setPollingVisible(false)
-        }
+        githubSettingsState.setPollingVisible(false)
         if appNavigation.workspace == nil {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
         }
@@ -470,6 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             authorizationCoordinator: authorizationCoordinator,
             githubInstallationURL: githubInstallationURL,
             provider: fixtureProvider ?? provider,
+            githubSettingsState: githubSettingsState,
             accessMode: accessMode,
             commandRunner: runner,
             appNavigation: appNavigation,

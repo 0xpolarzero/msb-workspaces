@@ -15,9 +15,10 @@ enum GitHubAccessMode: String, Sendable, Equatable {
 protocol GitHubProviding: Sendable {
     var isAvailable: Bool { get }
     func loadCatalog() async throws -> GitHubCatalog
-    func commit(_ policy: [GitHubWorkspacePolicy]) async throws
-    func currentPolicy() async -> GitHubPolicyFile?
-    func removeAllAccess() async throws
+    func savePolicy(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress
+    func desiredPolicy() async -> GitHubPolicyFile?
+    func clearPolicy() async throws -> GitHubApplyProgress
+    func resetAccess() async throws -> GitHubApplyProgress
     /// Runs the CLI-owned host-credential acquisition (gh reuse, fully
     /// non-TTY). Throws `.ghWebLoginRequired` when gh is not authenticated
     /// and no device-flow client ID is configured (the app then launches the
@@ -37,11 +38,10 @@ protocol GitHubProviding: Sendable {
     func pollDeviceFlow(deviceId: String) async throws -> MSWDeviceFlowPoll
     /// Local onboarding's desired/effective cutover. Implementations that do
     /// not support the background contract may use the synchronous default.
-    func beginPolicyApply(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress
-    func currentPolicyApplyProgress() async -> GitHubApplyProgress?
-    func waitForCurrentPolicyApply() async throws
-    func retryCurrentPolicyApply() async throws
-    func cancelCurrentPolicyApply() async
+    func policySyncProgress() async -> GitHubApplyProgress?
+    func waitForPolicySync() async throws
+    func retryPolicySync() async throws
+    func cancelPolicySync() async
     func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult
     /// Rebuilds every workspace-scoped target from the validated configuration
     /// published by Setup, independently of bootstrap registration.
@@ -49,12 +49,10 @@ protocol GitHubProviding: Sendable {
 }
 
 enum GitHubApplyPhase: String, Codable, Sendable, Equatable {
-    case validating
-    case saving
-    case configuring
-    case restoring
-    case activating
-    case completed
+    case saved
+    case applying
+    case delayed
+    case applied
     case failed
     case cancelled
 }
@@ -65,6 +63,27 @@ struct GitHubApplyFailure: Codable, Sendable, Equatable {
     let recovery: String
     let workspace: String?
     let retryable: Bool
+
+    var presentationMessage: String {
+        Self.containsInternalContentionLanguage(message)
+            ? "GitHub synchronization could not continue."
+            : message
+    }
+
+    var presentationRecovery: String {
+        guard Self.containsInternalContentionLanguage(recovery) else { return recovery }
+        return retryable
+            ? "Retry GitHub synchronization."
+            : "Review the saved GitHub choices and runtime status."
+    }
+
+    static func containsInternalContentionLanguage(_ value: String) -> Bool {
+        let normalized = value.lowercased()
+        let words = Set(normalized.split(whereSeparator: { !$0.isLetter }).map(String.init))
+        return !words.isDisjoint(with: ["lock", "locks", "locked", "locking", "deadlock"]) ||
+            normalized.contains("operation conflict") ||
+            (normalized.contains("another") && normalized.contains("operation"))
+    }
 }
 
 enum GitHubPolicyApplyError: Error, LocalizedError, Sendable, Equatable {
@@ -72,7 +91,7 @@ enum GitHubPolicyApplyError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         guard case .failed(let failure) = self else { return nil }
-        return failure.message
+        return failure.presentationMessage
     }
 }
 
@@ -82,43 +101,39 @@ struct GitHubApplyProgress: Sendable, Equatable {
     let workspace: String?
     let failure: GitHubApplyFailure?
 
-    var isTerminalSuccess: Bool { phase == .completed }
+    var isTerminalSuccess: Bool { phase == .applied }
     var isInFlight: Bool {
-        [.validating, .saving, .configuring, .restoring, .activating].contains(phase)
+        [.saved, .applying, .delayed].contains(phase)
     }
 
-    /// nil for terminal success: a finished apply is silent — the flow moves on
-    /// and failure/cancel states carry their own copy.
-    var summary: String? {
-        let scope = workspace.map { " for \($0)" } ?? ""
+    var canRetry: Bool {
+        (phase == .failed && failure?.retryable == true) || phase == .cancelled
+    }
+
+    var canCancel: Bool { phase == .delayed }
+
+    var label: String {
         switch phase {
-        case .validating: return "Validating GitHub access\(scope)…"
-        case .saving: return "Saving your GitHub repository choices…"
-        case .configuring: return "Configuring GitHub transport\(scope)…"
-        case .restoring: return "Restoring workspace lifecycle\(scope)…"
-        case .activating: return "Applying your GitHub repository choices…"
-        case .completed: return nil
-        case .failed: return failure?.message ?? "GitHub reconciliation failed."
-        case .cancelled: return "GitHub reconciliation was cancelled."
+        case .saved: return "Saved"
+        case .applying: return "Applying"
+        case .delayed: return "Delayed"
+        case .applied: return "Applied"
+        case .failed: return "Couldn’t apply"
+        case .cancelled: return "Cancelled"
         }
     }
-}
 
-extension GitHubProviding {
-    func beginPolicyApply(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress {
-        try await commit(policy)
-        return GitHubApplyProgress(generation: 0, phase: .completed, workspace: nil, failure: nil)
+    var summary: String {
+        let scope = workspace.map { " for \($0)" } ?? ""
+        switch phase {
+        case .saved: return "Saved locally. Waiting to apply\(scope)."
+        case .applying: return "Applying GitHub access\(scope)…"
+        case .delayed: return "Saved locally. Sync is taking longer than usual; Silo will keep trying."
+        case .applied: return "GitHub changes are applied."
+        case .failed: return failure?.presentationMessage ?? "GitHub access could not be applied."
+        case .cancelled: return "GitHub synchronization was cancelled."
+        }
     }
-    func currentPolicyApplyProgress() async -> GitHubApplyProgress? { nil }
-    func waitForCurrentPolicyApply() async throws {}
-    func retryCurrentPolicyApply() async throws {
-        throw GitHubCatalogError.unavailable("This GitHub provider cannot retry local policy reconciliation.")
-    }
-    func cancelCurrentPolicyApply() async {}
-    func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
-        throw GitHubCatalogError.unavailable("Workspace Git identity is unavailable for this GitHub provider.")
-    }
-    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws {}
 }
 
 /// Catalog for the existing picker models. `installations` is a synthetic
@@ -176,7 +191,6 @@ enum GitHubLocalStrings {
 /// only reads status and never holds the token.
 actor GitHubLocalProvider: GitHubProviding {
     private let client: MSWClient
-    private let policyStore: GitHubPolicyStore
     private let policyURL: URL
     private var applyProgress: GitHubApplyProgress?
     private var currentApplyTask: Task<Void, Never>?
@@ -185,51 +199,72 @@ actor GitHubLocalProvider: GitHubProviding {
     private var desiredRequest: MSWGitHubPolicyApplyRequest?
     private var desiredHash: String?
     private var nextGeneration: Int
-    private var persistedCompletionNeedsVerification: Bool
     private var configuredWorkspaces: [String]
+    private var configurationReloadInProgress = false
+    private var configurationReloadWaiters: [CheckedContinuation<Void, Never>] = []
+    private let contentionBackoff: @Sendable (Int) -> Duration
 
     init(
         client: MSWClient,
         policyStore: GitHubPolicyStore,
-        workspaceConfigurations: [SetupWorkspaceConfiguration] = SetupWorkspaceConfiguration.defaults
+        workspaceConfigurations: [SetupWorkspaceConfiguration] = SetupWorkspaceConfiguration.defaults,
+        contentionBackoff: @escaping @Sendable (Int) -> Duration = { attempt in
+            let exponent = min(max(attempt - 1, 0), 5)
+            let milliseconds = min(15_000, 500 * (1 << exponent))
+            return .milliseconds(milliseconds)
+        }
     ) {
         self.client = client
-        self.policyStore = policyStore
         self.policyURL = policyStore.policyURL
-        self.configuredWorkspaces = workspaceConfigurations.map(\.name)
+        let configuredWorkspaceNames = workspaceConfigurations.map(\.name)
+        self.configuredWorkspaces = configuredWorkspaceNames
+        self.contentionBackoff = contentionBackoff
         let persisted = GitHubPolicyStore.readIntent(policyURL: policyStore.policyURL)
-        let persistedDesired = persisted.map { Self.intentRequest($0.desired) }
+        let persistedDesired = persisted.map {
+            Self.scopedRequest(
+                Self.intentRequest($0.desired),
+                workspaces: configuredWorkspaceNames
+            )
+        }
+        let persistedHash = persistedDesired.map {
+            Self.semanticHash($0, workspaces: configuredWorkspaceNames)
+        }
         self.nextGeneration = persisted?.generation ?? 0
-        self.persistedCompletionNeedsVerification = persisted?.status == .completed
         self.desiredRequest = persistedDesired
-        self.desiredHash = persisted?.semanticHash
+        self.desiredHash = persistedHash
         if let persisted {
+            let failure = persisted.failure.map {
+                Self.scopedFailure($0, workspaces: configuredWorkspaceNames)
+            }
             let phase: GitHubApplyPhase
             switch persisted.status {
-            case .pending: phase = .saving
+            case .pending: phase = .saved
             case .failed: phase = .failed
-            case .completed: phase = .completed
+            case .completed: phase = .applied
             case .cancelled: phase = .cancelled
             }
             self.applyProgress = GitHubApplyProgress(
                 generation: persisted.generation,
                 phase: phase,
-                workspace: persisted.failure?.workspace,
-                failure: persisted.failure
+                workspace: failure?.workspace,
+                failure: failure
             )
-            // Older prerelease intent files may have duplicated effective
-            // capability values. Intent is repository-only; scrub those
-            // bearer values at the first provider construction.
-            if let persistedDesired, persistedDesired != persisted.desired {
+            // Intent is repository-only and scoped to the current configured
+            // workspace set. Rewriting obsolete keys here prevents a pending
+            // pre-rename generation from being replayed after restart.
+            if let persistedDesired, let persistedHash,
+               persistedDesired != persisted.desired ||
+                    persistedHash != persisted.semanticHash ||
+                    failure != persisted.failure {
                 try? GitHubPolicyStore.writeIntent(
                     GitHubApplyPersistentState(
                         schemaVersion: persisted.schemaVersion,
                         generation: persisted.generation,
-                        semanticHash: persisted.semanticHash,
+                        semanticHash: persistedHash,
                         status: persisted.status,
                         desired: persistedDesired,
                         updatedAt: Date(),
-                        failure: persisted.failure
+                        failure: failure
                     ),
                     policyURL: policyStore.policyURL
                 )
@@ -243,42 +278,64 @@ actor GitHubLocalProvider: GitHubProviding {
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: configurations) {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
         }
-        await cancelCurrentPolicyApply()
+        await waitForConfigurationReload()
+        configurationReloadInProgress = true
+        defer { finishConfigurationReload() }
+
+        await stopReconciliation()
         let names = configurations.map(\.name)
-        try await client.reloadWorkspaceConfiguration(configurations)
+        do {
+            try await client.reloadWorkspaceConfiguration(configurations)
+        } catch {
+            resumeInterruptedReconciliation()
+            throw error
+        }
         configuredWorkspaces = names
         let persisted = GitHubPolicyStore.readIntent(policyURL: policyURL)
-        let intentMatchesConfiguration = persisted.map {
-            Set($0.desired.workspaces.keys) == Set(names)
-        } ?? false
         nextGeneration = max(nextGeneration, persisted?.generation ?? 0)
         desiredRequest = persisted.map { Self.scopedRequest($0.desired, workspaces: names) }
-        desiredHash = intentMatchesConfiguration
-            ? desiredRequest.map { Self.semanticHash($0, workspaces: names) }
-            : nil
-        persistedCompletionNeedsVerification = intentMatchesConfiguration && persisted?.status == .completed
-        if let persisted, intentMatchesConfiguration {
+        desiredHash = desiredRequest.map { Self.semanticHash($0, workspaces: names) }
+        if let persisted, let desiredRequest, let desiredHash {
+            let failure = persisted.failure.map {
+                Self.scopedFailure($0, workspaces: names)
+            }
+            if desiredRequest != persisted.desired ||
+                desiredHash != persisted.semanticHash ||
+                failure != persisted.failure {
+                try GitHubPolicyStore.writeIntent(
+                    GitHubApplyPersistentState(
+                        schemaVersion: persisted.schemaVersion,
+                        generation: persisted.generation,
+                        semanticHash: desiredHash,
+                        status: persisted.status,
+                        desired: desiredRequest,
+                        updatedAt: Date(),
+                        failure: failure
+                    ),
+                    policyURL: policyURL
+                )
+            }
             let phase: GitHubApplyPhase
             switch persisted.status {
-            case .pending: phase = .saving
+            case .pending: phase = .saved
             case .failed: phase = .failed
-            case .completed: phase = .completed
+            case .completed: phase = .applied
             case .cancelled: phase = .cancelled
             }
             applyProgress = GitHubApplyProgress(
                 generation: persisted.generation,
                 phase: phase,
-                workspace: persisted.failure?.workspace.flatMap { names.contains($0) ? $0 : nil },
-                failure: persisted.failure.flatMap { failure in
-                    (failure.workspace.map(names.contains) ?? true) ? failure : nil
-                }
+                workspace: failure?.workspace,
+                failure: failure
             )
         } else {
             applyProgress = nil
         }
+        resumePendingReconciliationIfNeeded()
     }
 
     func loadCatalog() async throws -> GitHubCatalog {
+        await waitForConfigurationReload()
         let status = try await client.githubStatus()
         guard status.mode == GitHubAccessMode.local.rawValue else {
             throw GitHubCatalogError.notLocalMode(
@@ -326,7 +383,7 @@ actor GitHubLocalProvider: GitHubProviding {
                 fullName: repo.canonical,
                 name: repo.name,
                 owner: ownerAccount,
-                `private`: repo.private,
+                private: repo.private,
                 defaultBranch: nil,
                 canPush: repo.permissions.push,
                 inPolicy: repo.inPolicy
@@ -341,7 +398,7 @@ actor GitHubLocalProvider: GitHubProviding {
         let merged = Self.mergingPolicyOnlyRepositories(
             installations: installations,
             repositoriesByInstallation: repositoriesByInstallation,
-            policy: await policyStore.current,
+            policy: await desiredPolicy(),
             configuredWorkspaces: Set(configuredWorkspaces)
         )
         return GitHubCatalog(
@@ -399,26 +456,38 @@ actor GitHubLocalProvider: GitHubProviding {
         return (updatedInstallations, updatedRepositories)
     }
 
-    func currentPolicy() async -> GitHubPolicyFile? {
-        guard let policy = await policyStore.current else { return nil }
+    /// Returns the newest durable desired state for responsive local-first UI.
+    /// Capabilities still come only from the effective CLI-owned policy file.
+    func desiredPolicy() async -> GitHubPolicyFile? {
+        await waitForConfigurationReload()
+        let effective = GitHubPolicyStore.read(policyURL: policyURL)
+        guard let desiredRequest else {
+            guard let effective else { return nil }
+            return Self.scopedPolicy(effective, workspaces: configuredWorkspaces)
+        }
+        let intent = GitHubPolicyStore.readIntent(policyURL: policyURL)
         return GitHubPolicyFile(
-            schemaVersion: policy.schemaVersion,
+            schemaVersion: desiredRequest.schemaVersion,
             workspaces: Dictionary(uniqueKeysWithValues: configuredWorkspaces.map {
-                ($0, policy.workspaces[$0] ?? GitHubPolicyWorkspace(capability: nil, repos: []))
+                ($0, GitHubPolicyWorkspace(
+                    capability: effective?.workspaces[$0]?.capability,
+                    repos: desiredRequest.workspaces[$0]?.repos ?? []
+                ))
             }),
-            updatedAt: policy.updatedAt
+            updatedAt: intent?.updatedAt ?? effective?.updatedAt
         )
     }
 
     /// Validates and durably records intent, then returns immediately. The
     /// generation's CLI transaction runs in a child task; newer generations
     /// cancel it and are serialized behind cleanup by `mutationTail`.
-    func beginPolicyApply(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress {
-        let request = try await makeRequest(policy, preserving: desiredRequest)
+    func savePolicy(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress {
+        await waitForConfigurationReload()
+        let request = try makeRequest(policy, preserving: desiredRequest)
         let hash = Self.semanticHash(request, workspaces: configuredWorkspaces)
         if hash == desiredHash, let applyProgress {
             if applyProgress.isInFlight { return applyProgress }
-            if applyProgress.phase == .completed, await matchesEffectivePolicy(request) {
+            if applyProgress.phase == .applied, matchesEffectivePolicy(request) {
                 return applyProgress
             }
         }
@@ -426,30 +495,33 @@ actor GitHubLocalProvider: GitHubProviding {
         nextGeneration &+= 1
         let generation = nextGeneration
         let supersedesInFlight = applyProgress?.isInFlight == true && currentApplyTask != nil
-        currentApplyTask?.cancel()
-        desiredRequest = request
-        desiredHash = hash
-        let firstChanged = await firstChangedNonEmptyWorkspace(in: request)
+        let firstChanged = firstChangedNonEmptyWorkspace(in: request)
         let progress = GitHubApplyProgress(
             generation: generation,
-            phase: .saving,
+            phase: .saved,
             workspace: firstChanged,
             failure: nil
         )
         try persist(request: request, hash: hash, progress: progress, status: .pending)
+        currentApplyTask?.cancel()
+        desiredRequest = request
+        desiredHash = hash
         applyProgress = progress
 
         // A semantic match with the effective policy is a true no-op: it
         // supersedes stale work without restarting transport.
-        if !supersedesInFlight, await matchesEffectivePolicy(request) {
+        if !supersedesInFlight, matchesEffectivePolicy(request) {
             let completed = GitHubApplyProgress(
                 generation: generation,
-                phase: .completed,
+                phase: .applied,
                 workspace: nil,
                 failure: nil
             )
             applyProgress = completed
-            try persist(request: request, hash: hash, progress: completed, status: .completed)
+            // The effective policy already matches. If only the non-secret
+            // completion marker fails, keep Applied in memory; the durable
+            // pending intent safely re-verifies on restart.
+            try? persist(request: request, hash: hash, progress: completed, status: .completed)
             return completed
         }
 
@@ -457,18 +529,17 @@ actor GitHubLocalProvider: GitHubProviding {
         return progress
     }
 
-    func currentPolicyApplyProgress() async -> GitHubApplyProgress? {
-        if persistedCompletionNeedsVerification,
-           applyProgress?.phase == .completed,
+    func policySyncProgress() async -> GitHubApplyProgress? {
+        await waitForConfigurationReload()
+        if applyProgress?.phase == .applied,
            let desiredRequest, let desiredHash {
-            persistedCompletionNeedsVerification = false
-            if !(await matchesEffectivePolicy(desiredRequest)) {
+            if !matchesEffectivePolicy(desiredRequest) {
                 nextGeneration &+= 1
                 let generation = nextGeneration
-                let workspace = await firstChangedNonEmptyWorkspace(in: desiredRequest)
+                let workspace = firstChangedNonEmptyWorkspace(in: desiredRequest)
                 let pending = GitHubApplyProgress(
                     generation: generation,
-                    phase: .saving,
+                    phase: .saved,
                     workspace: workspace,
                     failure: nil
                 )
@@ -482,28 +553,23 @@ actor GitHubLocalProvider: GitHubProviding {
                 )
             }
         }
-        if currentApplyTask == nil, let applyProgress,
-           applyProgress.phase == .saving, let desiredRequest, let desiredHash {
-            let generation = applyProgress.generation
-            startReconciliation(
-                request: desiredRequest,
-                hash: desiredHash,
-                generation: generation,
-                workspace: applyProgress.workspace
-            )
-        }
+        resumePendingReconciliationIfNeeded()
         return applyProgress
     }
 
-    func waitForCurrentPolicyApply() async throws {
+    func waitForPolicySync() async throws {
         while true {
-            _ = await currentPolicyApplyProgress()
+            _ = await policySyncProgress()
             guard let task = currentApplyTask, let generation = currentApplyGeneration else { break }
             await task.value
             // A Back/edit may supersede the generation while this caller is
             // waiting. Gate Review/Done on the newest task, never the task
             // that happened to be current when the wait began.
             if currentApplyGeneration != generation { continue }
+            if task.isCancelled {
+                await Task.yield()
+                continue
+            }
             break
         }
         guard let progress = applyProgress else { return }
@@ -520,21 +586,23 @@ actor GitHubLocalProvider: GitHubProviding {
         if progress.phase == .cancelled { throw CancellationError() }
     }
 
-    func retryCurrentPolicyApply() async throws {
+    func retryPolicySync() async throws {
+        await waitForConfigurationReload()
         guard let desiredRequest, let desiredHash else {
             throw GitHubCatalogError.commitFailed("There is no saved GitHub policy to retry.")
         }
         nextGeneration &+= 1
         let generation = nextGeneration
-        let workspace = await firstChangedNonEmptyWorkspace(in: desiredRequest)
-        let progress = GitHubApplyProgress(generation: generation, phase: .saving, workspace: workspace, failure: nil)
+        let workspace = firstChangedNonEmptyWorkspace(in: desiredRequest)
+        let progress = GitHubApplyProgress(generation: generation, phase: .saved, workspace: workspace, failure: nil)
         try persist(request: desiredRequest, hash: desiredHash, progress: progress, status: .pending)
         applyProgress = progress
         currentApplyTask?.cancel()
         startReconciliation(request: desiredRequest, hash: desiredHash, generation: generation, workspace: workspace)
     }
 
-    func cancelCurrentPolicyApply() async {
+    func cancelPolicySync() async {
+        await waitForConfigurationReload()
         guard let task = currentApplyTask, let generation = currentApplyGeneration else { return }
         task.cancel()
         await task.value
@@ -557,6 +625,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
+        await waitForConfigurationReload()
         let expected = workspace.map { [$0] } ?? configuredWorkspaces
         guard !expected.isEmpty,
               expected.allSatisfy({ configuredWorkspaces.contains($0) }) else {
@@ -584,16 +653,11 @@ actor GitHubLocalProvider: GitHubProviding {
     /// step).
     /// Only returns once the CLI confirms provisioned + committed; unedited
     /// workspaces keep their current policy entries.
-    func commit(_ policy: [GitHubWorkspacePolicy]) async throws {
-        _ = try await beginPolicyApply(policy)
-        try await waitForCurrentPolicyApply()
-    }
-
     private func makeRequest(
         _ policy: [GitHubWorkspacePolicy],
         preserving pendingRequest: MSWGitHubPolicyApplyRequest?
-    ) async throws -> MSWGitHubPolicyApplyRequest {
-        let current = await policyStore.current
+    ) throws -> MSWGitHubPolicyApplyRequest {
+        let current = GitHubPolicyStore.read(policyURL: policyURL)
         var edited: [String: GitHubWorkspacePolicy] = [:]
         for workspacePolicy in policy {
             guard edited[workspacePolicy.workspace] == nil else {
@@ -651,9 +715,13 @@ actor GitHubLocalProvider: GitHubProviding {
 
     private static func apply(
         _ request: MSWGitHubPolicyApplyRequest,
-        with client: MSWClient
+        with client: MSWClient,
+        contentionBackoff: @escaping @Sendable (Int) -> Duration,
+        onContention: @escaping @Sendable (Int) async -> Void
     ) async throws {
-        for attempt in 0..<3 {
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
             do {
                 let result = try await client.githubPolicyApply(request)
                 guard result.applied == true,
@@ -665,8 +733,10 @@ actor GitHubLocalProvider: GitHubProviding {
                 }
                 return
             } catch MSWClientError.protocolFailure(let error)
-                where error.code == "MSW_OPERATION_CONFLICT" && error.retryable && attempt < 2 {
-                try await Task.sleep(for: attempt == 0 ? .milliseconds(500) : .seconds(1))
+                where error.code == "MSW_OPERATION_CONFLICT" && error.retryable {
+                attempt += 1
+                await onContention(attempt)
+                try await Task.sleep(for: contentionBackoff(attempt))
             }
         }
     }
@@ -677,15 +747,23 @@ actor GitHubLocalProvider: GitHubProviding {
         generation: Int,
         workspace: String?
     ) {
-        let configuring = GitHubApplyProgress(
+        let applying = GitHubApplyProgress(
             generation: generation,
-            phase: .configuring,
+            phase: .applying,
             workspace: workspace,
             failure: nil
         )
-        if applyProgress?.generation == generation { applyProgress = configuring }
-        let operation = makeMutationTask { [client] in
-            try await Self.apply(request, with: client)
+        if applyProgress?.generation == generation { applyProgress = applying }
+        let coordinator = self
+        let operation = makeMutationTask { [client, contentionBackoff, coordinator] in
+            try await Self.apply(
+                request,
+                with: client,
+                contentionBackoff: contentionBackoff
+            ) { attempt in
+                guard attempt >= 3 else { return }
+                await coordinator.markContentionDelayed(generation: generation, workspace: workspace)
+            }
         }
         currentApplyTask = Task { [weak self] in
             await self?.finishReconciliation(
@@ -713,37 +791,32 @@ actor GitHubLocalProvider: GitHubProviding {
                 operation.cancel()
             }
             guard applyProgress?.generation == generation else { return }
-            let restoring = GitHubApplyProgress(
-                generation: generation,
-                phase: .restoring,
-                workspace: workspace,
-                failure: nil
-            )
-            applyProgress = restoring
-            await Task.yield()
-            let activating = GitHubApplyProgress(
-                generation: generation,
-                phase: .activating,
-                workspace: nil,
-                failure: nil
-            )
-            applyProgress = activating
             let completed = GitHubApplyProgress(
                 generation: generation,
-                phase: .completed,
+                phase: .applied,
                 workspace: nil,
                 failure: nil
             )
             applyProgress = completed
-            persistedCompletionNeedsVerification = false
-            try persist(request: request, hash: hash, progress: completed, status: .completed)
+            // CLI confirmation is authoritative for effective state. If the
+            // non-secret completion marker cannot be updated, keep the
+            // truthful Applied state in memory; the existing pending marker
+            // safely replays and verifies the same desired intent on restart.
+            do {
+                try persist(request: request, hash: hash, progress: completed, status: .completed)
+            } catch {
+                // The current session already has CLI confirmation. A
+                // surviving pending marker will be replayed after restart;
+                // if no marker survives, the effective CLI-owned policy is
+                // still the source of truth.
+            }
             if currentApplyGeneration == generation {
                 currentApplyTask = nil
                 currentApplyGeneration = nil
             }
         } catch is CancellationError {
             // A newer generation owns the visible state. Setup-close
-            // cancellation is finalized by `cancelCurrentPolicyApply` after
+            // cancellation is finalized by `cancelPolicySync` after
             // the process group and CLI locks have been released.
         } catch let error as MSWClientError where error == .cancelled {
             // Same cancellation contract as Swift CancellationError.
@@ -763,6 +836,63 @@ actor GitHubLocalProvider: GitHubProviding {
                 currentApplyGeneration = nil
             }
         }
+    }
+
+    private func markContentionDelayed(generation: Int, workspace: String?) {
+        guard applyProgress?.generation == generation,
+              applyProgress?.isInFlight == true else { return }
+        applyProgress = GitHubApplyProgress(
+            generation: generation,
+            phase: .delayed,
+            workspace: workspace,
+            failure: nil
+        )
+    }
+
+    private func stopReconciliation() async {
+        guard let task = currentApplyTask, let generation = currentApplyGeneration else { return }
+        task.cancel()
+        await task.value
+        guard currentApplyGeneration == generation else { return }
+        currentApplyTask = nil
+        currentApplyGeneration = nil
+    }
+
+    private func waitForConfigurationReload() async {
+        while configurationReloadInProgress {
+            await withCheckedContinuation { continuation in
+                configurationReloadWaiters.append(continuation)
+            }
+        }
+    }
+
+    private func finishConfigurationReload() {
+        configurationReloadInProgress = false
+        let waiters = configurationReloadWaiters
+        configurationReloadWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func resumeInterruptedReconciliation() {
+        guard currentApplyTask == nil, let progress = applyProgress, progress.isInFlight else { return }
+        applyProgress = GitHubApplyProgress(
+            generation: progress.generation,
+            phase: .saved,
+            workspace: progress.workspace,
+            failure: nil
+        )
+        resumePendingReconciliationIfNeeded()
+    }
+
+    private func resumePendingReconciliationIfNeeded() {
+        guard currentApplyTask == nil, let applyProgress,
+              applyProgress.phase == .saved, let desiredRequest, let desiredHash else { return }
+        startReconciliation(
+            request: desiredRequest,
+            hash: desiredHash,
+            generation: applyProgress.generation,
+            workspace: applyProgress.workspace
+        )
     }
 
     private func performMutation<Value: Sendable>(
@@ -789,8 +919,8 @@ actor GitHubLocalProvider: GitHubProviding {
         return task
     }
 
-    private func matchesEffectivePolicy(_ request: MSWGitHubPolicyApplyRequest) async -> Bool {
-        guard let current = await policyStore.current else {
+    private func matchesEffectivePolicy(_ request: MSWGitHubPolicyApplyRequest) -> Bool {
+        guard let current = GitHubPolicyStore.read(policyURL: policyURL) else {
             return request.workspaces.values.allSatisfy(\.repos.isEmpty)
         }
         for workspace in configuredWorkspaces {
@@ -803,8 +933,8 @@ actor GitHubLocalProvider: GitHubProviding {
 
     private func firstChangedNonEmptyWorkspace(
         in request: MSWGitHubPolicyApplyRequest
-    ) async -> String? {
-        let current = await policyStore.current
+    ) -> String? {
+        let current = GitHubPolicyStore.read(policyURL: policyURL)
         return configuredWorkspaces.first { workspace in
             let desired = request.workspaces[workspace]?.repos ?? []
             let effective = current?.workspaces[workspace]?.repos ?? []
@@ -876,31 +1006,86 @@ actor GitHubLocalProvider: GitHubProviding {
         )
     }
 
+    private static func scopedPolicy(
+        _ policy: GitHubPolicyFile,
+        workspaces: [String]
+    ) -> GitHubPolicyFile {
+        GitHubPolicyFile(
+            schemaVersion: policy.schemaVersion,
+            workspaces: Dictionary(uniqueKeysWithValues: workspaces.map {
+                ($0, policy.workspaces[$0] ?? GitHubPolicyWorkspace(capability: nil, repos: []))
+            }),
+            updatedAt: policy.updatedAt
+        )
+    }
+
+    private static func scopedFailure(
+        _ failure: GitHubApplyFailure,
+        workspaces: [String]
+    ) -> GitHubApplyFailure {
+        GitHubApplyFailure(
+            code: failure.code,
+            message: failure.message,
+            recovery: failure.recovery,
+            workspace: failure.workspace.flatMap { workspaces.contains($0) ? $0 : nil },
+            retryable: failure.retryable
+        )
+    }
+
     private static func failure(for error: Error, workspace: String?) -> GitHubApplyFailure {
         if let clientError = error as? MSWClientError,
            case .protocolFailure(let protocolError) = clientError {
+            let containsInternalContentionLanguage = [
+                protocolError.message,
+                protocolError.recovery ?? ""
+            ].contains(where: GitHubApplyFailure.containsInternalContentionLanguage)
             return GitHubApplyFailure(
                 code: protocolError.code,
-                message: protocolError.message,
-                recovery: protocolError.recovery ?? "Retry GitHub reconciliation.",
+                message: containsInternalContentionLanguage
+                    ? "GitHub synchronization could not continue."
+                    : protocolError.message,
+                recovery: containsInternalContentionLanguage
+                    ? "Retry GitHub synchronization."
+                    : protocolError.recovery ?? "Retry GitHub synchronization.",
                 workspace: protocolError.workspace ?? workspace,
                 retryable: protocolError.retryable
             )
         }
+        let message = error.localizedDescription
         return GitHubApplyFailure(
             code: "MSW_GITHUB_RECONCILIATION_FAILED",
-            message: error.localizedDescription,
-            recovery: "Check the workspace runtime, then retry GitHub reconciliation.",
+            message: GitHubApplyFailure.containsInternalContentionLanguage(message)
+                ? "GitHub synchronization could not continue."
+                : message,
+            recovery: "Check the workspace runtime, then retry GitHub synchronization.",
             workspace: workspace,
             retryable: true
         )
     }
 
-    func removeAllAccess() async throws {
+    func clearPolicy() async throws -> GitHubApplyProgress {
         let cleared = configuredWorkspaces.map {
             GitHubWorkspacePolicy(workspace: $0, repositories: [])
         }
-        try await commit(cleared)
+        return try await savePolicy(cleared)
+    }
+
+    func resetAccess() async throws -> GitHubApplyProgress {
+        let saved = try await clearPolicy()
+        try await waitForPolicySync()
+        let completed = await policySyncProgress() ?? saved
+        guard completed.phase == .applied else {
+            throw GitHubCatalogError.commitFailed(
+                "GitHub policy cleanup did not complete before account reset."
+            )
+        }
+        guard let workspace = configuredWorkspaces.first else {
+            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(
+                "At least one workspace is required to reset GitHub access."
+            )
+        }
+        try await client.resetLocalGitHub(workspace: workspace)
+        return completed
     }
 
     func connectAccount() async throws -> GitHubAccount? {
@@ -932,7 +1117,7 @@ actor GitHubLocalProvider: GitHubProviding {
         do {
             try await client.githubWebLogin()
         } catch let error as MSWClientError {
-            if case .rawCLIError(let code, let message) = error {
+            if case .rawCLIError(_, let message) = error {
                 throw GitHubCatalogError.notConfigured(
                     message ?? "GitHub CLI (gh) sign-in could not be started."
                 )
@@ -1000,6 +1185,10 @@ actor GitHubFixtureProvider: GitHubProviding {
     let scenario: String?
     private var loadAttempts = 0
     private var connected: Bool
+    private var savedPolicy: GitHubPolicyFile?
+    private var syncProgress: GitHubApplyProgress?
+    private var syncGeneration = 0
+    private var configuredWorkspaces = SetupWorkspaceConfiguration.defaults.map(\.name)
 
     init(scenario: String?) {
         self.scenario = scenario
@@ -1012,8 +1201,21 @@ actor GitHubFixtureProvider: GitHubProviding {
 
     func loadCatalog() async throws -> GitHubCatalog {
         loadAttempts += 1
+        if scenario == "sync-completes-during-load",
+           let progress = syncProgress, progress.isInFlight {
+            try await Task.sleep(for: .milliseconds(50))
+            syncProgress = GitHubApplyProgress(
+                generation: progress.generation,
+                phase: .applied,
+                workspace: nil,
+                failure: nil
+            )
+        }
         if scenario == "slow-first-load", loadAttempts == 1 {
             try await Task.sleep(for: .milliseconds(250))
+        }
+        if scenario == "setup-loading-skeleton", loadAttempts == 1 {
+            try await Task.sleep(for: .seconds(15))
         }
         if scenario == "interaction-states", loadAttempts > 1 {
             try await Task.sleep(for: .seconds(2))
@@ -1050,15 +1252,84 @@ actor GitHubFixtureProvider: GitHubProviding {
         )
     }
 
-    func currentPolicy() async -> GitHubPolicyFile? { nil }
+    func desiredPolicy() async -> GitHubPolicyFile? { savedPolicy }
 
-    func commit(_ policy: [GitHubWorkspacePolicy]) async throws {
-        if scenario == "interaction-states" {
-            try await Task.sleep(for: .seconds(2))
+    func savePolicy(_ policy: [GitHubWorkspacePolicy]) async throws -> GitHubApplyProgress {
+        syncGeneration += 1
+        var desired = Dictionary(uniqueKeysWithValues: configuredWorkspaces.map { workspace in
+            (workspace, savedPolicy?.workspaces[workspace] ?? GitHubPolicyWorkspace(
+                capability: nil,
+                repos: []
+            ))
+        })
+        for item in policy where desired[item.workspace] != nil {
+            desired[item.workspace] = GitHubPolicyWorkspace(
+                capability: nil,
+                repos: item.repositories.map {
+                    GitHubPolicyRepository(
+                        canonical: GitHubLocalProvider.canonicalize($0.fullName),
+                        mode: $0.mode
+                    )
+                }
+            )
         }
+        savedPolicy = GitHubPolicyFile(
+            schemaVersion: 1,
+            workspaces: desired,
+            updatedAt: Date()
+        )
+        let phase: GitHubApplyPhase
+        switch scenario {
+        case "sync-delayed": phase = .delayed
+        case "sync-completes-during-load": phase = .applying
+        default: phase = .applied
+        }
+        let progress = GitHubApplyProgress(
+            generation: syncGeneration,
+            phase: phase,
+            workspace: phase == .delayed ? policy.first?.workspace : nil,
+            failure: nil
+        )
+        syncProgress = progress
+        return progress
     }
 
-    func removeAllAccess() async throws {}
+    func clearPolicy() async throws -> GitHubApplyProgress {
+        try await savePolicy(configuredWorkspaces.map {
+            GitHubWorkspacePolicy(workspace: $0, repositories: [])
+        })
+    }
+
+    func resetAccess() async throws -> GitHubApplyProgress {
+        connected = false
+        return try await clearPolicy()
+    }
+
+    func policySyncProgress() async -> GitHubApplyProgress? { syncProgress }
+
+    func waitForPolicySync() async throws {
+        if syncProgress?.phase == .cancelled { throw CancellationError() }
+    }
+
+    func retryPolicySync() async throws {
+        guard let progress = syncProgress else { return }
+        syncProgress = GitHubApplyProgress(
+            generation: progress.generation,
+            phase: .applied,
+            workspace: nil,
+            failure: nil
+        )
+    }
+
+    func cancelPolicySync() async {
+        guard let progress = syncProgress, progress.isInFlight else { return }
+        syncProgress = GitHubApplyProgress(
+            generation: progress.generation,
+            phase: .cancelled,
+            workspace: progress.workspace,
+            failure: nil
+        )
+    }
 
     func connectAccount() async throws -> GitHubAccount? {
         if scenario == "disconnected" {
@@ -1082,6 +1353,27 @@ actor GitHubFixtureProvider: GitHubProviding {
 
     func pollDeviceFlow(deviceId: String) async throws -> MSWDeviceFlowPoll {
         MSWDeviceFlowPoll(status: .authorized, interval: nil, accountLogin: "octocat")
+    }
+
+    func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
+        MSWIdentityResult(
+            target: workspace ?? "all",
+            name: name,
+            email: email,
+            workspaces: workspace.map { [$0] } ?? SetupWorkspaceConfiguration.defaults.map(\.name)
+        )
+    }
+
+    func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws {
+        configuredWorkspaces = configurations.map(\.name)
+        guard let savedPolicy else { return }
+        self.savedPolicy = GitHubPolicyFile(
+            schemaVersion: savedPolicy.schemaVersion,
+            workspaces: Dictionary(uniqueKeysWithValues: configuredWorkspaces.map {
+                ($0, savedPolicy.workspaces[$0] ?? GitHubPolicyWorkspace(capability: nil, repos: []))
+            }),
+            updatedAt: savedPolicy.updatedAt
+        )
     }
 
     static let fixtureAccount = GitHubAccount(login: "octocat", id: 1, name: nil, email: nil)

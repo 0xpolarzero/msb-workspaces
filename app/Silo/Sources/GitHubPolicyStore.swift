@@ -122,7 +122,7 @@ final class GitHubPolicyStore {
     /// Strict failable read. Any decode failure (missing file, malformed
     /// JSON, wrong schemaVersion, unknown mode value) returns nil, meaning
     /// "no credential grants".
-    static func read(policyURL: URL) -> GitHubPolicyFile? {
+    nonisolated static func read(policyURL: URL) -> GitHubPolicyFile? {
         guard let data = try? Data(contentsOf: policyURL) else { return nil }
         guard let file = try? MSWProtocolDecoder.decoder().decode(GitHubPolicyFile.self, from: data),
               file.schemaVersion == 1 else {
@@ -139,7 +139,13 @@ final class GitHubPolicyStore {
     nonisolated static func readIntent(policyURL: URL) -> GitHubApplyPersistentState? {
         let url = intentURL(for: policyURL)
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? MSWProtocolDecoder.decoder().decode(GitHubApplyPersistentState.self, from: data)
+        guard let state = try? MSWProtocolDecoder.decoder().decode(
+            GitHubApplyPersistentState.self,
+            from: data
+        ), state.schemaVersion == 1, state.desired.schemaVersion == 1 else {
+            return nil
+        }
+        return state
     }
 
     /// Writes a private sibling temporary file, fsyncs it, renames it, then

@@ -2122,7 +2122,7 @@ final class AppModel {
             Task { [weak self] in
                 do {
                     let catalog = try await provider.loadCatalog()
-                    let policy = await provider.currentPolicy()
+                    let policy = await provider.desiredPolicy()
                     guard let self, request == self.detailRequestGeneration else { return }
                     self.githubSnapshot = Self.localGitHubSnapshot(
                         policy: policy,
