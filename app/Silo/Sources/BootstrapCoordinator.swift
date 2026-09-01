@@ -569,16 +569,21 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
                 handshake = (try? await client.handshake())?.result
             }
             if let handshake {
-                let ready =
-                    handshake.configurationAvailable && handshake.runtimeAvailable &&
-                    handshake.capabilities.jq
+                let runtimeReady = handshake.runtimeAvailable && handshake.capabilities.jq
+                let detail: String
+                if runtimeReady {
+                    detail = handshake.configurationAvailable
+                        ? "Silo verified its coupled runtime."
+                        : "Silo verified its coupled runtime. Setup will create its configuration."
+                } else {
+                    detail = "Silo is present, but its JSON adapter or MicroSandbox runtime is incomplete."
+                }
                 record(SiloPreflightCheck(
                     id: "silo-runtime",
                     title: "Silo runtime",
-                    status: ready ? .pass : .needsAction,
-                    detail: ready ? "Silo verified its coupled runtime."
-                        : "Silo is present, but its configuration, JSON adapter, or MicroSandbox runtime is incomplete.",
-                    remediation: ready ? nil : (canInstallToolchain
+                    status: runtimeReady ? .pass : .needsAction,
+                    detail: detail,
+                    remediation: runtimeReady ? nil : (canInstallToolchain
                         ? repairRuntimeAction
                         : "Reinstall Silo from a complete app bundle.")
                 ))

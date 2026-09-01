@@ -3186,6 +3186,56 @@ final class AppModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(FileManager.default.fileExists(atPath: applyMarker.path))
     }
+    func testFreshOnboardingTreatsMissingConfigurationAsSetupWork() async throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("silo-bootstrap-first-run-test-\(UUID().uuidString)", isDirectory: true)
+        let bin = temporary.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
+        for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
+            let tool = bin.appendingPathComponent(name)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: tool)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tool.path)
+        }
+
+        let handshake = protocolCompatibleHandshake.replacingOccurrences(
+            of: #""configurationAvailable":true"#,
+            with: #""configurationAvailable":false"#
+        )
+        let executable = bin.appendingPathComponent("silo")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
+            printf '%s\\n' '\(handshake)'
+            exit 0
+        fi
+        exit 64
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let runner = SiloCommandRunner(configuration: .init(
+            homeDirectory: temporary,
+            additionalSearchPaths: [executable],
+            testSiloExecutable: executable
+        ))
+        let coordinator = BootstrapCoordinator(
+            client: SiloClient(runner: runner),
+            runner: runner,
+            stateStore: BootstrapStateStore(url: temporary.appendingPathComponent("bootstrap-state.json")),
+            hostService: RecordingHostService()
+        )
+
+        let checks = await coordinator.preflight()
+        let runtime = try XCTUnwrap(checks.first(where: { $0.id == "silo-runtime" }))
+        XCTAssertEqual(runtime.status, .pass)
+        XCTAssertEqual(
+            runtime.detail,
+            "Silo verified its coupled runtime. Setup will create its configuration."
+        )
+        XCTAssertNil(runtime.remediation)
+    }
 
     func testFailedNonHostPreflightDoesNotRegisterHostService() async throws {
         let temporary = FileManager.default.temporaryDirectory
