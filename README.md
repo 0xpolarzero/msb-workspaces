@@ -1,4 +1,4 @@
-# Silo 3.1.0
+# Silo
 
 <img src="assets/silo-logo.svg" alt="Silo" width="96">
 
