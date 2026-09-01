@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal gh(1) simulator for host-credential acquisition tests (Path C §5).
 
-Driven by MSW_FAKE_GH_STATE (a JSON file):
+Driven by SILO_FAKE_GH_STATE (a JSON file):
   {"authed": true, "token": "gho_...", "account": "fake-user"}
 - `gh auth status --active` exits 0 and prints a login line when authed, else 1.
   When `status_timeout` is true it exits 1 WITHOUT looking at authed, modeling
@@ -19,7 +19,7 @@ from pathlib import Path
 
 
 def main() -> int:
-    state_path = Path(os.environ.get("MSW_FAKE_GH_STATE", ""))
+    state_path = Path(os.environ.get("SILO_FAKE_GH_STATE", ""))
     if not state_path.is_file():
         state: dict = {"authed": False, "token": ""}
     else:

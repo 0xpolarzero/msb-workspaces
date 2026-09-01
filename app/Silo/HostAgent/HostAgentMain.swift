@@ -2,15 +2,13 @@ import Darwin
 import Foundation
 import Security
 
-private let serviceName = "org.microsandbox.Silo.host-agent"
-private let appIdentifier = "org.microsandbox.Silo"
+private let serviceName = "org.silo.Silo.host-agent"
+private let appIdentifier = "org.silo.Silo"
 private let managedStart = "# BEGIN SILO MANAGED HOSTS"
 private let managedEnd = "# END SILO MANAGED HOSTS"
-private let legacyManagedStart = "# BEGIN MSW WORKSPACES"
-private let legacyManagedEnd = "# END MSW WORKSPACES"
 private let hostsURL = URL(fileURLWithPath: "/etc/hosts")
 
-struct MSWHostRecordSnapshot: Codable, Sendable {
+struct SiloHostRecordSnapshot: Codable, Sendable {
     let fixedAliases: [String]
     let hostsBlockInstalled: Bool
     let launchDaemonRegistered: Bool
@@ -32,9 +30,9 @@ private enum HostAgentError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidInput: return "The fixed host integration state is malformed."
-        case .readFailed: return "The MSW-managed host records could not be read."
-        case .writeFailed: return "The MSW-managed host records could not be written atomically."
-        case .loopbackFailed: return "The fixed MSW loopback aliases could not be configured."
+        case .readFailed: return "The Silo-managed host records could not be read."
+        case .writeFailed: return "The Silo-managed host records could not be written atomically."
+        case .loopbackFailed: return "The fixed Silo loopback aliases could not be configured."
         }
     }
 }
@@ -52,12 +50,12 @@ private final class LoopbackStore {
         })
     }
 
-    func installedAddresses(records: [MSWWorkspaceNetworkRecord]) throws -> [String] {
+    func installedAddresses(records: [SiloWorkspaceNetworkRecord]) throws -> [String] {
         let installed = try currentAddresses()
         return records.map(\.address).filter(installed.contains).sorted()
     }
 
-    func ensureFixedAliases(records: [MSWWorkspaceNetworkRecord]) throws {
+    func ensureFixedAliases(records: [SiloWorkspaceNetworkRecord]) throws {
         let desired = Set(records.map(\.address))
         var installed = try currentAddresses()
         for address in installed.intersection(managedAddresses).subtracting(desired).sorted() {
@@ -105,17 +103,16 @@ private final class LoopbackStore {
 }
 
 private final class HostRecordStore {
-    func inspect(records: [MSWWorkspaceNetworkRecord]) throws -> Bool {
+    func inspect(records: [SiloWorkspaceNetworkRecord]) throws -> Bool {
         let lines = try readValidatedLines()
-        guard try managedRange(in: lines, startMarker: legacyManagedStart, endMarker: legacyManagedEnd) == nil,
-              let range = try managedRange(in: lines, startMarker: managedStart, endMarker: managedEnd) else {
+        guard let range = try managedRange(in: lines, startMarker: managedStart, endMarker: managedEnd) else {
             return false
         }
         let expected = records.map { "\($0.address)\t\($0.hostname)" }
         return Array(lines[(range.lowerBound + 1)..<range.upperBound]) == expected
     }
 
-    func install(records: [MSWWorkspaceNetworkRecord]) throws {
+    func install(records: [SiloWorkspaceNetworkRecord]) throws {
         var lines = try readValidatedLines()
         lines = try removingManagedBlock(from: lines)
         while lines.last == "" { lines.removeLast() }
@@ -170,14 +167,12 @@ private final class HostRecordStore {
 
     private func removingManagedBlock(from lines: [String]) throws -> [String] {
         var result = lines
-        for markers in [(managedStart, managedEnd), (legacyManagedStart, legacyManagedEnd)] {
-            if let range = try managedRange(
-                in: result,
-                startMarker: markers.0,
-                endMarker: markers.1
-            ) {
-                result.removeSubrange(range)
-            }
+        if let range = try managedRange(
+            in: result,
+            startMarker: managedStart,
+            endMarker: managedEnd
+        ) {
+            result.removeSubrange(range)
         }
         return result
     }
@@ -192,7 +187,7 @@ private final class HostRecordStore {
         let mode = mode_t((attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o644)
         let owner = uid_t((attributes[.ownerAccountID] as? NSNumber)?.uint32Value ?? 0)
         let group = gid_t((attributes[.groupOwnerAccountID] as? NSNumber)?.uint32Value ?? 0)
-        let temporary = hostsURL.deletingLastPathComponent().appendingPathComponent(".msw-hosts-\(UUID().uuidString)")
+        let temporary = hostsURL.deletingLastPathComponent().appendingPathComponent(".silo-hosts-\(UUID().uuidString)")
         let descriptor = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode)
         guard descriptor >= 0 else { throw HostAgentError.writeFailed }
         var shouldRemove = true
@@ -256,8 +251,8 @@ private final class HostAgentOperations: NSObject, SiloHostAgentProtocol {
         }
     }
 
-    private func snapshot(records: [MSWWorkspaceNetworkRecord]) throws -> MSWHostRecordSnapshot {
-        MSWHostRecordSnapshot(
+    private func snapshot(records: [SiloWorkspaceNetworkRecord]) throws -> SiloHostRecordSnapshot {
+        SiloHostRecordSnapshot(
             fixedAliases: try loopback.installedAddresses(records: records),
             hostsBlockInstalled: try hosts.inspect(records: records),
             launchDaemonRegistered: true
@@ -267,18 +262,18 @@ private final class HostAgentOperations: NSObject, SiloHostAgentProtocol {
     private func respond(
         _ configuration: Data,
         reply: @escaping (Data?, String?) -> Void,
-        operation: ([MSWWorkspaceNetworkRecord]) throws -> MSWHostRecordSnapshot
+        operation: ([SiloWorkspaceNetworkRecord]) throws -> SiloHostRecordSnapshot
     ) {
         lock.lock()
         defer { lock.unlock() }
         do {
             guard configuration.count <= 16 * 1024,
-                  let records = try? JSONDecoder().decode([MSWWorkspaceNetworkRecord].self, from: configuration),
+                  let records = try? JSONDecoder().decode([SiloWorkspaceNetworkRecord].self, from: configuration),
                   !records.isEmpty,
                   records.count <= 64,
                   records.enumerated().allSatisfy({ index, record in
                       record.address == "127.0.0.\(10 + index)" &&
-                      record.hostname.range(of: #"^[a-z][a-z0-9-]{0,31}\.msw\.test$"#, options: .regularExpression) != nil
+                      record.hostname.range(of: #"^[a-z][a-z0-9-]{0,31}\.silo\.test$"#, options: .regularExpression) != nil
                   }),
                   Set(records.map(\.hostname)).count == records.count else {
                 throw HostAgentError.invalidInput

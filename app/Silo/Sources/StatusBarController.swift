@@ -7,13 +7,13 @@ final class StatusBarController {
     let statusItem: NSStatusItem
     let popover: NSPopover
 
-    private let bootstrapCoordinator: (any MSWBootstrapCoordinating)?
+    private let bootstrapCoordinator: (any SiloBootstrapCoordinating)?
     private let authorizationCoordinator: GitHubAuthorizationCoordinator?
     private let githubInstallationURL: URL?
     private let provider: (any GitHubProviding)?
     private let githubSettingsState: GitHubSettingsState
     private let accessMode: GitHubAccessMode
-    private let commandRunner: MSWCommandRunner
+    private let commandRunner: SiloCommandRunner
     private let appNavigation: AppNavigationState
     private let applicationPreferences: ApplicationPreferenceStore
     private let startupRecoveryBlockedReason: String?
@@ -24,13 +24,13 @@ final class StatusBarController {
 
     init(
         model: AppModel,
-        bootstrapCoordinator: (any MSWBootstrapCoordinating)? = nil,
+        bootstrapCoordinator: (any SiloBootstrapCoordinating)? = nil,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         githubInstallationURL: URL? = nil,
         provider: (any GitHubProviding)? = nil,
         githubSettingsState: GitHubSettingsState? = nil,
         accessMode: GitHubAccessMode = .local,
-        commandRunner: MSWCommandRunner = MSWCommandRunner(),
+        commandRunner: SiloCommandRunner = SiloCommandRunner(),
         appNavigation: AppNavigationState = AppNavigationState(),
         applicationPreferences: ApplicationPreferenceStore,
         startupRecoveryBlockedReason: String? = nil,
@@ -247,7 +247,7 @@ private final class RuntimeRepairWindowController {
     private let window: NSWindow
 
     init(
-        coordinator: (any MSWBootstrapCoordinating)?,
+        coordinator: (any SiloBootstrapCoordinating)?,
         uiTestMode: Bool,
         repairDidSucceed: @escaping () -> Void,
         close: @escaping () -> Void
@@ -277,7 +277,7 @@ private final class RuntimeRepairWindowController {
         window = NSWindow(contentViewController: hosting)
         window.identifier = NSUserInterfaceItemIdentifier(RuntimeRepairAccessibilityIdentifier.repairWindow)
         hosting.view.setAccessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairWindow)
-        window.title = "Repair MSW Installation"
+        window.title = "Repair Silo Installation"
         window.setContentSize(NSSize(width: 500, height: 430))
         window.minSize = NSSize(width: 460, height: 360)
         window.styleMask = [.titled, .closable]
@@ -321,13 +321,13 @@ private struct RuntimeRepairView: View {
             HStack(spacing: 8) {
                 Image(systemName: "wrench.and.screwdriver.fill")
                     .accessibilityHidden(true)
-                Text("MSW installation needs repair")
+                Text("Silo installation needs repair")
                     .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairTitle)
             }
             .font(.title2.weight(.semibold))
             .foregroundStyle(.orange)
 
-            Text("Reinstall the bundled MSW runtime and verify its exact command identity.")
+            Text("Reinstall the bundled Silo runtime and verify its exact command identity.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairMessage)

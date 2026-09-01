@@ -9,7 +9,7 @@ if 'github.com/robots.txt' in url:
 parsed = urlparse(url)
 box = parsed.hostname.split('.', 1)[0] if parsed.hostname else ''
 port = str(parsed.port or (443 if parsed.scheme == 'https' else 80))
-state_file = Path(os.environ['MSW_FAKE_STATE']) / 'state.json'
+state_file = Path(os.environ['SILO_FAKE_STATE']) / 'state.json'
 state = json.loads(state_file.read_text())
 content = state.get('sandboxes', {}).get(box, {}).get('port_content', {}).get(port)
 if content is None:

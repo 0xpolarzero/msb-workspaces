@@ -1,4 +1,4 @@
-# MSW setup guide
+# Silo setup guide
 
 This guide installs configurable persistent MicroSandbox development workspaces on an Apple Silicon Mac. The packaged defaults are:
 
@@ -14,8 +14,8 @@ Unzip the package and run the installer:
 
 ```bash
 cd ~/Downloads
-unzip microsandbox-workspaces-v3.1.0.zip
-cd microsandbox-workspaces
+unzip silo-v3.1.0.zip
+cd silo
 ./setup.sh
 ```
 
@@ -30,7 +30,7 @@ The installer may request your macOS administrator password to add three private
 7. Configures Docker Engine, Compose, Buildx, Git, GitHub CLI, mise, Node LTS, pnpm, uv, Python, zsh, and common development tools.
 8. Enables local TLS interception so MicroSandbox can substitute host-held secrets only at their allow-listed HTTPS endpoints.
 9. Configures fixed local browser names and SSH aliases.
-10. Runs `msw check --deep` against every configured VM.
+10. Runs `silo check --deep` against every configured VM.
 
 When it finishes:
 
@@ -49,13 +49,13 @@ all live VM, Docker, SSH, internet, and published-port checks passed
 Apply one identity to every configured workspace:
 
 ```bash
-msw identity "Your Full Name" you@example.com
+silo identity "Your Full Name" you@example.com
 ```
 
 Or configure one workspace only:
 
 ```bash
-msw identity "Your Full Name" work@example.com dev
+silo identity "Your Full Name" work@example.com dev
 ```
 
 ## 3. Connect GitHub
@@ -79,7 +79,7 @@ Open **Silo** → **Settings** → **GitHub**:
    for VM push; a Device Flow fallback is available when a client ID is
    configured. The credential is stored as one versioned record in the
    login Keychain
-   (`org.microsandbox.Silo.github-host.v2`); the token never appears in
+   (`org.silo.Silo.github-host.v2`); the token never appears in
    command arguments, logs, journals, or backups. Any pre-v2 item remains
    dormant and unread.
 2. **Tick repositories per workspace.** The policy starts empty: until a
@@ -94,7 +94,7 @@ Open **Silo** → **Settings** → **GitHub**:
 The two modes mean exactly this — local editing and commits always work in
 both:
 
-| Mode | Clone/pull | Local edit & commit | Host push (`msw push`, app Push) | Push from inside the VM |
+| Mode | Clone/pull | Local edit & commit | Host push (`silo push`, app Push) | Push from inside the VM |
 |---|---|---|---|---|
 | **Clone/pull (push from Mac)** (read-only) | yes | always | yes | no |
 | **Clone/pull + Push from VM** (read-write) | yes | always | yes | yes |
@@ -112,26 +112,26 @@ version; use git, or run API operations from the Mac.
 The same surface is available from the terminal:
 
 ```bash
-msw github auth [--force] [--json]          # provision or rotate the host credential
-msw github status [WORKSPACE|all]           # mode, capability, repos, credential, shuttle
-msw github verify WORKSPACE [OWNER/REPO]    # probe policy, capability, credential (no VM writes)
-msw github remove WORKSPACE                 # revoke the host credential (fail-closed)
-msw github capability rotate WORKSPACE      # mint a fresh capability; the old one is denied immediately
-msw github proxy-configure [WORKSPACE]      # install or repair the proxy transport idempotently
-msw github repos [--owner OWNER] [--json]   # discover repositories for the picker
-msw app github-policy-set --workspace WORKSPACE --repository OWNER/REPO --mode read-only|read-write
+silo github auth [--force] [--json]          # provision or rotate the host credential
+silo github status [WORKSPACE|all]           # mode, capability, repos, credential, shuttle
+silo github verify WORKSPACE [OWNER/REPO]    # probe policy, capability, credential (no VM writes)
+silo github remove WORKSPACE                 # revoke the host credential (fail-closed)
+silo github capability rotate WORKSPACE      # mint a fresh capability; the old one is denied immediately
+silo github proxy-configure [WORKSPACE]      # install or repair the proxy transport idempotently
+silo github repos [--owner OWNER] [--json]   # discover repositories for the picker
+silo app github-policy-set --workspace WORKSPACE --repository OWNER/REPO --mode read-only|read-write
 ```
 
-Troubleshoot with `msw github status`, then `msw github verify`; repair the
-transport with `msw github proxy-configure`, and rotate a compromised
-credential with `msw github auth --force`. `msw check --deep` asserts that no
+Troubleshoot with `silo github status`, then `silo github verify`; repair the
+transport with `silo github proxy-configure`, and rotate a compromised
+credential with `silo github auth --force`. `silo check --deep` asserts that no
 guest holds a `GH_TOKEN` and probes proxy reachability from the guest. Legacy
 Connect-era state is retired automatically on first local-mode use as one
-journaled transaction (archiving `~/.config/msw/github/<box>.conf` and proving
-old guest secrets are removed); run `msw github migrate [WORKSPACE|all]` to do
+journaled transaction (archiving `~/.config/silo/github/<box>.conf` and proving
+old guest secrets are removed); run `silo github migrate [WORKSPACE|all]` to do
 it explicitly.
 
-Connect mode (`MSW_GITHUB_MODE=connect`) remains available as a rollback
+Connect mode (`SILO_GITHUB_MODE=connect`) remains available as a rollback
 alternative; local mode is the default and never reads or writes Connect
 grants.
 
@@ -148,14 +148,14 @@ Adding, editing, or removing a key creates pending configuration. Running
 workspaces show **Restart required**; stopped workspaces show **Applies on next
 start**. Multiple edits can be staged before using **Restart affected
 workspaces…**. Removal disables the old binding immediately and deletes the
-Keychain value only after MSW verifies the binding is absent.
+Keychain value only after Silo verifies the binding is absent.
 
 ## 4. Enter a workspace from Ghostty
 
 ```bash
-msw dev
-msw playgrounds
-msw personal
+silo dev
+silo playgrounds
+silo personal
 ```
 
 Each command starts a stopped VM automatically and opens a zsh login shell in `/workspace`.
@@ -163,8 +163,8 @@ Each command starts a stopped VM automatically and opens a zsh login shell in `/
 Enter a nested project directly:
 
 ```bash
-msw dev clients/acme/backend
-msw personal apps/my-site
+silo dev clients/acme/backend
+silo personal apps/my-site
 ```
 
 ## 5. Clone repositories
@@ -172,27 +172,27 @@ msw personal apps/my-site
 Clone at the workspace root:
 
 ```bash
-msw clone dev OWNER/backend
+silo clone dev OWNER/backend
 ```
 
 Clone into any nested folder; missing parent folders are created:
 
 ```bash
-msw clone dev OWNER/backend clients/acme/backend
-msw clone dev OWNER/frontend clients/acme/frontend
-msw clone personal OWNER/site apps/site
+silo clone dev OWNER/backend clients/acme/backend
+silo clone dev OWNER/frontend clients/acme/frontend
+silo clone personal OWNER/site apps/site
 ```
 
 List every repository in a workspace:
 
 ```bash
-msw repos dev
+silo repos dev
 ```
 
 You can also clone normally from inside a workspace:
 
 ```bash
-msw dev
+silo dev
 mkdir -p clients/acme
 cd clients/acme
 git clone https://github.com/OWNER/backend.git
@@ -207,14 +207,14 @@ In Zed, run `cli: install cli binary` once from the command palette.
 Then open a project from Ghostty:
 
 ```bash
-msw zed dev clients/acme/backend
-msw zed personal apps/site
+silo zed dev clients/acme/backend
+silo zed personal apps/site
 ```
 
 Open the whole workspace when useful:
 
 ```bash
-msw zed playgrounds
+silo zed playgrounds
 ```
 
 Zed's interface stays on macOS. Files, terminals, language servers, tasks, builds, tests, and remote agent processes run inside the selected VM.
@@ -224,7 +224,7 @@ Zed's interface stays on macOS. Files, terminals, language servers, tasks, build
 Run services normally inside the VM:
 
 ```bash
-msw dev clients/acme/backend
+silo dev clients/acme/backend
 docker compose up --build
 ```
 
@@ -237,22 +237,22 @@ docker compose up -d --build
 Open a published port from macOS:
 
 ```bash
-msw open dev 3000
-msw open dev 5173
-msw open personal 8080
+silo open dev 3000
+silo open dev 5173
+silo open personal 8080
 ```
 
 Equivalent URLs include:
 
 ```text
-http://dev.msw.test:3000
-http://playgrounds.msw.test:3000
-http://personal.msw.test:3000
+http://dev.silo.test:3000
+http://playgrounds.silo.test:3000
+http://personal.silo.test:3000
 ```
 
 The same port can be active in every configured VM because each workspace has its own loopback IP.
 
-Published ports are forwarded host-side: while a VM runs, the Mac keeps an SSH forward per free desired port. A port already in use on the Mac is skipped with a warning (`skippedPorts`/`portWarning` in `msw app state`) and never blocks, stops, or recreates the workspace.
+Published ports are forwarded host-side: while a VM runs, the Mac keeps an SSH forward per free desired port. A port already in use on the Mac is skipped with a warning (`skippedPorts`/`portWarning` in `silo app state`) and never blocks, stops, or recreates the workspace.
 
 The server inside the VM must bind to `0.0.0.0`, not only `127.0.0.1`. Examples:
 
@@ -282,7 +282,7 @@ services:
 For an uncommon unlisted port:
 
 ```bash
-msw tunnel dev 12345
+silo tunnel dev 12345
 ```
 
 Then open `http://localhost:12345`. Keep that tunnel command running until finished.
@@ -304,7 +304,7 @@ The VM has no GitHub credential of its own. Clone, fetch, and pull inside a work
 Push explicitly from a Mac terminal:
 
 ```bash
-msw push dev clients/acme/backend
+silo push dev clients/acme/backend
 ```
 
 Review the displayed repository, branch, commit, and commits, then type `PUSH`.
@@ -312,13 +312,13 @@ Review the displayed repository, branch, commit, and commits, then type `PUSH`.
 For an automation-friendly confirmation:
 
 ```bash
-msw push dev clients/acme/backend --yes
+silo push dev clients/acme/backend --yes
 ```
 
 A non-fast-forward push is refused. After deliberate review, use an exact lease-protected force push:
 
 ```bash
-msw push dev clients/acme/backend --force-with-lease
+silo push dev clients/acme/backend --force-with-lease
 ```
 
 Only the current committed branch is transferred. Dirty files, other local branches, and tags are not pushed.
@@ -326,24 +326,24 @@ Only the current committed branch is transferred. Dirty files, other local branc
 ## 9. Lifecycle and resource use
 
 ```bash
-msw status
-msw start dev
-msw stop dev
-msw restart personal
-msw stop all
+silo status
+silo start dev
+silo stop dev
+silo restart personal
+silo stop all
 ```
 
 All three can run together with the defaults. Monitor them with:
 
 ```bash
-msw metrics dev
-msw disk all
+silo metrics dev
+silo disk all
 ```
 
 Resize within the configured ceiling:
 
 ```bash
-msw resize dev 32G 10
+silo resize dev 32G 10
 ```
 
 ## 10. Back up everything
@@ -351,19 +351,19 @@ msw resize dev 32G 10
 Create a cold compressed backup:
 
 ```bash
-msw backup
+silo backup
 ```
 
 Default destination:
 
 ```text
-~/Backups/microsandbox/
+~/Backups/silo/
 ```
 
 Use encrypted external storage for a disaster-recovery copy:
 
 ```bash
-msw backup /Volumes/EncryptedBackup/MicroSandbox
+silo backup /Volumes/EncryptedBackup/Silo
 ```
 
 The command records which workspaces are running, flushes and stops them, archives all VM roots and persistent volumes with sparse-file support, writes a SHA-256 checksum and info file, and restarts only the workspaces that were previously running.
@@ -373,36 +373,36 @@ The archive includes code, Docker images, Docker volumes, databases, guest crede
 Restore:
 
 ```bash
-msw restore ~/Backups/microsandbox/microsandbox-all-YYYYMMDD-HHMMSS.tar.zst
+silo restore ~/Backups/silo/silo-all-YYYYMMDD-HHMMSS.tar.zst
 ```
 
 Type `RESTORE` after reviewing the warning. The restore validates the checksum and archive paths, installs into a transaction, checks the restored MicroSandbox state, and rolls back automatically if health checks fail. Workspaces remain stopped afterward:
 
 ```bash
-msw host repair
-msw check --deep
-msw start all
+silo host repair
+silo check --deep
+silo start all
 ```
 
-For best compatibility, restore with the same MSW/MicroSandbox generation used to make the backup.
+For best compatibility, restore with the same Silo/MicroSandbox generation used to make the backup.
 
 ## 11. Updates and maintenance
 
 ```bash
 # Update MicroSandbox and run diagnostics
-msw update
+silo update
 
 # Upgrade Ubuntu packages
-msw upgrade all
+silo upgrade all
 
 # Prune unused Docker objects, preserving volumes
-msw clean all
+silo clean all
 
 # Also delete unused Docker volumes—destructive for unused database volumes
-msw clean all --volumes
+silo clean all --volumes
 
 # Full live verification
-msw check --deep
+silo check --deep
 ```
 
 Re-run the packaged installer safely at any time:

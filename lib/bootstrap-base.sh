@@ -35,7 +35,7 @@ ln -sf /usr/bin/batcat /usr/local/bin/bat
 git lfs install --system --skip-repo
 
 log "Applying development limits"
-cat >/etc/sysctl.d/99-msw-development.conf <<'SYSCTL'
+cat >/etc/sysctl.d/99-silo-development.conf <<'SYSCTL'
 fs.inotify.max_user_watches=1048576
 fs.inotify.max_user_instances=1024
 fs.file-max=2097152
@@ -73,10 +73,10 @@ apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin gh
 
 systemctl stop docker.service docker.socket containerd.service 2>/dev/null || true
-mkdir -p /etc/docker /etc/containerd /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
+mkdir -p /etc/docker /etc/containerd /var/lib/silo-runtime/docker /var/lib/silo-runtime/containerd
 cat >/etc/docker/daemon.json <<'DOCKER_CONFIG'
 {
-  "data-root": "/var/lib/msw-runtime/docker",
+  "data-root": "/var/lib/silo-runtime/docker",
   "features": { "containerd-snapshotter": true },
   "live-restore": true,
   "log-driver": "local",
@@ -87,7 +87,7 @@ cat >/etc/docker/daemon.json <<'DOCKER_CONFIG'
 DOCKER_CONFIG
 cat >/etc/containerd/config.toml <<'CONTAINERD_CONFIG'
 version = 2
-root = "/var/lib/msw-runtime/containerd"
+root = "/var/lib/silo-runtime/containerd"
 CONTAINERD_CONFIG
 
 dockerd --validate --config-file=/etc/docker/daemon.json
@@ -102,7 +102,7 @@ docker buildx version
 log "Installing mise, uv, Node.js LTS, and pnpm"
 curl -fsSL https://mise.run | sh
 curl -LsSf https://astral.sh/uv/install.sh | sh
-cat >/etc/profile.d/msw-tools.sh <<'PROFILE'
+cat >/etc/profile.d/silo-tools.sh <<'PROFILE'
 export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
 export EDITOR=nvim
 export VISUAL=nvim
@@ -110,22 +110,22 @@ export PAGER=less
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
 PROFILE
-chmod 0644 /etc/profile.d/msw-tools.sh
+chmod 0644 /etc/profile.d/silo-tools.sh
 export PATH="/root/.local/bin:/root/.local/share/mise/shims:$PATH"
 mise use --global node@lts pnpm@latest
 npm config set update-notifier false
 
 for profile in /root/.profile /root/.zprofile; do
   touch "$profile"
-  grep -qxF '. /etc/profile.d/msw-tools.sh' "$profile" || echo '. /etc/profile.d/msw-tools.sh' >>"$profile"
+  grep -qxF '. /etc/profile.d/silo-tools.sh' "$profile" || echo '. /etc/profile.d/silo-tools.sh' >>"$profile"
 done
 cat >/root/.zshenv <<'ZSHENV'
-. /etc/profile.d/msw-tools.sh
-[ -f /etc/profile.d/msw-workspace.sh ] && . /etc/profile.d/msw-workspace.sh
+. /etc/profile.d/silo-tools.sh
+[ -f /etc/profile.d/silo-workspace.sh ] && . /etc/profile.d/silo-workspace.sh
 ZSHENV
 cat >/root/.zshrc <<'ZSHRC'
-. /etc/profile.d/msw-tools.sh
-[ -f /etc/profile.d/msw-workspace.sh ] && . /etc/profile.d/msw-workspace.sh
+. /etc/profile.d/silo-tools.sh
+[ -f /etc/profile.d/silo-workspace.sh ] && . /etc/profile.d/silo-workspace.sh
 
 eval "$(mise activate zsh)"
 eval "$(direnv hook zsh)"
@@ -137,7 +137,7 @@ setopt PROMPT_SUBST AUTO_CD INTERACTIVE_COMMENTS SHARE_HISTORY HIST_IGNORE_ALL_D
 HISTFILE="$HOME/.zsh_history"
 HISTSIZE=200000
 SAVEHIST=200000
-PROMPT='%F{cyan}[${MSW_WORKSPACE:-msw}]%f %F{blue}%~%f %# '
+PROMPT='%F{cyan}[${SILO_WORKSPACE:-silo}]%f %F{blue}%~%f %# '
 
 alias ll='ls -lah'
 alias la='ls -A'
@@ -166,15 +166,15 @@ gh config set git_protocol https --host github.com
 
 # Path C §7: never prompt interactively for GitHub credentials inside a
 # workspace; the proxy enforces access with the workspace capability.
-cat >/etc/profile.d/msw-github.sh <<'PROFILE'
+cat >/etc/profile.d/silo-github.sh <<'PROFILE'
 export GIT_TERMINAL_PROMPT=0
 PROFILE
-chmod 0644 /etc/profile.d/msw-github.sh
+chmod 0644 /etc/profile.d/silo-github.sh
 
-mkdir -p /workspace /var/lib/msw-runtime
-chmod 0755 /workspace /var/lib/msw-runtime
+mkdir -p /workspace /var/lib/silo-runtime
+chmod 0755 /workspace /var/lib/silo-runtime
 cat >/etc/motd <<'MOTD'
-MicroSandbox development workspace
+Silo development workspace
 
   Code:      /workspace
   Docker:    docker compose up --build

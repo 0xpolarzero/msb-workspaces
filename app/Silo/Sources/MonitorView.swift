@@ -97,8 +97,8 @@ struct MonitorView: View {
         .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.popoverRow)
     }
 
-    private func confirmationMessage(for plan: MSWLifecyclePlan) -> String {
-        switch MSWLifecycleAction(rawValue: plan.action) {
+    private func confirmationMessage(for plan: SiloLifecyclePlan) -> String {
+        switch SiloLifecycleAction(rawValue: plan.action) {
         case .start:
             return "The \(plan.workspace) workspace will start."
         case .stop:
@@ -110,8 +110,8 @@ struct MonitorView: View {
         }
     }
 
-    private func confirmationRole(for plan: MSWLifecyclePlan) -> ButtonRole? {
-        switch MSWLifecycleAction(rawValue: plan.action) {
+    private func confirmationRole(for plan: SiloLifecyclePlan) -> ButtonRole? {
+        switch SiloLifecycleAction(rawValue: plan.action) {
         case .stop, .restart:
             return .destructive
         case .start, nil:
@@ -184,7 +184,7 @@ struct MonitorView: View {
         .controlSize(.small)
     }
 
-    private func currentOperation(for workspace: Workspace) -> MSWOperationState? {
+    private func currentOperation(for workspace: Workspace) -> SiloOperationState? {
         model.operationStates.values
             .filter { $0.workspace == workspace.id.rawValue && $0.kind == .lifecycle }
             .max { $0.updatedAt < $1.updatedAt }
@@ -213,7 +213,7 @@ struct MonitorView: View {
 }
 
 struct LifecycleConfirmationView: View {
-    let plan: MSWLifecyclePlan
+    let plan: SiloLifecyclePlan
     let cancel: () -> Void
     let confirm: () -> Void
 
@@ -242,7 +242,7 @@ struct LifecycleConfirmationView: View {
     }
 
     private var message: String {
-        switch MSWLifecycleAction(rawValue: plan.action) {
+        switch SiloLifecycleAction(rawValue: plan.action) {
         case .start:
             return "The \(plan.workspace) workspace will start."
         case .stop:
@@ -255,7 +255,7 @@ struct LifecycleConfirmationView: View {
     }
 
     private var confirmationRole: ButtonRole? {
-        switch MSWLifecycleAction(rawValue: plan.action) {
+        switch SiloLifecycleAction(rawValue: plan.action) {
         case .stop, .restart: return .destructive
         case .start, nil: return nil
         }
@@ -264,7 +264,7 @@ struct LifecycleConfirmationView: View {
 
 private struct WorkspaceRow: View {
     let workspace: Workspace
-    let operation: MSWOperationState?
+    let operation: SiloOperationState?
     let activeSitePorts: [String]
     @Bindable var model: AppModel
     let openRoute: (AppRoute) -> Void

@@ -10,23 +10,23 @@ upstream stalls, aborts, and oversized upstreams.
 
 ENV INTERFACE (for Phase 1 proxy-test implementers)
 ---------------------------------------------------
-MSW_FAKE_GITHUB_PORT        int    TCP port to listen on; 0 = ephemeral. The
+SILO_FAKE_GITHUB_PORT        int    TCP port to listen on; 0 = ephemeral. The
                                    chosen port is printed on the ready line.
                                    TestEnv.start_fake_github() always passes 0
                                    and reads the ready line for the real port.
-MSW_FAKE_GITHUB_STATE       path   State dir (created if missing). Holds:
+SILO_FAKE_GITHUB_STATE       path   State dir (created if missing). Holds:
                                    requests.jsonl  one JSON line per request
                                    control.json    failure-injection control
                                    repos.json      /repos/{o}/{r} permissions
                                    user.json       GET /user payload override
                                    lfs-objects/    stored LFS object blobs
                                    server.err      server + git stderr
-MSW_FAKE_GITHUB_REMOTE_ROOT path   Directory of bare repos laid out as
+SILO_FAKE_GITHUB_REMOTE_ROOT path   Directory of bare repos laid out as
                                    {owner}/{repo}.git (same layout as the
-                                   suite's MSW_TEST_GITHUB_REMOTE_ROOT, which
+                                   suite's SILO_TEST_GITHUB_REMOTE_ROOT, which
                                    is the fallback; final fallback is
                                    <state>/remotes).
-MSW_FAKE_GITHUB_MODE        str    Initial failure-injection mode:
+SILO_FAKE_GITHUB_MODE        str    Initial failure-injection mode:
                                    normal | drop | slow=<seconds> | oversized.
                                    Runtime changes go in <state>/control.json
                                    (see FAILURE INJECTION below).
@@ -60,16 +60,16 @@ response_bytes the response body byte count. Authorization VALUES are never
 recorded — only whether the header was present.
 
 FAILURE INJECTION
-<state>/control.json is re-read per request and overrides MSW_FAKE_GITHUB_MODE:
+<state>/control.json is re-read per request and overrides SILO_FAKE_GITHUB_MODE:
 {"mode": "normal"|"drop"|"slow"|"oversized",
  "slow_seconds": 5.0, "oversized_bytes": 16777216,
  "match": {"path": "/acme/demo.git/info/refs", "method": "GET"},
  "once": true}
 - slow:      sleep slow_seconds before processing (upstream stall — the
-             proxy's MSW_PROXY_IDLE_TIMEOUT fires while the fake is stalled)
+             proxy's SILO_PROXY_IDLE_TIMEOUT fires while the fake is stalled)
 - drop:      close the connection with RST and no response (upstream teardown)
 - oversized: stream oversized_bytes with Content-Length larger than the
-             proxy's MSW_PROXY_MAX_BODY_BYTES so the proxy aborts mid-stream
+             proxy's SILO_PROXY_MAX_BODY_BYTES so the proxy aborts mid-stream
              (the fake's record is persisted before streaming with the
              declared byte count; the abort is observed on the proxy side)
 - once:      apply to the first matching request, then reset to normal
@@ -81,9 +81,9 @@ python3 tests/fake_github.py [--serve] [--port N] [--state DIR]
                              [--remote-root DIR] [--mode MODE]
 Prints "FAKE_GITHUB_READY port=<n> state=<dir>" once listening, then serves
 until SIGINT/SIGTERM (clean shutdown, exit 0). Stdlib-only and
-MSW_TEST_MODE-independent: runs under plain python3 with no third-party
+SILO_TEST_MODE-independent: runs under plain python3 with no third-party
 packages. TestEnv.start_fake_github() in tests/test_suite.py launches it as a
-subprocess with MSW_FAKE_GITHUB_PORT=0 and reads the ready line.
+subprocess with SILO_FAKE_GITHUB_PORT=0 and reads the ready line.
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def _pkt_line(data: bytes) -> bytes:
 
 
 def _parse_mode(value: str) -> dict[str, Any]:
-    """Parse MSW_FAKE_GITHUB_MODE into a control-style dict."""
+    """Parse SILO_FAKE_GITHUB_MODE into a control-style dict."""
     if value in ("", "normal"):
         return {"mode": "normal"}
     if value == "drop":
@@ -130,11 +130,11 @@ def _parse_mode(value: str) -> dict[str, Any]:
         try:
             seconds = float(value.split("=", 1)[1])
         except ValueError:
-            raise SystemExit(f"invalid MSW_FAKE_GITHUB_MODE slow value: {value}")
+            raise SystemExit(f"invalid SILO_FAKE_GITHUB_MODE slow value: {value}")
         if seconds < 0:
-            raise SystemExit(f"invalid MSW_FAKE_GITHUB_MODE slow value: {value}")
+            raise SystemExit(f"invalid SILO_FAKE_GITHUB_MODE slow value: {value}")
         return {"mode": "slow", "slow_seconds": seconds}
-    raise SystemExit(f"unknown MSW_FAKE_GITHUB_MODE: {value}")
+    raise SystemExit(f"unknown SILO_FAKE_GITHUB_MODE: {value}")
 
 
 class _State:
@@ -810,19 +810,19 @@ def serve(state_dir: Path, remote_root: Path, mode: dict[str, Any], port: int, g
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Stateful fake GitHub server (MSW Path C test fixture).")
+    parser = argparse.ArgumentParser(description="Stateful fake GitHub server (Silo Path C test fixture).")
     parser.add_argument("--serve", action="store_true", help="serve (default action; accepted for symmetry with the test harness)")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("MSW_FAKE_GITHUB_PORT", "0")))
-    parser.add_argument("--state", default=os.environ.get("MSW_FAKE_GITHUB_STATE", ""))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("SILO_FAKE_GITHUB_PORT", "0")))
+    parser.add_argument("--state", default=os.environ.get("SILO_FAKE_GITHUB_STATE", ""))
     parser.add_argument("--remote-root", default="")
-    parser.add_argument("--mode", default=os.environ.get("MSW_FAKE_GITHUB_MODE", "normal"))
+    parser.add_argument("--mode", default=os.environ.get("SILO_FAKE_GITHUB_MODE", "normal"))
     args = parser.parse_args(argv)
 
-    state_dir = Path(args.state or "/tmp/msw-fake-github-state").resolve()
+    state_dir = Path(args.state or "/tmp/silo-fake-github-state").resolve()
     remote_root = Path(
         args.remote_root
-        or os.environ.get("MSW_FAKE_GITHUB_REMOTE_ROOT")
-        or os.environ.get("MSW_TEST_GITHUB_REMOTE_ROOT")
+        or os.environ.get("SILO_FAKE_GITHUB_REMOTE_ROOT")
+        or os.environ.get("SILO_TEST_GITHUB_REMOTE_ROOT")
         or (state_dir / "remotes")
     ).resolve()
     git_bin = shutil.which("git") or "/usr/bin/git"

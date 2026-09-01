@@ -4,7 +4,7 @@
 Supports the Path C §5 hygiene form `add-generic-password ... -w` with -w as
 the LAST option: security(1)'s prompted mode reads the password from stdin,
 so the simulator reads it from stdin too (never from argv). It records every
-invocation's argv to MSW_FAKE_SECURITY_ARGV_LOG when set, so tests can prove
+invocation's argv to SILO_FAKE_SECURITY_ARGV_LOG when set, so tests can prove
 the token never appears in child argv.
 """
 from __future__ import annotations
@@ -38,10 +38,10 @@ def option_index(args: list[str], name: str) -> int:
 
 
 def main() -> int:
-    state_path = Path(os.environ["MSW_FAKE_SECURITY_STATE"])
+    state_path = Path(os.environ["SILO_FAKE_SECURITY_STATE"])
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     args = sys.argv[1:]
-    argv_log = os.environ.get("MSW_FAKE_SECURITY_ARGV_LOG")
+    argv_log = os.environ.get("SILO_FAKE_SECURITY_ARGV_LOG")
     if argv_log:
         with open(argv_log, "a") as fh:
             fh.write("|".join(args) + "\n")
@@ -53,7 +53,7 @@ def main() -> int:
     service = option(args, "-s")
     account = option(args, "-a")
     key = f"{service}/{account}"
-    mode = os.environ.get("MSW_FAKE_SECURITY_MODE", "normal")
+    mode = os.environ.get("SILO_FAKE_SECURITY_MODE", "normal")
 
     if command == "add-generic-password":
         # -w LAST => read the password from stdin (prompted mode); -w VALUE
@@ -72,7 +72,7 @@ def main() -> int:
         return 0
 
     if command == "find-generic-password":
-        expected_home = os.environ.get("MSW_FAKE_SECURITY_HOME")
+        expected_home = os.environ.get("SILO_FAKE_SECURITY_HOME")
         if expected_home and os.environ.get("HOME") != expected_home:
             print(ITEM_NOT_FOUND_MESSAGE, file=sys.stderr)
             return ITEM_NOT_FOUND

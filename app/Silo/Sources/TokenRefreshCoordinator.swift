@@ -13,7 +13,7 @@ enum TokenRefreshCoordinatorError: Error, LocalizedError, Sendable, Equatable {
         case .missingGrant:
             return "The workspace has no renewable GitHub installation grant. Reconnect it."
         case .serviceUnavailable:
-            return "MSW Connect could not renew the workspace grant. Retry when the service is available; the previous grant remains blocked until it can be verified."
+            return "Silo Connect could not renew the workspace grant. Retry when the service is available; the previous grant remains blocked until it can be verified."
         case .reauthorizationRequired:
             return "The GitHub installation grant was revoked, missing, or scope-mismatched. Reconnect this workspace."
         }
@@ -22,12 +22,12 @@ enum TokenRefreshCoordinatorError: Error, LocalizedError, Sendable, Equatable {
 
 actor TokenRefreshCoordinator {
     private let broker: CredentialBroker
-    private let connect: MSWConnectClient
+    private let connect: SiloConnectClient
     private var refreshing: Set<String> = []
 
     init(
         broker: CredentialBroker,
-        connect: MSWConnectClient = MSWConnectClient()
+        connect: SiloConnectClient = SiloConnectClient()
     ) {
         self.broker = broker
         self.connect = connect
@@ -57,7 +57,7 @@ actor TokenRefreshCoordinator {
                   let expectedVerificationRepository = metadata.verificationRepository else {
                 throw TokenRefreshCoordinatorError.reauthorizationRequired
             }
-            let expectedScope = MSWConnectGrantAssignment(
+            let expectedScope = SiloConnectGrantAssignment(
                 workspace: workspace,
                 role: role,
                 owner: expectedOwner,
@@ -98,8 +98,8 @@ actor TokenRefreshCoordinator {
             return grant.credential
         } catch let error as TokenRefreshCoordinatorError {
             throw error
-        } catch MSWConnectError.grantNotFound,
-                MSWConnectError.sessionExpired {
+        } catch SiloConnectError.grantNotFound,
+                SiloConnectError.sessionExpired {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,
@@ -107,7 +107,7 @@ actor TokenRefreshCoordinator {
                 quarantined: true
             )
             throw TokenRefreshCoordinatorError.reauthorizationRequired
-        } catch MSWConnectError.grantRevoked {
+        } catch SiloConnectError.grantRevoked {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,
@@ -115,8 +115,8 @@ actor TokenRefreshCoordinator {
                 quarantined: true
             )
             throw TokenRefreshCoordinatorError.reauthorizationRequired
-        } catch MSWConnectError.installationUnavailable,
-                MSWConnectError.installationRemoved {
+        } catch SiloConnectError.installationUnavailable,
+                SiloConnectError.installationRemoved {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,
@@ -124,7 +124,7 @@ actor TokenRefreshCoordinator {
                 quarantined: true
             )
             throw TokenRefreshCoordinatorError.reauthorizationRequired
-        } catch MSWConnectError.scopeMismatch {
+        } catch SiloConnectError.scopeMismatch {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,
@@ -132,9 +132,9 @@ actor TokenRefreshCoordinator {
                 quarantined: true
             )
             throw TokenRefreshCoordinatorError.reauthorizationRequired
-        } catch MSWConnectError.scopeAttestationMissing,
-                MSWConnectError.scopeAttestationInvalid,
-                MSWConnectError.malformedResponse {
+        } catch SiloConnectError.scopeAttestationMissing,
+                SiloConnectError.scopeAttestationInvalid,
+                SiloConnectError.malformedResponse {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,
@@ -142,10 +142,10 @@ actor TokenRefreshCoordinator {
                 quarantined: true
             )
             throw TokenRefreshCoordinatorError.reauthorizationRequired
-        } catch MSWConnectError.transportUnavailable,
-                MSWConnectError.httpStatus,
-                MSWConnectError.rateLimited,
-                MSWConnectError.sessionCleanupFailed {
+        } catch SiloConnectError.transportUnavailable,
+                SiloConnectError.httpStatus,
+                SiloConnectError.rateLimited,
+                SiloConnectError.sessionCleanupFailed {
             try? await broker.updateRecoveryState(
                 workspace: workspace,
                 role: role,

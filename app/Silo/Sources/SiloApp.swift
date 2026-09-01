@@ -22,11 +22,11 @@ struct SiloApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
-    private let runner: MSWCommandRunner
+    private let runner: SiloCommandRunner
     private let credentialBroker: CredentialBroker?
-    private let connect: MSWConnectClient?
+    private let connect: SiloConnectClient?
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
-    private let client: MSWClient
+    private let client: SiloClient
     let appNavigation = AppNavigationState()
     let applicationState = ApplicationState()
     let applicationPreferences: ApplicationPreferenceStore
@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// or passes the Connect broker/client/coordinator (no credentials.json
     /// reads, no Connect Keychain access, no fallback broker creation).
     init(
-        connectConfiguration: MSWConnectConfiguration,
+        connectConfiguration: SiloConnectConfiguration,
         policyStore: GitHubPolicyStore?,
         applicationPreferences: ApplicationPreferenceStore? = nil,
         makeBroker: () -> CredentialBroker? = { try? CredentialBroker() }
@@ -69,15 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.accessMode = accessMode
         self.githubInstallationURL = connectConfiguration.installationURL
         self.applicationPreferences = applicationPreferences ?? Self.makeApplicationPreferences()
-        let runner = MSWCommandRunner()
+        let runner = SiloCommandRunner()
         self.runner = runner
         if accessMode == .connect {
-            let connect = MSWConnectClient(configuration: connectConfiguration)
+            let connect = SiloConnectClient(configuration: connectConfiguration)
             let broker = makeBroker()
             let refresher = broker.map {
                 TokenRefreshCoordinator(broker: $0, connect: connect)
             }
-            let mswClient = MSWClient(
+            let siloClient = SiloClient(
                 runner: runner,
                 credentialBroker: broker,
                 tokenRefreshCoordinator: refresher
@@ -85,13 +85,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.connect = connect
             self.credentialBroker = broker
             self.tokenRefreshCoordinator = refresher
-            self.client = mswClient
+            self.client = siloClient
             self.authorizationCoordinator = broker.map {
                 GitHubAuthorizationCoordinator(
                     broker: $0,
                     connect: connect,
                     tokenRefreshCoordinator: refresher,
-                    mswClient: mswClient
+                    siloClient: siloClient
                 )
             }
             self.policyStore = nil
@@ -103,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.connect = nil
             self.credentialBroker = nil
             self.tokenRefreshCoordinator = nil
-            self.client = MSWClient(runner: runner)
+            self.client = SiloClient(runner: runner)
             self.authorizationCoordinator = nil
             let store = policyStore ?? GitHubPolicyStore.standard()
             self.policyStore = store
@@ -130,7 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return ApplicationPreferenceStore()
         }
 
-        let suiteName = "org.microsandbox.Silo.ApplicationPreferencesUITests"
+        let suiteName = "org.silo.Silo.ApplicationPreferencesUITests"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removeObject(forKey: ApplicationPreferenceStore.terminalOverrideKey)
         defaults.removeObject(forKey: ApplicationPreferenceStore.sourceEditorOverrideKey)
@@ -138,7 +138,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if preferencesFixture {
                 let defaultTerminal = SystemApplication(
                     url: URL(fileURLWithPath: "/Applications/Fixture Terminal.app"),
-                    bundleIdentifier: "org.microsandbox.fixture.default-terminal",
+                    bundleIdentifier: "org.silo.fixture.default-terminal",
                     displayName: "Fixture Terminal"
                 )
                 let defaultEditor = SystemApplication(
@@ -169,7 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let discovered = SystemApplicationCatalog.discover()
             let unsupported = SystemApplication(
                 url: URL(fileURLWithPath: "/Applications/Unsupported Editor.app"),
-                bundleIdentifier: "org.microsandbox.fixture.unsupported-editor",
+                bundleIdentifier: "org.silo.fixture.unsupported-editor",
                 displayName: "Unsupported Editor"
             )
             return SystemApplicationCatalog(
@@ -185,28 +185,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Reads the Connect build configuration from Info.plist. Reading the
     /// bundle's own Info.plist is not a Connect store access.
-    static func readConnectConfiguration() -> MSWConnectConfiguration {
-        let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectBaseURL") as? String)?
+    static func readConnectConfiguration() -> SiloConnectConfiguration {
+        let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectBaseURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let connectBaseURL = configuredBaseURL.flatMap { value in
             value.isEmpty ? nil : URL(string: value)
-        } ?? MSWConnectConfiguration().baseURL
-        let configuredClientID = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectClientID") as? String)?
+        } ?? SiloConnectConfiguration().baseURL
+        let configuredClientID = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectClientID") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let connectClientID = configuredClientID.flatMap { value in
             value.isEmpty ? nil : value
-        } ?? MSWConnectConfiguration().clientID
-        let configuredInstallationURL = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectInstallationURL") as? String)?
+        } ?? SiloConnectConfiguration().clientID
+        let configuredInstallationURL = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectInstallationURL") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let installationURL = configuredInstallationURL.flatMap { value in
             value.isEmpty ? nil : URL(string: value)
         }
-        let configuredAttestation = (Bundle.main.object(forInfoDictionaryKey: "MSWConnectScopeAttestationPublicKey") as? String)?
+        let configuredAttestation = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectScopeAttestationPublicKey") as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let scopeAttestationKey = configuredAttestation.flatMap { value in
             value.isEmpty ? nil : Data(base64Encoded: value)
         }
-        return MSWConnectConfiguration(
+        return SiloConnectConfiguration(
             baseURL: connectBaseURL,
             clientID: connectClientID,
             installationURL: installationURL,
@@ -218,8 +218,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A cold-launch route is retained until the status controller exists.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            if url.scheme == "msw", accessMode == .connect,
-               MSWConnectBrowser.shared.handleCallback(url) {
+            if url.scheme == "silo", accessMode == .connect,
+               SiloConnectBrowser.shared.handleCallback(url) {
                 continue
             }
             guard let route = AppRoute(deepLink: url) else { continue }
@@ -270,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     installationRoot: ToolchainLayout.managedRoot()
                 )
                 _ = try await installer.activate()
-                await runner.invalidateMSWResolution()
+                await runner.invalidateSiloResolution()
             } catch {
                 runtimeActivationFailed = true
             }
@@ -334,13 +334,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? GitHubFixtureProvider(scenario: uiTestGitHubScenario)
             : nil
         let fixtureOperationFailure = arguments.contains("--ui-test-operation-failure")
-            ? MSWOperationFailureNotice(
+            ? SiloOperationFailureNotice(
                 action: "start",
                 title: "Start failed",
                 reason: "The runtime rejected the start request.",
                 recovery: "Run Diagnostics and Maintenance before retrying start.",
                 workspace: .dev,
-                diagnosticDetails: "agentd: init failed\nfailed to mount /dev/vdc at /workspace as ext4: EINVAL: Invalid argument\nMSW error code: MSW_WORKSPACE_DISK_INVALID"
+                diagnosticDetails: "agentd: init failed\nfailed to mount /dev/vdc at /workspace as ext4: EINVAL: Invalid argument\nSilo error code: SILO_WORKSPACE_DISK_INVALID"
             )
             : nil
         let model: AppModel
@@ -349,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let configuredWorkspaces = fixtureMode
             ? SetupWorkspaceConfiguration.defaults
             : BootstrapStateStore.persistedWorkspaceConfigurations()
-        let operationCoordinator: MSWOperationCoordinator?
+        let operationCoordinator: SiloOperationCoordinator?
         let startupRecoveryRetry: (() -> Void)? = startupRecoveryBlockedReason == nil
             ? nil
             : { [weak self] in self?.retryStartupRecovery() }
@@ -366,9 +366,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             operationCoordinator = nil
         } else {
-            operationCoordinator = MSWOperationCoordinator(client: client)
-            let service = MSWOperationService(client: client, coordinator: operationCoordinator)
-            let diagnostics = MSWDiagnostics(client: client)
+            operationCoordinator = SiloOperationCoordinator(client: client)
+            let service = SiloOperationService(client: client, coordinator: operationCoordinator)
+            let diagnostics = SiloDiagnostics(client: client)
             model = AppModel(
                 client: client,
                 operationCoordinator: operationCoordinator,
@@ -447,14 +447,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if appNavigation.workspace == nil {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
         }
-        let bootstrap: (any MSWBootstrapCoordinating)?
+        let bootstrap: (any SiloBootstrapCoordinating)?
         if arguments.contains("--ui-test-setup-reconnect") {
-            bootstrap = MSWBootstrapUITestStub(
+            bootstrap = SiloBootstrapUITestStub(
                 failureWorkspace: "dev",
                 keepsFirstRunPending: arguments.contains("--ui-test-setup-registration-pending")
             )
         } else if setupFixtureOwnsGitHubLoading {
-            bootstrap = MSWBootstrapUITestStub(
+            bootstrap = SiloBootstrapUITestStub(
                 failureWorkspace: "dev",
                 completesFirstRun: true
             )
@@ -464,7 +464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bootstrap = BootstrapCoordinator(
                 client: client,
                 runner: runner,
-                hostService: MSWHostServiceController()
+                hostService: SiloHostServiceController()
             )
         }
         model.configureSystemHealthChecks(using: bootstrap)

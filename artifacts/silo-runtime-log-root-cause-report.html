@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MSW Runtime Log Failures — Root-Cause Report</title>
+<title>Silo Runtime Log Failures — Root-Cause Report</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -86,12 +86,12 @@
 </head>
 <body>
 <main>
-  <div class="eyebrow">MSW Monitor · Runtime log investigation</div>
+  <div class="eyebrow">Silo · Runtime log investigation</div>
   <h1>Three different failures share one missing boundary.</h1>
   <p class="lede">Provisioning, health checks, and Monitor queries run inside guests, but their sessions are captured as if they were user workload logs. One stale transport process then turns a missing runtime file into an endless visible retry storm.</p>
 
   <div class="verdict"><strong>Decision:</strong> fix lifecycle reconciliation and session provenance upstream. UI string filtering would hide symptoms, delete legitimate user output, and leave the broken relay and partial workspace configuration intact.</div>
-  <div class="evidence"><strong>Live evidence collected:</strong> all three workspaces reported <code>Running</code> with systemd as PID 1; the relay file was absent in every guest; the bounded log contained 197 missing-relay failures from 197 <code>personal</code> sessions at a mean 8.96-second interval; only <code>personal</code> had an orphaned shuttle process. These observations came from the live runtime, not MSWMonitor’s deterministic UI fixtures.</div>
+  <div class="evidence"><strong>Live evidence collected:</strong> all three workspaces reported <code>Running</code> with systemd as PID 1; the relay file was absent in every guest; the bounded log contained 197 missing-relay failures from 197 <code>personal</code> sessions at a mean 8.96-second interval; only <code>personal</code> had an orphaned shuttle process. These observations came from the live runtime, not SiloMonitor’s deterministic UI fixtures.</div>
 
   <section>
     <h2>Issue-by-issue findings</h2>
@@ -99,13 +99,13 @@
     <article class="issue">
       <div class="issue-head"><div class="number">1</div><div><h3>Missing GitHub relay retries forever</h3><p><code>personal</code> prints a Python ENOENT about every nine seconds.</p></div></div>
       <div class="facts">
-        <div class="fact"><h4>What is happening</h4><p><code>Shuttle.spawn_relay</code> executes <code>python3 /var/lib/msw-runtime/msw-github-relay.py</code> inside the workspace. The file is missing, so the child exits immediately. <code>Shuttle.run</code> respawns it; the backoff caps at eight seconds, producing the measured cadence.</p></div>
+        <div class="fact"><h4>What is happening</h4><p><code>Shuttle.spawn_relay</code> executes <code>python3 /var/lib/silo-runtime/silo-github-relay.py</code> inside the workspace. The file is missing, so the child exits immediately. <code>Shuttle.run</code> respawns it; the backoff caps at eight seconds, producing the measured cadence.</p></div>
         <div class="fact"><h4>Why it is wrong</h4><p>This is a permanent precondition failure treated as transient. It wastes sessions, evicts useful records from the bounded log, floods the UI, and never repairs GitHub transport. A log viewer cannot make this healthy.</p></div>
         <div class="fact"><h4>Root cause</h4><p>Relay installation occurs only during provisioning. Startup accepts a matching live shuttle without checking that the guest relay exists or matches the expected hash. Semantic policy no-ops skip transport checks; empty policies do not remove stale shuttles. The orphaned <code>personal</code> shuttle survived with parent PID 1, while <code>dev</code> and <code>playgrounds</code> had no shuttle, explaining the workspace difference.</p></div>
         <div class="fact"><h4>Evidence boundary</h4><p>The investigation proved the relay is absent in all three guests and found the orphaned process. Retained evidence cannot prove what deleted the files or originally orphaned that process.</p></div>
       </div>
-      <div class="fix"><strong>Permanent fix</strong><ol><li>Add one idempotent transport reconciler after app startup, workspace create/recreate/start, repair, and every policy application, including semantic no-ops.</li><li>For active policies, verify workspace stability, relay existence and hash, install atomically on drift, verify Git configuration, own exactly one shuttle, and require an end-to-end heartbeat before reporting <code>provisioned</code>.</li><li>For empty policies, stop owned children and remove stale PID, signature, plist, and LaunchAgent state.</li><li>Classify a missing relay or hash mismatch as permanent <code>MSW_RELAY_NOT_INSTALLED</code>: open the retry circuit and emit one repair action. Reserve jittered exponential retry for transient sandbox or transport failures; reset only after a verified heartbeat.</li></ol></div>
-      <p class="refs">Primary code: <code>lib/msw-github-shuttle.py:51–58, 111–133, 210–213, 382–418</code>; <code>bin/msw:3687–3720, 3869–3875, 7527–7541, 8112–8164</code>.</p>
+      <div class="fix"><strong>Permanent fix</strong><ol><li>Add one idempotent transport reconciler after app startup, workspace create/recreate/start, repair, and every policy application, including semantic no-ops.</li><li>For active policies, verify workspace stability, relay existence and hash, install atomically on drift, verify Git configuration, own exactly one shuttle, and require an end-to-end heartbeat before reporting <code>provisioned</code>.</li><li>For empty policies, stop owned children and remove stale PID, signature, plist, and LaunchAgent state.</li><li>Classify a missing relay or hash mismatch as permanent <code>SILO_RELAY_NOT_INSTALLED</code>: open the retry circuit and emit one repair action. Reserve jittered exponential retry for transient sandbox or transport failures; reset only after a verified heartbeat.</li></ol></div>
+      <p class="refs">Primary code: <code>lib/silo-github-shuttle.py:51–58, 111–133, 210–213, 382–418</code>; <code>bin/silo:3687–3720, 3869–3875, 7527–7541, 8112–8164</code>.</p>
     </article>
 
     <article class="issue">
@@ -117,7 +117,7 @@
         <div class="fact"><h4>Producer certainty</h4><p><code>hostnamectl</code> is the leading producer because it runs first and <code>set -e</code> ends the session. This remains an inference because current log records omit argv. The missing startup seam and early commit are verified.</p></div>
       </div>
       <div class="fix"><strong>Permanent fix</strong><ol><li>Poll a silent PID-1 and systemd-bus readiness predicate with a bounded deadline before any systemd client.</li><li>Journal per-workspace configuration stages and make every guest configuration step repeatable.</li><li>Commit workspace configuration only after all steps pass verification. On failure, restore the previous lifecycle and retain an explicit <code>needs-configuration</code> state.</li><li>Report a typed, retryable startup timeout in internal diagnostics, not raw guest stderr in workload logs.</li></ol></div>
-      <p class="refs">Call chain: <code>BootstrapCoordinator.swift:974</code> → <code>MSWClient.swift:686–700</code> → <code>bin/msw:8719–8793</code> → <code>bin/msw:8597–8717</code> → <code>bin/msw:8493–8531</code>. Existing correct wait: <code>setup.sh:459–470</code>.</p>
+      <p class="refs">Call chain: <code>BootstrapCoordinator.swift:974</code> → <code>SiloClient.swift:686–700</code> → <code>bin/silo:8719–8793</code> → <code>bin/silo:8597–8717</code> → <code>bin/silo:8493–8531</code>. Existing correct wait: <code>setup.sh:459–470</code>.</p>
     </article>
 
     <article class="issue">
@@ -128,8 +128,8 @@
         <div class="fact"><h4>Root cause</h4><p>Guest sessions carry no reliable origin or visibility metadata. Control-plane and workload output share one undifferentiated capture stream, and the adapter defaults unknown records to visible.</p></div>
         <div class="fact"><h4>The ext4 line</h4><p><code>workspace=ext4 runtime=ext4</code> came from an ad hoc <code>findmnt</code> verification command in an earlier Smithers execution, not tracked application code. It leaked into the same log because the underlying session-origin boundary is missing.</p></div>
       </div>
-      <div class="fix"><strong>Permanent fix</strong><ol><li>Add structured session-origin metadata, or a first-class internal/no-capture execution mode, at the MicroSandbox/MSW boundary.</li><li>Tag directory, repository, setup, storage, health, and relay sessions as <code>control-plane</code>; tag user processes as <code>workload</code>.</li><li>Default the Logs tab to workload records. Put typed internal diagnostics behind an explicit disclosure with operation name, result, and repair action.</li><li>Preserve unknown user payloads verbatim. Never classify by message content.</li></ol></div>
-      <p class="refs">Directory chain: <code>DetailView.swift:889–942, 1013–1053</code> → <code>AppModel.swift:1354–1435</code> → <code>MSWClient.swift:218–255</code> → <code>bin/msw:6127–6243, 6301–6352</code>. Repository chain: <code>DetailView.swift:186–199, 243–249</code> → <code>AppModel.swift:1850–1879</code> → <code>MSWOperationService.swift:47–51</code> → <code>MSWClient.swift:204–215</code> → <code>bin/msw:7855–8069</code>.</p>
+      <div class="fix"><strong>Permanent fix</strong><ol><li>Add structured session-origin metadata, or a first-class internal/no-capture execution mode, at the MicroSandbox/Silo boundary.</li><li>Tag directory, repository, setup, storage, health, and relay sessions as <code>control-plane</code>; tag user processes as <code>workload</code>.</li><li>Default the Logs tab to workload records. Put typed internal diagnostics behind an explicit disclosure with operation name, result, and repair action.</li><li>Preserve unknown user payloads verbatim. Never classify by message content.</li></ol></div>
+      <p class="refs">Directory chain: <code>DetailView.swift:889–942, 1013–1053</code> → <code>AppModel.swift:1354–1435</code> → <code>SiloClient.swift:218–255</code> → <code>bin/silo:6127–6243, 6301–6352</code>. Repository chain: <code>DetailView.swift:186–199, 243–249</code> → <code>AppModel.swift:1850–1879</code> → <code>SiloOperationService.swift:47–51</code> → <code>SiloClient.swift:204–215</code> → <code>bin/silo:7855–8069</code>.</p>
     </article>
 
     <article class="issue">
@@ -139,7 +139,7 @@
         <div class="fact"><h4>Why it is wrong</h4><p>A user cannot distinguish “today at 10:25” from “yesterday at 19:55.” The presentation contradicts the underlying order and copied evidence is ambiguous.</p></div>
       </div>
       <div class="fix"><strong>Permanent fix</strong><p>Add day separators or render a date whenever results span calendar days. Always copy an ISO 8601 timestamp with date and offset. Keep compact clock time only for a single-day visible range.</p></div>
-      <p class="refs">Presentation: <code>DetailView.swift:665–700, 716–740</code>. Shuttle: <code>lib/msw-github-shuttle.py:71–73</code>. Existing timestamp-preservation tests: <code>AppModelTests.swift:860–906</code>; multi-day rendering is uncovered.</p>
+      <p class="refs">Presentation: <code>DetailView.swift:665–700, 716–740</code>. Shuttle: <code>lib/silo-github-shuttle.py:71–73</code>. Existing timestamp-preservation tests: <code>AppModelTests.swift:860–906</code>; multi-day rendering is uncovered.</p>
     </article>
   </section>
 

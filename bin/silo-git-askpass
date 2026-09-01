@@ -1,23 +1,23 @@
 #!/bin/sh
-# GIT_ASKPASS helper for MSW host-side git operations.
+# GIT_ASKPASS helper for Silo host-side git operations.
 #
-# Local mode (MSW_GITHUB_MODE=local, §5/§8): answers ONLY github.com prompts,
+# Local mode (SILO_GITHUB_MODE=local, §5/§8): answers ONLY github.com prompts,
 # emitting the host credential's accessToken through the fail-closed
-# msw-github-host-token helper (missing/invalid record => exit 1, nothing
+# silo-github-host-token helper (missing/invalid record => exit 1, nothing
 # emitted). Any non-github.com prompt exits 1 so the token can never be
 # handed to another host.
 #
 # Connect mode (legacy): answers with the host write token from
-# MSW_GITHUB_WRITE_TOKEN, a schema-3 app installation record, or the
-# MSW_KEYCHAIN_SERVICE/MSW_KEYCHAIN_ACCOUNT record (test mode).
+# SILO_GITHUB_WRITE_TOKEN, a schema-3 app installation record, or the
+# SILO_KEYCHAIN_SERVICE/SILO_KEYCHAIN_ACCOUNT record (test mode).
 set -eu
 
-service="${MSW_KEYCHAIN_SERVICE:-msw.github.write}"
-account="${MSW_KEYCHAIN_ACCOUNT:-}"
-security_bin="${MSW_SECURITY_BIN:-/usr/bin/security}"
-keychain_home="${MSW_KEYCHAIN_HOME:-$HOME}"
-test_keychain_dir="${MSW_TEST_KEYCHAIN_DIR:-}"
-host_token_bin="${MSW_HOST_TOKEN_BIN:-}"
+service="${SILO_KEYCHAIN_SERVICE:-silo.github.write}"
+account="${SILO_KEYCHAIN_ACCOUNT:-}"
+security_bin="${SILO_SECURITY_BIN:-/usr/bin/security}"
+keychain_home="${SILO_KEYCHAIN_HOME:-$HOME}"
+test_keychain_dir="${SILO_TEST_KEYCHAIN_DIR:-}"
+host_token_bin="${SILO_HOST_TOKEN_BIN:-}"
 prompt="${1:-}"
 
 safe_component() {
@@ -44,12 +44,12 @@ resolve_host_token_bin() {
     return 0
   fi
   dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-  if [ -x "$dir/msw-github-host-token" ]; then
-    printf '%s\n' "$dir/msw-github-host-token"
+  if [ -x "$dir/silo-github-host-token" ]; then
+    printf '%s\n' "$dir/silo-github-host-token"
     return 0
   fi
-  if [ -x "${HOME:-}/.local/libexec/msw-github-host-token" ]; then
-    printf '%s\n' "${HOME:-}/.local/libexec/msw-github-host-token"
+  if [ -x "${HOME:-}/.local/libexec/silo-github-host-token" ]; then
+    printf '%s\n' "${HOME:-}/.local/libexec/silo-github-host-token"
     return 0
   fi
   return 1
@@ -76,7 +76,7 @@ valid_installation_token() {
 
 valid_scoped_record() {
   raw="$1"
-  jq_bin="${MSW_JQ_BIN:-}"
+  jq_bin="${SILO_JQ_BIN:-}"
   [ -n "$jq_bin" ] && [ -x "$jq_bin" ] || return 1
   "$jq_bin" -e '
     type == "object" and
@@ -99,7 +99,7 @@ EOF
 
 case "$prompt" in
   *sername*|*Username*)
-    if [ "${MSW_GITHUB_MODE:-}" = local ]; then
+    if [ "${SILO_GITHUB_MODE:-}" = local ]; then
       case "$prompt" in
         *github.com*) printf '%s\n' 'x-access-token' ;;
         *) exit 1 ;;
@@ -109,25 +109,25 @@ case "$prompt" in
     fi
     ;;
   *assword*)
-    if [ "${MSW_GITHUB_MODE:-}" = local ]; then
+    if [ "${SILO_GITHUB_MODE:-}" = local ]; then
       case "$prompt" in
         *github.com*) ;;
         *) exit 1 ;;
       esac
       host_token || exit 1
-    elif valid_installation_token "${MSW_GITHUB_WRITE_TOKEN:-}"; then
-      printf '%s\n' "$MSW_GITHUB_WRITE_TOKEN"
-    elif [ -n "${MSW_APP_KEYCHAIN_SERVICE:-}" ]; then
-      raw="$(keychain_read "$MSW_APP_KEYCHAIN_SERVICE" "${MSW_APP_KEYCHAIN_ACCOUNT:-profile}")" || exit 1
+    elif valid_installation_token "${SILO_GITHUB_WRITE_TOKEN:-}"; then
+      printf '%s\n' "$SILO_GITHUB_WRITE_TOKEN"
+    elif [ -n "${SILO_APP_KEYCHAIN_SERVICE:-}" ]; then
+      raw="$(keychain_read "$SILO_APP_KEYCHAIN_SERVICE" "${SILO_APP_KEYCHAIN_ACCOUNT:-profile}")" || exit 1
       valid_scoped_record "$raw" || exit 1
-      jq_bin="${MSW_JQ_BIN:-}"
+      jq_bin="${SILO_JQ_BIN:-}"
       "$jq_bin" -r '.accessToken' <<EOF
 $raw
 EOF
-    elif [ "${MSW_TEST_MODE:-0}" = 1 ] &&
-      [ -n "${MSW_KEYCHAIN_SERVICE:-}" ] &&
-      [ -n "${MSW_KEYCHAIN_ACCOUNT:-}" ]; then
-      keychain_read "$MSW_KEYCHAIN_SERVICE" "$MSW_KEYCHAIN_ACCOUNT" || exit 1
+    elif [ "${SILO_TEST_MODE:-0}" = 1 ] &&
+      [ -n "${SILO_KEYCHAIN_SERVICE:-}" ] &&
+      [ -n "${SILO_KEYCHAIN_ACCOUNT:-}" ]; then
+      keychain_read "$SILO_KEYCHAIN_SERVICE" "$SILO_KEYCHAIN_ACCOUNT" || exit 1
     else
       exit 1
     fi

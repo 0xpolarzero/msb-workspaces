@@ -1,16 +1,16 @@
 import Foundation
 
-actor MSWClient {
-    private let runner: MSWCommandRunner
+actor SiloClient {
+    private let runner: SiloCommandRunner
     private let credentialBroker: CredentialBroker?
     private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let ghResolver: @Sendable () async -> URL?
     private var configuredWorkspaces: [String]
-    private var lastState: MSWStateResponse?
+    private var lastState: SiloStateResponse?
     private var lastStateObservedAt: Date?
 
     init(
-        runner: MSWCommandRunner = MSWCommandRunner(),
+        runner: SiloCommandRunner = SiloCommandRunner(),
         credentialBroker: CredentialBroker? = nil,
         tokenRefreshCoordinator: TokenRefreshCoordinator? = nil,
         ghResolver: (@Sendable () async -> URL?)? = nil
@@ -30,13 +30,13 @@ actor MSWClient {
     }
 
     func executableURL() async -> URL? {
-        await runner.mswResolution().selected
+        await runner.siloResolution().selected
     }
 
     /// Resolves only the coupled bundled or activated executable and verifies
     /// its exact app handshake. It never starts or previews a backup.
     func runtimeRepairRequired(forceRefresh: Bool = false) async -> Bool? {
-        let resolution = await runner.mswResolution(forceRefresh: forceRefresh)
+        let resolution = await runner.siloResolution(forceRefresh: forceRefresh)
         // Cancellation deliberately returns an unselected transient resolution
         // so it cannot poison the runner cache. Preserve the last published UI
         // state instead of misreporting that transient as a broken install.
@@ -45,7 +45,7 @@ actor MSWClient {
     }
 
     func invalidateRuntimeResolution() async {
-        await runner.invalidateMSWResolution()
+        await runner.invalidateSiloResolution()
     }
 
     func executableSearchPath() async -> String {
@@ -59,17 +59,17 @@ actor MSWClient {
         configuredWorkspaces = configurations.map(\.name)
     }
 
-    func handshake() async throws -> MSWEnvelope<MSWHandshake> {
-        try await execute(arguments: ["app", "handshake", "--format", "json"], as: MSWHandshake.self, command: "handshake")
+    func handshake() async throws -> SiloEnvelope<SiloHandshake> {
+        try await execute(arguments: ["app", "handshake", "--format", "json"], as: SiloHandshake.self, command: "handshake")
     }
 
-    func state(workspace: String? = nil) async throws -> MSWEnvelope<MSWStateResponse> {
+    func state(workspace: String? = nil) async throws -> SiloEnvelope<SiloStateResponse> {
         var arguments = ["app", "state", "--format", "json"]
         if let workspace { arguments += ["--workspace", workspace] }
         do {
             let envelope = try await execute(
                 arguments: arguments,
-                as: MSWStateResponse.self,
+                as: SiloStateResponse.self,
                 command: "state"
             )
             if let result = envelope.result {
@@ -77,7 +77,7 @@ actor MSWClient {
                       !result.workspaces.isEmpty,
                       Set(result.workspaces.map(\.id)).count == result.workspaces.count,
                       result.workspaces.allSatisfy({ WorkspaceID.isValid($0.id) }) else {
-                    throw MSWClientError.malformedJSON(command: "state")
+                    throw SiloClientError.malformedJSON(command: "state")
                 }
                 lastState = result
                 lastStateObservedAt = envelope.observedAt
@@ -90,27 +90,27 @@ actor MSWClient {
         }
     }
 
-    func cachedState() -> (state: MSWStateResponse, observedAt: Date)? {
+    func cachedState() -> (state: SiloStateResponse, observedAt: Date)? {
         guard let lastState else { return nil }
         return (lastState, lastStateObservedAt ?? .distantPast)
     }
 
-    func ports(workspace: String? = nil) async throws -> MSWEnvelope<MSWPortsResponse> {
+    func ports(workspace: String? = nil) async throws -> SiloEnvelope<SiloPortsResponse> {
         var arguments = ["app", "ports", "--format", "json"]
         if let workspace { arguments += ["--workspace", workspace] }
-        return try await execute(arguments: arguments, as: MSWPortsResponse.self, command: "ports")
+        return try await execute(arguments: arguments, as: SiloPortsResponse.self, command: "ports")
     }
 
-    func metrics(workspace: String) async throws -> MSWEnvelope<MSWMetricsResponse> {
+    func metrics(workspace: String) async throws -> SiloEnvelope<SiloMetricsResponse> {
         return try await execute(
             arguments: ["app", "metrics", "--workspace", workspace, "--format", "json", "--once"],
-            as: MSWMetricsResponse.self,
+            as: SiloMetricsResponse.self,
             command: "metrics",
             timeout: .seconds(20)
         )
     }
-    func logs(workspace: String) async throws -> MSWLogsResponse {
-        let request = try await runner.makeMSWCommand(
+    func logs(workspace: String) async throws -> SiloLogsResponse {
+        let request = try await runner.makeSiloCommand(
             arguments: ["app", "logs", "--workspace", workspace, "--format", "jsonl"],
             timeout: .seconds(30)
         )
@@ -118,22 +118,22 @@ actor MSWClient {
         let data = output.stdout
         if output.status != 0 {
             do {
-                _ = try MSWProtocolDecoder.decodeEnvelope(data, as: LogEnvelopeResult.self, expectedCommand: "logs")
-            } catch let error as MSWClientError {
+                _ = try SiloProtocolDecoder.decodeEnvelope(data, as: LogEnvelopeResult.self, expectedCommand: "logs")
+            } catch let error as SiloClientError {
                 if case .protocolFailure = error { throw error }
                 let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                throw MSWClientError.processFailed(
+                throw SiloClientError.processFailed(
                     command: "logs",
                     status: output.status,
                     message: message.isEmpty ? nil : message
                 )
             }
         }
-        if let header = try? MSWProtocolDecoder.decoder().decode(LogEnvelopeHeader.self, from: data),
+        if let header = try? SiloProtocolDecoder.decoder().decode(LogEnvelopeHeader.self, from: data),
            header.command == "logs" {
-            let envelope = try MSWProtocolDecoder.decodeEnvelope(data, as: LogEnvelopeResult.self, expectedCommand: "logs")
-            guard let result = envelope.result else { throw MSWClientError.missingResult(command: "logs") }
-            return MSWLogsResponse(
+            let envelope = try SiloProtocolDecoder.decodeEnvelope(data, as: LogEnvelopeResult.self, expectedCommand: "logs")
+            guard let result = envelope.result else { throw SiloClientError.missingResult(command: "logs") }
+            return SiloLogsResponse(
                 workspace: result.workspace,
                 available: result.available,
                 lifecycle: result.lifecycle,
@@ -142,12 +142,12 @@ actor MSWClient {
                 lines: result.lines
             )
         }
-        var framer = MSWJSONLFramer()
+        var framer = SiloJSONLFramer()
         var records = try framer.append(data)
         if let line = try framer.finish() { records.append(line) }
         let decoded = try records.map { record -> LogStreamRecord in
-            do { return try MSWProtocolDecoder.decoder().decode(LogStreamRecord.self, from: record) }
-            catch { throw MSWClientError.unavailable("MSW returned a malformed log stream record.") }
+            do { return try SiloProtocolDecoder.decoder().decode(LogStreamRecord.self, from: record) }
+            catch { throw SiloClientError.unavailable("Silo returned a malformed log stream record.") }
         }
         guard let start = decoded.first,
               let end = decoded.last,
@@ -163,19 +163,19 @@ actor MSWClient {
                     $0.observedAt != nil &&
                     $0.safeForDisplay
               }) else {
-            throw MSWClientError.unavailable("MSW returned a malformed or unsafe log stream.")
+            throw SiloClientError.unavailable("Silo returned a malformed or unsafe log stream.")
         }
-        var lines: [MSWLogEntry] = []
+        var lines: [SiloLogEntry] = []
         for record in decoded.dropFirst().dropLast() {
             switch record.type {
             case "log":
                 guard let observedAt = record.observedAt,
                       let source = record.source,
                       let message = record.message else {
-                    throw MSWClientError.unavailable("MSW returned a malformed log entry.")
+                    throw SiloClientError.unavailable("Silo returned a malformed log entry.")
                 }
                 lines.append(
-                    MSWLogEntry(
+                    SiloLogEntry(
                         workspace: workspace,
                         observedAt: observedAt,
                         source: source,
@@ -186,12 +186,12 @@ actor MSWClient {
                     )
                 )
             case "failed":
-                throw MSWClientError.unavailable(record.message ?? "The MSW log stream failed.")
+                throw SiloClientError.unavailable(record.message ?? "The Silo log stream failed.")
             default:
-                throw MSWClientError.unavailable("MSW returned an unsupported log stream record.")
+                throw SiloClientError.unavailable("Silo returned an unsupported log stream record.")
             }
         }
-        return MSWLogsResponse(
+        return SiloLogsResponse(
             workspace: workspace,
             available: start.available ?? false,
             lifecycle: start.lifecycle ?? .unknown,
@@ -201,14 +201,14 @@ actor MSWClient {
         )
     }
 
-    func repositories(workspace: String, ifRunning: Bool = true, includeWorktreeStatus: Bool = false) async throws -> MSWEnvelope<MSWRepositoriesResponse> {
+    func repositories(workspace: String, ifRunning: Bool = true, includeWorktreeStatus: Bool = false) async throws -> SiloEnvelope<SiloRepositoriesResponse> {
         var arguments = ["app", "repositories", "--workspace", workspace]
         if ifRunning { arguments.append("--if-running") }
         if includeWorktreeStatus { arguments.append("--include-worktree-status") }
         arguments += ["--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWRepositoriesResponse.self,
+            as: SiloRepositoriesResponse.self,
             command: "repositories",
             credentialsFor: workspace,
             includeGuestCredentials: true
@@ -220,11 +220,11 @@ actor MSWClient {
         path: String = ".",
         query: String? = nil,
         limit: Int = 100
-    ) async throws -> MSWEnvelope<MSWDirectoryResponse> {
+    ) async throws -> SiloEnvelope<SiloDirectoryResponse> {
         guard WorkspaceID.isValid(workspace), Self.isSafeRelativePath(path),
               (1...200).contains(limit),
               query.map({ !$0.isEmpty && $0.count <= 128 && Self.isControlFree($0) }) ?? true else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let command = query == nil ? "directory-list" : "directory-search"
         var arguments = ["app", command, "--workspace", workspace, "--path", path]
@@ -232,12 +232,12 @@ actor MSWClient {
         arguments += ["--limit", String(limit), "--format", "json"]
         let envelope = try await execute(
             arguments: arguments,
-            as: MSWDirectoryResponse.self,
+            as: SiloDirectoryResponse.self,
             command: command,
             timeout: .seconds(20)
         )
         guard let result = envelope.result else {
-            throw MSWClientError.malformedJSON(command: command)
+            throw SiloClientError.malformedJSON(command: command)
         }
         let flattenedEntries = Self.flattenedDirectoryEntries(result.entries)
         guard result.workspace == workspace,
@@ -250,18 +250,18 @@ actor MSWClient {
                   within: path,
                   recursive: query != nil
               ) else {
-            throw MSWClientError.malformedJSON(command: command)
+            throw SiloClientError.malformedJSON(command: command)
         }
         return envelope
     }
 
-    func editorTarget(workspace: String, path: String = ".") async throws -> MSWEnvelope<MSWEditorTarget> {
+    func editorTarget(workspace: String, path: String = ".") async throws -> SiloEnvelope<SiloEditorTarget> {
         guard WorkspaceID.isValid(workspace), Self.isSafeRelativePath(path) else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let envelope = try await execute(
             arguments: ["app", "editor-target", "--workspace", workspace, "--path", path, "--format", "json"],
-            as: MSWEditorTarget.self,
+            as: SiloEditorTarget.self,
             command: "editor-target",
             timeout: .seconds(20)
         )
@@ -271,30 +271,30 @@ actor MSWClient {
               result.host == "\(workspace).msb",
               result.isValid,
               result.remoteURL != nil else {
-            throw MSWClientError.malformedJSON(command: "editor-target")
+            throw SiloClientError.malformedJSON(command: "editor-target")
         }
         return envelope
     }
 
-    func githubState(workspace: String? = nil) async throws -> MSWEnvelope<MSWGitHubStateResponse> {
+    func githubState(workspace: String? = nil) async throws -> SiloEnvelope<SiloGitHubStateResponse> {
         var arguments = ["app", "github-state", "--format", "json"]
         if let workspace { arguments += ["--workspace", workspace] }
-        return try await execute(arguments: arguments, as: MSWGitHubStateResponse.self, command: "github-state")
+        return try await execute(arguments: arguments, as: SiloGitHubStateResponse.self, command: "github-state")
     }
 
     // MARK: - Host-held secrets
 
-    /// `msw app secrets-list --format json`: nonsecret secret metadata. Real
+    /// `silo app secrets-list --format json`: nonsecret secret metadata. Real
     /// values live only in the Mac Keychain and never appear in this response.
-    func secretsList() async throws -> MSWSecretsListResponse {
+    func secretsList() async throws -> SiloSecretsListResponse {
         let envelope = try await execute(
             arguments: ["app", "secrets-list", "--format", "json"],
-            as: MSWSecretsListResponse.self,
+            as: SiloSecretsListResponse.self,
             command: "secrets-list",
             timeout: .seconds(30)
         )
         guard let result = envelope.result else {
-            throw MSWClientError.missingResult(command: "secrets-list")
+            throw SiloClientError.missingResult(command: "secrets-list")
         }
         let entryNames = result.entries.map(\.name)
         let summaryNames = result.workspaces.map(\.workspace)
@@ -328,32 +328,32 @@ actor MSWClient {
                       $0.pendingCount >= 0 &&
                       (!$0.restartRequired || $0.pendingCount > 0)
               }) else {
-            throw MSWClientError.malformedJSON(command: "secrets-list")
+            throw SiloClientError.malformedJSON(command: "secrets-list")
         }
         return result
     }
 
-    /// `msw app secret-plan --input-fd 0 --format json`: stages a host-held
+    /// `silo app secret-plan --input-fd 0 --format json`: stages a host-held
     /// secret change. Only nonsecret metadata travels on stdin; the value is
     /// requested at apply time.
-    func prepareSecretPlan(_ request: MSWSecretPlanRequest) async throws -> MSWSecretPlanResult {
+    func prepareSecretPlan(_ request: SiloSecretPlanRequest) async throws -> SiloSecretPlanResult {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let input: Data
         do {
             input = try encoder.encode(request)
         } catch {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let envelope = try await execute(
             arguments: ["app", "secret-plan", "--input-fd", "0", "--format", "json"],
-            as: MSWSecretPlanResult.self,
+            as: SiloSecretPlanResult.self,
             command: "secret-plan",
             stdin: input,
             timeout: .seconds(60)
         )
         guard let result = envelope.result else {
-            throw MSWClientError.missingResult(command: "secret-plan")
+            throw SiloClientError.missingResult(command: "secret-plan")
         }
         // The staged plan must match the reviewed request exactly; a
         // mismatched plan could pair the entered value with a different
@@ -368,58 +368,58 @@ actor MSWClient {
               result.requiresSecret == (request.operation != "remove"),
               result.expiresAt > Date(),
               result.affectedWorkspaces.allSatisfy(WorkspaceID.isValid) else {
-            throw MSWClientError.malformedJSON(command: "secret-plan")
+            throw SiloClientError.malformedJSON(command: "secret-plan")
         }
         return result
     }
 
-    /// `msw app secret-apply PLAN_ID --input-fd 0 --format json`: commits a
+    /// `silo app secret-apply PLAN_ID --input-fd 0 --format json`: commits a
     /// staged secret change. The confirmation phrase and the (optional) value
     /// travel exclusively on stdin; the value is never placed in argv, the
     /// environment, or any persisted app state.
     func applySecretPlan(
-        _ plan: MSWSecretPlanResult,
+        _ plan: SiloSecretPlanResult,
         confirmation: String,
         value: String?
-    ) async throws -> MSWSecretApplyResult {
+    ) async throws -> SiloSecretApplyResult {
         guard !plan.planId.isEmpty,
               confirmation == plan.confirmationPhrase else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         // The value is mandatory for additions; edits may keep the current
         // Keychain value (nil), and removals never carry one.
         switch plan.operation {
         case "add":
             guard let value, !value.isEmpty else {
-                throw MSWClientError.invalidArguments
+                throw SiloClientError.invalidArguments
             }
         case "edit":
             guard value.map({ !$0.isEmpty }) ?? true else {
-                throw MSWClientError.invalidArguments
+                throw SiloClientError.invalidArguments
             }
         default:
             guard value == nil else {
-                throw MSWClientError.invalidArguments
+                throw SiloClientError.invalidArguments
             }
         }
-        let request = MSWSecretApplyRequest(confirmation: confirmation, value: value)
+        let request = SiloSecretApplyRequest(confirmation: confirmation, value: value)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let input: Data
         do {
             input = try encoder.encode(request)
         } catch {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let envelope = try await execute(
             arguments: ["app", "secret-apply", plan.planId, "--input-fd", "0", "--format", "json"],
-            as: MSWSecretApplyResult.self,
+            as: SiloSecretApplyResult.self,
             command: "secret-apply",
             stdin: input,
             timeout: .seconds(120)
         )
         guard let result = envelope.result else {
-            throw MSWClientError.missingResult(command: "secret-apply")
+            throw SiloClientError.missingResult(command: "secret-apply")
         }
         // The success document must be complete and consistent with the
         // reviewed plan; an empty or mismatched document is malformed.
@@ -430,41 +430,41 @@ actor MSWClient {
               result.valueStored == (value != nil),
               !result.outcome.isEmpty,
               result.pending.allSatisfy({ WorkspaceID.isValid($0.workspace) }) else {
-            throw MSWClientError.malformedJSON(command: "secret-apply")
+            throw SiloClientError.malformedJSON(command: "secret-apply")
         }
         return result
     }
 
     // MARK: - Path C local mode
 
-    /// `msw github status --format json` (raw, non-envelope CLI output).
-    func githubStatus() async throws -> MSWGitHubStatusResponse {
+    /// `silo github status --format json` (raw, non-envelope CLI output).
+    func githubStatus() async throws -> SiloGitHubStatusResponse {
         try await runRawJSON(
             arguments: ["github", "status", "--format", "json"],
-            as: MSWGitHubStatusResponse.self,
+            as: SiloGitHubStatusResponse.self,
             command: "github status"
         )
     }
 
-    /// `msw github auth --json`: nonsecret host-credential metadata. Succeeds
+    /// `silo github auth --json`: nonsecret host-credential metadata. Succeeds
     /// fully non-interactively via gh reuse; on failure (gh not authenticated
     /// and no device client ID, or verification failure) the CLI prints a
     /// typed `{ok:false,error}` document to stdout with a nonzero exit.
-    func githubAuth(force: Bool = false) async throws -> MSWGitHubAuthMetadata {
+    func githubAuth(force: Bool = false) async throws -> SiloGitHubAuthMetadata {
         var arguments = ["github", "auth"]
         if force { arguments.append("--force") }
         arguments.append("--json")
-        let request = try await runner.makeMSWCommand(arguments: arguments, timeout: .seconds(180))
+        let request = try await runner.makeSiloCommand(arguments: arguments, timeout: .seconds(180))
         let output = try await runner.run(request)
         // Success is the bare nonsecret metadata object. Guard against the
         // failure document decoding as an all-optional metadata struct.
-        if let metadata = try? MSWProtocolDecoder.decoder().decode(MSWGitHubAuthMetadata.self, from: output.stdout),
+        if let metadata = try? SiloProtocolDecoder.decoder().decode(SiloGitHubAuthMetadata.self, from: output.stdout),
            metadata.accountLogin != nil || metadata.provider != nil {
             guard output.status == 0 else {
-                throw MSWClientError.processFailed(
+                throw SiloClientError.processFailed(
                     command: "github auth",
                     status: output.status,
-                    message: "MSW returned success metadata with a failing exit status."
+                    message: "Silo returned success metadata with a failing exit status."
                 )
             }
             return metadata
@@ -472,7 +472,7 @@ actor MSWClient {
         throw Self.rawCLIError(from: output.stdout, command: "github auth", fallbackStatus: output.status)
     }
 
-    func githubAuthMetadata() async throws -> MSWGitHubAuthMetadata {
+    func githubAuthMetadata() async throws -> SiloGitHubAuthMetadata {
         try await githubAuth(force: false)
     }
 
@@ -480,19 +480,19 @@ actor MSWClient {
     /// host credential. Generic Silo secrets use a separate metadata and
     /// Keychain domain and are intentionally untouched.
     func resetLocalGitHub(workspace: String) async throws {
-        guard WorkspaceID.isValid(workspace) else { throw MSWClientError.invalidArguments }
+        guard WorkspaceID.isValid(workspace) else { throw SiloClientError.invalidArguments }
         for (arguments, command) in [
             (["github", "migrate", "all"], "github migrate all"),
             (["github", "remove", workspace], "github remove")
         ] {
-            let request = try await runner.makeMSWCommand(
+            let request = try await runner.makeSiloCommand(
                 arguments: arguments,
                 timeout: .seconds(180)
             )
             let output = try await runner.run(request)
             guard output.status == 0 else {
                 let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                throw MSWClientError.processFailed(
+                throw SiloClientError.processFailed(
                     command: command,
                     status: output.status,
                     message: message.isEmpty ? nil : message
@@ -508,11 +508,11 @@ actor MSWClient {
     /// this returns. Throws a typed error when gh is unavailable.
     func githubWebLogin() async throws {
         guard let gh = await ghResolver() else {
-            throw MSWClientError.unavailable(
+            throw SiloClientError.unavailable(
                 "The GitHub CLI (gh) is not installed on this Mac. Install it, then sign in again."
             )
         }
-        let request = MSWCommand(
+        let request = SiloCommand(
             executable: gh,
             arguments: [
                 "auth", "login",
@@ -526,7 +526,7 @@ actor MSWClient {
         let output = try await runner.run(request)
         guard output.status == 0 else {
             let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw MSWClientError.processFailed(
+            throw SiloClientError.processFailed(
                 command: "gh auth login",
                 status: output.status,
                 message: message.isEmpty ? nil : message
@@ -534,9 +534,9 @@ actor MSWClient {
         }
     }
 
-    /// `msw github repos --format json`: paginated repository discovery
+    /// `silo github repos --format json`: paginated repository discovery
     /// (CLI paginates internally; flat, deduped, sorted by canonical).
-    func githubRepos() async throws -> [MSWGitHubDiscoveredRepo] {
+    func githubRepos() async throws -> [SiloGitHubDiscoveredRepo] {
         let response = try await runRawCLI(arguments: ["github", "repos", "--format", "json"], command: "github repos")
         guard response.ok == true, let repos = response.repos else {
             throw Self.rawCLIError(from: response, command: "github repos")
@@ -544,9 +544,9 @@ actor MSWClient {
         return repos
     }
 
-    /// `msw github auth --device --format json`: one-shot device-flow start.
+    /// `silo github auth --device --format json`: one-shot device-flow start.
     /// `deviceId` is the poll handle passed to `githubAuthDeviceComplete`.
-    func githubAuthDevice() async throws -> MSWDeviceFlowStart {
+    func githubAuthDevice() async throws -> SiloDeviceFlowStart {
         let response = try await runRawCLI(arguments: ["github", "auth", "--device", "--format", "json"], command: "github auth --device")
         guard response.ok == true,
               let deviceId = response.deviceId,
@@ -555,7 +555,7 @@ actor MSWClient {
               let expiresAt = response.expiresAt else {
             throw Self.rawCLIError(from: response, command: "github auth --device")
         }
-        return MSWDeviceFlowStart(
+        return SiloDeviceFlowStart(
             deviceId: deviceId,
             code: code,
             verificationUri: verificationUri,
@@ -564,11 +564,11 @@ actor MSWClient {
         )
     }
 
-    /// `msw github auth --device-complete DEVICE_ID --format json`: exactly
+    /// `silo github auth --device-complete DEVICE_ID --format json`: exactly
     /// one exchange attempt (the app drives the poll loop with interval
     /// sleeps). Authorization stores and verifies the credential.
-    func githubAuthDeviceComplete(deviceId: String) async throws -> MSWDeviceFlowPoll {
-        guard !deviceId.isEmpty else { throw MSWClientError.invalidArguments }
+    func githubAuthDeviceComplete(deviceId: String) async throws -> SiloDeviceFlowPoll {
+        guard !deviceId.isEmpty else { throw SiloClientError.invalidArguments }
         let response = try await runRawCLI(
             arguments: ["github", "auth", "--device-complete", deviceId, "--format", "json"],
             command: "github auth --device-complete"
@@ -576,26 +576,26 @@ actor MSWClient {
         if response.ok == true {
             switch response.status {
             case "slow_down":
-                return MSWDeviceFlowPoll(status: .slowDown, interval: response.interval, accountLogin: nil)
+                return SiloDeviceFlowPoll(status: .slowDown, interval: response.interval, accountLogin: nil)
             case "authorized":
-                return MSWDeviceFlowPoll(
+                return SiloDeviceFlowPoll(
                     status: .authorized,
                     interval: nil,
                     accountLogin: response.metadata?.accountLogin
                 )
             case "expired":
-                return MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+                return SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
             case "denied":
-                return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+                return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
             default:
-                return MSWDeviceFlowPoll(status: .pending, interval: response.interval, accountLogin: nil)
+                return SiloDeviceFlowPoll(status: .pending, interval: response.interval, accountLogin: nil)
             }
         }
         switch response.status {
         case "expired":
-            return MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+            return SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
         case "denied":
-            return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+            return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
         default:
             throw Self.rawCLIError(from: response, command: "github auth --device-complete")
         }
@@ -608,14 +608,14 @@ actor MSWClient {
         arguments: [String],
         command: String,
         timeout: Duration = .seconds(60)
-    ) async throws -> MSWGitHubCLIResponse {
-        let request = try await runner.makeMSWCommand(arguments: arguments, timeout: timeout)
+    ) async throws -> SiloGitHubCLIResponse {
+        let request = try await runner.makeSiloCommand(arguments: arguments, timeout: timeout)
         let output = try await runner.run(request)
         do {
-            return try MSWProtocolDecoder.decoder().decode(MSWGitHubCLIResponse.self, from: output.stdout)
+            return try SiloProtocolDecoder.decoder().decode(SiloGitHubCLIResponse.self, from: output.stdout)
         } catch {
             let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw MSWClientError.processFailed(
+            throw SiloClientError.processFailed(
                 command: command,
                 status: output.status,
                 message: message.isEmpty ? nil : message
@@ -625,12 +625,12 @@ actor MSWClient {
 
     /// Converts a decoded raw-CLI response into a typed error.
     private static func rawCLIError(
-        from response: MSWGitHubCLIResponse,
+        from response: SiloGitHubCLIResponse,
         command: String
-    ) -> MSWClientError {
+    ) -> SiloClientError {
         let error = response.error
         return .rawCLIError(
-            code: error?.code ?? "MSW_CLI_ERROR",
+            code: error?.code ?? "SILO_CLI_ERROR",
             message: error?.message ?? "\(command) failed."
         )
     }
@@ -641,11 +641,11 @@ actor MSWClient {
         from stdout: Data,
         command: String,
         fallbackStatus: Int32
-    ) -> MSWClientError {
-        if let response = try? MSWProtocolDecoder.decoder().decode(MSWGitHubCLIResponse.self, from: stdout),
+    ) -> SiloClientError {
+        if let response = try? SiloProtocolDecoder.decoder().decode(SiloGitHubCLIResponse.self, from: stdout),
            response.ok == false,
            let error = response.error {
-            return .rawCLIError(code: error.code ?? "MSW_CLI_ERROR", message: error.message ?? "\(command) failed.")
+            return .rawCLIError(code: error.code ?? "SILO_CLI_ERROR", message: error.message ?? "\(command) failed.")
         }
         let message = String(decoding: stdout, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -656,32 +656,32 @@ actor MSWClient {
         )
     }
 
-    /// ONE `msw app github-policy-apply` invocation carrying the FULL desired
+    /// ONE `silo app github-policy-apply` invocation carrying the FULL desired
     /// policy on stdin. The CLI validates the request, acquires the
     /// per-workspace github locks, provisions/verifies transport for each
     /// semantically changed, non-empty workspace using the final capabilities,
     /// and performs ONE atomic policy-file commit (rolling back byte-exact on
     /// any unproven step).
-    /// Typed failures (MSW_INVALID_REQUEST, MSW_GITHUB_MODE_MISMATCH,
-    /// MSW_OPERATION_CONFLICT, MSW_TRANSPORT_PROVISION_FAILED,
-    /// MSW_POLICY_WRITE_FAILED, MSW_INTERNAL_ERROR) surface as protocol
+    /// Typed failures (SILO_INVALID_REQUEST, SILO_GITHUB_MODE_MISMATCH,
+    /// SILO_OPERATION_CONFLICT, SILO_TRANSPORT_PROVISION_FAILED,
+    /// SILO_POLICY_WRITE_FAILED, SILO_INTERNAL_ERROR) surface as protocol
     /// failures; the caller marks the operation applied only after the CLI
     /// reports provisioned + committed.
-    func githubPolicyApply(_ request: MSWGitHubPolicyApplyRequest) async throws -> MSWGitHubPolicyApplyResult {
+    func githubPolicyApply(_ request: SiloGitHubPolicyApplyRequest) async throws -> SiloGitHubPolicyApplyResult {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let input: Data
         do {
             input = try encoder.encode(request)
         } catch {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let envelope = try await execute(
             arguments: [
                 "app", "github-policy-apply",
                 "--format", "json"
             ],
-            as: MSWGitHubPolicyApplyResult.self,
+            as: SiloGitHubPolicyApplyResult.self,
             command: "github-policy-apply",
             stdin: input,
             timeout: .seconds(600),
@@ -691,7 +691,7 @@ actor MSWClient {
             terminationGrace: .seconds(65)
         )
         guard let result = envelope.result else {
-            throw MSWClientError.missingResult(command: "github-policy-apply")
+            throw SiloClientError.missingResult(command: "github-policy-apply")
         }
         return result
     }
@@ -703,20 +703,20 @@ actor MSWClient {
         command: String,
         timeout: Duration = .seconds(30)
     ) async throws -> Value {
-        let request = try await runner.makeMSWCommand(arguments: arguments, timeout: timeout)
+        let request = try await runner.makeSiloCommand(arguments: arguments, timeout: timeout)
         let output = try await runner.run(request)
         guard output.status == 0 else {
             let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw MSWClientError.processFailed(
+            throw SiloClientError.processFailed(
                 command: command,
                 status: output.status,
                 message: message.isEmpty ? nil : message
             )
         }
         do {
-            return try MSWProtocolDecoder.decoder().decode(type, from: output.stdout)
+            return try SiloProtocolDecoder.decoder().decode(type, from: output.stdout)
         } catch {
-            throw MSWClientError.malformedJSON(command: command)
+            throw SiloClientError.malformedJSON(command: command)
         }
     }
 
@@ -725,10 +725,10 @@ actor MSWClient {
         workspace: String,
         accessMode: String,
         verificationRepository: String
-    ) async throws -> MSWEnvelope<MSWGitHubBindResult> {
+    ) async throws -> SiloEnvelope<SiloGitHubBindResult> {
         guard accessMode == "read-only" || accessMode == "host-write",
               !verificationRepository.isEmpty else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         if accessMode == "host-write" {
             _ = try await execute(
@@ -739,7 +739,7 @@ actor MSWClient {
                     "--mode", "read-only",
                     "--format", "json"
                 ],
-                as: MSWGitHubBindResult.self,
+                as: SiloGitHubBindResult.self,
                 command: "github-bind",
                 credentialsFor: workspace,
                 includeGuestCredentials: true,
@@ -753,7 +753,7 @@ actor MSWClient {
                     "--mode", "host-write",
                     "--format", "json"
                 ],
-                as: MSWGitHubBindResult.self,
+                as: SiloGitHubBindResult.self,
                 command: "github-bind",
                 credentialsFor: workspace,
                 includeGuestCredentials: true,
@@ -769,16 +769,16 @@ actor MSWClient {
                 "--mode", accessMode,
                 "--format", "json"
             ],
-            as: MSWGitHubBindResult.self,
+            as: SiloGitHubBindResult.self,
             command: "github-bind",
             credentialsFor: workspace,
             includeGuestCredentials: true,
             timeout: .seconds(300)
         )
     }
-    func unbindGitHubCredentials(workspace: String) async throws -> MSWEnvelope<MSWGitHubUnbindResult> {
+    func unbindGitHubCredentials(workspace: String) async throws -> SiloEnvelope<SiloGitHubUnbindResult> {
         guard WorkspaceID.isValid(workspace) else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         return try await execute(
             arguments: [
@@ -786,37 +786,37 @@ actor MSWClient {
                 "--workspace", workspace,
                 "--format", "json"
             ],
-            as: MSWGitHubUnbindResult.self,
+            as: SiloGitHubUnbindResult.self,
             command: "github-unbind",
             timeout: .seconds(300)
         )
     }
 
  
-    func preparePushPlan(workspace: String, repositories: [String]) async throws -> MSWEnvelope<MSWPushPlan> {
+    func preparePushPlan(workspace: String, repositories: [String]) async throws -> SiloEnvelope<SiloPushPlan> {
         guard WorkspaceID.isValid(workspace), repositories.count == 1,
               repositories.allSatisfy(Self.isSafeRelativePath) else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         return try await execute(
             arguments: ["app", "push-plan", "--workspace", workspace, "--repositories"] + repositories + ["--format", "json"],
-            as: MSWPushPlan.self,
+            as: SiloPushPlan.self,
             command: "push-plan",
             credentialsFor: workspace,
             includeGuestCredentials: true
         )
     }
 
-    func applyPushPlan(_ plan: MSWPushPlan, confirmation: String) async throws -> MSWEnvelope<MSWPushApplyResult> {
+    func applyPushPlan(_ plan: SiloPushPlan, confirmation: String) async throws -> SiloEnvelope<SiloPushApplyResult> {
         guard WorkspaceID.isValid(plan.workspace),
               plan.expiresAt > Date(),
               confirmation == plan.confirmationPhrase else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let input = Data((confirmation + "\n").utf8)
         return try await execute(
             arguments: ["app", "apply", plan.planId, "--confirmation-fd", "0", "--format", "json"],
-            as: MSWPushApplyResult.self,
+            as: SiloPushApplyResult.self,
             command: "apply",
             credentialsFor: plan.workspace,
             includeGuestCredentials: true,
@@ -827,21 +827,21 @@ actor MSWClient {
     }
 
 
-    func prepareLifecyclePlan(action: MSWLifecycleAction, workspace: String) async throws -> MSWEnvelope<MSWLifecyclePlan> {
-        guard WorkspaceID.isValid(workspace) else { throw MSWClientError.invalidArguments }
+    func prepareLifecyclePlan(action: SiloLifecycleAction, workspace: String) async throws -> SiloEnvelope<SiloLifecyclePlan> {
+        guard WorkspaceID.isValid(workspace) else { throw SiloClientError.invalidArguments }
         return try await execute(
             arguments: ["app", "plan", action.rawValue, "--workspace", workspace, "--format", "json"],
-            as: MSWLifecyclePlan.self,
+            as: SiloLifecyclePlan.self,
             command: "plan"
         )
     }
 
-    func applyLifecyclePlan(_ plan: MSWLifecyclePlan, confirmation: String) async throws -> MSWEnvelope<MSWApplyResult> {
+    func applyLifecyclePlan(_ plan: SiloLifecyclePlan, confirmation: String) async throws -> SiloEnvelope<SiloApplyResult> {
         guard WorkspaceID.isValid(plan.workspace),
-              let action = MSWLifecycleAction(rawValue: plan.action),
+              let action = SiloLifecycleAction(rawValue: plan.action),
               plan.expiresAt > Date(),
               confirmation == plan.confirmationPhrase else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let includeGuestCredentials: Bool
         switch action {
@@ -852,7 +852,7 @@ actor MSWClient {
         }
         return try await execute(
             arguments: ["app", "apply", plan.planId, "--confirmation-fd", "0", "--format", "json"],
-            as: MSWApplyResult.self,
+            as: SiloApplyResult.self,
             command: "apply",
             credentialsFor: includeGuestCredentials ? plan.workspace : nil,
             includeGuestCredentials: includeGuestCredentials,
@@ -863,45 +863,45 @@ actor MSWClient {
 
     func bootstrap(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
-    ) async throws -> MSWEnvelope<MSWBootstrapResult> {
+    ) async throws -> SiloEnvelope<SiloBootstrapResult> {
         guard SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) == nil else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
-        let input = try JSONEncoder().encode(MSWBootstrapConfiguration(workspaceConfigurations))
+        let input = try JSONEncoder().encode(SiloBootstrapConfiguration(workspaceConfigurations))
         return try await execute(
             arguments: ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json"],
-            as: MSWBootstrapResult.self,
+            as: SiloBootstrapResult.self,
             command: "bootstrap",
             includeGuestCredentials: true,
             stdin: input,
             timeout: .seconds(1800)
         )
     }
-    func url(workspace: String, port: String = "3000", scheme: String = "http") async throws -> MSWEnvelope<MSWURLResult> {
+    func url(workspace: String, port: String = "3000", scheme: String = "http") async throws -> SiloEnvelope<SiloURLResult> {
         guard WorkspaceID.isValid(workspace),
               let portNumber = Int(port), (1...65_535).contains(portNumber),
               scheme == "http" || scheme == "https" else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         return try await execute(
             arguments: ["app", "url", "--workspace", workspace, "--port", port, "--scheme", scheme, "--format", "json"],
-            as: MSWURLResult.self,
+            as: SiloURLResult.self,
             command: "url"
         )
     }
 
-    func clone(workspace: String, repository: String, destination: String? = nil) async throws -> MSWEnvelope<MSWWorkspaceOperationResult> {
+    func clone(workspace: String, repository: String, destination: String? = nil) async throws -> SiloEnvelope<SiloWorkspaceOperationResult> {
         guard WorkspaceID.isValid(workspace),
               repository.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
               destination.map(Self.isSafeRelativePath) ?? true else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         var arguments = ["app", "clone", "--workspace", workspace, "--repository", repository]
         if let destination { arguments += ["--destination", destination] }
         arguments += ["--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWWorkspaceOperationResult.self,
+            as: SiloWorkspaceOperationResult.self,
             command: "clone",
             credentialsFor: workspace,
             includeGuestCredentials: true,
@@ -909,13 +909,13 @@ actor MSWClient {
         )
     }
 
-    func pull(workspace: String, path: String = "all") async throws -> MSWEnvelope<MSWWorkspaceOperationResult> {
+    func pull(workspace: String, path: String = "all") async throws -> SiloEnvelope<SiloWorkspaceOperationResult> {
         guard WorkspaceID.isValid(workspace), path == "all" || Self.isSafeRelativePath(path) else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         return try await execute(
             arguments: ["app", "pull", "--workspace", workspace, "--path", path, "--format", "json"],
-            as: MSWWorkspaceOperationResult.self,
+            as: SiloWorkspaceOperationResult.self,
             command: "pull",
             credentialsFor: workspace,
             includeGuestCredentials: true,
@@ -923,13 +923,13 @@ actor MSWClient {
         )
     }
 
-    func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> MSWEnvelope<MSWIdentityResult> {
+    func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> SiloEnvelope<SiloIdentityResult> {
         var arguments = ["app", "identity", "--name", name, "--email", email]
         if let workspace { arguments += ["--workspace", workspace] }
         arguments += ["--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWIdentityResult.self,
+            as: SiloIdentityResult.self,
             command: "identity",
             credentialsFor: workspace,
             includeGuestCredentials: true,
@@ -937,13 +937,13 @@ actor MSWClient {
         )
     }
 
-    func disk(workspace: String? = nil) async throws -> MSWEnvelope<MSWWorkspaceOperationResult> {
+    func disk(workspace: String? = nil) async throws -> SiloEnvelope<SiloWorkspaceOperationResult> {
         var arguments = ["app", "disk"]
         if let workspace { arguments += ["--workspace", workspace] }
         arguments += ["--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWWorkspaceOperationResult.self,
+            as: SiloWorkspaceOperationResult.self,
             command: "disk",
             credentialsFor: workspace,
             includeGuestCredentials: true,
@@ -951,13 +951,13 @@ actor MSWClient {
         )
     }
 
-    func resize(workspace: String, memory: String, cpus: String? = nil) async throws -> MSWEnvelope<MSWResourceResult> {
+    func resize(workspace: String, memory: String, cpus: String? = nil) async throws -> SiloEnvelope<SiloResourceResult> {
         var arguments = ["app", "resize", "--workspace", workspace, "--memory", memory]
         if let cpus { arguments += ["--cpus", cpus] }
         arguments += ["--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWResourceResult.self,
+            as: SiloResourceResult.self,
             command: "resize",
             credentialsFor: workspace,
             includeGuestCredentials: true,
@@ -965,10 +965,10 @@ actor MSWClient {
         )
     }
 
-    func clean(workspace: String = "all", removeVolumes: Bool = false, confirmation: String) async throws -> MSWEnvelope<MSWMaintenanceResult> {
+    func clean(workspace: String = "all", removeVolumes: Bool = false, confirmation: String) async throws -> SiloEnvelope<SiloMaintenanceResult> {
         guard workspace == "all" || WorkspaceID.isValid(workspace),
               confirmation == (removeVolumes ? "DELETE VOLUMES \(workspace)" : "CLEAN \(workspace)") else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let input = Data((confirmation + "\n").utf8)
         var arguments = ["app", "clean", "--workspace", workspace]
@@ -976,7 +976,7 @@ actor MSWClient {
         arguments += ["--confirmation-fd", "0", "--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWMaintenanceResult.self,
+            as: SiloMaintenanceResult.self,
             command: "clean",
             credentialsFor: workspace == "all" ? nil : workspace,
             includeGuestCredentials: true,
@@ -985,15 +985,15 @@ actor MSWClient {
         )
     }
 
-    func upgrade(workspace: String = "all", confirmation: String) async throws -> MSWEnvelope<MSWMaintenanceResult> {
+    func upgrade(workspace: String = "all", confirmation: String) async throws -> SiloEnvelope<SiloMaintenanceResult> {
         guard workspace == "all" || WorkspaceID.isValid(workspace),
               confirmation == "UPGRADE \(workspace)" else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let input = Data((confirmation + "\n").utf8)
         return try await execute(
             arguments: ["app", "upgrade", "--workspace", workspace, "--confirmation-fd", "0", "--format", "json"],
-            as: MSWMaintenanceResult.self,
+            as: SiloMaintenanceResult.self,
             command: "upgrade",
             credentialsFor: workspace == "all" ? nil : workspace,
             includeGuestCredentials: true,
@@ -1002,31 +1002,31 @@ actor MSWClient {
         )
     }
 
-    func update(confirmation: String) async throws -> MSWEnvelope<MSWMaintenanceResult> {
-        guard confirmation == "UPDATE" else { throw MSWClientError.invalidArguments }
+    func update(confirmation: String) async throws -> SiloEnvelope<SiloMaintenanceResult> {
+        guard confirmation == "UPDATE" else { throw SiloClientError.invalidArguments }
         return try await execute(
             arguments: ["app", "update", "--confirmation-fd", "0", "--format", "json"],
-            as: MSWMaintenanceResult.self,
+            as: SiloMaintenanceResult.self,
             command: "update",
             stdin: Data("UPDATE\n".utf8),
             timeout: .seconds(900)
         )
     }
 
-    func check(deep: Bool = false, confirmation: String? = nil) async throws -> MSWEnvelope<MSWCheckResult> {
+    func check(deep: Bool = false, confirmation: String? = nil) async throws -> SiloEnvelope<SiloCheckResult> {
         var arguments = ["app", "check"]
         var stdin: Data?
         if deep {
-            guard confirmation == "DEEP CHECK" else { throw MSWClientError.invalidArguments }
+            guard confirmation == "DEEP CHECK" else { throw SiloClientError.invalidArguments }
             arguments += ["--deep", "--confirmation-fd", "0"]
             stdin = Data("DEEP CHECK\n".utf8)
         } else if confirmation != nil {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         arguments += ["--format", "json"]
         return try await execute(
             arguments: arguments,
-            as: MSWCheckResult.self,
+            as: SiloCheckResult.self,
             command: "check",
             includeGuestCredentials: deep,
             stdin: stdin,
@@ -1034,57 +1034,57 @@ actor MSWClient {
         )
     }
 
-    func startBackup(directory: URL, requestKey: String) async throws -> MSWEnvelope<MSWBackupOperationResponse> {
+    func startBackup(directory: URL, requestKey: String) async throws -> SiloEnvelope<SiloBackupOperationResponse> {
         guard requestKey.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         return try await execute(
             arguments: ["app", "backup-start", "--directory", directory.path, "--request-key", requestKey, "--format", "json"],
-            as: MSWBackupOperationResponse.self,
+            as: SiloBackupOperationResponse.self,
             command: "backup-start",
             includeGuestCredentials: true,
             timeout: .seconds(30)
         )
     }
 
-    func listBackups() async throws -> MSWEnvelope<[MSWBackupOperationResponse]> {
+    func listBackups() async throws -> SiloEnvelope<[SiloBackupOperationResponse]> {
         try await execute(
             arguments: ["app", "backup-list", "--format", "json"],
-            as: [MSWBackupOperationResponse].self,
+            as: [SiloBackupOperationResponse].self,
             command: "backup-list",
             timeout: .seconds(30)
         )
     }
 
-    func backupStatus(id: String) async throws -> MSWEnvelope<MSWBackupOperationResponse> {
+    func backupStatus(id: String) async throws -> SiloEnvelope<SiloBackupOperationResponse> {
         guard id.range(of: #"^[a-z0-9-]{8,64}$"#, options: .regularExpression) != nil else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         return try await execute(
             arguments: ["app", "backup-status", "--operation-id", id, "--format", "json"],
-            as: MSWBackupOperationResponse.self,
+            as: SiloBackupOperationResponse.self,
             command: "backup-status",
             timeout: .seconds(30)
         )
     }
 
-    func previewBackup(directory: URL) async throws -> MSWEnvelope<MSWBackupPreviewResponse> {
+    func previewBackup(directory: URL) async throws -> SiloEnvelope<SiloBackupPreviewResponse> {
         try await execute(
             arguments: ["app", "backup-preview", "--directory", directory.path, "--format", "json"],
-            as: MSWBackupPreviewResponse.self,
+            as: SiloBackupPreviewResponse.self,
             command: "backup-preview",
             timeout: .seconds(300)
         )
     }
 
-    func restore(archive: URL, confirmation: String) async throws -> MSWEnvelope<MSWWorkspaceOperationResult> {
+    func restore(archive: URL, confirmation: String) async throws -> SiloEnvelope<SiloWorkspaceOperationResult> {
         guard confirmation == "RESTORE", archive.isFileURL, archive.pathExtension == "zst" else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let input = Data((confirmation + "\n").utf8)
         return try await execute(
             arguments: ["app", "restore", "--archive", archive.path, "--confirmation-fd", "0", "--format", "json"],
-            as: MSWWorkspaceOperationResult.self,
+            as: SiloWorkspaceOperationResult.self,
             command: "restore",
             includeGuestCredentials: true,
             stdin: input,
@@ -1103,13 +1103,13 @@ actor MSWClient {
         stdin: Data? = nil,
         timeout: Duration = .seconds(30),
         terminationGrace: Duration = .milliseconds(250)
-    ) async throws -> MSWEnvelope<Value> {
+    ) async throws -> SiloEnvelope<Value> {
         try await prepareCredentials(
             for: workspace,
             includeGuest: includeGuestCredentials,
             includeHost: includeHostCredentials
         )
-        let request = try await runner.makeMSWCommand(
+        let request = try await runner.makeSiloCommand(
             arguments: arguments,
             timeout: timeout,
             stdin: stdin,
@@ -1117,22 +1117,22 @@ actor MSWClient {
         )
         let output = try await runner.run(request)
         do {
-            let envelope = try MSWProtocolDecoder.decodeEnvelope(output.stdout, as: type, expectedCommand: command)
+            let envelope = try SiloProtocolDecoder.decodeEnvelope(output.stdout, as: type, expectedCommand: command)
             guard output.status == 0 else {
-                throw MSWClientError.processFailed(
+                throw SiloClientError.processFailed(
                     command: command,
                     status: output.status,
-                    message: "MSW returned a success envelope with a failing exit status."
+                    message: "Silo returned a success envelope with a failing exit status."
                 )
             }
             return envelope
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             if case .protocolFailure = error {
                 throw error
             }
             guard output.status != 0 else { throw error }
             let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw MSWClientError.processFailed(
+            throw SiloClientError.processFailed(
                 command: command,
                 status: output.status,
                 message: message.isEmpty ? nil : message
@@ -1140,8 +1140,8 @@ actor MSWClient {
         }
     }
 
-    /// Refreshes expiring records in Keychain before invoking MSW. Token bytes
-    /// are not copied into the app-to-CLI environment; MSW obtains the fixed
+    /// Refreshes expiring records in Keychain before invoking Silo. Token bytes
+    /// are not copied into the app-to-CLI environment; Silo obtains the fixed
     /// workspace/role record only at the narrow binding or host-askpass edge.
     private func prepareCredentials(
         for workspace: String?,
@@ -1177,15 +1177,15 @@ actor MSWClient {
                 let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
                 return refreshed.accessToken
             }
-            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
+            throw SiloClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
         } catch CredentialBrokerError.quarantineRequired {
-            throw MSWClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
+            throw SiloClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
         }
         if !bundle.credential.isAccessExpired {
             return bundle.credential.accessToken
         }
         guard let tokenRefreshCoordinator else {
-            throw MSWClientError.unavailable("The GitHub installation token expired, but renewal is unavailable in this build. GitHub access remains blocked.")
+            throw SiloClientError.unavailable("The GitHub installation token expired, but renewal is unavailable in this build. GitHub access remains blocked.")
         }
         let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
         return refreshed.accessToken
@@ -1207,15 +1207,15 @@ actor MSWClient {
     }
 
     private static func flattenedDirectoryEntries(
-        _ entries: [MSWDirectoryResponse.Entry]
-    ) -> [MSWDirectoryResponse.Entry] {
+        _ entries: [SiloDirectoryResponse.Entry]
+    ) -> [SiloDirectoryResponse.Entry] {
         entries.flatMap { entry in
             [entry] + flattenedDirectoryEntries(entry.children)
         }
     }
 
     private static func directoryEntriesAreValid(
-        _ entries: [MSWDirectoryResponse.Entry],
+        _ entries: [SiloDirectoryResponse.Entry],
         within scope: String,
         recursive: Bool
     ) -> Bool {
@@ -1257,19 +1257,19 @@ actor MSWClient {
     private struct LogEnvelopeResult: Codable, Sendable {
         let workspace: String
         let available: Bool
-        let lifecycle: MSWLifecycle
-        let freshness: MSWFreshness
+        let lifecycle: SiloLifecycle
+        let freshness: SiloFreshness
         let reason: String?
-        let lines: [MSWLogEntry]
+        let lines: [SiloLogEntry]
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             workspace = try container.decode(String.self, forKey: .workspace)
             available = try container.decode(Bool.self, forKey: .available)
-            lifecycle = try container.decodeIfPresent(MSWLifecycle.self, forKey: .lifecycle) ?? .unknown
-            freshness = try container.decodeIfPresent(MSWFreshness.self, forKey: .freshness) ?? .unavailable
+            lifecycle = try container.decodeIfPresent(SiloLifecycle.self, forKey: .lifecycle) ?? .unknown
+            freshness = try container.decodeIfPresent(SiloFreshness.self, forKey: .freshness) ?? .unavailable
             reason = try container.decodeIfPresent(String.self, forKey: .reason)
-            lines = try container.decodeIfPresent([MSWLogEntry].self, forKey: .lines) ?? []
+            lines = try container.decodeIfPresent([SiloLogEntry].self, forKey: .lines) ?? []
         }
     }
 
@@ -1282,8 +1282,8 @@ actor MSWClient {
         let workspace: String
         let observedAt: Date?
         let available: Bool?
-        let lifecycle: MSWLifecycle?
-        let freshness: MSWFreshness?
+        let lifecycle: SiloLifecycle?
+        let freshness: SiloFreshness?
         let reason: String?
         let source: String?
         let sessionID: Int?
@@ -1300,7 +1300,7 @@ actor MSWClient {
     }
 }
 
-enum MSWLifecycleAction: String, Codable, Sendable {
+enum SiloLifecycleAction: String, Codable, Sendable {
     case start
     case stop
     case restart

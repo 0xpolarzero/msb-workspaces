@@ -1,9 +1,9 @@
 # GitHub access in Silo
 
-GitHub is optional. The default local mode (`MSW_GITHUB_MODE=local`) keeps the
+GitHub is optional. The default local mode (`SILO_GITHUB_MODE=local`) keeps the
 GitHub credential on this Mac: git inside a workspace reaches GitHub through a
 host-side proxy on `127.0.0.1:18446` that enforces a per-workspace capability
-(`X-MSW-Capability`) against the policy file
+(`X-Silo-Capability`) against the policy file
 (`~/Library/Application Support/Silo/github-policy.json`). No GitHub
 token is ever bound into a VM.
 
@@ -18,7 +18,7 @@ this Mac:
 - When configured for it, the app falls back to the OAuth Device Flow and
   prints the code on screen.
 - The credential is stored as one versioned record in the login Keychain
-  (`org.microsandbox.Silo.github-host.v2`); the token never appears in
+  (`org.silo.Silo.github-host.v2`); the token never appears in
   argv, logs, journals, or backups. A pre-v2 item is left dormant and unread.
 
 The policy starts empty: until you tick repositories, no workspace can reach
@@ -33,7 +33,7 @@ The repository picker shows **paginated checkboxes grouped by owner**:
 - Toggle **Clone/pull + Push from VM** only for repositories that must accept
   pushes initiated inside the VM.
 
-| Mode | Clone/pull | Local edit & commit | Host push (`msw push`, app Push) | Push from inside the VM |
+| Mode | Clone/pull | Local edit & commit | Host push (`silo push`, app Push) | Push from inside the VM |
 |---|---|---|---|---|
 | **Clone/pull (push from Mac)** (read-only) | yes | always works | yes | no |
 | **Clone/pull + Push from VM** (read-write) | yes | always works | yes | yes |
@@ -50,14 +50,14 @@ The repository picker shows **paginated checkboxes grouped by owner**:
 
 ## Daily use and recovery
 
-- `msw github status [WORKSPACE|all] [--format json|text]` — mode, capability,
+- `silo github status [WORKSPACE|all] [--format json|text]` — mode, capability,
   ticked repositories, host credential, and shuttle state.
-- `msw github verify WORKSPACE [REPO]` — probes policy, capability, and host
+- `silo github verify WORKSPACE [REPO]` — probes policy, capability, and host
   credential without touching the VM.
-- `msw github auth --force` — rotates the host credential (generation+1).
-- `msw github capability rotate WORKSPACE` — mints a fresh capability; the old
+- `silo github auth --force` — rotates the host credential (generation+1).
+- `silo github capability rotate WORKSPACE` — mints a fresh capability; the old
   one is denied immediately.
-- `msw github remove WORKSPACE` — revokes the host credential metadata-first,
+- `silo github remove WORKSPACE` — revokes the host credential metadata-first,
   then removes the Keychain record; if either step cannot be proven, the state
   stays quarantined (fail-closed). The app never claims removal it cannot
   verify.
@@ -76,17 +76,17 @@ The repository picker shows **paginated checkboxes grouped by owner**:
 ## Security properties
 
 - The VM has no GitHub credential of any kind — not in env, git config,
-  keychain, or backups. `msw check --deep` asserts the guest holds no
+  keychain, or backups. `silo check --deep` asserts the guest holds no
   `GH_TOKEN`.
 - The proxy's identity gate is the per-workspace capability (constant-time
   compare); enforcement is fail-closed for unknown workspaces, unknown
   repositories, and any endpoint outside the GitHub git/LFS surface.
 - The host credential is used by the proxy (outbound leg) and by the explicit
-  `msw push` path only; the askpass helper emits a token only for `github.com`
+  `silo push` path only; the askpass helper emits a token only for `github.com`
   prompts.
 - Deleting or corrupting the policy file denies all proxy and host-push access;
   no repository remains selected.
-- Connect mode (`MSW_GITHUB_MODE=connect`) remains available as a rollback
+- Connect mode (`SILO_GITHUB_MODE=connect`) remains available as a rollback
   alternative; local mode is the default and never reads or writes Connect
   grants.
 
@@ -96,18 +96,18 @@ The same surface is available from the terminal (the app remains the
 recommended path):
 
 ```bash
-msw github auth [--force] [--json]
-msw github repos [--owner OWNER] [--format json]   # picker repository list
-msw github status [WORKSPACE|all] [--format json|text]
-msw github verify WORKSPACE [OWNER/REPO]
-msw github remove WORKSPACE
-msw app github-policy-get [--workspace W] --format json
-msw app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear]
+silo github auth [--force] [--json]
+silo github repos [--owner OWNER] [--format json]   # picker repository list
+silo github status [WORKSPACE|all] [--format json|text]
+silo github verify WORKSPACE [OWNER/REPO]
+silo github remove WORKSPACE
+silo app github-policy-get [--workspace W] --format json
+silo app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear]
 ```
 
-Advanced: `msw github proxy-configure [WORKSPACE]` installs/repairs the
-transport idempotently, `msw github capability rotate WORKSPACE` rotates a
-capability, and `msw github migrate [WORKSPACE|all]` retires legacy
+Advanced: `silo github proxy-configure [WORKSPACE]` installs/repairs the
+transport idempotently, `silo github capability rotate WORKSPACE` rotates a
+capability, and `silo github migrate [WORKSPACE|all]` retires legacy
 Connect-era state on first local-mode use (archives
-`~/.config/msw/github/<box>.conf` under `migrated-local/`, proves any old
+`~/.config/silo/github/<box>.conf` under `migrated-local/`, proves any old
 guest secret removed, and preserves pre-existing quarantine markers).

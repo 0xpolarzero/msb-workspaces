@@ -6,13 +6,13 @@ final class SetupWindowController {
     private let window: NSWindow
 
     init(
-        coordinator: (any MSWBootstrapCoordinating)?,
+        coordinator: (any SiloBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
         githubInstallationURL: URL? = nil,
         provider: (any GitHubProviding)? = nil,
         githubState: GitHubSettingsState? = nil,
         accessMode: GitHubAccessMode = .local,
-        commandRunner: MSWCommandRunner = MSWCommandRunner(),
+        commandRunner: SiloCommandRunner = SiloCommandRunner(),
         applicationPreferences: ApplicationPreferenceStore,
         openSettings: @escaping (AppTab) -> Void,
         closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void = { _ in },
@@ -272,12 +272,12 @@ final class SetupLifecycleGate {
 }
 
 struct SetupView: View {
-    let coordinator: (any MSWBootstrapCoordinating)?
+    let coordinator: (any SiloBootstrapCoordinating)?
     let authorizationCoordinator: GitHubAuthorizationCoordinator?
     let provider: (any GitHubProviding)?
     @Bindable var githubState: GitHubSettingsState
     let accessMode: GitHubAccessMode
-    let commandRunner: MSWCommandRunner
+    let commandRunner: SiloCommandRunner
     @Bindable var applicationPreferences: ApplicationPreferenceStore
     let openSettings: (AppTab) -> Void
     let closeSetup: ([SetupWorkspaceConfiguration]) -> Void
@@ -288,8 +288,8 @@ struct SetupView: View {
     let startupRecoveryBlockedReason: String?
     let retryStartupRecovery: () -> Void
     let setupLifecycle: SetupLifecycleGate
-    @State private var checks: [MSWPreflightCheck] = []
-    @State private var state = MSWBootstrapState.initial
+    @State private var checks: [SiloPreflightCheck] = []
+    @State private var state = SiloBootstrapState.initial
     @State private var isRunning = false
     @State private var registrationTask: Task<Void, Never>?
     @State private var registrationConfiguration: [SetupWorkspaceConfiguration]?
@@ -378,12 +378,12 @@ struct SetupView: View {
 
     /// Explicit initializer keeps the setup dependencies visible at call sites.
     init(
-        coordinator: (any MSWBootstrapCoordinating)?,
+        coordinator: (any SiloBootstrapCoordinating)?,
         authorizationCoordinator: GitHubAuthorizationCoordinator?,
         provider: (any GitHubProviding)?,
         githubState: GitHubSettingsState? = nil,
         accessMode: GitHubAccessMode,
-        commandRunner: MSWCommandRunner = MSWCommandRunner(),
+        commandRunner: SiloCommandRunner = SiloCommandRunner(),
         applicationPreferences: ApplicationPreferenceStore,
         openSettings: @escaping (AppTab) -> Void,
         closeSetup: @escaping ([SetupWorkspaceConfiguration]) -> Void,
@@ -576,14 +576,14 @@ struct SetupView: View {
         invalidateSetupLifecycle()
     }
 
-    private var blockingChecks: [MSWPreflightCheck] {
+    private var blockingChecks: [SiloPreflightCheck] {
         checks.filter { $0.status != .pass && $0.id != "memory" }
     }
 
-    private var warningChecks: [MSWPreflightCheck] {
+    private var warningChecks: [SiloPreflightCheck] {
         checks.filter { $0.status == .needsAction && $0.id == "memory" }
     }
-    private var passedChecks: [MSWPreflightCheck] {
+    private var passedChecks: [SiloPreflightCheck] {
         checks.filter { $0.status == .pass }
     }
     private var canConnectGitHub: Bool {
@@ -622,7 +622,7 @@ struct SetupView: View {
         persisted: [SetupWorkspaceConfiguration]?
     ) -> Bool {
         guard let persisted else { return false }
-        return MSWBootstrapConfiguration(persisted) == MSWBootstrapConfiguration(current)
+        return SiloBootstrapConfiguration(persisted) == SiloBootstrapConfiguration(current)
     }
 
     private var workspaceValidationMessage: String? {
@@ -633,7 +633,7 @@ struct SetupView: View {
         workspaceConfigurations.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
-    private var setupPhases: [MSWBootstrapState.Phase] {
+    private var setupPhases: [SiloBootstrapState.Phase] {
         [.preflight, .toolchain, .hostIntegration, .workspaces, .github, .identity, .complete]
     }
 
@@ -653,7 +653,7 @@ struct SetupView: View {
     /// resolved only when a successful commit actually includes the affected
     /// workspace; committing unrelated workspaces must not reopen the gates
     /// while the failed workspace stays unresolved. Dependency-missing failures
-    /// (issueWorkspace nil: no coordinator, no mswClient, or no affected
+    /// (issueWorkspace nil: no coordinator, no siloClient, or no affected
     /// workspace reported) are never resolved by any commit — only by a
     /// successful skip retry.
     static func skipIssueResolved(issueWorkspace: String?, committedWorkspaces: [String]) -> Bool {
@@ -663,10 +663,10 @@ struct SetupView: View {
 
     /// Plain-language status for the phase currently being applied while the
     /// Continue button is disabled and spinning.
-    static func bootstrapPhaseProgress(for phase: MSWBootstrapState.Phase) -> String {
+    static func bootstrapPhaseProgress(for phase: SiloBootstrapState.Phase) -> String {
         switch phase {
         case .welcome, .preflight: return "Running system checks"
-        case .toolchain: return "Checking the MSW runtime"
+        case .toolchain: return "Checking the Silo runtime"
         case .hostIntegration: return "Updating system records"
         case .workspaces: return "Registering your workspaces"
         case .github, .identity: return "Saving access choices"
@@ -1048,7 +1048,7 @@ struct SetupView: View {
         let coordinator = authorizationCoordinator
         // UI fixtures never create a live host binding. Their simulated GitHub
         // state models a verified unbind so test navigation can be exercised
-        // without invoking a developer's MSW runtime.
+        // without invoking a developer's Silo runtime.
         let usesFixtureGitHubSkip = uiTestMode
         githubSkipTask = Task {
             if let affectedWorkspace, !usesFixtureGitHubSkip {
@@ -1521,7 +1521,7 @@ struct SetupView: View {
     }
 
     @ViewBuilder
-    private func preflightRow(_ check: MSWPreflightCheck, prominent: Bool) -> some View {
+    private func preflightRow(_ check: SiloPreflightCheck, prominent: Bool) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol(for: check.status))
                 .foregroundStyle(color(for: check.status))
@@ -2492,7 +2492,7 @@ struct SetupView: View {
                     account = discovery.account
                     installations = discovery.installations
                     githubInstallationURL = Self.validatedInstallationURL(
-                        URL(string: "https://github.com/apps/msw/installations/new")
+                        URL(string: "https://github.com/apps/silo/installations/new")
                     )
                     authorizationSessionID = discovery.sessionID
                     if let installation = discovery.installations.first {
@@ -2514,7 +2514,7 @@ struct SetupView: View {
         }
 
         guard let authorizationCoordinator else { return }
-        let browser = MSWConnectBrowser.shared
+        let browser = SiloConnectBrowser.shared
         githubConnectionTask = Task {
             do {
                 let discovery = try await authorizationCoordinator.beginAuthorization(browser: browser)
@@ -2720,10 +2720,10 @@ struct SetupView: View {
 
     /// Runs the CLI-owned host-credential flow. gh reuse completes
     /// in-process. When the CLI reports gh is unauthenticated with no
-    /// device-flow client ID (MSW_HOST_OAUTH_NOT_CONFIGURED) the app
+    /// device-flow client ID (SILO_HOST_OAUTH_NOT_CONFIGURED) the app
     /// launches the installed gh web OAuth flow and then retries auth; when
     /// the CLI reports the Device Flow is available
-    /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
+    /// (SILO_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
     /// in-app device sheet. Other typed remedies surface verbatim.
     private func connectGitHubAccount() {
         guard workspaceConfigurationAccepted, githubContextLoaded,
@@ -3282,7 +3282,7 @@ struct SetupView: View {
         return metadata
     }
 
-    /// Restores the cached MSW Connect authorization. The startup lifecycle
+    /// Restores the cached Silo Connect authorization. The startup lifecycle
     /// token is carried in and re-checked after EVERY await before any UI
     /// publication — a close during `resumeAuthorization`, the installation
     /// URL read, or a repository listing suppresses the corresponding
@@ -3479,7 +3479,7 @@ struct SetupView: View {
 
     /// Streams one finished dependency check into the checklist while the
     /// remaining checks are still running.
-    private func upsertPreflightCheck(_ check: MSWPreflightCheck) {
+    private func upsertPreflightCheck(_ check: SiloPreflightCheck) {
         if let index = checks.firstIndex(where: { $0.id == check.id }) {
             checks[index] = check
         } else {
@@ -3510,7 +3510,7 @@ struct SetupView: View {
 
     private func beginWorkspaceRegistration(
         _ submittedWorkspaceConfigurations: [SetupWorkspaceConfiguration],
-        coordinator: any MSWBootstrapCoordinating
+        coordinator: any SiloBootstrapCoordinating
     ) {
         isRunning = true
         registrationConfiguration = submittedWorkspaceConfigurations
@@ -3537,21 +3537,21 @@ struct SetupView: View {
                 // Only approval blockers persist in the footer slot; success
                 // messages would linger into later steps as stale captions.
                 notice = result.requiresApproval
-                    ? (result.phase == MSWBootstrapState.Phase.hostIntegration.rawValue
+                    ? (result.phase == SiloBootstrapState.Phase.hostIntegration.rawValue
                         ? "Allow Silo in Login Items, then choose Retry."
                         : result.message)
                     : nil
             } catch is CancellationError {
                 // Reset and teardown intentionally interrupt background registration.
-            } catch let clientError as MSWClientError where clientError == .cancelled {
+            } catch let clientError as SiloClientError where clientError == .cancelled {
                 // The command runner reports cooperative process cancellation
                 // through its typed error rather than Swift CancellationError.
             } catch let setupError {
                 let savedState = await coordinator.state()
                 state = savedState
-                if let clientError = setupError as? MSWClientError,
+                if let clientError = setupError as? SiloClientError,
                    case .protocolFailure(let protocolError) = clientError,
-                   protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
+                   protocolError.code == "SILO_GITHUB_RECONNECT_REQUIRED",
                    submittedWorkspaceConfigurations == workspaceConfigurations {
                     githubReconnectRequired = true
                     githubAttentionWorkspace = protocolError.workspace
@@ -3565,7 +3565,7 @@ struct SetupView: View {
     }
 
     private func finishWorkspaceRegistration(
-        coordinator: any MSWBootstrapCoordinating
+        coordinator: any SiloBootstrapCoordinating
     ) {
         isRunning = false
         registrationTask = nil
@@ -3657,7 +3657,7 @@ struct SetupView: View {
                 try? await Task.sleep(for: .seconds(0.5))
             }
             do {
-                let result: MSWIdentityResult
+                let result: SiloIdentityResult
                 if accessMode == .local, let provider {
                     result = try await provider.setIdentity(name: name, email: email, workspace: target)
                 } else if let authorizationCoordinator {
@@ -3665,7 +3665,7 @@ struct SetupView: View {
                         name: name, email: email, workspace: target
                     )
                 } else {
-                    throw MSWClientError.invalidExecutable
+                    throw SiloClientError.invalidExecutable
                 }
                 try Task.checkCancellation()
                 await MainActor.run {
@@ -3757,7 +3757,7 @@ struct SetupView: View {
                 return AuthorizationIssue(kind: .failed, message: authorizationError.localizedDescription)
             }
         }
-        if let connectError = error as? MSWConnectError {
+        if let connectError = error as? SiloConnectError {
             switch connectError {
             case .cancelled:
                 return AuthorizationIssue(kind: .cancelled, message: connectError.localizedDescription)
@@ -3981,13 +3981,13 @@ struct SetupView: View {
     private func loadUITestState() {
         let now = Date()
         checks = [
-            MSWPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
-            MSWPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
-            MSWPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
-            MSWPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
+            SiloPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
+            SiloPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
+            SiloPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
+            SiloPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
         ]
         state = uiTestBootstrapReconnect
-            ? MSWBootstrapState(
+            ? SiloBootstrapState(
                 phase: .workspaces,
                 startedAt: now,
                 updatedAt: now,
@@ -3995,12 +3995,12 @@ struct SetupView: View {
                 completedPhases: [.preflight, .toolchain, .hostIntegration],
                 workspaceConfigurations: workspaceConfigurations
             )
-            : MSWBootstrapState(
+            : SiloBootstrapState(
                 phase: .complete,
                 startedAt: now,
                 updatedAt: now,
                 lastError: nil,
-                completedPhases: Set(MSWBootstrapState.Phase.allCases),
+                completedPhases: Set(SiloBootstrapState.Phase.allCases),
                 workspaceConfigurations: workspaceConfigurations
             )
         lastPreflightAt = now
@@ -4023,7 +4023,7 @@ struct SetupView: View {
     }
 
 
-    private func guidance(for phase: MSWBootstrapState.Phase) -> String {
+    private func guidance(for phase: SiloBootstrapState.Phase) -> String {
         switch phase {
         case .welcome: return "Review requirements"
         case .preflight: return "Usually under 1 minute"
@@ -4036,7 +4036,7 @@ struct SetupView: View {
         }
     }
 
-    private func phaseIsComplete(_ phase: MSWBootstrapState.Phase) -> Bool {
+    private func phaseIsComplete(_ phase: SiloBootstrapState.Phase) -> Bool {
         switch phase {
         case .github: return githubDecisionMade && verificationAllowsCompletion
         case .identity: return identityDecisionMade
@@ -4045,7 +4045,7 @@ struct SetupView: View {
         }
     }
 
-    private func phaseIsCurrent(_ phase: MSWBootstrapState.Phase) -> Bool {
+    private func phaseIsCurrent(_ phase: SiloBootstrapState.Phase) -> Bool {
         if phase == .github {
             return canFinishWithoutGitHub && !phaseIsComplete(.github)
         }
@@ -4065,7 +4065,7 @@ struct SetupView: View {
         return minutes > 0 ? "\(minutes)m \(seconds)s" : "\(seconds)s"
     }
 
-    private func label(for phase: MSWBootstrapState.Phase) -> String {
+    private func label(for phase: SiloBootstrapState.Phase) -> String {
         switch phase {
         case .welcome: return "Welcome"
         case .preflight: return "Requirements"
@@ -4078,7 +4078,7 @@ struct SetupView: View {
         }
     }
 
-    private func statusLabel(for status: MSWPreflightCheck.Status) -> String {
+    private func statusLabel(for status: SiloPreflightCheck.Status) -> String {
         switch status {
         case .pass: return "Ready"
         case .needsAction: return "Needs attention"
@@ -4086,7 +4086,7 @@ struct SetupView: View {
         }
     }
 
-    private func symbol(for status: MSWPreflightCheck.Status) -> String {
+    private func symbol(for status: SiloPreflightCheck.Status) -> String {
         switch status {
         case .pass: return "checkmark.circle.fill"
         case .needsAction: return "exclamationmark.triangle.fill"
@@ -4094,7 +4094,7 @@ struct SetupView: View {
         }
     }
 
-    private func color(for status: MSWPreflightCheck.Status) -> Color {
+    private func color(for status: SiloPreflightCheck.Status) -> Color {
         switch status {
         case .pass: return .green
         case .needsAction: return .orange

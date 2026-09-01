@@ -14,7 +14,7 @@
 <div class="eyebrow">Forensic report · causal proof</div>
 <h1>ext4 superblocks exceed four raw images by 132,112,384 bytes</h1>
 <p class="lede"><strong>Root cause:</strong> a guest ext4 FITRIM tail discard reaches MicroSandbox v0.6.8's raw virtio-blk backend, then <code>msb-imago 0.1.1</code> <code>File::try_discard_by_truncate</code> executes <code>file.set_len(offset)</code>. That operation shortens <code>disk.raw</code> at the first free block of the final ext4 group while the ext4 superblock and in-memory virtual capacity remain unchanged.</p>
-<div class="callout verdict"><strong>This is not a formatter-size bug and not an MSW copy, backup, restore, resize, or migration bug.</strong> The formatter creates the full requested length. Corruption happens after attach, on an EOF-reaching virtio discard. A clean 2 GiB disposable volume reproduced the exact 132,112,384-byte mismatch; an otherwise identical no-FITRIM control retained delta 0.</div>
+<div class="callout verdict"><strong>This is not a formatter-size bug and not a Silo copy, backup, restore, resize, or migration bug.</strong> The formatter creates the full requested length. Corruption happens after attach, on an EOF-reaching virtio discard. A clean 2 GiB disposable volume reproduced the exact 132,112,384-byte mismatch; an otherwise identical no-FITRIM control retained delta 0.</div>
 <div class="grid">
 <div class="card"><strong class="bad">4</strong><span>Affected retained images</span></div>
 <div class="card"><strong>132,112,384 B</strong><span>Exact deficit in each</span></div>
@@ -26,7 +26,7 @@
 <h2>1. Root-cause statement</h2>
 <p><span class="tag bad">Culprit</span> <strong>Repository:</strong> <a href="https://github.com/superradcompany/imago">superradcompany/imago</a>, packaged as <code>msb-imago 0.1.1</code>, commit <code>2d9dfdec864e28f14e18c0d954ae8c471195f625</code>. <strong>File:</strong> <code>src/file.rs</code>. <strong>Function:</strong> <code>File::try_discard_by_truncate</code>, released lines 818–838. <strong>Faulty operation:</strong> <code>file.set_len(offset)</code> at line 836.</p>
 <p><strong>Triggering input:</strong> any EOF-reaching <code>VIRTIO_BLK_T_DISCARD</code> or <code>VIRTIO_BLK_T_WRITE_ZEROES</code> range where <code>offset + length &gt;= cached_size</code>. <strong>Triggering state:</strong> a writable raw image opened as a virtio-blk device. The observed <code>fstrim</code> proof follows <code>DISCARD → discard_to_any</code>; WRITE_ZEROES with UNMAP follows <code>discard_to_zero</code>, while WRITE_ZEROES without UNMAP follows <code>write_zeroes</code>. Both zeroing branches reach <code>Raw::ensure_zero_mapping → File::pure_write_zeroes → File::discard_to_zero → try_discard_by_truncate</code>. <strong>Observed command used for proof:</strong> <code>fstrim -v /mnt/trimtest</code>.</p>
-<p><strong>Ownership:</strong> the faulty function belongs to another tool, <code>msb-imago</code>. MicroSandbox v0.6.8 exposes it through pinned <code>msb_krun_devices 0.1.25</code> and advertises virtio discard. MSW only creates and attaches the named disk; it does not compute or apply this truncation.</p>
+<p><strong>Ownership:</strong> the faulty function belongs to another tool, <code>msb-imago</code>. MicroSandbox v0.6.8 exposes it through pinned <code>msb_krun_devices 0.1.25</code> and advertises virtio discard. Silo only creates and attaches the named disk; it does not compute or apply this truncation.</p>
 <p class="warn"><strong>Historical-trigger limit:</strong> no retained request trace identifies the historical request kind, issuer, or time for the four images, nor why dev avoided a qualifying tail request. The base guest has an enabled, active, persistent weekly <code>fstrim.timer</code>, but the disposable boot had no automatic service journal entry. The deterministic reproduction used manual <code>fstrim</code>. The faulty operation, code path, boundary, and outcome are proven; historical attribution is not.</p>
 
 <h2>2. Retained-image inventory</h2>
@@ -34,12 +34,12 @@
 <div class="scroll"><table>
 <thead><tr><th>Volume</th><th>Requested / DB capacity</th><th>Raw length</th><th>ext4 blocks × size</th><th>Deficit</th><th>DB created UTC</th><th>File birth UTC</th><th>File mtime = ctime UTC</th></tr></thead>
 <tbody>
-<tr><td><code>msw-playgrounds-workspace</code></td><td>64,424,509,440 B<br>60 GiB</td><td>64,292,397,056 B</td><td>15,728,640 × 4,096<br>64,424,509,440 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:40:34.130990</td><td>2026-08-27 17:40:34.092799</td><td>2026-08-28 18:40:10.323950</td></tr>
-<tr><td><code>msw-playgrounds-runtime</code></td><td>64,424,509,440 B<br>60 GiB</td><td>64,292,397,056 B</td><td>15,728,640 × 4,096<br>64,424,509,440 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:40:34.246793</td><td>2026-08-27 17:40:34.207817</td><td>2026-08-29 10:43:47.390423</td></tr>
-<tr><td><code>msw-personal-workspace</code></td><td>107,374,182,400 B<br>100 GiB</td><td>107,242,070,016 B</td><td>26,214,400 × 4,096<br>107,374,182,400 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:42:39.787784</td><td>2026-08-27 17:42:39.723431</td><td>2026-08-28 18:40:09.970354</td></tr>
-<tr><td><code>msw-personal-runtime</code></td><td>85,899,345,920 B<br>80 GiB</td><td>85,767,233,536 B</td><td>20,971,520 × 4,096<br>85,899,345,920 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:42:39.928913</td><td>2026-08-27 17:42:39.877478</td><td>2026-08-29 10:56:16.838830</td></tr>
-<tr><td><code>msw-dev-workspace</code></td><td>128,849,018,880 B<br>120 GiB</td><td>128,849,018,880 B</td><td>31,457,280 × 4,096<br>128,849,018,880 B</td><td class="good">0 B</td><td>2026-08-27 16:24:19.273852</td><td>2026-08-27 16:24:19.160665</td><td>2026-08-28 18:40:10.373081</td></tr>
-<tr><td><code>msw-dev-runtime</code></td><td>107,374,182,400 B<br>100 GiB</td><td>107,374,182,400 B</td><td>26,214,400 × 4,096<br>107,374,182,400 B</td><td class="good">0 B</td><td>2026-08-27 16:24:19.390994</td><td>2026-08-27 16:24:19.326211</td><td>2026-08-29 10:52:17.320973</td></tr>
+<tr><td><code>silo-playgrounds-workspace</code></td><td>64,424,509,440 B<br>60 GiB</td><td>64,292,397,056 B</td><td>15,728,640 × 4,096<br>64,424,509,440 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:40:34.130990</td><td>2026-08-27 17:40:34.092799</td><td>2026-08-28 18:40:10.323950</td></tr>
+<tr><td><code>silo-playgrounds-runtime</code></td><td>64,424,509,440 B<br>60 GiB</td><td>64,292,397,056 B</td><td>15,728,640 × 4,096<br>64,424,509,440 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:40:34.246793</td><td>2026-08-27 17:40:34.207817</td><td>2026-08-29 10:43:47.390423</td></tr>
+<tr><td><code>silo-personal-workspace</code></td><td>107,374,182,400 B<br>100 GiB</td><td>107,242,070,016 B</td><td>26,214,400 × 4,096<br>107,374,182,400 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:42:39.787784</td><td>2026-08-27 17:42:39.723431</td><td>2026-08-28 18:40:09.970354</td></tr>
+<tr><td><code>silo-personal-runtime</code></td><td>85,899,345,920 B<br>80 GiB</td><td>85,767,233,536 B</td><td>20,971,520 × 4,096<br>85,899,345,920 B</td><td class="bad">132,112,384 B</td><td>2026-08-27 17:42:39.928913</td><td>2026-08-27 17:42:39.877478</td><td>2026-08-29 10:56:16.838830</td></tr>
+<tr><td><code>silo-dev-workspace</code></td><td>128,849,018,880 B<br>120 GiB</td><td>128,849,018,880 B</td><td>31,457,280 × 4,096<br>128,849,018,880 B</td><td class="good">0 B</td><td>2026-08-27 16:24:19.273852</td><td>2026-08-27 16:24:19.160665</td><td>2026-08-28 18:40:10.373081</td></tr>
+<tr><td><code>silo-dev-runtime</code></td><td>107,374,182,400 B<br>100 GiB</td><td>107,374,182,400 B</td><td>26,214,400 × 4,096<br>107,374,182,400 B</td><td class="good">0 B</td><td>2026-08-27 16:24:19.390994</td><td>2026-08-27 16:24:19.326211</td><td>2026-08-29 10:52:17.320973</td></tr>
 </tbody></table></div>
 <p>All six are sparse regular files with stable birth identity. The four affected files were not replaced after creation. The dev images have the same final-group free-tail geometry but retain full EOF, which rules out a universal formatter arithmetic defect. It does not establish which runtime writes or discard history differed for dev.</p>
 
@@ -57,7 +57,7 @@ deficit = 32,254 × 4,096 = 132,112,384 bytes</div>
 <h2>4. Evidence chain from creation through corruption</h2>
 <ol class="chain">
 <li><strong>Creation is full-size.</strong> MicroSandbox v0.6.8 <code>crates/image/lib/ext4/formatter.rs</code> validates alignment, computes <code>num_blocks = size_bytes / 4096</code>, creates the file, and calls <code>raw_file.set_len(options.size_bytes)</code> before metadata writes. The reported 1 GiB create probe and the new 2 GiB disposable controls both had raw length equal to superblock length.</li>
-<li><strong>MSW attaches the named raw disk.</strong> Current paths explicitly call <code>msb volume create NAME --kind disk --size SIZE</code>, then <code>msb run ... --mount-named NAME:/path:kind=disk,size=SIZE</code>. Historical implicit creation still reaches MicroSandbox's same <code>materialize_volume_path</code> formatter. The Aug 27 recovery record is direct historical proof: the freshly recreated playgrounds volumes passed <code>volume_ext4_status</code> with <code>rc=0</code> immediately after creation at 17:41:11 UTC, then the recovery attached them, started the guests, and verified both ext4 mounts. The same current file births remain, so the later short EOF arose after successful creation rather than through replacement.</li>
+<li><strong>Silo attaches the named raw disk.</strong> Current paths explicitly call <code>msb volume create NAME --kind disk --size SIZE</code>, then <code>msb run ... --mount-named NAME:/path:kind=disk,size=SIZE</code>. Historical implicit creation still reaches MicroSandbox's same <code>materialize_volume_path</code> formatter. The Aug 27 recovery record is direct historical proof: the freshly recreated playgrounds volumes passed <code>volume_ext4_status</code> with <code>rc=0</code> immediately after creation at 17:41:11 UTC, then the recovery attached them, started the guests, and verified both ext4 mounts. The same current file births remain, so the later short EOF arose after successful creation rather than through replacement.</li>
 <li><strong>MicroSandbox opens raw storage and advertises both operations.</strong> <code>msb_krun_devices 0.1.25</code> <code>Block::new</code> opens <code>ImagoFile</code>, wraps <code>Raw</code>, derives virtio capacity, and advertises <code>VIRTIO_BLK_F_DISCARD</code> and <code>VIRTIO_BLK_F_WRITE_ZEROES</code> with their maximum request fields.</li>
 <li><strong>Guest FITRIM emits an EOF-reaching discard.</strong> ext4 reports its final group free from block 514 through group end. <code>fstrim</code> sends that free extent through virtio-blk as <code>VIRTIO_BLK_T_DISCARD</code>.</li>
 <li><strong>The released runtime routes the request to imago.</strong> The reproduced discard path is <code>BlockWorker VIRTIO_BLK_T_DISCARD</code> → <code>DiskProperties::discard_to_any</code> → <code>SyncFormatAccess</code> → <code>FormatAccess</code> → <code>Raw::discard_to_any_unsafe</code> → <code>StorageExt::discard</code> → <code>File::pure_discard</code> → <code>File::discard_to_zero</code>. The alternative <code>VIRTIO_BLK_T_WRITE_ZEROES</code> branches call <code>discard_to_zero</code> or <code>write_zeroes</code>; both reach the same <code>File::discard_to_zero</code> helper through raw zero mapping and <code>File::pure_write_zeroes</code>.</li>
@@ -87,15 +87,15 @@ deficit = 32,254 × 4,096 = 132,112,384 bytes</div>
 
 <h2>6. Controlled reproduction and comparison</h2>
 <h3>Mismatch path</h3>
-<pre>msb volume create msw-trim-repro-b --kind disk --size 2G
+<pre>msb volume create silo-trim-repro-b --kind disk --size 2G
 
-msb run --detach --name msw-trim-repro-b-sb \
-  --from-snapshot msw-base-v1 \
+msb run --detach --name silo-trim-repro-b-sb \
+  --from-snapshot silo-base-v1 \
   --cpus 2 --max-cpus 4 --memory 2G --max-memory 4G \
-  --mount-named msw-trim-repro-b:/mnt/trimtest:kind=disk,size=2G \
+  --mount-named silo-trim-repro-b:/mnt/trimtest:kind=disk,size=2G \
   --init auto --security default --net public -- sleep infinity
 
-msb exec --no-tty msw-trim-repro-b-sb -- fstrim -v /mnt/trimtest</pre>
+msb exec --no-tty silo-trim-repro-b-sb -- fstrim -v /mnt/trimtest</pre>
 <div class="scroll"><table>
 <thead><tr><th>Observation</th><th>Value</th></tr></thead>
 <tbody>
@@ -123,16 +123,16 @@ msb exec --no-tty msw-trim-repro-b-sb -- fstrim -v /mnt/trimtest</pre>
 <tr><td>Explicit versus implicit named-volume creation</td><td>Both reach <code>materialize_volume_path</code> and the same formatter.</td><td class="good">Ruled out as source of fixed subtraction.</td></tr>
 <tr><td>MicroSandbox ext4 grow path</td><td>Validates current file length equals declared geometry; grows with <code>set_len(new_size)</code>; refuses shrink.</td><td class="good">Ruled out.</td></tr>
 <tr><td>MicroSandbox sparse copy / snapshot import</td><td>Sets destination to source logical length before copying extents; archive import sets recorded real size.</td><td class="good">Ruled out.</td></tr>
-<tr><td>MSW backup / restore</td><td>GNU tar <code>--sparse</code> records logical real size; extraction restores it. Restore stages then moves files.</td><td class="good">Cannot invent this EOF boundary; can only preserve an already-short source.</td></tr>
-<tr><td>MSW capacity migration</td><td>Guest <code>cp -a /source/. /destination/</code> copies inner ext4 contents, not host <code>disk.raw</code>.</td><td class="good">Ruled out.</td></tr>
-<tr><td>MSW resource resize</td><td>Changes memory/CPU through <code>msb modify</code>; no disk operation.</td><td class="good">Ruled out.</td></tr>
-<tr><td>MSW current fresh-volume finalizer</td><td>Fresh-only, upward-only <code>os.ftruncate(fd, declared_bytes)</code>; existing volumes are inspected, not changed.</td><td class="good">Cannot cause shortening.</td></tr>
+<tr><td>Silo backup / restore</td><td>GNU tar <code>--sparse</code> records logical real size; extraction restores it. Restore stages then moves files.</td><td class="good">Cannot invent this EOF boundary; can only preserve an already-short source.</td></tr>
+<tr><td>Silo capacity migration</td><td>Guest <code>cp -a /source/. /destination/</code> copies inner ext4 contents, not host <code>disk.raw</code>.</td><td class="good">Ruled out.</td></tr>
+<tr><td>Silo resource resize</td><td>Changes memory/CPU through <code>msb modify</code>; no disk operation.</td><td class="good">Ruled out.</td></tr>
+<tr><td>Silo current fresh-volume finalizer</td><td>Fresh-only, upward-only <code>os.ftruncate(fd, declared_bytes)</code>; existing volumes are inspected, not changed.</td><td class="good">Cannot cause shortening.</td></tr>
 <tr><td>Sparse allocation itself</td><td><code>st_blocks</code> differs from logical EOF. Hole punching must preserve EOF. The observed failure is logical-length loss.</td><td class="good">Ruled out as an explanation without the faulty truncate.</td></tr>
 <tr><td>Decimal/binary size conversion, journal, GDT, reservation</td><td>Do not equal 32,254 blocks across 60/80/100 GiB. Direct bitmap evidence identifies the exact final free extent.</td><td class="good">Ruled out.</td></tr>
 </tbody></table></div>
 
 <h2>8. Minimal source fix</h2>
-<p><strong>Fix imago, not MSW.</strong> Remove the EOF <code>try_discard_by_truncate</code> fast path from <code>File::discard_to_zero</code>, or otherwise prohibit a discard from changing <code>Storage::size()</code>. Route tail ranges through the existing size-preserving implementations:</p>
+<p><strong>Fix imago, not Silo.</strong> Remove the EOF <code>try_discard_by_truncate</code> fast path from <code>File::discard_to_zero</code>, or otherwise prohibit a discard from changing <code>Storage::size()</code>. Route tail ranges through the existing size-preserving implementations:</p>
 <ul>
 <li>macOS: <code>fcntl(F_PUNCHHOLE)</code></li>
 <li>Linux: <code>fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)</code></li>
@@ -160,10 +160,10 @@ msb exec --no-tty msw-trim-repro-b-sb -- fstrim -v /mnt/trimtest</pre>
 </ol>
 <p>Use 2 GiB, not 1 GiB, so the final group is a non-sparse-super group and the regression exercises the exact 514-block metadata boundary seen here. This test fails on v0.6.8's pinned runtime and passes only when the runtime discard operation preserves logical size.</p>
 
-<h2>10. Disposition of the recent MSW defensive correction</h2>
+<h2>10. Disposition of the recent Silo defensive correction</h2>
 <p><strong>Replace the fresh-volume extension behavior; retain fail-closed geometry validation.</strong></p>
 <ul>
-<li><strong>Remove</strong> the strict fresh-only conditional <code>ftruncate</code> extension once MSW requires a MicroSandbox build containing the imago fix. The formatter already creates exact length, and post-create extension does not protect against a later FITRIM truncation.</li>
+<li><strong>Remove</strong> the strict fresh-only conditional <code>ftruncate</code> extension once Silo requires a MicroSandbox build containing the imago fix. The formatter already creates exact length, and post-create extension does not protect against a later FITRIM truncation.</li>
 <li><strong>Retain</strong> read-only raw/ext4 geometry validation before attach and on later starts. It detected this corruption and prevents mounting an internally inconsistent image. Detection is not speculative repair.</li>
 <li><strong>Do not</strong> extend existing affected images automatically. Their recovery remains a separate offline data-integrity decision.</li>
 <li><strong>Until a fixed runtime is installed,</strong> the current fresh correction is not a durable solution. The actual faulty operation remains reachable after attach.</li>

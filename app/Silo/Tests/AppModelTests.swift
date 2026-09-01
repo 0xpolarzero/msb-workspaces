@@ -5,11 +5,11 @@ import UserNotifications
 @testable import Silo
 
 @MainActor
-private final class RecordingHostService: MSWHostServiceControlling {
-    let status: MSWHostServiceStatus = .notRegistered
+private final class RecordingHostService: SiloHostServiceControlling {
+    let status: SiloHostServiceStatus = .notRegistered
     private(set) var registerInvocationCount = 0
 
-    func registerIfNeeded() throws -> MSWHostServiceStatus {
+    func registerIfNeeded() throws -> SiloHostServiceStatus {
         registerInvocationCount += 1
         return .notRegistered
     }
@@ -17,11 +17,11 @@ private final class RecordingHostService: MSWHostServiceControlling {
     func openApprovalSettings() {}
 }
 @MainActor
-private final class EnabledHostService: MSWHostServiceControlling {
-    let status: MSWHostServiceStatus = .enabled
+private final class EnabledHostService: SiloHostServiceControlling {
+    let status: SiloHostServiceStatus = .enabled
     private(set) var registerInvocationCount = 0
 
-    func registerIfNeeded() throws -> MSWHostServiceStatus {
+    func registerIfNeeded() throws -> SiloHostServiceStatus {
         registerInvocationCount += 1
         return .enabled
     }
@@ -32,29 +32,29 @@ private final class EnabledHostService: MSWHostServiceControlling {
 private actor RecordingHostAgent: SiloHostAgentControlling {
     private(set) var ensureAliasInvocationCount = 0
     private(set) var installRecordsInvocationCount = 0
-    private(set) var inspectRequests: [[MSWWorkspaceNetworkRecord]] = []
+    private(set) var inspectRequests: [[SiloWorkspaceNetworkRecord]] = []
 
-    func inspect(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func inspect(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         inspectRequests.append(records)
         return snapshot(records: records)
     }
 
-    func ensureFixedLoopbackAliases(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func ensureFixedLoopbackAliases(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         ensureAliasInvocationCount += 1
         return snapshot(records: records)
     }
 
-    func installFixedHostRecords(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func installFixedHostRecords(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         installRecordsInvocationCount += 1
         return snapshot(records: records)
     }
 
-    func uninstall(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func uninstall(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         snapshot(records: records)
     }
 
-    private func snapshot(records: [MSWWorkspaceNetworkRecord]) -> MSWHostRecordSnapshot {
-        MSWHostRecordSnapshot(
+    private func snapshot(records: [SiloWorkspaceNetworkRecord]) -> SiloHostRecordSnapshot {
+        SiloHostRecordSnapshot(
             fixedAliases: records.map(\.address),
             hostsBlockInstalled: true,
             launchDaemonRegistered: true
@@ -62,22 +62,22 @@ private actor RecordingHostAgent: SiloHostAgentControlling {
     }
 }
 
-private struct AvailableUserIntegration: MSWUserIntegrationControlling {
+private struct AvailableUserIntegration: SiloUserIntegrationControlling {
     func configureUserIntegrationIfAvailable() async throws {}
 }
 
 private actor CommandRecorder {
-    private(set) var command: MSWCommand?
+    private(set) var command: SiloCommand?
 
-    func record(_ command: MSWCommand) {
+    func record(_ command: SiloCommand) {
         self.command = command
     }
 }
 
-private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
+private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"siloVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
 private func writeBackupExecutable(temporary: URL, response: String) throws -> URL {
-    let executable = temporary.appendingPathComponent("msw")
+    let executable = temporary.appendingPathComponent("silo")
     let script = """
     #!/bin/sh
     if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -96,14 +96,14 @@ private func writeBackupExecutable(temporary: URL, response: String) throws -> U
 @MainActor
 private func makeBackupModel(temporary: URL, response: String) throws -> AppModel {
     let executable = try writeBackupExecutable(temporary: temporary, response: response)
-    let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+    let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
         homeDirectory: temporary,
-        testMSWExecutable: executable
+        testSiloExecutable: executable
     )))
-    return AppModel(client: client, diagnostics: MSWDiagnostics(client: client))
+    return AppModel(client: client, diagnostics: SiloDiagnostics(client: client))
 }
 
-private final class ControllableNotificationCenter: MSWNotificationCenterControlling {
+private final class ControllableNotificationCenter: SiloNotificationCenterControlling {
     var status: UNAuthorizationStatus
     var authorizationResult: Result<Bool, Error>
     var shouldFailDelivery: Bool
@@ -138,8 +138,8 @@ private final class ControllableNotificationCenter: MSWNotificationCenterControl
 }
 
 @MainActor
-private func makeNotificationEvent() -> MSWNotificationEvent {
-    MSWNotificationEvent(
+private func makeNotificationEvent() -> SiloNotificationEvent {
+    SiloNotificationEvent(
         id: UUID(),
         kind: .operationFailure,
         createdAt: Date(),
@@ -253,7 +253,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testBackupPreviewFirstRunShowsAllocatedSourceWithoutArchiveEstimate() async throws {
-        let destination = URL(fileURLWithPath: "/tmp/msw-preview-fixture", isDirectory: true)
+        let destination = URL(fileURLWithPath: "/tmp/silo-preview-fixture", isDirectory: true)
         let model = AppModel()
         model.installBackupUITestFixture(sourceAllocatedBytes: 16_000_000_000, destination: destination)
 
@@ -266,8 +266,8 @@ final class AppModelTests: XCTestCase {
     }
 
     func testBackupPreviewHistoricalEstimatePreservesConservativeRangeAndProvenance() async throws {
-        let destination = URL(fileURLWithPath: "/tmp/msw-preview-history", isDirectory: true)
-        let estimate = MSWBackupEstimate(
+        let destination = URL(fileURLWithPath: "/tmp/silo-preview-history", isDirectory: true)
+        let estimate = SiloBackupEstimate(
             lowerBytes: 3_000_000_000, upperBytes: 6_000_000_000, basisRatio: 0.25,
             changedSourceRatio: 1.2, provenance: "same managed scope, prior completed backup"
         )
@@ -286,7 +286,7 @@ final class AppModelTests: XCTestCase {
 
     func testBackupPreviewUsesResolvedInstalledShippedCLIAndReturnsEstimatedSourceBytes() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-backup-preview-integration-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-backup-preview-integration-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -295,17 +295,17 @@ final class AppModelTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("bin/msw")
+            .appendingPathComponent("bin/silo")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: sourceExecutable.path))
 
-        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
+        let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
         let toolDirectory = temporary.appendingPathComponent(".local/bin", isDirectory: true)
         let managedDirectory = temporary.appendingPathComponent(".microsandbox", isDirectory: true)
         let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
         for directory in [configDirectory, toolDirectory, managedDirectory, destination] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        let installedExecutable = toolDirectory.appendingPathComponent("msw")
+        let installedExecutable = toolDirectory.appendingPathComponent("silo")
         try FileManager.default.copyItem(at: sourceExecutable, to: installedExecutable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedExecutable.path)
         try Data(repeating: 0x41, count: 4_096).write(
@@ -316,21 +316,21 @@ final class AppModelTests: XCTestCase {
         try Data("#!/bin/sh\ncase \"$1\" in\n  -e) exit 0 ;;\n  -r) printf 'dev\\n' ;;\n  *) exit 1 ;;\nesac\n".utf8).write(to: jq)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: jq.path)
         let config = """
-        MSW_VERSION="3.1.0"
-        MSW_MSB_BIN="/usr/bin/false"
-        MSW_JQ_BIN="\(jq.path)"
-        MSW_GITHUB_MODE="local"
+        SILO_VERSION="3.1.0"
+        SILO_MSB_BIN="/usr/bin/false"
+        SILO_JQ_BIN="\(jq.path)"
+        SILO_GITHUB_MODE="local"
         """
         try Data(config.utf8).write(to: configDirectory.appendingPathComponent("config.sh"))
         let workspaces = #"{"schemaVersion":1,"workspaces":[{"name":"dev","cpu":4,"cpuCeiling":4,"memoryGiB":16,"memoryCeilingGiB":16,"workspaceStorageGiB":60,"runtimeStorageGiB":60}]}"#
         try Data(workspaces.utf8).write(to: configDirectory.appendingPathComponent("workspaces.json"))
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: installedExecutable
+            testSiloExecutable: installedExecutable
         ))
-        let client = MSWClient(runner: runner)
-        let model = AppModel(diagnostics: MSWDiagnostics(client: client))
+        let client = SiloClient(runner: runner)
+        let model = AppModel(diagnostics: SiloDiagnostics(client: client))
 
         let returnedPreview = await model.prepareBackup(to: destination)
         let preview = try XCTUnwrap(returnedPreview)
@@ -346,32 +346,32 @@ final class AppModelTests: XCTestCase {
 
     func testBackupPreviewDecodesCurrentlyResolvedHostCLIWhenAvailable() async throws {
         let destination = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-backup-preview-host-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-backup-preview-host-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: destination) }
 
-        let client = MSWClient(runner: MSWCommandRunner())
+        let client = SiloClient(runner: SiloCommandRunner())
         guard let handshake = try? await client.handshake().result,
               handshake.configurationAvailable,
               handshake.runtimeAvailable,
               handshake.capabilities.isComplete else {
-            throw XCTSkip("No configured backup-preview-capable host MSW installation is currently resolved.")
+            throw XCTSkip("No configured backup-preview-capable host Silo installation is currently resolved.")
         }
-        let model = AppModel(diagnostics: MSWDiagnostics(client: client))
+        let model = AppModel(diagnostics: SiloDiagnostics(client: client))
 
         let returnedPreview = await model.prepareBackup(to: destination)
         let executableURL = await client.executableURL()
         let preview = try XCTUnwrap(returnedPreview)
         let resolvedExecutable = try XCTUnwrap(executableURL)
 
-        XCTAssertEqual(resolvedExecutable.lastPathComponent, "msw")
+        XCTAssertEqual(resolvedExecutable.lastPathComponent, "silo")
         XCTAssertEqual(preview.destination, destination)
         XCTAssertGreaterThan(preview.sourceAllocatedBytes, 0)
         XCTAssertNil(model.detailError)
     }
 
     func testBackupFixtureTracksIndependentConcurrentOperationsAndAdvancingProgress() throws {
-        let destination = URL(fileURLWithPath: "/tmp/msw-backup-progress", isDirectory: true)
+        let destination = URL(fileURLWithPath: "/tmp/silo-backup-progress", isDirectory: true)
         let model = AppModel()
         model.installConcurrentBackupReattachmentFixture(destination: destination)
         let initial = try XCTUnwrap(model.backupOperations.first(where: { $0.state == .running }))
@@ -386,7 +386,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testBackupFixtureModelsFullPartialAndFailureResultsIndependently() throws {
-        let destination = URL(fileURLWithPath: "/tmp/msw-backup-result-fixtures", isDirectory: true)
+        let destination = URL(fileURLWithPath: "/tmp/silo-backup-result-fixtures", isDirectory: true)
 
         for scenario in [AppModel.BackupUITestResultScenario.success, .partial, .failure] {
             let model = AppModel()
@@ -406,7 +406,7 @@ final class AppModelTests: XCTestCase {
             case .failure:
                 XCTAssertEqual(operation.state, .failed)
                 XCTAssertEqual(operation.phase, .failed)
-                XCTAssertEqual(operation.error?.code, "MSW_BACKUP_FAILED")
+                XCTAssertEqual(operation.error?.code, "SILO_BACKUP_FAILED")
                 XCTAssertNil(operation.result)
             case .running:
                 XCTFail("The result fixture test does not include the running scenario.")
@@ -416,7 +416,7 @@ final class AppModelTests: XCTestCase {
 
     func testBackupListReattachesPersistedRunningAndCompletedOperationsAfterModelRelaunch() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-backup-reattach-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-backup-reattach-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
@@ -427,7 +427,7 @@ final class AppModelTests: XCTestCase {
         """#
             .replacingOccurrences(of: "DESTINATION", with: destination.path)
             .replacingOccurrences(of: "ARCHIVE", with: archive.path)
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -440,8 +440,8 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let diagnostics = MSWDiagnostics(client: MSWClient(runner: MSWCommandRunner(configuration: .init(
-            homeDirectory: temporary, testMSWExecutable: executable
+        let diagnostics = SiloDiagnostics(client: SiloClient(runner: SiloCommandRunner(configuration: .init(
+            homeDirectory: temporary, testSiloExecutable: executable
         ))))
 
         let relaunchedModel = AppModel(diagnostics: diagnostics)
@@ -458,7 +458,7 @@ final class AppModelTests: XCTestCase {
 
     func testBackupListRejectsMalformedCompletedResultWithoutRuntimeRepair() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-backup-list-old-result-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-backup-list-old-result-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
@@ -469,7 +469,7 @@ final class AppModelTests: XCTestCase {
         """#
             .replacingOccurrences(of: "DESTINATION", with: destination.path)
             .replacingOccurrences(of: "ARCHIVE", with: archive.path)
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -482,8 +482,8 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: MSWCommandRunner(
-            configuration: .init(homeDirectory: temporary, testMSWExecutable: executable)
+        let model = AppModel(diagnostics: SiloDiagnostics(client: SiloClient(runner: SiloCommandRunner(
+            configuration: .init(homeDirectory: temporary, testSiloExecutable: executable)
         ))))
 
         await model.refreshBackupOperations()
@@ -491,16 +491,16 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(model.backupOperations.isEmpty)
         XCTAssertFalse(model.runtimeRepairRequired)
         XCTAssertNil(model.detailError)
-        XCTAssertEqual(model.backupError, "MSW returned malformed backup data for backup-list.")
+        XCTAssertEqual(model.backupError, "Silo returned malformed backup data for backup-list.")
     }
 
     func testBackupListCorruptRecordDoesNotMasqueradeAsRuntimeRepair() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-backup-list-protocol-rejection-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-backup-list-protocol-rejection-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-        let executable = temporary.appendingPathComponent("msw")
-        let rejection = #"{"schemaVersion":1,"requestId":"backup-list-rejected","ok":false,"command":"backup-list","observedAt":null,"result":null,"warnings":[],"error":{"code":"MSW_BACKUP_RECORD_INVALID","message":"A durable backup operation record is corrupt.","recovery":"Copy the diagnostic details and inspect the record before retrying.","workspace":null,"retryable":false}}"#
+        let executable = temporary.appendingPathComponent("silo")
+        let rejection = #"{"schemaVersion":1,"requestId":"backup-list-rejected","ok":false,"command":"backup-list","observedAt":null,"result":null,"warnings":[],"error":{"code":"SILO_BACKUP_RECORD_INVALID","message":"A durable backup operation record is corrupt.","recovery":"Copy the diagnostic details and inspect the record before retrying.","workspace":null,"retryable":false}}"#
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -514,8 +514,8 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let model = AppModel(diagnostics: MSWDiagnostics(client: MSWClient(runner: MSWCommandRunner(
-            configuration: .init(homeDirectory: temporary, testMSWExecutable: executable)
+        let model = AppModel(diagnostics: SiloDiagnostics(client: SiloClient(runner: SiloCommandRunner(
+            configuration: .init(homeDirectory: temporary, testSiloExecutable: executable)
         ))))
 
         await model.refreshBackupOperations()
@@ -545,17 +545,17 @@ final class AppModelTests: XCTestCase {
             "GitHub request timed out."
         )
         XCTAssertTrue(
-            RuntimeRepairIssueClassifier.isRepairRelated(MSWClientError.invalidExecutable)
+            RuntimeRepairIssueClassifier.isRepairRelated(SiloClientError.invalidExecutable)
         )
         XCTAssertFalse(
             RuntimeRepairIssueClassifier.isRepairRelated(
-                MSWClientError.timedOut(command: "github-status")
+                SiloClientError.timedOut(command: "github-status")
             )
         )
         XCTAssertFalse(
             RuntimeRepairIssueClassifier.isRepairRelated(
-                MSWClientError.protocolFailure(MSWProtocolError(
-                    code: "MSW_WORKSPACE_DISK_INVALID",
+                SiloClientError.protocolFailure(SiloProtocolError(
+                    code: "SILO_WORKSPACE_DISK_INVALID",
                     message: "The workspace disk could not be mounted as ext4.",
                     recovery: "Inspect the named volume.",
                     workspace: "dev",
@@ -573,15 +573,15 @@ final class AppModelTests: XCTestCase {
 
     func testRuntimeRepairStateUsesExactHandshakeAndDedicatedRetryWithoutBackupProbe() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-runtime-repair-state-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-repair-state-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let handshakeURL = temporary.appendingPathComponent("handshake.json")
         let invocationLog = temporary.appendingPathComponent("invocations.log")
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let incompatibleHandshake = protocolCompatibleHandshake.replacingOccurrences(
-            of: #""protocolVersion":1,"mswVersion""#,
-            with: #""protocolVersion":2,"mswVersion""#
+            of: #""protocolVersion":1,"siloVersion""#,
+            with: #""protocolVersion":2,"siloVersion""#
         )
         let script = """
         #!/bin/sh
@@ -596,9 +596,9 @@ final class AppModelTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         try Data(protocolCompatibleHandshake.utf8).write(to: handshakeURL)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client)
 
@@ -621,10 +621,10 @@ final class AppModelTests: XCTestCase {
 
     func testCancelledRuntimeNegotiationPreservesPublishedRepairState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-runtime-repair-cancellation-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-repair-cancellation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         /bin/sleep 2
@@ -633,9 +633,9 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client, initialRuntimeRepairRequired: true)
         let refresh = Task { await model.refreshRuntimeRepairState(forceRefresh: true) }
@@ -651,10 +651,10 @@ final class AppModelTests: XCTestCase {
 
     func testFailedOperationRefreshesRuntimeRepairStateWhenCachedExecutableDisappears() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-runtime-repair-operation-failure-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-repair-operation-failure-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -666,9 +666,9 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client)
         await model.refreshRuntimeRepairState(forceRefresh: true)
@@ -688,12 +688,12 @@ final class AppModelTests: XCTestCase {
 
     func testConcurrentExactHandshakeProbeDoesNotCorruptBackupPreviewState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-runtime-repair-operation-race-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-repair-operation-race-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let firstHandshakeStarted = temporary.appendingPathComponent("first-handshake-started")
         let releaseFirstHandshake = temporary.appendingPathComponent("release-first-handshake")
         let previewResponse = #"{"schemaVersion":1,"requestId":"preview","ok":true,"command":"backup-preview","observedAt":"2026-08-26T12:00:00Z","result":{"destination":"DESTINATION","sourceAllocatedBytes":1024,"archiveEstimate":null,"runningWorkspaces":[]},"warnings":[],"error":null}"#
@@ -714,11 +714,11 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
-        let model = AppModel(client: client, diagnostics: MSWDiagnostics(client: client))
+        let model = AppModel(client: client, diagnostics: SiloDiagnostics(client: client))
         let staleProbe = Task { await model.refreshRuntimeRepairState(forceRefresh: true) }
         for _ in 0..<100 where !FileManager.default.fileExists(atPath: firstHandshakeStarted.path) {
             try await Task.sleep(for: .milliseconds(10))
@@ -914,7 +914,7 @@ final class AppModelTests: XCTestCase {
 
     func testSystemHealthUsesSetupPreflightChecks() async throws {
         let model = AppModel()
-        let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")
+        let coordinator = SiloBootstrapUITestStub(failureWorkspace: "dev")
         model.configureSystemHealthChecks(using: coordinator)
 
         model.runSystemHealthChecks()
@@ -932,11 +932,11 @@ final class AppModelTests: XCTestCase {
     }
 
     func testPortsProtocolDecodesPerWorkspaceListeningState() throws {
-        let payload = Data(#"{"schemaVersion":1,"requestId":"ports","ok":true,"command":"ports","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"all","workspaces":[{"workspace":"dev","lifecycle":"Running","host":"dev.msw.test","listeningState":"known","ports":[{"port":"3000","configured":true,"listening":true},{"port":"5173","configured":true,"listening":false}]},{"workspace":"personal","lifecycle":"Unknown","host":"personal.msw.test","listeningState":"unknown","ports":[{"port":"3000","configured":true,"listening":null}]}],"freshness":"fresh"},"warnings":[],"error":null}"#.utf8)
+        let payload = Data(#"{"schemaVersion":1,"requestId":"ports","ok":true,"command":"ports","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"all","workspaces":[{"workspace":"dev","lifecycle":"Running","host":"dev.silo.test","listeningState":"known","ports":[{"port":"3000","configured":true,"listening":true},{"port":"5173","configured":true,"listening":false}]},{"workspace":"personal","lifecycle":"Unknown","host":"personal.silo.test","listeningState":"unknown","ports":[{"port":"3000","configured":true,"listening":null}]}],"freshness":"fresh"},"warnings":[],"error":null}"#.utf8)
 
-        let envelope = try MSWProtocolDecoder.decodeEnvelope(
+        let envelope = try SiloProtocolDecoder.decodeEnvelope(
             payload,
-            as: MSWPortsResponse.self,
+            as: SiloPortsResponse.self,
             expectedCommand: "ports"
         )
         let result = try XCTUnwrap(envelope.result)
@@ -949,12 +949,12 @@ final class AppModelTests: XCTestCase {
 
     func testUnavailableLogsBecomeQuietPerWorkspaceCapabilityState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-logs-capability-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-logs-capability-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let failure = #"{"schemaVersion":1,"requestId":"logs-failed","ok":false,"command":"logs","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_LOGS_UNAVAILABLE","message":"logs unavailable","recovery":"Repair the runtime.","workspace":"dev","retryable":true}}"#
-        let executable = temporary.appendingPathComponent("msw")
+        let failure = #"{"schemaVersion":1,"requestId":"logs-failed","ok":false,"command":"logs","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_LOGS_UNAVAILABLE","message":"logs unavailable","recovery":"Repair the runtime.","workspace":"dev","retryable":true}}"#
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -969,13 +969,13 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(
             client: client,
-            operationService: MSWOperationService(client: client)
+            operationService: SiloOperationService(client: client)
         )
         let workspaces: [Workspace.ID] = [.dev, .personal]
 
@@ -997,7 +997,7 @@ final class AppModelTests: XCTestCase {
 
     func testLogStreamPreservesPerLineObservedAt() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-logs-timestamps-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-logs-timestamps-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -1007,7 +1007,7 @@ final class AppModelTests: XCTestCase {
         {"schemaVersion":1,"type":"log","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:01.125Z","source":"stderr","sessionId":18,"encoding":"utf-8","message":"repeated message","safeForDisplay":true}
         {"schemaVersion":1,"type":"stream-end","requestId":"logs-timestamps","workspace":"dev","observedAt":"2026-08-25T18:10:02Z","safeForDisplay":true}
         """
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -1023,9 +1023,9 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let response = try await client.logs(workspace: "dev")
 
@@ -1140,25 +1140,25 @@ final class AppModelTests: XCTestCase {
 
     func testTerminalLauncherBuildsSelfDeletingCommandScript() {
         let script = TerminalLauncher.commandScript(
-            executableURL: URL(fileURLWithPath: "/tmp/Silo's/msw"),
+            executableURL: URL(fileURLWithPath: "/tmp/Silo's/silo"),
             workspaceID: "dev",
             executableSearchPath: "/Users/test/.local/bin:/usr/bin:/bin"
         )
 
         XCTAssertTrue(script.contains("rm -f -- \"$script_path\""))
-        XCTAssertTrue(script.contains(#"exec '/tmp/Silo'"'"'s/msw' 'dev'"#))
+        XCTAssertTrue(script.contains(#"exec '/tmp/Silo'"'"'s/silo' 'dev'"#))
         XCTAssertTrue(script.contains("export PATH='/Users/test/.local/bin:/usr/bin:/bin'"))
     }
 
     func testTerminalLauncherBuildsNativeGhosttyTabAutomation() {
         let script = TerminalLauncher.ghosttyScript(
-            executableURL: URL(fileURLWithPath: "/usr/local/bin/msw"),
+            executableURL: URL(fileURLWithPath: "/usr/local/bin/silo"),
             workspaceID: "dev",
             executableSearchPath: "/Users/test/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
         )
 
         XCTAssertTrue(script.contains("new tab in front window with configuration cfg"))
-        XCTAssertTrue(script.contains("set commandText to \"'/usr/local/bin/msw' 'dev'\""))
+        XCTAssertTrue(script.contains("set commandText to \"'/usr/local/bin/silo' 'dev'\""))
         XCTAssertTrue(script.contains(
             "set environment variables of cfg to {\"PATH=/Users/test/.local/bin:/opt/homebrew/bin:/usr/bin:/bin\"}"
         ))
@@ -1388,7 +1388,7 @@ final class AppModelTests: XCTestCase {
         do {
             try await SourceEditorLauncher().open(
                 application: application,
-                target: MSWEditorTarget(workspace: "dev", path: ".", host: "dev.msb")
+                target: SiloEditorTarget(workspace: "dev", path: ".", host: "dev.msb")
             )
             XCTFail("An unverified editor must not be opened.")
         } catch {
@@ -1418,7 +1418,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testEditorTargetEncodesExactFolderPathForVerifiedZedAdapter() throws {
-        let target = MSWEditorTarget(
+        let target = SiloEditorTarget(
             workspace: "dev",
             path: "Projects/Demo #1",
             host: "dev.msb"
@@ -1434,7 +1434,7 @@ final class AppModelTests: XCTestCase {
         )
 
         for path in ["../escape", "/workspace", "safe//nested", "bad\u{7f}path"] {
-            let unsafe = MSWEditorTarget(workspace: "dev", path: path, host: "dev.msb")
+            let unsafe = SiloEditorTarget(workspace: "dev", path: path, host: "dev.msb")
             XCTAssertFalse(unsafe.isValid)
             XCTAssertNil(unsafe.remoteURL)
             XCTAssertNil(unsafe.zedRemoteURL)
@@ -1443,11 +1443,11 @@ final class AppModelTests: XCTestCase {
 
     func testDirectoryClientRejectsUnsafeInputsAndMalformedResponsePaths() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-directory-client-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-directory-client-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let malformed = #"{"schemaVersion":1,"requestId":"directories","ok":true,"command":"directory-list","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":".","query":null,"entries":[{"name":"escape","path":"../escape","kind":"directory"}],"truncated":false},"warnings":[],"error":null}"#
         let outOfScope = #"{"schemaVersion":1,"requestId":"directories","ok":true,"command":"directory-list","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":"Projects","query":null,"entries":[{"name":"Other","path":"Other","kind":"directory"}],"truncated":false},"warnings":[],"error":null}"#
         let duplicate = #"{"schemaVersion":1,"requestId":"directories","ok":true,"command":"directory-list","observedAt":"2026-08-08T00:00:00Z","result":{"workspace":"dev","path":"Duplicate","query":null,"entries":[{"name":"Child","path":"Duplicate/Child","kind":"directory"},{"name":"Child","path":"Duplicate/Child","kind":"directory"}],"truncated":false},"warnings":[],"error":null}"#
@@ -1472,55 +1472,55 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
 
         do {
             _ = try await client.directories(workspace: "dev", path: "../escape")
-            XCTFail("Traversal must be rejected before invoking MSW.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+            XCTFail("Traversal must be rejected before invoking Silo.")
+        } catch { XCTAssertEqual(error as? SiloClientError, .invalidArguments) }
         do {
             _ = try await client.directories(workspace: "dev", path: String(repeating: "x", count: 1_025))
-            XCTFail("Oversized paths must be rejected before invoking MSW.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+            XCTFail("Oversized paths must be rejected before invoking Silo.")
+        } catch { XCTAssertEqual(error as? SiloClientError, .invalidArguments) }
         do {
             _ = try await client.directories(workspace: "dev", query: "bad\u{1b}query")
-            XCTFail("Control characters in search queries must be rejected before invoking MSW.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+            XCTFail("Control characters in search queries must be rejected before invoking Silo.")
+        } catch { XCTAssertEqual(error as? SiloClientError, .invalidArguments) }
         do {
             _ = try await client.directories(workspace: "dev", limit: 201)
             XCTFail("Unbounded directory limits must be rejected.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .invalidArguments) }
+        } catch { XCTAssertEqual(error as? SiloClientError, .invalidArguments) }
         do {
             _ = try await client.directories(workspace: "dev")
             XCTFail("Malformed returned paths must be rejected.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "directory-list")) }
+        } catch { XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "directory-list")) }
         do {
             _ = try await client.directories(workspace: "dev", path: "Projects")
             XCTFail("Nonrecursive listings must not return folders outside their requested scope.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "directory-list")) }
+        } catch { XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "directory-list")) }
         do {
             _ = try await client.directories(workspace: "dev", path: "Duplicate")
             XCTFail("Duplicate directory identities must be rejected before SwiftUI consumes them.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "directory-list")) }
+        } catch { XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "directory-list")) }
         do {
             _ = try await client.editorTarget(workspace: "dev")
             XCTFail("A target for another workspace must be rejected.")
-        } catch { XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "editor-target")) }
+        } catch { XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "editor-target")) }
     }
 
     // MARK: - Local-mode init never builds Connect dependencies (blocker 7)
 
     func testAppDelegateLocalModeConstructsNoConnectDependencies() throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-local-init-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-local-init-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         // No trusted scope attestation => local mode.
-        let configuration = MSWConnectConfiguration()
+        let configuration = SiloConnectConfiguration()
         XCTAssertFalse(configuration.hasTrustedScopeAttestation)
         let policyStore = GitHubPolicyStore(policyURL: temporary.appendingPathComponent("github-policy.json"))
 
@@ -1537,14 +1537,14 @@ final class AppModelTests: XCTestCase {
 
     func testAppDelegateLocalModeDoesNotReadConnectStores() throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-local-no-connect-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-local-no-connect-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         // A poisoned credentials.json at the real location must not be
         // touched by local init. The AppDelegate seam takes an explicit
         // policy store, so no Connect metadata path is ever consulted.
-        let configuration = MSWConnectConfiguration()
+        let configuration = SiloConnectConfiguration()
         let delegate = AppDelegate(
             connectConfiguration: configuration,
             policyStore: GitHubPolicyStore(policyURL: temporary.appendingPathComponent("github-policy.json"))
@@ -1556,7 +1556,7 @@ final class AppModelTests: XCTestCase {
 
     func testAppDelegateConnectModeStillBuildsConnectDependencies() throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-init-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-init-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -1588,7 +1588,7 @@ final class AppModelTests: XCTestCase {
 
     func testSetupWindowControllerLocalModeNeverCreatesFallbackBroker() {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-fallback-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-fallback-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
 
         // Local mode must drop even a passed-in coordinator: never pass or
@@ -1723,32 +1723,32 @@ final class AppModelTests: XCTestCase {
 
     func testNotificationCategoriesUseApprovedLabelsAndMapEveryEventOnce() {
         XCTAssertEqual(
-            MSWNotificationCategory.allCases.map(\.title),
+            SiloNotificationCategory.allCases.map(\.title),
             ["Workspace health", "Action failures", "Backup failures"]
         )
         XCTAssertEqual(
-            MSWNotificationCategory.allCases.map(\.detail),
+            SiloNotificationCategory.allCases.map(\.detail),
             [
                 "Alerts when a workspace remains unavailable, stops unexpectedly, or is quarantined.",
                 "Alerts when a workspace action fails.",
                 "Alerts when a requested backup does not complete.",
             ]
         )
-        XCTAssertEqual(MSWNotificationCategory.category(for: .sustainedUnavailability), .workspaceHealth)
-        XCTAssertEqual(MSWNotificationCategory.category(for: .quarantine), .workspaceHealth)
-        XCTAssertEqual(MSWNotificationCategory.category(for: .lifecycleLoss), .workspaceHealth)
-        XCTAssertEqual(MSWNotificationCategory.category(for: .operationFailure), .actionFailures)
-        XCTAssertEqual(MSWNotificationCategory.category(for: .backupFailure), .backupFailures)
+        XCTAssertEqual(SiloNotificationCategory.category(for: .sustainedUnavailability), .workspaceHealth)
+        XCTAssertEqual(SiloNotificationCategory.category(for: .quarantine), .workspaceHealth)
+        XCTAssertEqual(SiloNotificationCategory.category(for: .lifecycleLoss), .workspaceHealth)
+        XCTAssertEqual(SiloNotificationCategory.category(for: .operationFailure), .actionFailures)
+        XCTAssertEqual(SiloNotificationCategory.category(for: .backupFailure), .backupFailures)
     }
 
     func testClientBackedColdLaunchAndFailedObservationsRemainTruthful() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-cold-launch-truth-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-cold-launch-truth-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let failure = #"{"schemaVersion":1,"requestId":"state-failed","ok":false,"command":"state","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_RUNTIME_UNAVAILABLE","message":"runtime unavailable","recovery":"Repair MSW and retry.","workspace":null,"retryable":true}}"#
-        let executable = temporary.appendingPathComponent("msw")
+        let failure = #"{"schemaVersion":1,"requestId":"state-failed","ok":false,"command":"state","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_RUNTIME_UNAVAILABLE","message":"runtime unavailable","recovery":"Repair Silo and retry.","workspace":null,"retryable":true}}"#
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -1763,9 +1763,9 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client)
 
@@ -1774,8 +1774,8 @@ final class AppModelTests: XCTestCase {
 
         await model.refreshRemote()
         XCTAssertEqual(model.aggregateText, "Unavailable")
-        XCTAssertEqual(model.lastRecovery?.code, "MSW_RUNTIME_UNAVAILABLE")
-        XCTAssertEqual(model.lastRecovery?.recovery, "Repair MSW and retry.")
+        XCTAssertEqual(model.lastRecovery?.code, "SILO_RUNTIME_UNAVAILABLE")
+        XCTAssertEqual(model.lastRecovery?.recovery, "Repair Silo and retry.")
         XCTAssertTrue(model.notificationEvents.isEmpty)
 
         await model.refreshRemote()
@@ -1786,7 +1786,7 @@ final class AppModelTests: XCTestCase {
 
     func testFirstAuthoritativeObservationDoesNotNotifyForExistingQuarantine() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-notification-baseline-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-notification-baseline-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -1794,7 +1794,7 @@ final class AppModelTests: XCTestCase {
         encoder.dateEncodingStrategy = .iso8601
         let stateURL = temporary.appendingPathComponent("state.json")
         try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .quarantined)).write(to: stateURL)
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -1808,9 +1808,9 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client)
 
@@ -1831,7 +1831,7 @@ final class AppModelTests: XCTestCase {
 
     func testFailedRefreshPreservesLastKnownSnapshotAndServerCapabilities() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-last-known-state-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-last-known-state-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -1840,8 +1840,8 @@ final class AppModelTests: XCTestCase {
         let stateURL = temporary.appendingPathComponent("state.json")
         try encoder.encode(makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .clear)).write(to: stateURL)
         let failureMarker = temporary.appendingPathComponent("fail")
-        let executable = temporary.appendingPathComponent("msw")
-        let failure = #"{"schemaVersion":1,"requestId":"state-failed","ok":false,"command":"state","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_STATE_UNAVAILABLE","message":"state unavailable","recovery":"Run diagnostics.","workspace":"dev","retryable":true}}"#
+        let executable = temporary.appendingPathComponent("silo")
+        let failure = #"{"schemaVersion":1,"requestId":"state-failed","ok":false,"command":"state","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_STATE_UNAVAILABLE","message":"state unavailable","recovery":"Run diagnostics.","workspace":"dev","retryable":true}}"#
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -1859,9 +1859,9 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client)
         await model.refreshRemote()
@@ -1891,7 +1891,7 @@ final class AppModelTests: XCTestCase {
 
     func testStartupStartsOnlySelectedWorkspaceAfterFreshObservation() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-startup-workspaces-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-startup-workspaces-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -1912,22 +1912,22 @@ final class AppModelTests: XCTestCase {
             devQuarantine: .clear,
             observedAt: Date().addingTimeInterval(1)
         )).write(to: runningURL)
-        try encoder.encode(MSWEnvelope(
+        try encoder.encode(SiloEnvelope(
             schemaVersion: 1, requestId: "startup-plan", ok: true, command: "plan", observedAt: Date(),
-            result: MSWLifecyclePlan(
+            result: SiloLifecyclePlan(
                 planId: "startup-plan", action: "start", workspace: "dev",
                 expiresAt: Date().addingTimeInterval(300), confirmationPhrase: "START dev",
                 effects: "Starting dev."
             )
         )).write(to: planURL)
-        try encoder.encode(MSWEnvelope(
+        try encoder.encode(SiloEnvelope(
             schemaVersion: 1, requestId: "startup-apply", ok: true, command: "apply", observedAt: Date(),
-            result: MSWApplyResult(
+            result: SiloApplyResult(
                 workspace: "dev", action: "start", reconciled: true, outcome: "Start applied."
             )
         )).write(to: applyURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         printf '%s %s %s\n' "$1" "$2" "$3" >> "\(commandLog.path)"
@@ -1954,13 +1954,13 @@ final class AppModelTests: XCTestCase {
             ofItemAtPath: executable.path
         )
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(
             client: client,
-            operationCoordinator: MSWOperationCoordinator(client: client)
+            operationCoordinator: SiloOperationCoordinator(client: client)
         )
 
         await model.startWorkspacesAtLaunch([.dev])
@@ -1978,7 +1978,7 @@ final class AppModelTests: XCTestCase {
 
     func testLifecycleOperationStaysVerifyingUntilFreshMatchingObservation() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-operation-verification-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-operation-verification-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -2000,19 +2000,19 @@ final class AppModelTests: XCTestCase {
             devQuarantine: .clear,
             observedAt: baseline.addingTimeInterval(2)
         )).write(to: runningURL)
-        try encoder.encode(MSWEnvelope(
+        try encoder.encode(SiloEnvelope(
             schemaVersion: 1, requestId: "plan-start", ok: true, command: "plan", observedAt: Date(),
-            result: MSWLifecyclePlan(
+            result: SiloLifecyclePlan(
                 planId: "plan-start", action: "start", workspace: "dev",
                 expiresAt: Date().addingTimeInterval(300), confirmationPhrase: "START dev", effects: "Starting dev."
             )
         )).write(to: planURL)
-        try encoder.encode(MSWEnvelope(
+        try encoder.encode(SiloEnvelope(
             schemaVersion: 1, requestId: "apply-start", ok: true, command: "apply", observedAt: baseline,
-            result: MSWApplyResult(workspace: "dev", action: "start", reconciled: true, outcome: "Start applied.")
+            result: SiloApplyResult(workspace: "dev", action: "start", reconciled: true, outcome: "Start applied.")
         )).write(to: applyURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -2036,13 +2036,13 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(
             client: client,
-            operationCoordinator: MSWOperationCoordinator(client: client)
+            operationCoordinator: SiloOperationCoordinator(client: client)
         )
         await model.refreshRemote()
         model.start(.dev)
@@ -2436,10 +2436,10 @@ final class AppModelTests: XCTestCase {
             ],
             applyObservedAt: baseline,
             delays: [.milliseconds(20)],
-            applyFailure: MSWProtocolError(
-                code: "MSW_RECONCILE_PENDING",
+            applyFailure: SiloProtocolError(
+                code: "SILO_RECONCILE_PENDING",
                 message: "The lifecycle operation completed without a matching fresh state observation.",
-                recovery: "Refresh after checking the workspace runtime; MSW did not claim final state.",
+                recovery: "Refresh after checking the workspace runtime; Silo did not claim final state.",
                 workspace: "dev",
                 retryable: true
             )
@@ -2488,8 +2488,8 @@ final class AppModelTests: XCTestCase {
             observations: [(.running, baseline.addingTimeInterval(1), 0)],
             applyObservedAt: baseline,
             delays: [],
-            applyFailure: MSWProtocolError(
-                code: "MSW_OPERATION_FAILED",
+            applyFailure: SiloProtocolError(
+                code: "SILO_OPERATION_FAILED",
                 message: "The restart command failed.",
                 recovery: "Repair the runtime and retry.",
                 workspace: "dev",
@@ -2507,8 +2507,8 @@ final class AppModelTests: XCTestCase {
 
     func testRepairInvalidatesResolutionAndSelectsOnlyActivatedRuntime() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-managed-runtime-resolution-\(UUID().uuidString)", isDirectory: true)
-        let legacy = temporary.appendingPathComponent(".local/bin/msw")
+            .appendingPathComponent("silo-managed-runtime-resolution-\(UUID().uuidString)", isDirectory: true)
+        let legacy = temporary.appendingPathComponent(".local/bin/silo")
         let managedRoot = temporary.appendingPathComponent("managed-toolchain", isDirectory: true)
         try FileManager.default.createDirectory(
             at: legacy.deletingLastPathComponent(),
@@ -2519,11 +2519,11 @@ final class AppModelTests: XCTestCase {
         try Data("#!/bin/sh\nprintf 'external fake must not run\\n'\nexit 99\n".utf8).write(to: legacy)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: legacy.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
             managedToolchainRoot: managedRoot
         ))
-        let beforeRepair = await runner.mswResolution(forceRefresh: true)
+        let beforeRepair = await runner.siloResolution(forceRefresh: true)
         XCTAssertNil(beforeRepair.selected)
 
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
@@ -2531,25 +2531,25 @@ final class AppModelTests: XCTestCase {
             bundledRoot: bundledRoot,
             installationRoot: managedRoot
         ).activate()
-        await runner.invalidateMSWResolution()
+        await runner.invalidateSiloResolution()
 
-        let afterRepair = await runner.mswResolution()
+        let afterRepair = await runner.siloResolution()
         XCTAssertEqual(
             afterRepair.selected?.standardizedFileURL,
-            managedRoot.appendingPathComponent("current/bin/msw").standardizedFileURL
+            managedRoot.appendingPathComponent("current/bin/silo").standardizedFileURL
         )
     }
 
     func testSupersededRuntimeResolutionCannotOverwriteRepairedRuntimeCache() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-runtime-resolution-race-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-resolution-race-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let firstHandshakeStarted = temporary.appendingPathComponent("first-handshake-started")
         let incompatibleHandshake = protocolCompatibleHandshake.replacingOccurrences(
-            of: #""protocolVersion":1,"mswVersion""#,
-            with: #""protocolVersion":2,"mswVersion""#
+            of: #""protocolVersion":1,"siloVersion""#,
+            with: #""protocolVersion":2,"siloVersion""#
         )
         let script = """
         #!/bin/sh
@@ -2563,23 +2563,23 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
-        let staleResolution = Task { await runner.mswResolution(forceRefresh: true) }
+        let staleResolution = Task { await runner.siloResolution(forceRefresh: true) }
         for _ in 0..<100 where !FileManager.default.fileExists(atPath: firstHandshakeStarted.path) {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: firstHandshakeStarted.path))
 
-        await runner.invalidateMSWResolution()
-        let repairedResolution = await runner.mswResolution(forceRefresh: true)
+        await runner.invalidateSiloResolution()
+        let repairedResolution = await runner.siloResolution(forceRefresh: true)
         XCTAssertEqual(repairedResolution.selected?.standardizedFileURL, executable.standardizedFileURL)
         let supersededResolution = await staleResolution.value
         XCTAssertNil(supersededResolution.selected)
 
-        let cachedResolution = await runner.mswResolution()
+        let cachedResolution = await runner.siloResolution()
         XCTAssertEqual(
             cachedResolution.selected?.standardizedFileURL,
             executable.standardizedFileURL,
@@ -2589,22 +2589,22 @@ final class AppModelTests: XCTestCase {
 
     func testUnknownQuarantineSnapshotAllowsStopButDisablesOtherLifecycleActions() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-unknown-quarantine-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-unknown-quarantine-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let snapshots = Workspace.ID.fixtureDefaults.map { id in
             let isUnknownQuarantine = id == .dev
-            return MSWWorkspaceSnapshot(
+            return SiloWorkspaceSnapshot(
                 id: id.rawValue,
                 purpose: "Test workspace",
                 lifecycle: isUnknownQuarantine ? .running : .stopped,
                 freshness: .fresh,
-                quarantine: MSWQuarantineSnapshot(
+                quarantine: SiloQuarantineSnapshot(
                     state: isUnknownQuarantine ? .unknown : .clear,
                     reason: nil
                 ),
-                credential: MSWCredentialSnapshot(
+                credential: SiloCredentialSnapshot(
                     state: .ready,
                     accessMode: "guest-read",
                     verificationRepository: nil,
@@ -2614,18 +2614,18 @@ final class AppModelTests: XCTestCase {
                     refreshExpiresAt: nil,
                     needsRestart: false
                 ),
-                resources: MSWResourceSnapshot(
+                resources: SiloResourceSnapshot(
                     cpus: "2",
                     maxCpus: "8",
                     memory: "4GiB",
                     maxMemory: "16GiB",
                     rootDisk: "20GiB"
                 ),
-                network: MSWNetworkSnapshot(
-                    host: "\(id.rawValue).msw.test",
+                network: SiloNetworkSnapshot(
+                    host: "\(id.rawValue).silo.test",
                     ip: "127.0.0.10"
                 ),
-                actionCapabilities: MSWActionCapabilities(
+                actionCapabilities: SiloActionCapabilities(
                     canStart: true,
                     canStop: true,
                     canRestart: true,
@@ -2634,8 +2634,8 @@ final class AppModelTests: XCTestCase {
                 )
             )
         }
-        let state = MSWStateResponse(schemaVersion: 1, mswVersion: "test", workspaces: snapshots)
-        let envelope = MSWEnvelope(
+        let state = SiloStateResponse(schemaVersion: 1, siloVersion: "test", workspaces: snapshots)
+        let envelope = SiloEnvelope(
             schemaVersion: 1,
             requestId: "state-test",
             ok: true,
@@ -2650,13 +2650,13 @@ final class AppModelTests: XCTestCase {
 
         let planURL = temporary.appendingPathComponent("plan.json")
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-stop",
                 ok: true,
                 command: "plan",
                 observedAt: Date(),
-                result: MSWLifecyclePlan(
+                result: SiloLifecyclePlan(
                     planId: "plan-stop",
                     action: "stop",
                     workspace: "dev",
@@ -2667,7 +2667,7 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: planURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -2683,14 +2683,14 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
-        let client = MSWClient(runner: runner)
+        let client = SiloClient(runner: runner)
         let model = AppModel(
             client: client,
-            operationCoordinator: MSWOperationCoordinator(client: client)
+            operationCoordinator: SiloOperationCoordinator(client: client)
         )
         await model.refreshRemote()
         XCTAssertNil(model.lastError, "Refresh error: \(model.lastError ?? "nil")")
@@ -2724,7 +2724,7 @@ final class AppModelTests: XCTestCase {
 
     func testFailedStartPersistsNoticeAndDetailedActivityAfterRefresh() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-start-failure-notice-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-start-failure-notice-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -2737,13 +2737,13 @@ final class AppModelTests: XCTestCase {
 
         let planURL = temporary.appendingPathComponent("plan.json")
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-start",
                 ok: true,
                 command: "plan",
                 observedAt: Date(),
-                result: MSWLifecyclePlan(
+                result: SiloLifecyclePlan(
                     planId: "plan-start",
                     action: "start",
                     workspace: "dev",
@@ -2754,7 +2754,7 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: planURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -2773,14 +2773,14 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
-        let client = MSWClient(runner: runner)
+        let client = SiloClient(runner: runner)
         let model = AppModel(
             client: client,
-            operationCoordinator: MSWOperationCoordinator(client: client)
+            operationCoordinator: SiloOperationCoordinator(client: client)
         )
 
         await model.refreshRemote()
@@ -2827,7 +2827,7 @@ final class AppModelTests: XCTestCase {
 
     func testLifecycleFailureNoticeKeepsConciseSummaryAndBoundedFinalDiagnostics() throws {
         let finalLine = "failed to mount /dev/vdc at /workspace as ext4: EINVAL"
-        let notice = MSWOperationFailureNotice(
+        let notice = SiloOperationFailureNotice(
             action: "start",
             title: "Start failed",
             reason: "The dev workspace could not start.\nignored duplicate summary",
@@ -2838,29 +2838,29 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(notice.reason, "The dev workspace could not start.")
         let details = try XCTUnwrap(notice.diagnosticDetails)
-        XCTAssertLessThanOrEqual(Data(details.utf8).count, MSWOperationFailureNotice.diagnosticLimit)
+        XCTAssertLessThanOrEqual(Data(details.utf8).count, SiloOperationFailureNotice.diagnosticLimit)
         XCTAssertTrue(details.hasSuffix(finalLine))
         XCTAssertEqual(details.components(separatedBy: "The dev workspace could not start.").count, 1)
 
-        let unicodeNotice = MSWOperationFailureNotice(
+        let unicodeNotice = SiloOperationFailureNotice(
             action: "start",
             title: "Start failed",
             reason: "Short summary.",
             recovery: "Inspect storage.",
             workspace: .dev,
-            diagnosticDetails: String(repeating: "🧱", count: MSWOperationFailureNotice.diagnosticLimit)
+            diagnosticDetails: String(repeating: "🧱", count: SiloOperationFailureNotice.diagnosticLimit)
         )
         let unicodeDetails = try XCTUnwrap(unicodeNotice.diagnosticDetails)
         XCTAssertLessThanOrEqual(
             Data(unicodeDetails.utf8).count,
-            MSWOperationFailureNotice.diagnosticLimit
+            SiloOperationFailureNotice.diagnosticLimit
         )
         XCTAssertFalse(unicodeDetails.contains("�"))
     }
 
     func testStopApplyDoesNotLoadQuarantinedGuestCredential() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-stop-credential-isolation-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-stop-credential-isolation-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -2889,13 +2889,13 @@ final class AppModelTests: XCTestCase {
         encoder.dateEncodingStrategy = .iso8601
         let responseURL = temporary.appendingPathComponent("apply.json")
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "apply-stop",
                 ok: true,
                 command: "apply",
                 observedAt: Date(),
-                result: MSWApplyResult(
+                result: SiloApplyResult(
                     workspace: "dev",
                     action: "stop",
                     reconciled: true,
@@ -2904,7 +2904,7 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: responseURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -2918,12 +2918,12 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
-        let client = MSWClient(runner: runner, credentialBroker: broker)
-        let plan = MSWLifecyclePlan(
+        let client = SiloClient(runner: runner, credentialBroker: broker)
+        let plan = SiloLifecyclePlan(
             planId: "plan-stop",
             action: "stop",
             workspace: "dev",
@@ -2938,7 +2938,7 @@ final class AppModelTests: XCTestCase {
 
     func testUnsafeRefreshCancelsPendingLifecycleConfirmation() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-stale-lifecycle-plan-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-stale-lifecycle-plan-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -2957,13 +2957,13 @@ final class AppModelTests: XCTestCase {
             makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .quarantined)
         ).write(to: unsafeStateURL)
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-stop",
                 ok: true,
                 command: "plan",
                 observedAt: Date(),
-                result: MSWLifecyclePlan(
+                result: SiloLifecyclePlan(
                     planId: "plan-stop",
                     action: "stop",
                     workspace: "dev",
@@ -2974,13 +2974,13 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: planURL)
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "apply-stop",
                 ok: true,
                 command: "apply",
                 observedAt: Date(),
-                result: MSWApplyResult(
+                result: SiloApplyResult(
                     workspace: "dev",
                     action: "stop",
                     reconciled: true,
@@ -2989,7 +2989,7 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: applyURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -3012,14 +3012,14 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
-        let client = MSWClient(runner: runner)
+        let client = SiloClient(runner: runner)
         let model = AppModel(
             client: client,
-            operationCoordinator: MSWOperationCoordinator(client: client)
+            operationCoordinator: SiloOperationCoordinator(client: client)
         )
 
         await model.refreshRemote()
@@ -3053,7 +3053,7 @@ final class AppModelTests: XCTestCase {
 
     func testUnsafeRefreshCancelsPendingPushConfirmation() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-stale-push-plan-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-stale-push-plan-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -3072,13 +3072,13 @@ final class AppModelTests: XCTestCase {
             makeTestStateEnvelope(devLifecycle: .running, devQuarantine: .quarantined)
         ).write(to: unsafeStateURL)
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "push-plan",
                 ok: true,
                 command: "push-plan",
                 observedAt: Date(),
-                result: MSWPushPlan(
+                result: SiloPushPlan(
                     planId: "push-plan",
                     workspace: "dev",
                     repositoryPath: "repo",
@@ -3095,13 +3095,13 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: planURL)
         try encoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "push-apply",
                 ok: true,
                 command: "apply",
                 observedAt: Date(),
-                result: MSWPushApplyResult(
+                result: SiloPushApplyResult(
                     workspace: "dev",
                     repositoryPath: "repo",
                     branch: "main",
@@ -3112,7 +3112,7 @@ final class AppModelTests: XCTestCase {
             )
         ).write(to: applyURL)
 
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -3135,18 +3135,18 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
-        let client = MSWClient(runner: runner)
-        let coordinator = MSWOperationCoordinator(client: client)
+        let client = SiloClient(runner: runner)
+        let coordinator = SiloOperationCoordinator(client: client)
         let model = AppModel(
             client: client,
             operationCoordinator: coordinator,
-            operationService: MSWOperationService(client: client, coordinator: coordinator)
+            operationService: SiloOperationService(client: client, coordinator: coordinator)
         )
-        let repository = MSWRepositorySnapshot(
+        let repository = SiloRepositorySnapshot(
             path: "repo",
             canonicalRemote: "https://github.com/example/repo.git",
             branch: "main",
@@ -3186,18 +3186,19 @@ final class AppModelTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(FileManager.default.fileExists(atPath: applyMarker.path))
     }
+
     func testFailedNonHostPreflightDoesNotRegisterHostService() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-bootstrap-preflight-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-bootstrap-preflight-test-\(UUID().uuidString)", isDirectory: true)
         let bin = temporary.appendingPathComponent("bin", isDirectory: true)
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let passingHandshake = #"""
-        {"schemaVersion":1,"requestId":"handshake-pass","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}
+        {"schemaVersion":1,"requestId":"handshake-pass","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"siloVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}
         """#
         let failingHandshake = #"""
-        {"schemaVersion":1,"requestId":"handshake-fail","ok":false,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_RUNTIME_UNAVAILABLE","message":"runtime unavailable","recovery":"Repair MSW","workspace":null,"retryable":true}}
+        {"schemaVersion":1,"requestId":"handshake-fail","ok":false,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_RUNTIME_UNAVAILABLE","message":"runtime unavailable","recovery":"Repair Silo","workspace":null,"retryable":true}}
         """#
         let passingURL = temporary.appendingPathComponent("handshake-pass.json")
         let failingURL = temporary.appendingPathComponent("handshake-fail.json")
@@ -3211,7 +3212,7 @@ final class AppModelTests: XCTestCase {
         }
 
         let marker = temporary.appendingPathComponent("handshake-seen")
-        let executable = bin.appendingPathComponent("msw")
+        let executable = bin.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         count=0
@@ -3227,14 +3228,14 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
             additionalSearchPaths: [executable],
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
         let hostService = RecordingHostService()
         let coordinator = BootstrapCoordinator(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             runner: runner,
             stateStore: BootstrapStateStore(url: temporary.appendingPathComponent("bootstrap-state.json")),
             hostService: hostService
@@ -3266,11 +3267,11 @@ final class AppModelTests: XCTestCase {
 
     func testBootstrapRunCompletesWithInjectedSetupAndHostFakes() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-bootstrap-success-test-\(UUID().uuidString)", isDirectory: true)
-        let mswBin = temporary.appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("silo-bootstrap-success-test-\(UUID().uuidString)", isDirectory: true)
+        let siloBin = temporary.appendingPathComponent("bin", isDirectory: true)
         let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
-        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
-        try FileManager.default.createDirectory(at: mswBin, withIntermediateDirectories: true)
+        let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
+        try FileManager.default.createDirectory(at: siloBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: toolBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
@@ -3294,7 +3295,7 @@ final class AppModelTests: XCTestCase {
         """#
         try Data(bootstrapResponse.utf8).write(to: bootstrapURL)
 
-        let executable = mswBin.appendingPathComponent("msw")
+        let executable = siloBin.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -3313,14 +3314,14 @@ final class AppModelTests: XCTestCase {
             ofItemAtPath: executable.path
         )
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
         let hostService = EnabledHostService()
         let hostAgent = RecordingHostAgent()
         let coordinator = BootstrapCoordinator(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             runner: runner,
             stateStore: BootstrapStateStore(
                 url: temporary.appendingPathComponent("bootstrap-state.json")
@@ -3351,7 +3352,7 @@ final class AppModelTests: XCTestCase {
         ]
         let result = try await coordinator.run(workspaceConfigurations: configurations)
 
-        XCTAssertEqual(result.phase, MSWBootstrapState.Phase.complete.rawValue)
+        XCTAssertEqual(result.phase, SiloBootstrapState.Phase.complete.rawValue)
         let ensureAliasCount = await hostAgent.ensureAliasInvocationCount
         let installRecordsCount = await hostAgent.installRecordsInvocationCount
         let inspectRequests = await hostAgent.inspectRequests
@@ -3359,7 +3360,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(installRecordsCount, 1)
         XCTAssertEqual(
             inspectRequests.last?.map(\.hostname),
-            ["development.msw.test", "personal.msw.test", "lab.msw.test"],
+            ["development.silo.test", "personal.silo.test", "lab.silo.test"],
             "Post-repair verification must inspect the selected configuration before bootstrap can unlock GitHub."
         )
         let finalState = await coordinator.state()
@@ -3391,10 +3392,10 @@ final class AppModelTests: XCTestCase {
             "Per-phase timings must survive persistence so a resumed setup can show them."
         )
         let boundary = try JSONDecoder().decode(
-            MSWBootstrapConfiguration.self,
+            SiloBootstrapConfiguration.self,
             from: Data(contentsOf: bootstrapInputURL)
         )
-        XCTAssertEqual(boundary, MSWBootstrapConfiguration(configurations))
+        XCTAssertEqual(boundary, SiloBootstrapConfiguration(configurations))
         XCTAssertEqual(boundary.workspaces.map(\.name), ["development", "personal", "lab"])
         XCTAssertEqual(boundary.workspaces[1].cpu, 4)
         XCTAssertEqual(boundary.workspaces[1].cpuCeiling, 8)
@@ -3403,11 +3404,11 @@ final class AppModelTests: XCTestCase {
     }
     func testBootstrapInvalidRequestPreservesTypedCLIError() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-bootstrap-mismatch-test-\(UUID().uuidString)", isDirectory: true)
-        let mswBin = temporary.appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("silo-bootstrap-mismatch-test-\(UUID().uuidString)", isDirectory: true)
+        let siloBin = temporary.appendingPathComponent("bin", isDirectory: true)
         let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
-        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
-        try FileManager.default.createDirectory(at: mswBin, withIntermediateDirectories: true)
+        let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
+        try FileManager.default.createDirectory(at: siloBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: toolBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
@@ -3424,14 +3425,14 @@ final class AppModelTests: XCTestCase {
         }
 
         let invalidRequest = #"""
-        {"schemaVersion":1,"requestId":"bootstrap-invalid","ok":false,"command":"bootstrap","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_INVALID_REQUEST","message":"The requested 'msw app' command has invalid arguments.","recovery":"See 'msw app help' for the typed command contract.","workspace":null,"retryable":false}}
+        {"schemaVersion":1,"requestId":"bootstrap-invalid","ok":false,"command":"bootstrap","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_INVALID_REQUEST","message":"The requested 'silo app' command has invalid arguments.","recovery":"See 'silo app help' for the typed command contract.","workspace":null,"retryable":false}}
         """#
         let handshakeURL = temporary.appendingPathComponent("handshake.json")
         let invalidURL = temporary.appendingPathComponent("bootstrap-invalid.json")
         try Data(protocolCompatibleHandshake.utf8).write(to: handshakeURL)
         try Data(invalidRequest.utf8).write(to: invalidURL)
 
-        let executable = mswBin.appendingPathComponent("msw")
+        let executable = siloBin.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -3448,12 +3449,12 @@ final class AppModelTests: XCTestCase {
             ofItemAtPath: executable.path
         )
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
         let coordinator = BootstrapCoordinator(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             runner: runner,
             stateStore: BootstrapStateStore(
                 url: temporary.appendingPathComponent("bootstrap-state.json")
@@ -3466,18 +3467,18 @@ final class AppModelTests: XCTestCase {
 
         do {
             _ = try await coordinator.run(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
-            XCTFail("Expected MSW_INVALID_REQUEST to fail setup.")
-        } catch let error as MSWClientError {
+            XCTFail("Expected SILO_INVALID_REQUEST to fail setup.")
+        } catch let error as SiloClientError {
             guard case .protocolFailure(let protocolError) = error else {
                 return XCTFail("Unexpected client error: \(error)")
             }
-            XCTAssertEqual(protocolError.code, "MSW_INVALID_REQUEST")
+            XCTAssertEqual(protocolError.code, "SILO_INVALID_REQUEST")
         } catch {
             XCTFail("Unexpected bootstrap error: \(error)")
         }
 
         let finalState = await coordinator.state()
-        XCTAssertTrue(finalState.lastError?.contains("MSW_INVALID_REQUEST") == true)
+        XCTAssertTrue(finalState.lastError?.contains("SILO_INVALID_REQUEST") == true)
         XCTAssertNil(
             finalState.workspaceConfigurations,
             "A rejected bootstrap must not publish an unapplied configuration."
@@ -3485,34 +3486,34 @@ final class AppModelTests: XCTestCase {
     }
 
     func testProtocolErrorDescriptionIncludesRecoveryAndCode() {
-        let error = MSWProtocolError(
-            code: "MSW_INVALID_REQUEST",
-            message: "The requested 'msw app' command has invalid arguments.",
-            recovery: "See 'msw app help' for the typed command contract.",
+        let error = SiloProtocolError(
+            code: "SILO_INVALID_REQUEST",
+            message: "The requested 'silo app' command has invalid arguments.",
+            recovery: "See 'silo app help' for the typed command contract.",
             workspace: nil,
             retryable: false
         )
         let description = error.localizedDescription
-        XCTAssertTrue(description.contains("The requested 'msw app' command has invalid arguments."))
-        XCTAssertTrue(description.contains("See 'msw app help' for the typed command contract."))
-        XCTAssertTrue(description.contains("MSW_INVALID_REQUEST"))
-        let withoutRecovery = MSWProtocolError(
-            code: "MSW_RUNTIME_UNAVAILABLE",
+        XCTAssertTrue(description.contains("The requested 'silo app' command has invalid arguments."))
+        XCTAssertTrue(description.contains("See 'silo app help' for the typed command contract."))
+        XCTAssertTrue(description.contains("SILO_INVALID_REQUEST"))
+        let withoutRecovery = SiloProtocolError(
+            code: "SILO_RUNTIME_UNAVAILABLE",
             message: "runtime unavailable",
             recovery: nil,
             workspace: nil,
             retryable: true
         )
-        XCTAssertEqual(withoutRecovery.localizedDescription, "runtime unavailable (MSW error code: MSW_RUNTIME_UNAVAILABLE.)")
+        XCTAssertEqual(withoutRecovery.localizedDescription, "runtime unavailable (Silo error code: SILO_RUNTIME_UNAVAILABLE.)")
     }
 
     func testRealBootstrapReconnectReadbackPrecedesGitHubEntry() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-bootstrap-reconnect-test-\(UUID().uuidString)", isDirectory: true)
-        let mswBin = temporary.appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("silo-bootstrap-reconnect-test-\(UUID().uuidString)", isDirectory: true)
+        let siloBin = temporary.appendingPathComponent("bin", isDirectory: true)
         let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
-        let configDirectory = temporary.appendingPathComponent(".config/msw", isDirectory: true)
-        try FileManager.default.createDirectory(at: mswBin, withIntermediateDirectories: true)
+        let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
+        try FileManager.default.createDirectory(at: siloBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: toolBin, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: configDirectory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
@@ -3528,8 +3529,8 @@ final class AppModelTests: XCTestCase {
             )
         }
 
-        let reconnectResponse = #"{"schemaVersion":1,"requestId":"bootstrap-reconnect","ok":false,"command":"bootstrap","observedAt":"2026-08-23T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_GITHUB_RECONNECT_REQUIRED","message":"GitHub is configured for development, but its credential is unavailable.","recovery":"Reconnect development.","workspace":"development","retryable":true}}"#
-        let executable = mswBin.appendingPathComponent("msw")
+        let reconnectResponse = #"{"schemaVersion":1,"requestId":"bootstrap-reconnect","ok":false,"command":"bootstrap","observedAt":"2026-08-23T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_GITHUB_RECONNECT_REQUIRED","message":"GitHub is configured for development, but its credential is unavailable.","recovery":"Reconnect development.","workspace":"development","retryable":true}}"#
+        let executable = siloBin.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -3548,12 +3549,12 @@ final class AppModelTests: XCTestCase {
             ofItemAtPath: executable.path
         )
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
         let coordinator = BootstrapCoordinator(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             runner: runner,
             stateStore: BootstrapStateStore(
                 url: temporary.appendingPathComponent("bootstrap-state.json")
@@ -3580,7 +3581,7 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await coordinator.run(workspaceConfigurations: selected)
             XCTFail("Expected reconnect to interrupt deep verification.")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             guard case .protocolFailure(let protocolError) = error else {
                 return XCTFail("Expected typed reconnect, got \(error).")
             }
@@ -3599,7 +3600,7 @@ final class AppModelTests: XCTestCase {
 
     @MainActor
     func testReconnectPublishesAppliedConfigurationBeforeGitHubEntry() async throws {
-        let coordinator = MSWBootstrapUITestStub(failureWorkspace: "dev")
+        let coordinator = SiloBootstrapUITestStub(failureWorkspace: "dev")
         var configurations = SetupWorkspaceConfiguration.defaults
         configurations[0].name = "development"
         configurations[0].memoryGiB = 16
@@ -3607,11 +3608,11 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await coordinator.run(workspaceConfigurations: configurations)
             XCTFail("Expected reconnect to interrupt deep bootstrap verification.")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             guard case .protocolFailure(let protocolError) = error else {
                 return XCTFail("Expected a typed reconnect error, got \(error).")
             }
-            XCTAssertEqual(protocolError.code, "MSW_GITHUB_RECONNECT_REQUIRED")
+            XCTAssertEqual(protocolError.code, "SILO_GITHUB_RECONNECT_REQUIRED")
         }
         let state = await coordinator.state()
 
@@ -3626,7 +3627,7 @@ final class AppModelTests: XCTestCase {
 
     func testConnectCoordinatorReloadScopesRetainedTargetsToAppliedConfiguration() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-target-reload-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-target-reload-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let broker = try CredentialBroker(
@@ -3679,7 +3680,7 @@ final class AppModelTests: XCTestCase {
     }
 
     func testJSONLFramerSplitsChunksAndFinishesPendingData() throws {
-        var framer = MSWJSONLFramer(maxLineBytes: 8, maxBufferedBytes: 16)
+        var framer = SiloJSONLFramer(maxLineBytes: 8, maxBufferedBytes: 16)
 
         XCTAssertEqual(try framer.append(Data("one\n".utf8)), [Data("one".utf8)])
         XCTAssertEqual(try framer.append(Data("tail".utf8)), [])
@@ -3687,12 +3688,12 @@ final class AppModelTests: XCTestCase {
     }
 
     func testJSONLFramerRejectsAnOversizedUnterminatedLine() {
-        var framer = MSWJSONLFramer(maxLineBytes: 4, maxBufferedBytes: 16)
+        var framer = SiloJSONLFramer(maxLineBytes: 4, maxBufferedBytes: 16)
 
         XCTAssertThrowsError(try framer.append(Data("12345".utf8))) { error in
             XCTAssertEqual(
-                error as? MSWClientError,
-                .unavailable("MSW JSONL line exceeded the capture limit.")
+                error as? SiloClientError,
+                .unavailable("Silo JSONL line exceeded the capture limit.")
             )
         }
     }
@@ -3702,22 +3703,22 @@ final class AppModelTests: XCTestCase {
             #"{"schemaVersion":2,"requestId":"req","ok":true,"command":"handshake","observedAt":null,"result":"ok","warnings":[],"error":null}"#.utf8
         )
         XCTAssertThrowsError(
-            try MSWProtocolDecoder.decodeEnvelope(unsupported, as: String.self, expectedCommand: "handshake")
+            try SiloProtocolDecoder.decodeEnvelope(unsupported, as: String.self, expectedCommand: "handshake")
         ) { error in
-            XCTAssertEqual(error as? MSWClientError, .unsupportedSchema(2))
+            XCTAssertEqual(error as? SiloClientError, .unsupportedSchema(2))
         }
 
         let failed = Data(
-            #"{"schemaVersion":1,"requestId":"req","ok":false,"command":"state","observedAt":null,"result":null,"warnings":[],"error":{"code":"MSW_CONFIG_MISSING","message":"setup required","recovery":"Run Setup","workspace":null,"retryable":false}}"#.utf8
+            #"{"schemaVersion":1,"requestId":"req","ok":false,"command":"state","observedAt":null,"result":null,"warnings":[],"error":{"code":"SILO_CONFIG_MISSING","message":"setup required","recovery":"Run Setup","workspace":null,"retryable":false}}"#.utf8
         )
         XCTAssertThrowsError(
-            try MSWProtocolDecoder.decodeEnvelope(failed, as: String.self, expectedCommand: "state")
+            try SiloProtocolDecoder.decodeEnvelope(failed, as: String.self, expectedCommand: "state")
         ) { error in
             XCTAssertEqual(
-                error as? MSWClientError,
+                error as? SiloClientError,
                 .protocolFailure(
-                    MSWProtocolError(
-                        code: "MSW_CONFIG_MISSING",
+                    SiloProtocolError(
+                        code: "SILO_CONFIG_MISSING",
                         message: "setup required",
                         recovery: "Run Setup",
                         workspace: nil,
@@ -3731,41 +3732,41 @@ final class AppModelTests: XCTestCase {
             #"{"schemaVersion":1,"requestId":"req","ok":true,"command":"handshake","observedAt":null,"result":"ok","warnings":[],"error":null}"#.utf8
         )
         XCTAssertThrowsError(
-            try MSWProtocolDecoder.decodeEnvelope(missingObservation, as: String.self, expectedCommand: "handshake")
+            try SiloProtocolDecoder.decodeEnvelope(missingObservation, as: String.self, expectedCommand: "handshake")
         ) { error in
-            XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
+            XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "handshake"))
         }
 
         let missingResult = Data(
             #"{"schemaVersion":1,"requestId":"req","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":null,"warnings":[],"error":null}"#.utf8
         )
         XCTAssertThrowsError(
-            try MSWProtocolDecoder.decodeEnvelope(missingResult, as: String.self, expectedCommand: "handshake")
+            try SiloProtocolDecoder.decodeEnvelope(missingResult, as: String.self, expectedCommand: "handshake")
         ) { error in
-            XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
+            XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "handshake"))
         }
 
         let extendedEnvelope = Data(
             #"{"schemaVersion":1,"requestId":"req","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":"ok","warnings":[],"error":null,"futureField":true}"#.utf8
         )
         XCTAssertThrowsError(
-            try MSWProtocolDecoder.decodeEnvelope(extendedEnvelope, as: String.self, expectedCommand: "handshake")
+            try SiloProtocolDecoder.decodeEnvelope(extendedEnvelope, as: String.self, expectedCommand: "handshake")
         ) { error in
-            XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
+            XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "handshake"))
         }
 
         let nullWarnings = Data(
             #"{"schemaVersion":1,"requestId":"req","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":"ok","warnings":null,"error":null}"#.utf8
         )
         XCTAssertThrowsError(
-            try MSWProtocolDecoder.decodeEnvelope(nullWarnings, as: String.self, expectedCommand: "handshake")
+            try SiloProtocolDecoder.decodeEnvelope(nullWarnings, as: String.self, expectedCommand: "handshake")
         ) { error in
-            XCTAssertEqual(error as? MSWClientError, .malformedJSON(command: "handshake"))
+            XCTAssertEqual(error as? SiloClientError, .malformedJSON(command: "handshake"))
         }
     }
 
     func testProtocolRedactorRemovesBearerTokenAndCredentialURL() {
-        let redactor = MSWProtocolRedactor()
+        let redactor = SiloProtocolRedactor()
         let input = "Authorization: Bearer ghp_secret https://user:password@example.test/repo.git"
 
         XCTAssertEqual(
@@ -3776,7 +3777,7 @@ final class AppModelTests: XCTestCase {
 
     func testProtocolRedactorPreservesStructuredJSONBoundaries() throws {
         let input = #"{"detail":"GH_TOKEN=ghp_secret","next":"ok"}"#
-        let redacted = MSWProtocolRedactor().redact(input)
+        let redacted = SiloProtocolRedactor().redact(input)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(redacted.utf8)) as? [String: String])
 
         XCTAssertEqual(object["detail"], "[REDACTED]")
@@ -3785,7 +3786,7 @@ final class AppModelTests: XCTestCase {
     }
     func testProtocolRedactorRemovesOpaqueJSONCredentialValues() throws {
         let input = #"{"accessToken":"opaque-access","refresh_token":"opaque-refresh","next":"ok"}"#
-        let redacted = MSWProtocolRedactor().redact(input)
+        let redacted = SiloProtocolRedactor().redact(input)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(redacted.utf8)) as? [String: String])
 
         XCTAssertEqual(object["accessToken"], "[REDACTED]")
@@ -3795,8 +3796,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(redacted.contains("opaque-refresh"))
     }
     func testProtocolRedactorRemovesScopedWorkspaceTokenAssignments() {
-        let input = "MSW_GITHUB_READ_TOKEN_DEV=opaque_read MSW_GITHUB_WRITE_TOKEN_PLAYGROUNDS=opaque_write"
-        let redacted = MSWProtocolRedactor().redact(input)
+        let input = "SILO_GITHUB_READ_TOKEN_DEV=opaque_read SILO_GITHUB_WRITE_TOKEN_PLAYGROUNDS=opaque_write"
+        let redacted = SiloProtocolRedactor().redact(input)
 
         XCTAssertEqual(redacted, "[REDACTED] [REDACTED]")
         XCTAssertFalse(redacted.contains("opaque_read"))
@@ -3806,13 +3807,13 @@ final class AppModelTests: XCTestCase {
 
 
     func testCommandRunnerCapturesOutputAndFiltersCredentialConfiguration() async throws {
-        let runner = MSWCommandRunner()
-        let command = MSWCommand(
+        let runner = SiloCommandRunner()
+        let command = SiloCommand(
             executable: URL(fileURLWithPath: "/bin/sh"),
-            arguments: ["-c", "printf '%s\\n' \"$MSW_TEST_VISIBLE\"; printf '%s' \"${MSW_TEST_TOKEN-unset}\""],
+            arguments: ["-c", "printf '%s\\n' \"$SILO_TEST_VISIBLE\"; printf '%s' \"${SILO_TEST_TOKEN-unset}\""],
             environment: [
-                "MSW_TEST_VISIBLE": "visible",
-                "MSW_TEST_TOKEN": "blocked"
+                "SILO_TEST_VISIBLE": "visible",
+                "SILO_TEST_TOKEN": "blocked"
             ],
             timeout: .seconds(5)
         )
@@ -3823,12 +3824,12 @@ final class AppModelTests: XCTestCase {
         XCTAssertFalse(result.stdoutString.contains("blocked"))
     }
     func testCommandRunnerAllowsHostRepairControlWithoutCredentialEnvironment() async throws {
-        let runner = MSWCommandRunner()
+        let runner = SiloCommandRunner()
         let result = try await runner.run(
-            MSWCommand(
+            SiloCommand(
                 executable: URL(fileURLWithPath: "/bin/sh"),
-                arguments: ["-c", "printf '%s' \"${MSW_SKIP_HOST_REPAIR-unset}\""],
-                environment: ["MSW_SKIP_HOST_REPAIR": "1"],
+                arguments: ["-c", "printf '%s' \"${SILO_SKIP_HOST_REPAIR-unset}\""],
+                environment: ["SILO_SKIP_HOST_REPAIR": "1"],
                 timeout: .seconds(5)
             )
         )
@@ -3837,21 +3838,21 @@ final class AppModelTests: XCTestCase {
     }
 
 
-    func testCommandRunnerIgnoresEveryFormerExternalMSWCandidate() async throws {
+    func testCommandRunnerIgnoresEveryFormerExternalSiloCandidate() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-protocol-resolution-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-protocol-resolution-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let handshake = protocolCompatibleHandshake.replacingOccurrences(of: "test-handshake", with: "compatible")
         let formerCandidates = [
-            "configured/msw",
-            ".local/bin/msw",
-            "homebrew/bin/msw",
-            "usr-local/bin/msw",
-            "source-checkout/bin/msw",
-            "Library/Application Support/Silo/Toolchains/current/bin/msw",
-            "path-entry/bin/msw"
+            "configured/silo",
+            ".local/bin/silo",
+            "homebrew/bin/silo",
+            "usr-local/bin/silo",
+            "source-checkout/bin/silo",
+            "Library/Application Support/Silo/Toolchains/current/bin/silo",
+            "path-entry/bin/silo"
         ].map { temporary.appendingPathComponent($0) }
         for candidate in formerCandidates {
             try FileManager.default.createDirectory(
@@ -3862,12 +3863,12 @@ final class AppModelTests: XCTestCase {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: candidate.path)
         }
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
             additionalSearchPaths: formerCandidates
         ))
-        let resolution = await runner.mswResolution()
-        let namedResolution = await runner.resolveExecutable(named: "msw")
+        let resolution = await runner.siloResolution()
+        let namedResolution = await runner.resolveExecutable(named: "silo")
 
         XCTAssertNil(resolution.selected)
         XCTAssertNil(namedResolution)
@@ -3875,37 +3876,37 @@ final class AppModelTests: XCTestCase {
 
     func testCommandRunnerRejectsAHandshakeThatIsNotTheExactSchema() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-protocol-repair-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-protocol-repair-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let future = temporary.appendingPathComponent("msw")
+        let future = temporary.appendingPathComponent("silo")
         let extendedHandshake = protocolCompatibleHandshake.replacingOccurrences(
             of: #""workspaceCount":3"#,
             with: #""workspaceCount":3,"futureField":true"#
         )
         try Data("#!/bin/sh\nprintf '%s\\n' '\(extendedHandshake)'\n".utf8).write(to: future)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: future.path)
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: future
+            testSiloExecutable: future
         ))
 
-        let resolution = await runner.mswResolution()
+        let resolution = await runner.siloResolution()
         XCTAssertNil(resolution.selected)
     }
 
     func testUnsignedDevelopmentBundleExplainsHostServiceRegistrationFailure() {
         XCTAssertEqual(
-            MSWHostPackagingInspector.inspect(bundleURL: Bundle.main.bundleURL),
+            SiloHostPackagingInspector.inspect(bundleURL: Bundle.main.bundleURL),
             .signingUnavailable
         )
     }
     func testHostRepairAuthorizationBuildsFixedAdministratorPayload() async throws {
         let recorder = CommandRecorder()
-        let authorization = MSWHostRepairAuthorization { command in
+        let authorization = SiloHostRepairAuthorization { command in
             await recorder.record(command)
-            return MSWCommandResult(
+            return SiloCommandResult(
                 status: 0,
                 stdout: Data(),
                 stderr: Data(),
@@ -3913,7 +3914,7 @@ final class AppModelTests: XCTestCase {
             )
         }
 
-        try await authorization.repair(records: MSWWorkspaceNetwork.fixtureRecords)
+        try await authorization.repair(records: SiloWorkspaceNetwork.fixtureRecords)
 
         let recordedCommand = await recorder.command
         let command = try XCTUnwrap(recordedCommand)
@@ -3921,22 +3922,22 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(command.arguments.first, "-e")
         let script = try XCTUnwrap(command.arguments.dropFirst().first)
         XCTAssertTrue(script.contains("with administrator privileges"))
-        XCTAssertTrue(script.contains("127.0.0.10 dev.msw.test"))
-        XCTAssertTrue(script.contains("127.0.0.11 playgrounds.msw.test"))
-        XCTAssertTrue(script.contains("127.0.0.12 personal.msw.test"))
+        XCTAssertTrue(script.contains("127.0.0.10 dev.silo.test"))
+        XCTAssertTrue(script.contains("127.0.0.11 playgrounds.silo.test"))
+        XCTAssertTrue(script.contains("127.0.0.12 personal.silo.test"))
         XCTAssertFalse(script.contains("sudo"))
     }
     func testHostRepairAuthorizationAppleScriptCompilesWithoutRunning() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-host-repair-script-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-host-repair-script-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let output = temporary.appendingPathComponent("repair.scpt")
-        let result = try await MSWCommandRunner().run(
-            MSWCommand(
+        let result = try await SiloCommandRunner().run(
+            SiloCommand(
                 executable: URL(fileURLWithPath: "/usr/bin/osacompile"),
-                arguments: ["-o", output.path, "-e", MSWHostRepairAuthorization.appleScriptForTesting],
+                arguments: ["-o", output.path, "-e", SiloHostRepairAuthorization.appleScriptForTesting],
                 timeout: .seconds(5)
             )
         )
@@ -3947,7 +3948,7 @@ final class AppModelTests: XCTestCase {
 
     func testCommandRunnerReadsOptionalGitIdentity() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-git-identity-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-git-identity-\(UUID().uuidString)", isDirectory: true)
         let git = temporary.appendingPathComponent("bin/git")
         try FileManager.default.createDirectory(
             at: git.deletingLastPathComponent(),
@@ -3967,7 +3968,7 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: git)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: git.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
             additionalSearchPaths: [git]
         ))
@@ -3981,7 +3982,7 @@ final class AppModelTests: XCTestCase {
 
     func testCommandRunnerTreatsMissingGitIdentityAsOptional() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-git-identity-missing-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-git-identity-missing-\(UUID().uuidString)", isDirectory: true)
         let git = temporary.appendingPathComponent("bin/git")
         try FileManager.default.createDirectory(
             at: git.deletingLastPathComponent(),
@@ -3991,7 +3992,7 @@ final class AppModelTests: XCTestCase {
         try Data("#!/bin/sh\nexit 1\n".utf8).write(to: git)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: git.path)
 
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
             additionalSearchPaths: [git]
         ))
@@ -4032,27 +4033,27 @@ final class AppModelTests: XCTestCase {
 
     func testUserIntegrationUsesOnlyResolvedCoupledRuntime() async throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-source-setup-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-source-setup-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
 
         let hostRepairMarker = root.appendingPathComponent("host-repair-marker")
-        let launcher = root.appendingPathComponent("msw")
+        let launcher = root.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         set -eu
         if [ "$1" = app ] && [ "$2" = handshake ]; then
             printf '%s\\n' '\(protocolCompatibleHandshake)'
         else
-            printf '%s %s %s\\n' "$1" "$2" "${MSW_SKIP_HOST_REPAIR:-unset}" > "\(hostRepairMarker.path)"
+            printf '%s %s %s\\n' "$1" "$2" "${SILO_SKIP_HOST_REPAIR:-unset}" > "\(hostRepairMarker.path)"
         fi
         """
         try Data(script.utf8).write(to: launcher)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
 
-        let service = MSWUserIntegrationService(runner: MSWCommandRunner(configuration: .init(
+        let service = SiloUserIntegrationService(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: root,
-            testMSWExecutable: launcher
+            testSiloExecutable: launcher
         )))
 
         try await service.configureUserIntegrationIfAvailable()
@@ -4077,13 +4078,13 @@ final class AppModelTests: XCTestCase {
 
     func testRuntimeRepairVerifiesExactActivatedCLIWithoutRuntimePrerequisites() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-runtime-repair-exact-cli-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-runtime-repair-exact-cli-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: temporary))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: temporary))
         let coordinator = BootstrapCoordinator(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             runner: runner,
             stateStore: BootstrapStateStore(url: temporary.appendingPathComponent("bootstrap-state.json")),
             hostService: EnabledHostService()
@@ -4091,20 +4092,20 @@ final class AppModelTests: XCTestCase {
 
         try await coordinator.repairRuntime()
 
-        let selected = await runner.mswResolution().selected?.standardizedFileURL
+        let selected = await runner.siloResolution().selected?.standardizedFileURL
         let expected = ToolchainLayout.managedRoot(homeDirectory: temporary)
-            .appendingPathComponent("current/bin/msw")
+            .appendingPathComponent("current/bin/silo")
             .standardizedFileURL
         XCTAssertEqual(selected, expected)
         XCTAssertFalse(FileManager.default.fileExists(
-            atPath: temporary.appendingPathComponent(".config/msw/config.sh").path
+            atPath: temporary.appendingPathComponent(".config/silo/config.sh").path
         ))
     }
 
 
     func testCommandRunnerTerminatesTimedOutProcessGroup() async {
-        let runner = MSWCommandRunner()
-        let command = MSWCommand(
+        let runner = SiloCommandRunner()
+        let command = SiloCommand(
             executable: URL(fileURLWithPath: "/bin/sh"),
             arguments: ["-c", "sleep 30"],
             timeout: .milliseconds(100)
@@ -4113,7 +4114,7 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await runner.run(command)
             XCTFail("Expected the command to time out.")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .timedOut(command: "-c"))
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -4121,9 +4122,9 @@ final class AppModelTests: XCTestCase {
     }
 
     func testCommandRunnerExplicitCancellationReportsCancelled() async {
-        let runner = MSWCommandRunner()
+        let runner = SiloCommandRunner()
         let operationID = UUID()
-        let command = MSWCommand(
+        let command = SiloCommand(
             executable: URL(fileURLWithPath: "/bin/sleep"),
             arguments: ["30"],
             timeout: .seconds(60)
@@ -4136,7 +4137,7 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await task.value
             XCTFail("Expected explicit cancellation.")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .cancelled)
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -4145,26 +4146,26 @@ final class AppModelTests: XCTestCase {
 
     func testWorkspaceURLValidationRejectsMismatchedOrCredentialedURLs() {
         XCTAssertNotNil(AppModel.validatedWorkspaceURL(
-            "http://dev.msw.test:3000",
+            "http://dev.silo.test:3000",
             expectedWorkspace: "dev",
             responseWorkspace: "dev",
-            expectedHost: "dev.msw.test",
+            expectedHost: "dev.silo.test",
             expectedPort: "3000",
             expectedScheme: "http"
         ))
         XCTAssertNil(AppModel.validatedWorkspaceURL(
-            "http://user:password@dev.msw.test:3000",
+            "http://user:password@dev.silo.test:3000",
             expectedWorkspace: "dev",
             responseWorkspace: "dev",
-            expectedHost: "dev.msw.test",
+            expectedHost: "dev.silo.test",
             expectedPort: "3000",
             expectedScheme: "http"
         ))
         XCTAssertNil(AppModel.validatedWorkspaceURL(
-            "https://dev.msw.test:3000/path?token=value",
+            "https://dev.silo.test:3000/path?token=value",
             expectedWorkspace: "dev",
             responseWorkspace: "personal",
-            expectedHost: "dev.msw.test",
+            expectedHost: "dev.silo.test",
             expectedPort: "3000",
             expectedScheme: "http"
         ))
@@ -4172,7 +4173,7 @@ final class AppModelTests: XCTestCase {
             "http://attacker.example:3000",
             expectedWorkspace: "dev",
             responseWorkspace: "dev",
-            expectedHost: "dev.msw.test",
+            expectedHost: "dev.silo.test",
             expectedPort: "3000",
             expectedScheme: "http"
         ))
@@ -4185,11 +4186,11 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(validated.manifest.schemaVersion, 1)
         XCTAssertEqual(Set(validated.manifest.artifacts.map(\.path)), [
-            "VERSION", "MANIFEST.txt", "config.sh", "bin/msw", "bin/msw-git-askpass",
-            "bin/msw-github-host-token", "bin/msw-github-proxy", "bin/msw-keychain-bridge",
-            "bin/msw-ssh-proxy", "launchd/org.microsandbox.Silo.github-proxy.plist",
-            "lib/bootstrap-base.sh", "lib/msw-github-relay.py",
-            "lib/msw-github-shuttle.py", "lib/msw-port-forwarder.py", "lib/proxy-upstream.py",
+            "VERSION", "MANIFEST.txt", "config.sh", "bin/silo", "bin/silo-git-askpass",
+            "bin/silo-github-host-token", "bin/silo-github-proxy", "bin/silo-keychain-bridge",
+            "bin/silo-ssh-proxy", "launchd/org.silo.Silo.github-proxy.plist",
+            "lib/bootstrap-base.sh", "lib/silo-github-relay.py",
+            "lib/silo-github-shuttle.py", "lib/silo-port-forwarder.py", "lib/proxy-upstream.py",
             "lib/proxycore.py", "lib/vendor/h11/LICENSE.txt", "lib/vendor/h11/__init__.py",
             "lib/vendor/h11/_abnf.py", "lib/vendor/h11/_connection.py",
             "lib/vendor/h11/_events.py", "lib/vendor/h11/_headers.py",
@@ -4198,7 +4199,7 @@ final class AppModelTests: XCTestCase {
             "lib/vendor/h11/_version.py", "lib/vendor/h11/_writers.py",
             "lib/vendor/h11/py.typed"
         ])
-        XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "bin/msw" }?.executable == true)
+        XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "bin/silo" }?.executable == true)
         XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "config.sh" }?.executable == true)
         XCTAssertTrue(validated.manifest.artifacts.first { $0.path == "lib/proxycore.py" }?.executable == true)
     }
@@ -4206,7 +4207,7 @@ final class AppModelTests: XCTestCase {
     func testBundledToolchainManifestRequiresEveryCoupledArtifact() throws {
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-toolchain-incomplete-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-toolchain-incomplete-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.copyItem(at: bundledRoot, to: temporary)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -4216,7 +4217,7 @@ final class AppModelTests: XCTestCase {
         manifest = ToolchainManifest(
             schemaVersion: manifest.schemaVersion,
             version: manifest.version,
-            artifacts: manifest.artifacts.filter { $0.path != "lib/msw-github-relay.py" }
+            artifacts: manifest.artifacts.filter { $0.path != "lib/silo-github-relay.py" }
         )
         try JSONEncoder().encode(manifest).write(to: manifestURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: manifestURL.path)
@@ -4229,7 +4230,7 @@ final class AppModelTests: XCTestCase {
     func testToolchainUpdateAtomicallyReplacesCorruptionAndLeavesOnlyCurrent() async throws {
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-toolchain-install-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-toolchain-install-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let installer = ToolchainInstaller(bundledRoot: bundledRoot, installationRoot: temporary)
@@ -4239,7 +4240,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertThrowsError(try ToolchainValidator.validateActivated(root: first.root)) { error in
             XCTAssertEqual(error as? ToolchainInstallerError, .invalidManifest)
         }
-        try Data("corrupt".utf8).write(to: first.root.appendingPathComponent("bin/msw"))
+        try Data("corrupt".utf8).write(to: first.root.appendingPathComponent("bin/silo"))
         try FileManager.default.createDirectory(
             at: temporary.appendingPathComponent("historical-1.0.0"),
             withIntermediateDirectories: true
@@ -4255,20 +4256,20 @@ final class AppModelTests: XCTestCase {
     func testBundledToolchainRejectsCorruptPayloadBeforeActivation() throws {
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-toolchain-corrupt-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-toolchain-corrupt-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.copyItem(at: bundledRoot, to: temporary)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-        try Data("corrupt".utf8).write(to: temporary.appendingPathComponent("payload/bin/msw"))
+        try Data("corrupt".utf8).write(to: temporary.appendingPathComponent("payload/bin/silo"))
 
         XCTAssertThrowsError(try ToolchainValidator.validateBundled(root: temporary)) { error in
-            XCTAssertEqual(error as? ToolchainInstallerError, .checksumMismatch("bin/msw"))
+            XCTAssertEqual(error as? ToolchainInstallerError, .checksumMismatch("bin/silo"))
         }
     }
 
     func testBundledToolchainRejectsAReplacementPayloadDirectorySymlink() throws {
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-toolchain-symlink-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-toolchain-symlink-\(UUID().uuidString)", isDirectory: true)
         let externalPayload = temporary.appendingPathComponent("external-payload", isDirectory: true)
         let candidate = temporary.appendingPathComponent("candidate", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -4296,23 +4297,23 @@ final class AppModelTests: XCTestCase {
     }
 
     private func makeTestStateEnvelope(
-        devLifecycle: MSWLifecycle,
-        devQuarantine: MSWQuarantineSnapshot.State,
+        devLifecycle: SiloLifecycle,
+        devQuarantine: SiloQuarantineSnapshot.State,
         observedAt: Date = Date(),
         devStatusObservedAt: Date? = nil
-    ) -> MSWEnvelope<MSWStateResponse> {
+    ) -> SiloEnvelope<SiloStateResponse> {
         let snapshots = Workspace.ID.fixtureDefaults.map { id in
             let quarantine = id == .dev ? devQuarantine : .clear
-            return MSWWorkspaceSnapshot(
+            return SiloWorkspaceSnapshot(
                 id: id.rawValue,
                 purpose: "Test workspace",
                 lifecycle: id == .dev ? devLifecycle : .stopped,
                 freshness: .fresh,
-                quarantine: MSWQuarantineSnapshot(
+                quarantine: SiloQuarantineSnapshot(
                     state: quarantine,
                     reason: quarantine == .clear ? nil : "Test quarantine"
                 ),
-                credential: MSWCredentialSnapshot(
+                credential: SiloCredentialSnapshot(
                     state: .ready,
                     accessMode: "guest-read",
                     verificationRepository: nil,
@@ -4322,18 +4323,18 @@ final class AppModelTests: XCTestCase {
                     refreshExpiresAt: nil,
                     needsRestart: false
                 ),
-                resources: MSWResourceSnapshot(
+                resources: SiloResourceSnapshot(
                     cpus: "2",
                     maxCpus: "8",
                     memory: "4GiB",
                     maxMemory: "16GiB",
                     rootDisk: "20GiB"
                 ),
-                network: MSWNetworkSnapshot(
-                    host: "\(id.rawValue).msw.test",
+                network: SiloNetworkSnapshot(
+                    host: "\(id.rawValue).silo.test",
                     ip: "127.0.0.10"
                 ),
-                actionCapabilities: MSWActionCapabilities(
+                actionCapabilities: SiloActionCapabilities(
                     canStart: true,
                     canStop: true,
                     canRestart: true,
@@ -4343,34 +4344,34 @@ final class AppModelTests: XCTestCase {
                 statusObservedAt: id == .dev ? devStatusObservedAt : nil
             )
         }
-        return MSWEnvelope(
+        return SiloEnvelope(
             schemaVersion: 1,
             requestId: "state-test",
             ok: true,
             command: "state",
             observedAt: observedAt,
-            result: MSWStateResponse(
+            result: SiloStateResponse(
                 schemaVersion: 1,
-                mswVersion: "test",
+                siloVersion: "test",
                 workspaces: snapshots
             )
         )
     }
 
     private func makeLifecycleVerificationModel(
-        action: MSWLifecycleAction,
-        initial: (MSWLifecycle, Date),
-        observations: [(MSWLifecycle, Date, Double)],
+        action: SiloLifecycleAction,
+        initial: (SiloLifecycle, Date),
+        observations: [(SiloLifecycle, Date, Double)],
         applyObservedAt: Date,
         delays: [Duration],
         observationStatusObservedAts: [Date]? = nil,
         failingObservationIndices: Set<Int> = [],
-        applyFailure: MSWProtocolError? = nil,
+        applyFailure: SiloProtocolError? = nil,
         applyReconciled: Bool = true,
         applyDelay: Double = 0
     ) throws -> AppModel {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-lifecycle-verification-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -4388,7 +4389,7 @@ final class AppModelTests: XCTestCase {
                 devStatusObservedAt: statusObservedAt
             )).write(to: temporary.appendingPathComponent("state-\(index + 1).json"))
         }
-        let plan = MSWLifecyclePlan(
+        let plan = SiloLifecyclePlan(
             planId: "plan-\(action.rawValue)",
             action: action.rawValue,
             workspace: "dev",
@@ -4396,7 +4397,7 @@ final class AppModelTests: XCTestCase {
             confirmationPhrase: "\(action.rawValue.uppercased()) dev",
             effects: "Testing \(action.rawValue)."
         )
-        try encoder.encode(MSWEnvelope(
+        try encoder.encode(SiloEnvelope(
             schemaVersion: 1,
             requestId: "plan-\(action.rawValue)",
             ok: true,
@@ -4404,14 +4405,14 @@ final class AppModelTests: XCTestCase {
             observedAt: applyObservedAt,
             result: plan
         )).write(to: temporary.appendingPathComponent("plan.json"))
-        let applyEnvelope = MSWEnvelope<MSWApplyResult>(
+        let applyEnvelope = SiloEnvelope<SiloApplyResult>(
             schemaVersion: 1,
             requestId: "apply-\(action.rawValue)",
             ok: applyFailure == nil,
             command: "apply",
             observedAt: applyFailure == nil ? applyObservedAt : nil,
             result: applyFailure == nil
-                ? MSWApplyResult(
+                ? SiloApplyResult(
                     workspace: "dev",
                     action: action.rawValue,
                     reconciled: applyReconciled,
@@ -4435,7 +4436,7 @@ final class AppModelTests: XCTestCase {
             guard observation.2 > 0 else { return nil }
             return "\(index + 2)) \(delay) ;;"
         }.joined(separator: "\n")
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -4464,19 +4465,19 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         return AppModel(
             client: client,
-            operationCoordinator: MSWOperationCoordinator(client: client),
+            operationCoordinator: SiloOperationCoordinator(client: client),
             lifecycleVerificationDelays: delays
         )
     }
 
     private func beginConfirmedLifecycle(
-        _ action: MSWLifecycleAction,
+        _ action: SiloLifecycleAction,
         model: AppModel
     ) async throws {
         switch action {
@@ -4496,7 +4497,7 @@ final class AppModelTests: XCTestCase {
         model.confirmPendingLifecycle(surface: .unifiedWindow)
     }
 
-    private func waitForLifecycleCompletion(in model: AppModel) async throws -> MSWOperationState {
+    private func waitForLifecycleCompletion(in model: AppModel) async throws -> SiloOperationState {
         for _ in 0..<160 {
             if model.operationStates["lifecycle:dev"]?.phase == .finished { break }
             try await Task.sleep(for: .milliseconds(10))
@@ -4506,12 +4507,12 @@ final class AppModelTests: XCTestCase {
         return operation
     }
 
-    func testMSWConnectRejectsUnknownExpiredAndReplayedCallbacks() async throws {
+    func testSiloConnectRejectsUnknownExpiredAndReplayedCallbacks() async throws {
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let client = MSWConnectClient(
+        let client = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -4524,7 +4525,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(startQuery.first(where: { $0.name == "state" })?.value, start.state)
         XCTAssertEqual(
             startQuery.first(where: { $0.name == "code_challenge" })?.value,
-            MSWConnectClient.pkceChallenge(for: start.codeVerifier)
+            SiloConnectClient.pkceChallenge(for: start.codeVerifier)
         )
 
         do {
@@ -4532,7 +4533,7 @@ final class AppModelTests: XCTestCase {
                 callbackURL: testCallbackURL(configuration: configuration, state: "unknown-state", code: "code")
             )
             XCTFail("An unknown callback state must be rejected.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .callbackStateMismatch)
         }
 
@@ -4552,7 +4553,7 @@ final class AppModelTests: XCTestCase {
                 callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "replayed")
             )
             XCTFail("A callback state must be single-use.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .callbackReplayed)
         }
 
@@ -4563,14 +4564,14 @@ final class AppModelTests: XCTestCase {
                 callbackURL: testCallbackURL(configuration: configuration, state: expiredStart.state, code: "expired")
             )
             XCTFail("An expired callback must be rejected.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .callbackExpired)
         }
     }
 
-    func testMSWConnectAuthorizationOpensBrowserWithoutEndpointPreflight() async throws {
+    func testSiloConnectAuthorizationOpensBrowserWithoutEndpointPreflight() async throws {
         let transport = QueueConnectTransport()
-        let client = MSWConnectClient(
+        let client = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: InMemoryConnectKeychain(),
@@ -4581,7 +4582,7 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await client.authorize(browser: browser)
             XCTFail("A cancelled browser authorization must fail.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .cancelled)
         }
 
@@ -4594,11 +4595,11 @@ final class AppModelTests: XCTestCase {
     }
 
     func testDefaultBrowserIgnoresStaleCallbackAfterCancelRetry() async throws {
-        let browser = MSWConnectBrowser(opener: { _ in true })
+        let browser = SiloConnectBrowser(opener: { _ in true })
         let first = Task {
             try await browser.authenticate(
                 url: Self.authorizeURL(state: "stale-state"),
-                callbackScheme: "msw"
+                callbackScheme: "silo"
             )
         }
         try await Self.waitUntil { browser.expectedState == "stale-state" }
@@ -4610,7 +4611,7 @@ final class AppModelTests: XCTestCase {
         let retry = Task {
             try await browser.authenticate(
                 url: Self.authorizeURL(state: "fresh-state"),
-                callbackScheme: "msw"
+                callbackScheme: "silo"
             )
         }
         try await Self.waitUntil { browser.expectedState == "fresh-state" }
@@ -4619,13 +4620,13 @@ final class AppModelTests: XCTestCase {
         guard case .failure(let firstError) = firstResult else {
             return XCTFail("The cancelled first attempt must fail.")
         }
-        XCTAssertEqual(firstError as? MSWConnectError, .cancelled)
+        XCTAssertEqual(firstError as? SiloConnectError, .cancelled)
 
-        let stale = URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=one&state=stale-state")!
+        let stale = URL(string: "silo://connect.silo.dev/oauth/callback?code=one&state=stale-state")!
         XCTAssertFalse(browser.handleCallback(stale), "A callback from a cancelled attempt must be ignored.")
         XCTAssertTrue(browser.isWaiting, "An ignored stale callback must not consume the wait.")
 
-        let fresh = URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=two&state=fresh-state")!
+        let fresh = URL(string: "silo://connect.silo.dev/oauth/callback?code=two&state=fresh-state")!
         XCTAssertTrue(browser.handleCallback(fresh))
         let value = try await retry.value
         XCTAssertEqual(value.absoluteString, fresh.absoluteString)
@@ -4633,33 +4634,33 @@ final class AppModelTests: XCTestCase {
     }
 
     func testDefaultBrowserIgnoresCallbacksFromOtherSchemesHostsPathsOrStates() async throws {
-        let browser = MSWConnectBrowser(opener: { _ in true })
+        let browser = SiloConnectBrowser(opener: { _ in true })
         let task = Task {
             try await browser.authenticate(
                 url: Self.authorizeURL(state: "expected-state"),
-                callbackScheme: "msw"
+                callbackScheme: "silo"
             )
         }
         try await Self.waitUntil { browser.expectedState == "expected-state" }
 
         XCTAssertFalse(browser.handleCallback(
-            URL(string: "https://connect.microsandbox.dev/oauth/callback?code=x&state=expected-state")!
+            URL(string: "https://connect.silo.dev/oauth/callback?code=x&state=expected-state")!
         ))
         XCTAssertFalse(browser.handleCallback(
-            URL(string: "msw://other.example.com/oauth/callback?code=x&state=expected-state")!
+            URL(string: "silo://other.example.com/oauth/callback?code=x&state=expected-state")!
         ))
         XCTAssertFalse(browser.handleCallback(
-            URL(string: "msw://connect.microsandbox.dev/other/callback?code=x&state=expected-state")!
+            URL(string: "silo://connect.silo.dev/other/callback?code=x&state=expected-state")!
         ))
         XCTAssertFalse(browser.handleCallback(
-            URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=x&state=wrong-state")!
+            URL(string: "silo://connect.silo.dev/oauth/callback?code=x&state=wrong-state")!
         ))
         XCTAssertFalse(browser.handleCallback(
-            URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=x")!
+            URL(string: "silo://connect.silo.dev/oauth/callback?code=x")!
         ))
         XCTAssertTrue(browser.isWaiting, "Mismatched callbacks must leave the wait intact.")
 
-        let fresh = URL(string: "msw://connect.microsandbox.dev/oauth/callback?code=ok&state=expected-state")!
+        let fresh = URL(string: "silo://connect.silo.dev/oauth/callback?code=ok&state=expected-state")!
         XCTAssertTrue(browser.handleCallback(fresh))
         let value = try await task.value
         XCTAssertEqual(value.absoluteString, fresh.absoluteString)
@@ -4670,7 +4671,7 @@ final class AppModelTests: XCTestCase {
         var components = URLComponents(string: "https://connect.test/oauth/authorize")!
         components.queryItems = [
             URLQueryItem(name: "client_id", value: "test-client"),
-            URLQueryItem(name: "redirect_uri", value: "msw://connect.microsandbox.dev/oauth/callback"),
+            URLQueryItem(name: "redirect_uri", value: "silo://connect.silo.dev/oauth/callback"),
             URLQueryItem(name: "state", value: state),
             URLQueryItem(name: "code_challenge", value: "challenge"),
             URLQueryItem(name: "code_challenge_method", value: "S256")
@@ -4734,16 +4735,16 @@ final class AppModelTests: XCTestCase {
     }
 
     func testBootstrapPhaseProgressCoversEveryPhaseWithPlainLanguage() {
-        for phase in MSWBootstrapState.Phase.allCases {
+        for phase in SiloBootstrapState.Phase.allCases {
             XCTAssertFalse(SetupView.bootstrapPhaseProgress(for: phase).isEmpty)
         }
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .toolchain), "Checking the MSW runtime")
+        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .toolchain), "Checking the Silo runtime")
         XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .hostIntegration), "Updating system records")
         XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .workspaces), "Registering your workspaces")
     }
 
     func testBootstrapStateWithoutPhaseDurationsStillDecodes() throws {
-        var state = MSWBootstrapState.initial
+        var state = SiloBootstrapState.initial
         state.updatedAt = Date(timeIntervalSince1970: 0)
         let data = try JSONEncoder().encode(state)
         var object = try XCTUnwrap(
@@ -4751,7 +4752,7 @@ final class AppModelTests: XCTestCase {
         )
         object.removeValue(forKey: "phaseDurations")
         let legacy = try JSONDecoder().decode(
-            MSWBootstrapState.self,
+            SiloBootstrapState.self,
             from: try JSONSerialization.data(withJSONObject: object)
         )
         XCTAssertNil(legacy.phaseDurations)
@@ -4776,7 +4777,7 @@ final class AppModelTests: XCTestCase {
         let sessionService = "test-startup-connect-\(UUID().uuidString)"
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let seedTransport = QueueConnectTransport()
-        let seedClient = MSWConnectClient(
+        let seedClient = SiloConnectClient(
             configuration: connectConfiguration,
             transport: seedTransport,
             keychain: keychain,
@@ -4800,7 +4801,7 @@ final class AppModelTests: XCTestCase {
 
         let restoreTransport = GatedConnectTransport()
         await restoreTransport.enqueue(Data(#"{"installations":[]}"#.utf8))
-        let restoreClient = MSWConnectClient(
+        let restoreClient = SiloConnectClient(
             configuration: connectConfiguration,
             transport: restoreTransport,
             keychain: keychain,
@@ -4808,7 +4809,7 @@ final class AppModelTests: XCTestCase {
             sessionService: sessionService
         )
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-startup-chain-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-startup-chain-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let broker = try CredentialBroker(
@@ -4982,7 +4983,7 @@ final class AppModelTests: XCTestCase {
             systemReady: true,
             name: "Taylor Example",
             email: "taylor@example.com"
-        ), "A valid identity still requires the migrated MSW client dependency.")
+        ), "A valid identity still requires the migrated Silo client dependency.")
         XCTAssertFalse(SetupView.allowsIdentitySave(
             clientAvailable: true,
             systemReady: false,
@@ -5032,9 +5033,9 @@ final class AppModelTests: XCTestCase {
 
     func testStrictBootstrapConfigurationDecoderRejectsUnknownFields() throws {
         let valid = try JSONEncoder().encode(
-            MSWBootstrapConfiguration(SetupWorkspaceConfiguration.defaults)
+            SiloBootstrapConfiguration(SetupWorkspaceConfiguration.defaults)
         )
-        XCTAssertNotNil(MSWBootstrapConfiguration.decodeValidated(from: valid))
+        XCTAssertNotNil(SiloBootstrapConfiguration.decodeValidated(from: valid))
 
         var object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: valid) as? [String: Any]
@@ -5043,11 +5044,11 @@ final class AppModelTests: XCTestCase {
         workspaces[0]["host"] = "$(touch should-never-run)"
         object["workspaces"] = workspaces
         let unknownWorkspaceField = try JSONSerialization.data(withJSONObject: object)
-        XCTAssertNil(MSWBootstrapConfiguration.decodeValidated(from: unknownWorkspaceField))
+        XCTAssertNil(SiloBootstrapConfiguration.decodeValidated(from: unknownWorkspaceField))
 
         object["unexpected"] = true
         let unknownRootField = try JSONSerialization.data(withJSONObject: object)
-        XCTAssertNil(MSWBootstrapConfiguration.decodeValidated(from: unknownRootField))
+        XCTAssertNil(SiloBootstrapConfiguration.decodeValidated(from: unknownRootField))
     }
 
     @MainActor
@@ -5110,19 +5111,19 @@ final class AppModelTests: XCTestCase {
     @MainActor
     func testAppModelRejectsAnOldWorkspaceSnapshotAfterAppliedTargetReload() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-model-target-reload-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-model-target-reload-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let stateLine = String(decoding: try testJSON(makeTestStateEnvelope(
             devLifecycle: .stopped,
             devQuarantine: .clear
         )), as: UTF8.self)
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         try Data("#!/bin/sh\nprintf '%s\\n' '\(stateLine)'\n".utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let client = MSWClient(runner: MSWCommandRunner(configuration: .init(
+        let client = SiloClient(runner: SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         )))
         let model = AppModel(client: client)
         let selected = [
@@ -5214,13 +5215,13 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(drafts["dev"]?.workspace, "dev")
     }
 
-    func testMSWConnectSessionSurvivesRestoreFromAnotherConfiguration() async throws {
+    func testSiloConnectSessionSurvivesRestoreFromAnotherConfiguration() async throws {
         let keychain = InMemoryConnectKeychain()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let sessionService = "test-connect-retained-\(UUID().uuidString)"
 
         let transport = QueueConnectTransport()
-        let configuredClient = MSWConnectClient(
+        let configuredClient = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: keychain,
@@ -5243,8 +5244,8 @@ final class AppModelTests: XCTestCase {
         )
 
         // A different configuration must neither restore nor delete the session.
-        let otherClient = MSWConnectClient(
-            configuration: MSWConnectConfiguration(
+        let otherClient = SiloConnectClient(
+            configuration: SiloConnectConfiguration(
                 baseURL: URL(string: "https://other-connect.test")!,
                 clientID: "other-client"
             ),
@@ -5257,8 +5258,8 @@ final class AppModelTests: XCTestCase {
         XCTAssertNil(otherRestored)
 
         // The unconfigured sentinel configuration must also leave it alone.
-        let sentinelClient = MSWConnectClient(
-            configuration: MSWConnectConfiguration(),
+        let sentinelClient = SiloConnectClient(
+            configuration: SiloConnectConfiguration(),
             transport: QueueConnectTransport(),
             keychain: keychain,
             now: clock.now,
@@ -5272,9 +5273,9 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(restored?.account.login, "octocat")
     }
 
-    func testMSWConnectAuthorizationSurfacesUnavailableCallbackExchange() async throws {
+    func testSiloConnectAuthorizationSurfacesUnavailableCallbackExchange() async throws {
         let transport = QueueConnectTransport()
-        let client = MSWConnectClient(
+        let client = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: InMemoryConnectKeychain(),
@@ -5284,7 +5285,7 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await client.authorize(browser: TestConnectBrowser())
             XCTFail("An unavailable callback exchange must fail.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .transportUnavailable)
         }
 
@@ -5294,17 +5295,17 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(requests.first?.url?.path, "/oauth/callback")
     }
 
-    func testMSWConnectRejectsUnsafeClientConfiguration() {
-        let configuration = MSWConnectConfiguration(
+    func testSiloConnectRejectsUnsafeClientConfiguration() {
+        let configuration = SiloConnectConfiguration(
             baseURL: URL(string: "https://connect.test")!,
             clientID: "client id",
-            redirectURL: URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+            redirectURL: URL(string: "silo://connect.silo.dev/oauth/callback")!,
             authorizationPath: "/oauth/authorize",
             callbackPath: "/oauth/callback"
         )
 
         XCTAssertThrowsError(try configuration.validate()) { error in
-            XCTAssertEqual(error as? MSWConnectError, .invalidConfiguration)
+            XCTAssertEqual(error as? SiloConnectError, .invalidConfiguration)
         }
     }
 
@@ -5319,41 +5320,41 @@ final class AppModelTests: XCTestCase {
         )
         XCTAssertTrue(attested.hasTrustedScopeAttestation)
     }
-    func testMSWConnectAcceptsOnlyConfiguredGitHubInstallationURL() throws {
-        let approved = MSWConnectConfiguration(
+    func testSiloConnectAcceptsOnlyConfiguredGitHubInstallationURL() throws {
+        let approved = SiloConnectConfiguration(
             baseURL: URL(string: "https://connect.test")!,
             clientID: "test-client",
-            redirectURL: URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+            redirectURL: URL(string: "silo://connect.silo.dev/oauth/callback")!,
             authorizationPath: "/oauth/authorize",
             callbackPath: "/oauth/callback",
-            installationURL: URL(string: "https://github.com/apps/msw/installations/new")!
+            installationURL: URL(string: "https://github.com/apps/silo/installations/new")!
         )
         XCTAssertNoThrow(try approved.validate())
         XCTAssertTrue(approved.isConfigured)
 
         let rejected = [
-            URL(string: "https://github.com/apps/msw/installations/new?state=1")!,
-            URL(string: "https://example.com/apps/msw/installations/new")!,
-            URL(string: "https://github.com/apps/msw/installations/../new")!
+            URL(string: "https://github.com/apps/silo/installations/new?state=1")!,
+            URL(string: "https://example.com/apps/silo/installations/new")!,
+            URL(string: "https://github.com/apps/silo/installations/../new")!
         ]
         for installationURL in rejected {
-            let configuration = MSWConnectConfiguration(
+            let configuration = SiloConnectConfiguration(
                 baseURL: URL(string: "https://connect.test")!,
                 clientID: "test-client",
-                redirectURL: URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+                redirectURL: URL(string: "silo://connect.silo.dev/oauth/callback")!,
                 authorizationPath: "/oauth/authorize",
                 callbackPath: "/oauth/callback",
                 installationURL: installationURL
             )
             XCTAssertThrowsError(try configuration.validate()) { error in
-                XCTAssertEqual(error as? MSWConnectError, .invalidConfiguration)
+                XCTAssertEqual(error as? SiloConnectError, .invalidConfiguration)
             }
             XCTAssertFalse(configuration.isConfigured)
         }
     }
 
     func testUnconfiguredBuildUsesConciseConnectionFailure() {
-        let configuration = MSWConnectConfiguration()
+        let configuration = SiloConnectConfiguration()
 
         XCTAssertFalse(GitHubFeatureAvailability.isAvailable(configuration: configuration))
         XCTAssertEqual(
@@ -5364,7 +5365,7 @@ final class AppModelTests: XCTestCase {
 
     func testConfiguredConnectWithoutTrustedAttestationCannotOpenAuthorization() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-untrusted-connect-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-untrusted-connect-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let broker = try CredentialBroker(
@@ -5374,7 +5375,7 @@ final class AppModelTests: XCTestCase {
         )
         let coordinator = GitHubAuthorizationCoordinator(
             broker: broker,
-            connect: MSWConnectClient(configuration: testConnectConfiguration()),
+            connect: SiloConnectClient(configuration: testConnectConfiguration()),
             journalURL: temporary.appendingPathComponent("authorization-journal.json")
         )
         let browser = RecordingConnectBrowser()
@@ -5436,7 +5437,7 @@ final class AppModelTests: XCTestCase {
             state: .expired,
             quarantined: false
         )
-        await fixture.transport.enqueue(try testJSON(MSWConnectGrant(
+        await fixture.transport.enqueue(try testJSON(SiloConnectGrant(
             id: fixture.grantID,
             workspace: "dev",
             role: .guest,
@@ -5470,7 +5471,7 @@ final class AppModelTests: XCTestCase {
             state: .expired,
             quarantined: false
         )
-        await fixture.transport.enqueue(try testJSON(MSWConnectGrant(
+        await fixture.transport.enqueue(try testJSON(SiloConnectGrant(
             id: fixture.grantID,
             workspace: "dev",
             role: .guest,
@@ -5545,7 +5546,7 @@ final class AppModelTests: XCTestCase {
 
     func testTokenRenewalScopeDriftBecomesWorkspaceSpecificReconnect() async throws {
         let fixture = try await makeTokenRefreshFixture()
-        await fixture.transport.enqueue(try testJSON(MSWConnectGrant(
+        await fixture.transport.enqueue(try testJSON(SiloConnectGrant(
             id: fixture.grantID,
             workspace: "dev",
             role: .guest,
@@ -5583,14 +5584,14 @@ final class AppModelTests: XCTestCase {
 
     func testAuthorizationMapsRemovedInstallationToOwnerNotInstalled() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-installation-removed-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-installation-removed-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let transport = QueueConnectTransport()
         let keychain = InMemoryConnectKeychain()
-        let client = MSWConnectClient(
+        let client = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: keychain,
@@ -5658,13 +5659,13 @@ final class AppModelTests: XCTestCase {
 
     func testRepositoryPolicyRejectsMultipleInstallationsForOneWorkspace() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-policy-partition-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-policy-partition-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: keychain,
@@ -5714,7 +5715,7 @@ final class AppModelTests: XCTestCase {
 
     func testOneConnectSessionCommitsIndependentWorkspaceGrants() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-assignments-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-assignments-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -5722,7 +5723,7 @@ final class AppModelTests: XCTestCase {
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -5793,7 +5794,7 @@ final class AppModelTests: XCTestCase {
         )
 
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: UUID(),
             workspace: "dev",
             role: .guest,
@@ -5809,7 +5810,7 @@ final class AppModelTests: XCTestCase {
             generation: 1
         )))
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: UUID(),
             workspace: "personal",
             role: .guest,
@@ -5824,7 +5825,7 @@ final class AppModelTests: XCTestCase {
             accessExpiresAt: clock.value.addingTimeInterval(1800),
             generation: 1
         )))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: UUID(),
             workspace: "personal",
             role: .host,
@@ -5865,7 +5866,7 @@ final class AppModelTests: XCTestCase {
 
     func testAuthorizationRecoveryRevokesReplacementAfterIncompleteLocalCommit() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-recovery-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-recovery-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -5874,7 +5875,7 @@ final class AppModelTests: XCTestCase {
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
         let sessionService = "test-connect-recovery-\(UUID().uuidString)"
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -5913,7 +5914,7 @@ final class AppModelTests: XCTestCase {
         ]
         try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
 
-        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: replacementID,
             revoked: true,
             terminal: true,
@@ -5951,7 +5952,7 @@ final class AppModelTests: XCTestCase {
     }
     func testUnconfiguredAuthorizationMetadataQuarantinesAndRetainsPreparedJournal() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-startup-recovery-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-startup-recovery-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -5991,7 +5992,7 @@ final class AppModelTests: XCTestCase {
 
     func testPreparedRecoveryQuarantinesPartialLocalCommitAndPreservesJournalOnServiceOutage() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-prepared-recovery-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-prepared-recovery-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -6035,7 +6036,7 @@ final class AppModelTests: XCTestCase {
         ]
         try JSONSerialization.data(withJSONObject: journal).write(to: journalURL)
 
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: QueueConnectTransport(),
             keychain: keychain,
@@ -6112,7 +6113,7 @@ final class AppModelTests: XCTestCase {
                 repositories: repositories
             )))
             let replacementID = UUID()
-            await fixture.transport.enqueue(try testJSON(MSWConnectGrant(
+            await fixture.transport.enqueue(try testJSON(SiloConnectGrant(
                 id: replacementID,
                 workspace: "dev",
                 role: .guest,
@@ -6297,7 +6298,7 @@ final class AppModelTests: XCTestCase {
         ) as? [String: Any]
         XCTAssertEqual(interrupted?["verifiedUnboundWorkspaces"] as? [String], ["dev"])
 
-        await fixture.transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await fixture.transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: fixture.grantID,
             revoked: true,
             terminal: true,
@@ -6318,7 +6319,7 @@ final class AppModelTests: XCTestCase {
 
     func testOldGrantRevokeTransportFailureQuarantinesEveryJournalRole() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-old-revoke-failure-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-old-revoke-failure-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -6327,7 +6328,7 @@ final class AppModelTests: XCTestCase {
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
         let sessionService = "test-old-revoke-connect-\(UUID().uuidString)"
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -6417,7 +6418,7 @@ final class AppModelTests: XCTestCase {
 
     func testReadWriteToReadOnlyRecoveryRemovesOldHostRole() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-access-replacement-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-access-replacement-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -6425,7 +6426,7 @@ final class AppModelTests: XCTestCase {
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -6507,13 +6508,13 @@ final class AppModelTests: XCTestCase {
                 code: "access-replacement"
             )
         )
-        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: oldGuestID,
             revoked: true,
             terminal: true,
             revokedAt: clock.value
         )))
-        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: oldHostID,
             revoked: true,
             terminal: true,
@@ -6554,7 +6555,7 @@ final class AppModelTests: XCTestCase {
 
     func testExpiredSessionRecoveryQuarantinesAndAllowsFreshAuthorizationRetry() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-connect-expired-recovery-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-connect-expired-recovery-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -6562,7 +6563,7 @@ final class AppModelTests: XCTestCase {
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -6639,12 +6640,12 @@ final class AppModelTests: XCTestCase {
     }
 
 
-    func testMSWConnectGrantRequestUsesReviewedRepositoryScope() async throws {
+    func testSiloConnectGrantRequestUsesReviewedRepositoryScope() async throws {
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let client = MSWConnectClient(
+        let client = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -6663,7 +6664,7 @@ final class AppModelTests: XCTestCase {
             callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "code")
         )
 
-        let grant = MSWConnectGrant(
+        let grant = SiloConnectGrant(
             id: UUID(),
             workspace: "dev",
             role: .guest,
@@ -6679,7 +6680,7 @@ final class AppModelTests: XCTestCase {
             generation: 1
         )
         await transport.enqueue(try testJSON(grant))
-        let assignment = MSWConnectGrantAssignment(
+        let assignment = SiloConnectGrantAssignment(
             workspace: "dev",
             role: .guest,
             owner: "acme",
@@ -6697,13 +6698,13 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(grantRequest.url?.path, "/v1/grants")
         XCTAssertEqual(grantRequest.value(forHTTPHeaderField: "Authorization"), "Bearer opaque-service-session")
         let body = try XCTUnwrap(grantRequest.httpBody)
-        let sent = try JSONDecoder().decode(MSWConnectGrantAssignment.self, from: body)
+        let sent = try JSONDecoder().decode(SiloConnectGrantAssignment.self, from: body)
         XCTAssertEqual(sent, assignment)
         let bodyText = String(decoding: body, as: UTF8.self)
         XCTAssertFalse(bodyText.contains("refresh_token"))
         XCTAssertFalse(bodyText.contains("access_token"))
     }
-    func testMSWConnectAcceptsPortableSignedScopeAttestation() async throws {
+    func testSiloConnectAcceptsPortableSignedScopeAttestation() async throws {
         let signingKey = Curve25519.Signing.PrivateKey()
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
@@ -6733,7 +6734,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(returned.credentialDigest, testCredentialDigest(returned.accessToken))
     }
 
-    func testMSWConnectRejectsMissingOrTamperedScopeAttestation() async throws {
+    func testSiloConnectRejectsMissingOrTamperedScopeAttestation() async throws {
         let signingKey = Curve25519.Signing.PrivateKey()
         let configuration = testConnectConfiguration(
             scopeAttestationPublicKey: signingKey.publicKey.rawRepresentation,
@@ -6756,7 +6757,7 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await missingClient.createGrant(assignment)
             XCTFail("A configured attestation key requires a signed scope.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .scopeAttestationMissing)
         } catch {
             XCTFail("Unexpected attestation error: \(error)")
@@ -6787,14 +6788,14 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await tamperedClient.createGrant(assignment)
             XCTFail("A tampered scope signature must be rejected.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .scopeAttestationInvalid)
         } catch {
             XCTFail("Unexpected attestation error: \(error)")
         }
     }
 
-    func testMSWConnectRejectsSignedScopeAttestationWithTamperedScope() async throws {
+    func testSiloConnectRejectsSignedScopeAttestationWithTamperedScope() async throws {
         let signingKey = Curve25519.Signing.PrivateKey()
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
@@ -6831,14 +6832,14 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await client.createGrant(assignment)
             XCTFail("A signed grant whose repository scope changed must be rejected.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .scopeMismatch)
         } catch {
             XCTFail("Unexpected attestation error: \(error)")
         }
     }
 
-    func testMSWConnectRejectsTokenSwappedAfterScopeAttestation() async throws {
+    func testSiloConnectRejectsTokenSwappedAfterScopeAttestation() async throws {
         let signingKey = Curve25519.Signing.PrivateKey()
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
@@ -6872,14 +6873,14 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await client.createGrant(assignment)
             XCTFail("A signed scope must bind the returned installation credential.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .scopeAttestationInvalid)
         } catch {
             XCTFail("Unexpected attestation error: \(error)")
         }
     }
 
-    func testMSWConnectRejectsGrantIDSwappedAfterScopeAttestation() async throws {
+    func testSiloConnectRejectsGrantIDSwappedAfterScopeAttestation() async throws {
         let signingKey = Curve25519.Signing.PrivateKey()
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
@@ -6913,19 +6914,19 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await client.createGrant(assignment)
             XCTFail("A signed scope must bind the returned grant ID.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .scopeAttestationInvalid)
         } catch {
             XCTFail("Unexpected attestation error: \(error)")
         }
     }
 
-    func testMSWConnectRejectsGrantWithExtraRepositoryScope() async throws {
+    func testSiloConnectRejectsGrantWithExtraRepositoryScope() async throws {
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let client = MSWConnectClient(
+        let client = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -6944,7 +6945,7 @@ final class AppModelTests: XCTestCase {
             callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "code")
         )
 
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: UUID(),
             workspace: "dev",
             role: .guest,
@@ -6959,7 +6960,7 @@ final class AppModelTests: XCTestCase {
             accessExpiresAt: clock.value.addingTimeInterval(1800),
             generation: 1
         )))
-        let assignment = MSWConnectGrantAssignment(
+        let assignment = SiloConnectGrantAssignment(
             workspace: "dev",
             role: .guest,
             owner: "acme",
@@ -6972,14 +6973,14 @@ final class AppModelTests: XCTestCase {
         do {
             _ = try await client.createGrant(assignment)
             XCTFail("A grant containing an extra repository must be rejected.")
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             XCTAssertEqual(error, .scopeMismatch)
         }
     }
 
     func testCredentialBrokerMetadataContainsNoScopedTokenBytes() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-scoped-credential-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-scoped-credential-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -7049,7 +7050,7 @@ final class AppModelTests: XCTestCase {
 
     func testLegacyWorkspaceMetadataRequiresExplicitReauthorization() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-legacy-credential-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-legacy-credential-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let metadataURL = temporary.appendingPathComponent("credentials.json")
@@ -7071,8 +7072,8 @@ final class AppModelTests: XCTestCase {
         ]
         try JSONSerialization.data(withJSONObject: legacy).write(to: metadataURL)
         let keychain = InMemoryConnectKeychain()
-        try keychain.save(KeychainItem(service: "msw.github.read", account: "dev", secret: Data("legacy-read".utf8)))
-        try keychain.save(KeychainItem(service: "msw.github.write", account: "dev", secret: Data("legacy-write".utf8)))
+        try keychain.save(KeychainItem(service: "silo.github.read", account: "dev", secret: Data("legacy-read".utf8)))
+        try keychain.save(KeychainItem(service: "silo.github.write", account: "dev", secret: Data("legacy-write".utf8)))
         let broker = try CredentialBroker(keychain: keychain, metadataURL: metadataURL)
         let optionalEntry = try await broker.metadata(for: "dev", role: .guest)
         let entry = try XCTUnwrap(optionalEntry)
@@ -7085,8 +7086,8 @@ final class AppModelTests: XCTestCase {
         } catch let error as CredentialBrokerError {
             XCTAssertEqual(error, .legacyCredentialRequiresAuthorization)
         }
-        XCTAssertThrowsError(try keychain.load(service: "msw.github.read", account: "dev"))
-        XCTAssertThrowsError(try keychain.load(service: "msw.github.write", account: "dev"))
+        XCTAssertThrowsError(try keychain.load(service: "silo.github.read", account: "dev"))
+        XCTAssertThrowsError(try keychain.load(service: "silo.github.write", account: "dev"))
     }
 
     func testLegacyDirectGitHubCredentialRetirementDeletesPriorCredential() throws {
@@ -7117,9 +7118,9 @@ final class AppModelTests: XCTestCase {
     }
 
     // MARK: - Verified Connect -> Apply integration
-    func testVerifiedConnectApplyPersistsScopedMetadataAfterMSWVerification() async throws {
+    func testVerifiedConnectApplyPersistsScopedMetadataAfterSiloVerification() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-verified-connect-apply-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-verified-connect-apply-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -7134,7 +7135,7 @@ final class AppModelTests: XCTestCase {
         let transport = QueueConnectTransport()
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -7142,15 +7143,15 @@ final class AppModelTests: XCTestCase {
             sessionService: "test-verified-connect-\(UUID().uuidString)"
         )
 
-        let invocationURL = temporary.appendingPathComponent("msw-bind-invocations.log")
+        let invocationURL = temporary.appendingPathComponent("silo-bind-invocations.log")
         let bindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-bind",
                 ok: true,
                 command: "github-bind",
                 observedAt: clock.value,
-                result: MSWGitHubBindResult(
+                result: SiloGitHubBindResult(
                     workspace: "dev",
                     accessMode: "read-only",
                     verificationRepository: "acme/two",
@@ -7161,13 +7162,13 @@ final class AppModelTests: XCTestCase {
             as: UTF8.self
         )
         let hostBindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-bind-host",
                 ok: true,
                 command: "github-bind",
                 observedAt: clock.value,
-                result: MSWGitHubBindResult(
+                result: SiloGitHubBindResult(
                     workspace: "dev",
                     accessMode: "host-write",
                     verificationRepository: "acme/two",
@@ -7177,7 +7178,7 @@ final class AppModelTests: XCTestCase {
             )),
             as: UTF8.self
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -7195,10 +7196,10 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let mswClient = MSWClient(
-            runner: MSWCommandRunner(configuration: .init(
+        let siloClient = SiloClient(
+            runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: temporary,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             )),
             credentialBroker: broker
         )
@@ -7207,7 +7208,7 @@ final class AppModelTests: XCTestCase {
             broker: broker,
             connect: connect,
             allowsUnattestedTestConfiguration: true,
-            mswClient: mswClient,
+            siloClient: siloClient,
             now: clock.now,
             journalURL: journalURL
         )
@@ -7264,7 +7265,7 @@ final class AppModelTests: XCTestCase {
             )
         }
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000071")!,
             workspace: "dev",
             role: .guest,
@@ -7279,7 +7280,7 @@ final class AppModelTests: XCTestCase {
             accessExpiresAt: clock.value.addingTimeInterval(1800),
             generation: 1
         )))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000072")!,
             workspace: "dev",
             role: .host,
@@ -7356,7 +7357,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(grantRequests.count, 2)
         for request in grantRequests {
             let body = try XCTUnwrap(request.httpBody)
-            let sent = try JSONDecoder().decode(MSWConnectGrantAssignment.self, from: body)
+            let sent = try JSONDecoder().decode(SiloConnectGrantAssignment.self, from: body)
             if sent.role == .guest {
                 XCTAssertEqual(sent.repositoryIDs, [7, 8])
                 XCTAssertEqual(sent.repositoryNames, ["acme/one", "acme/two"])
@@ -7372,14 +7373,14 @@ final class AppModelTests: XCTestCase {
 
     func testRepositoryPolicyDowngradeAndRemovalReplaceEveryScope() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-policy-replacement-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-policy-replacement-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let keychain = InMemoryConnectKeychain()
         let transport = QueueConnectTransport()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: keychain,
@@ -7449,8 +7450,8 @@ final class AppModelTests: XCTestCase {
             repositoryNames: [String],
             accessMode: String,
             verificationRepository: String
-        ) -> MSWConnectGrant {
-            MSWConnectGrant(
+        ) -> SiloConnectGrant {
+            SiloConnectGrant(
                 id: id,
                 workspace: "dev",
                 role: role,
@@ -7482,7 +7483,7 @@ final class AppModelTests: XCTestCase {
         }
 
         func enqueueRevocation(_ grantID: UUID) async throws {
-            await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+            await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
                 grantID: grantID,
                 revoked: true,
                 terminal: true,
@@ -7589,7 +7590,7 @@ final class AppModelTests: XCTestCase {
             .filter { $0.url?.path == "/v1/grants" }
             .map { request in
                 try JSONDecoder().decode(
-                    MSWConnectGrantAssignment.self,
+                    SiloConnectGrantAssignment.self,
                     from: XCTUnwrap(request.httpBody)
                 )
             }
@@ -7609,7 +7610,7 @@ final class AppModelTests: XCTestCase {
 
     func testVerifiedConnectApplyRollsBackAfterVerificationFailure() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-verified-connect-rollback-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-verified-connect-rollback-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -7646,23 +7647,23 @@ final class AppModelTests: XCTestCase {
 
         let transport = QueueConnectTransport()
         let configuration = testConnectConfiguration()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
             now: clock.now,
             sessionService: "test-verified-rollback-connect-\(UUID().uuidString)"
         )
-        let invocationURL = temporary.appendingPathComponent("msw-rollback-invocations.log")
+        let invocationURL = temporary.appendingPathComponent("silo-rollback-invocations.log")
         let bindMarkerURL = temporary.appendingPathComponent("failed-bind")
         let failedBindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-bind-failed",
                 ok: true,
                 command: "github-bind",
                 observedAt: clock.value,
-                result: MSWGitHubBindResult(
+                result: SiloGitHubBindResult(
                     workspace: "dev",
                     accessMode: "read-only",
                     verificationRepository: "acme/one",
@@ -7673,13 +7674,13 @@ final class AppModelTests: XCTestCase {
             as: UTF8.self
         )
         let restoredBindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-bind-restored",
                 ok: true,
                 command: "github-bind",
                 observedAt: clock.value,
-                result: MSWGitHubBindResult(
+                result: SiloGitHubBindResult(
                     workspace: "dev",
                     accessMode: "read-only",
                     verificationRepository: "acme/one",
@@ -7690,17 +7691,17 @@ final class AppModelTests: XCTestCase {
             as: UTF8.self
         )
         let unbindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-unbind",
                 ok: true,
                 command: "github-unbind",
                 observedAt: clock.value,
-                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+                result: SiloGitHubUnbindResult(workspace: "dev", unbound: true)
             )),
             as: UTF8.self
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -7723,10 +7724,10 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let mswClient = MSWClient(
-            runner: MSWCommandRunner(configuration: .init(
+        let siloClient = SiloClient(
+            runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: temporary,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             )),
             credentialBroker: broker
         )
@@ -7735,7 +7736,7 @@ final class AppModelTests: XCTestCase {
             broker: broker,
             connect: connect,
             allowsUnattestedTestConfiguration: true,
-            mswClient: mswClient,
+            siloClient: siloClient,
             now: clock.now,
             journalURL: journalURL
         )
@@ -7779,7 +7780,7 @@ final class AppModelTests: XCTestCase {
             ownerType: owner.type
         )
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: repositories)))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: newGrantID,
             workspace: "dev",
             role: .guest,
@@ -7794,7 +7795,7 @@ final class AppModelTests: XCTestCase {
             accessExpiresAt: clock.value.addingTimeInterval(1800),
             generation: 2
         )))
-        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: newGrantID,
             revoked: true,
             terminal: true,
@@ -7806,7 +7807,7 @@ final class AppModelTests: XCTestCase {
                 sessionID: discovery.sessionID,
                 policy: [GitHubWorkspacePolicy(workspace: "dev", repositories: [policy])]
             )
-            XCTFail("A failed MSW verification must not commit replacement access.")
+            XCTFail("A failed Silo verification must not commit replacement access.")
         } catch let error as GitHubAuthorizationError {
             XCTAssertEqual(error, .verificationFailed("dev"))
         }
@@ -7841,7 +7842,7 @@ final class AppModelTests: XCTestCase {
 
     func testPartialPreviousPolicyRebindIsImmediatelyUnboundAndDurablyCleaned() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-partial-rollback-rebind-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-partial-rollback-rebind-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -7881,25 +7882,25 @@ final class AppModelTests: XCTestCase {
         }
 
         let transport = QueueConnectTransport()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: testConnectConfiguration(),
             transport: transport,
             keychain: keychain,
             now: clock.now,
             sessionService: "test-partial-rollback-connect-\(UUID().uuidString)"
         )
-        let invocationURL = temporary.appendingPathComponent("msw-partial-rollback.log")
+        let invocationURL = temporary.appendingPathComponent("silo-partial-rollback.log")
         let bindCountURL = temporary.appendingPathComponent("bind-count")
         let liveBindingURL = temporary.appendingPathComponent("live-binding")
         func bindResponse(accessMode: String, verified: Bool) throws -> String {
             String(
-                decoding: try testJSON(MSWEnvelope(
+                decoding: try testJSON(SiloEnvelope(
                     schemaVersion: 1,
                     requestId: "github-bind-\(accessMode)",
                     ok: true,
                     command: "github-bind",
                     observedAt: clock.value,
-                    result: MSWGitHubBindResult(
+                    result: SiloGitHubBindResult(
                         workspace: "dev",
                         accessMode: accessMode,
                         verificationRepository: "acme/one",
@@ -7914,17 +7915,17 @@ final class AppModelTests: XCTestCase {
         let restoredGuestResponse = try bindResponse(accessMode: "read-only", verified: true)
         let failedHostResponse = try bindResponse(accessMode: "host-write", verified: false)
         let unbindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-unbind",
                 ok: true,
                 command: "github-unbind",
                 observedAt: clock.value,
-                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+                result: SiloGitHubUnbindResult(workspace: "dev", unbound: true)
             )),
             as: UTF8.self
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -7953,10 +7954,10 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let mswClient = MSWClient(
-            runner: MSWCommandRunner(configuration: .init(
+        let siloClient = SiloClient(
+            runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: temporary,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             )),
             credentialBroker: broker
         )
@@ -7965,7 +7966,7 @@ final class AppModelTests: XCTestCase {
             broker: broker,
             connect: connect,
             allowsUnattestedTestConfiguration: true,
-            mswClient: mswClient,
+            siloClient: siloClient,
             now: clock.now,
             journalURL: journalURL
         )
@@ -7989,7 +7990,7 @@ final class AppModelTests: XCTestCase {
         await transport.enqueue(try testJSON(TestInstallationResponse(installations: [installation])))
         let discovery = try await coordinator.beginAuthorization(browser: TestConnectBrowser())
         await transport.enqueue(try testJSON(TestRepositoryResponse(repositories: [repository])))
-        await transport.enqueue(try testJSON(MSWConnectGrant(
+        await transport.enqueue(try testJSON(SiloConnectGrant(
             id: newGrantID,
             workspace: "dev",
             role: .guest,
@@ -8004,7 +8005,7 @@ final class AppModelTests: XCTestCase {
             accessExpiresAt: clock.value.addingTimeInterval(1800),
             generation: 2
         )))
-        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: newGrantID,
             revoked: true,
             terminal: true,
@@ -8049,7 +8050,7 @@ final class AppModelTests: XCTestCase {
             broker: broker,
             connect: connect,
             allowsUnattestedTestConfiguration: true,
-            mswClient: mswClient,
+            siloClient: siloClient,
             now: clock.now,
             journalURL: journalURL
         )
@@ -8131,7 +8132,7 @@ final class AppModelTests: XCTestCase {
 
     func testUnconfiguredCoordinatorDisablesReconnectOnlyWorkspace() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-disable-unconfigured-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-disable-unconfigured-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -8141,19 +8142,19 @@ final class AppModelTests: XCTestCase {
             metadataURL: temporary.appendingPathComponent("credentials.json"),
             keychainService: "test-disable-unconfigured-\(UUID().uuidString)"
         )
-        let invocationURL = temporary.appendingPathComponent("msw-unbind-invocations.log")
+        let invocationURL = temporary.appendingPathComponent("silo-unbind-invocations.log")
         let unbindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-unbind",
                 ok: true,
                 command: "github-unbind",
                 observedAt: Date(),
-                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+                result: SiloGitHubUnbindResult(workspace: "dev", unbound: true)
             )),
             as: UTF8.self
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -8168,21 +8169,21 @@ final class AppModelTests: XCTestCase {
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
-        let mswClient = MSWClient(
-            runner: MSWCommandRunner(configuration: .init(
+        let siloClient = SiloClient(
+            runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: temporary,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             )),
             credentialBroker: broker
         )
         let coordinator = GitHubAuthorizationCoordinator(
             broker: broker,
-            connect: MSWConnectClient(
-                configuration: MSWConnectConfiguration(),
+            connect: SiloConnectClient(
+                configuration: SiloConnectConfiguration(),
                 keychain: keychain,
                 sessionService: "test-disable-unconfigured-connect-\(UUID().uuidString)"
             ),
-            mswClient: mswClient,
+            siloClient: siloClient,
             journalURL: temporary.appendingPathComponent("authorization-transaction.json")
         )
 
@@ -8200,7 +8201,7 @@ final class AppModelTests: XCTestCase {
 
     func testDisableWorkspaceGitHubAccessUnbindsHostAndRemovesGrant() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-disable-github-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-disable-github-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -8215,7 +8216,7 @@ final class AppModelTests: XCTestCase {
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
         let transport = QueueConnectTransport()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -8253,26 +8254,26 @@ final class AppModelTests: XCTestCase {
         _ = try await connect.completeAuthorization(
             callbackURL: testCallbackURL(configuration: configuration, state: start.state, code: "disable")
         )
-        await transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: grantID,
             revoked: true,
             terminal: true,
             revokedAt: clock.value
         )))
 
-        let invocationURL = temporary.appendingPathComponent("msw-unbind-invocations.log")
+        let invocationURL = temporary.appendingPathComponent("silo-unbind-invocations.log")
         let unbindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-unbind",
                 ok: true,
                 command: "github-unbind",
                 observedAt: clock.value,
-                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+                result: SiloGitHubUnbindResult(workspace: "dev", unbound: true)
             )),
             as: UTF8.self
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -8286,17 +8287,17 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let mswClient = MSWClient(
-            runner: MSWCommandRunner(configuration: .init(
+        let siloClient = SiloClient(
+            runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: temporary,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             )),
             credentialBroker: broker
         )
         let coordinator = GitHubAuthorizationCoordinator(
             broker: broker,
             connect: connect,
-            mswClient: mswClient,
+            siloClient: siloClient,
             now: clock.now,
             journalURL: temporary.appendingPathComponent("authorization-transaction.json")
         )
@@ -8322,7 +8323,7 @@ final class AppModelTests: XCTestCase {
 
     func testDisableWorkspaceGitHubAccessTreatsAlreadyRevokedGrantAsSuccess() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-disable-github-retry-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-disable-github-retry-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -8337,7 +8338,7 @@ final class AppModelTests: XCTestCase {
         let clock = TestConnectClock(Date(timeIntervalSince1970: 1_900_000_000))
         let configuration = testConnectConfiguration()
         let transport = QueueConnectTransport()
-        let connect = MSWConnectClient(
+        let connect = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -8382,19 +8383,19 @@ final class AppModelTests: XCTestCase {
             status: 409
         )
 
-        let invocationURL = temporary.appendingPathComponent("msw-unbind-retry-invocations.log")
+        let invocationURL = temporary.appendingPathComponent("silo-unbind-retry-invocations.log")
         let unbindResponse = String(
-            decoding: try testJSON(MSWEnvelope(
+            decoding: try testJSON(SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "github-unbind",
                 ok: true,
                 command: "github-unbind",
                 observedAt: clock.value,
-                result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+                result: SiloGitHubUnbindResult(workspace: "dev", unbound: true)
             )),
             as: UTF8.self
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -8408,17 +8409,17 @@ final class AppModelTests: XCTestCase {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let mswClient = MSWClient(
-            runner: MSWCommandRunner(configuration: .init(
+        let siloClient = SiloClient(
+            runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: temporary,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             )),
             credentialBroker: broker
         )
         let coordinator = GitHubAuthorizationCoordinator(
             broker: broker,
             connect: connect,
-            mswClient: mswClient,
+            siloClient: siloClient,
             now: clock.now,
             journalURL: temporary.appendingPathComponent("authorization-transaction.json")
         )
@@ -8439,12 +8440,12 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testRemoveWorkspaceRequiresMSWClientBeforeCleanup() async throws {
+    func testRemoveWorkspaceRequiresSiloClientBeforeCleanup() async throws {
         let fixture = try await makeGitHubRemovalFixture(unbindProof: .missingClient)
 
         do {
             try await fixture.coordinator.removeWorkspace("dev")
-            XCTFail("Workspace removal must fail without an MSW client.")
+            XCTFail("Workspace removal must fail without a Silo client.")
         } catch let error as GitHubAuthorizationError {
             XCTAssertEqual(error, .revocationFailed)
         }
@@ -8469,7 +8470,7 @@ final class AppModelTests: XCTestCase {
 
     func testRemoveWorkspaceCompletesOnlyAfterVerifiedUnbind() async throws {
         let fixture = try await makeGitHubRemovalFixture(unbindProof: .verified)
-        await fixture.transport.enqueue(try testJSON(MSWConnectRevocationReceipt(
+        await fixture.transport.enqueue(try testJSON(SiloConnectRevocationReceipt(
             grantID: fixture.grantID,
             revoked: true,
             terminal: true,
@@ -8489,12 +8490,12 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(invocations.contains("app github-unbind --workspace dev"))
     }
 
-    func testDisconnectAccountRequiresMSWClientBeforeCleanup() async throws {
+    func testDisconnectAccountRequiresSiloClientBeforeCleanup() async throws {
         let fixture = try await makeGitHubRemovalFixture(unbindProof: .missingClient)
 
         do {
             try await fixture.coordinator.disconnectAccount()
-            XCTFail("Account disconnect must fail without an MSW client.")
+            XCTFail("Account disconnect must fail without a Silo client.")
         } catch let error as GitHubAuthorizationError {
             XCTAssertEqual(error, .revocationFailed)
         }
@@ -8523,7 +8524,7 @@ final class AppModelTests: XCTestCase {
 
     func testDisconnectAccountCompletesOnlyAfterVerifiedUnbind() async throws {
         let fixture = try await makeGitHubRemovalFixture(unbindProof: .verified)
-        await fixture.transport.enqueue(try testJSON(MSWConnectDisconnectReceipt(
+        await fixture.transport.enqueue(try testJSON(SiloConnectDisconnectReceipt(
             revokedGrantIDs: [fixture.grantID],
             terminal: true
         )))
@@ -8543,18 +8544,18 @@ final class AppModelTests: XCTestCase {
 
     func testRemoveAllRolesClearsLegacyKeychainRecordsWithoutSchema3Metadata() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-remove-legacy-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-remove-legacy-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
         let keychain = InMemoryConnectKeychain()
         try keychain.save(KeychainItem(
-            service: "msw.github.read",
+            service: "silo.github.read",
             account: "dev",
             secret: Data("legacy-read-token".utf8)
         ))
         try keychain.save(KeychainItem(
-            service: "msw.github.write",
+            service: "silo.github.write",
             account: "dev",
             secret: Data("legacy-write-token".utf8)
         ))
@@ -8569,8 +8570,8 @@ final class AppModelTests: XCTestCase {
         // the workspace as GitHub-configured.
         try await broker.removeAllRoles(workspace: "dev")
 
-        XCTAssertThrowsError(try keychain.load(service: "msw.github.read", account: "dev"))
-        XCTAssertThrowsError(try keychain.load(service: "msw.github.write", account: "dev"))
+        XCTAssertThrowsError(try keychain.load(service: "silo.github.read", account: "dev"))
+        XCTAssertThrowsError(try keychain.load(service: "silo.github.write", account: "dev"))
     }
 
     private func testCredentialMetadata(
@@ -8629,7 +8630,7 @@ final class AppModelTests: XCTestCase {
     private typealias GitHubRemovalFixture = (
         coordinator: GitHubAuthorizationCoordinator,
         broker: CredentialBroker,
-        connect: MSWConnectClient,
+        connect: SiloConnectClient,
         transport: QueueConnectTransport,
         clock: TestConnectClock,
         grantID: UUID,
@@ -8641,7 +8642,7 @@ final class AppModelTests: XCTestCase {
         unbindProof: GitHubRemovalUnbindProof
     ) async throws -> GitHubRemovalFixture {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-github-removal-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-github-removal-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -8679,15 +8680,15 @@ final class AppModelTests: XCTestCase {
             repositoryNames: ["acme/one"]
         )
 
-        let invocationURL = temporary.appendingPathComponent("msw-unbind-invocations.log")
-        var mswClient: MSWClient?
+        let invocationURL = temporary.appendingPathComponent("silo-unbind-invocations.log")
+        var siloClient: SiloClient?
         if unbindProof == .missingClient {
-            mswClient = nil
+            siloClient = nil
         } else {
-            let envelope: MSWEnvelope<MSWGitHubUnbindResult>
+            let envelope: SiloEnvelope<SiloGitHubUnbindResult>
             switch unbindProof {
             case .absent, .commandError:
-                envelope = MSWEnvelope(
+                envelope = SiloEnvelope(
                     schemaVersion: 1,
                     requestId: "github-unbind",
                     ok: true,
@@ -8695,40 +8696,40 @@ final class AppModelTests: XCTestCase {
                     observedAt: clock.value
                 )
             case .wrongWorkspace:
-                envelope = MSWEnvelope(
+                envelope = SiloEnvelope(
                     schemaVersion: 1,
                     requestId: "github-unbind",
                     ok: true,
                     command: "github-unbind",
                     observedAt: clock.value,
-                    result: MSWGitHubUnbindResult(workspace: "personal", unbound: true)
+                    result: SiloGitHubUnbindResult(workspace: "personal", unbound: true)
                 )
             case .refused:
-                envelope = MSWEnvelope(
+                envelope = SiloEnvelope(
                     schemaVersion: 1,
                     requestId: "github-unbind",
                     ok: true,
                     command: "github-unbind",
                     observedAt: clock.value,
-                    result: MSWGitHubUnbindResult(workspace: "dev", unbound: false)
+                    result: SiloGitHubUnbindResult(workspace: "dev", unbound: false)
                 )
             case .verified:
-                envelope = MSWEnvelope(
+                envelope = SiloEnvelope(
                     schemaVersion: 1,
                     requestId: "github-unbind",
                     ok: true,
                     command: "github-unbind",
                     observedAt: clock.value,
-                    result: MSWGitHubUnbindResult(workspace: "dev", unbound: true)
+                    result: SiloGitHubUnbindResult(workspace: "dev", unbound: true)
                 )
             case .missingClient:
-                fatalError("The missing-client fixture does not create an MSW executable.")
+                fatalError("The missing-client fixture does not create a Silo executable.")
             }
             let response = String(decoding: try testJSON(envelope), as: UTF8.self)
             let commandBehavior = unbindProof == .commandError
                 ? "printf '%s\\n' 'unbind failed' >&2\n    exit 70"
                 : "printf '%s\\n' '\(response)'"
-            let executable = temporary.appendingPathComponent("msw")
+            let executable = temporary.appendingPathComponent("silo")
             let script = """
             #!/bin/sh
             if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -8742,10 +8743,10 @@ final class AppModelTests: XCTestCase {
             """
             try Data(script.utf8).write(to: executable)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-            mswClient = MSWClient(
-                runner: MSWCommandRunner(configuration: .init(
+            siloClient = SiloClient(
+                runner: SiloCommandRunner(configuration: .init(
                     homeDirectory: temporary,
-                    testMSWExecutable: executable
+                    testSiloExecutable: executable
                 )),
                 credentialBroker: broker
             )
@@ -8756,7 +8757,7 @@ final class AppModelTests: XCTestCase {
                 broker: broker,
                 connect: connect,
                 allowsUnattestedTestConfiguration: true,
-                mswClient: mswClient,
+                siloClient: siloClient,
                 now: clock.now,
                 journalURL: temporary.appendingPathComponent("authorization-transaction.json")
             ),
@@ -8795,13 +8796,13 @@ final class AppModelTests: XCTestCase {
         broker: CredentialBroker,
         transport: QueueConnectTransport,
         refresher: TokenRefreshCoordinator,
-        client: MSWConnectClient,
+        client: SiloConnectClient,
         clock: TestConnectClock,
         grantID: UUID,
         journalURL: URL
     ) {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-token-renewal-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-token-renewal-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let keychain = InMemoryConnectKeychain()
@@ -8851,11 +8852,11 @@ final class AppModelTests: XCTestCase {
     private func testConnectConfiguration(
         scopeAttestationPublicKey: Data? = nil,
         requiresScopeAttestation: Bool = false
-    ) -> MSWConnectConfiguration {
-        MSWConnectConfiguration(
+    ) -> SiloConnectConfiguration {
+        SiloConnectConfiguration(
             baseURL: URL(string: "https://connect.test")!,
             clientID: "test-client",
-            redirectURL: URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+            redirectURL: URL(string: "silo://connect.silo.dev/oauth/callback")!,
             authorizationPath: "/oauth/authorize",
             callbackPath: "/oauth/callback",
             scopeAttestationPublicKey: scopeAttestationPublicKey,
@@ -8864,12 +8865,12 @@ final class AppModelTests: XCTestCase {
     }
 
     private func authenticatedConnectClient(
-        configuration: MSWConnectConfiguration,
+        configuration: SiloConnectConfiguration,
         transport: QueueConnectTransport,
         keychain: InMemoryConnectKeychain,
         clock: TestConnectClock
-    ) async throws -> MSWConnectClient {
-        let client = MSWConnectClient(
+    ) async throws -> SiloConnectClient {
+        let client = SiloConnectClient(
             configuration: configuration,
             transport: transport,
             keychain: keychain,
@@ -8888,7 +8889,7 @@ final class AppModelTests: XCTestCase {
         )
         return client
     }
-    private func testCallbackURL(configuration: MSWConnectConfiguration, state: String, code: String) -> URL {
+    private func testCallbackURL(configuration: SiloConnectConfiguration, state: String, code: String) -> URL {
         var components = URLComponents(url: configuration.redirectURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "code", value: code),
@@ -8923,8 +8924,8 @@ private struct TestAttestedScopePayload: Encodable {
     let verificationRepository: String
 }
 
-private func testAttestedScopeAssignment() -> MSWConnectGrantAssignment {
-    MSWConnectGrantAssignment(
+private func testAttestedScopeAssignment() -> SiloConnectGrantAssignment {
+    SiloConnectGrantAssignment(
         workspace: "dev",
         role: .guest,
         owner: "acme",
@@ -8936,9 +8937,9 @@ private func testAttestedScopeAssignment() -> MSWConnectGrantAssignment {
     )
 }
 
-/// Intentionally independent of MSWConnectClient. A repository full name
+/// Intentionally independent of SiloConnectClient. A repository full name
 /// contains `/`, so the signature detects escaped-slash canonicalization.
-private func testAttestedScopeDigest(for assignment: MSWConnectGrantAssignment) throws -> String {
+private func testAttestedScopeDigest(for assignment: SiloConnectGrantAssignment) throws -> String {
     let repositories = zip(assignment.repositoryIDs, assignment.repositoryNames)
         .map { TestAttestedScopeRepository(id: $0.0, name: $0.1.lowercased()) }
         .sorted { $0.id < $1.id }
@@ -8962,7 +8963,7 @@ private func testCredentialDigest(_ value: String) -> String {
 }
 
 private func testTokenBoundScopeAttestationPayload(
-    grant: MSWConnectGrant,
+    grant: SiloConnectGrant,
     scopeDigest: String,
     credentialDigest: String
 ) throws -> Data {
@@ -8982,10 +8983,10 @@ private func testTokenBoundScopeAttestationPayload(
 }
 
 private func testSignedAttestedScopeGrant(
-    assignment: MSWConnectGrantAssignment,
+    assignment: SiloConnectGrantAssignment,
     now: Date,
     signingKey: Curve25519.Signing.PrivateKey
-) throws -> MSWConnectGrant {
+) throws -> SiloConnectGrant {
     let unsigned = testAttestedScopeGrant(assignment: assignment, now: now)
     let scopeDigest = try testAttestedScopeDigest(for: assignment)
     let credentialDigest = testCredentialDigest(unsigned.accessToken)
@@ -9008,7 +9009,7 @@ private func testSignedAttestedScopeGrant(
 }
 
 private func testAttestedScopeGrant(
-    assignment: MSWConnectGrantAssignment,
+    assignment: SiloConnectGrantAssignment,
     now: Date,
     id: UUID = UUID(),
     accessToken: String = "ghs_attested_scope_token",
@@ -9018,8 +9019,8 @@ private func testAttestedScopeGrant(
     credentialDigest: String? = nil,
     repositoryNames: [String]? = nil,
     verificationRepository: String? = nil
-) -> MSWConnectGrant {
-    MSWConnectGrant(
+) -> SiloConnectGrant {
+    SiloConnectGrant(
         id: id,
         workspace: assignment.workspace,
         role: assignment.role,
@@ -9040,7 +9041,7 @@ private func testAttestedScopeGrant(
         credentialDigest: credentialDigest
     )
 }
-private final class InMemoryConnectKeychain: MSWConnectKeychainStoring, CredentialKeychainStoring, @unchecked Sendable {
+private final class InMemoryConnectKeychain: SiloConnectKeychainStoring, CredentialKeychainStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Data] = [:]
 
@@ -9081,7 +9082,7 @@ private struct FailingCredentialKeychain: CredentialKeychainStoring {
 }
 
 
-private actor QueueConnectTransport: MSWConnectHTTPTransport {
+private actor QueueConnectTransport: SiloConnectHTTPTransport {
     private struct Response: Sendable {
         let data: Data
         let status: Int
@@ -9096,7 +9097,7 @@ private actor QueueConnectTransport: MSWConnectHTTPTransport {
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         recordedRequests.append(request)
-        guard !responses.isEmpty else { throw MSWConnectError.transportUnavailable }
+        guard !responses.isEmpty else { throw SiloConnectError.transportUnavailable }
         let response = responses.removeFirst()
         let httpResponse = HTTPURLResponse(
             url: request.url!,
@@ -9115,7 +9116,7 @@ private actor QueueConnectTransport: MSWConnectHTTPTransport {
 /// A one-shot request gate for deterministic teardown tests. It blocks the
 /// first request until the test invalidates the setup lifecycle, proving that
 /// async cached-authorization results cannot publish after the setup closes.
-private actor GatedConnectTransport: MSWConnectHTTPTransport {
+private actor GatedConnectTransport: SiloConnectHTTPTransport {
     private struct Response: Sendable {
         let data: Data
         let status: Int
@@ -9147,7 +9148,7 @@ private actor GatedConnectTransport: MSWConnectHTTPTransport {
     }
 
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        guard !responses.isEmpty else { throw MSWConnectError.transportUnavailable }
+        guard !responses.isEmpty else { throw SiloConnectError.transportUnavailable }
         let response = responses.removeFirst()
         if !sendEntered {
             sendEntered = true
@@ -9199,12 +9200,12 @@ private final class TestConnectClock: @unchecked Sendable {
 }
 
 @MainActor
-private struct TestConnectBrowser: MSWConnectBrowserAuthenticating {
+private struct TestConnectBrowser: SiloConnectBrowserAuthenticating {
     func authenticate(url: URL, callbackScheme: String) async throws -> URL {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
         let state = components.queryItems?.first(where: { $0.name == "state" })?.value
         components.scheme = callbackScheme
-        components.host = "connect.microsandbox.dev"
+        components.host = "connect.silo.dev"
         components.path = "/oauth/callback"
         components.queryItems = [
             URLQueryItem(name: "code", value: "one-time-code"),
@@ -9215,7 +9216,7 @@ private struct TestConnectBrowser: MSWConnectBrowserAuthenticating {
 }
 
 @MainActor
-private final class RecordingConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Sendable {
+private final class RecordingConnectBrowser: SiloConnectBrowserAuthenticating, @unchecked Sendable {
     private var storage: URL?
 
     var openedURL: URL? {
@@ -9224,7 +9225,7 @@ private final class RecordingConnectBrowser: MSWConnectBrowserAuthenticating, @u
 
     func authenticate(url: URL, callbackScheme: String) async throws -> URL {
         storage = url
-        throw MSWConnectError.cancelled
+        throw SiloConnectError.cancelled
     }
 }
 
@@ -9256,100 +9257,76 @@ private func testJSON<Value: Encodable>(_ value: Value) throws -> Data {
     return try encoder.encode(value)
 }
 
-final class MSWHostRepairVerifierHostsParsingTests: XCTestCase {
-    private let expected: [MSWWorkspaceNetworkRecord] = [
-        MSWWorkspaceNetworkRecord(address: "127.0.0.10", hostname: "dev.msw.test"),
-        MSWWorkspaceNetworkRecord(address: "127.0.0.11", hostname: "playgrounds.msw.test"),
-        MSWWorkspaceNetworkRecord(address: "127.0.0.12", hostname: "personal.msw.test")
+final class SiloHostRepairVerifierHostsParsingTests: XCTestCase {
+    private let expected: [SiloWorkspaceNetworkRecord] = [
+        SiloWorkspaceNetworkRecord(address: "127.0.0.10", hostname: "dev.silo.test"),
+        SiloWorkspaceNetworkRecord(address: "127.0.0.11", hostname: "playgrounds.silo.test"),
+        SiloWorkspaceNetworkRecord(address: "127.0.0.12", hostname: "personal.silo.test")
     ]
 
     func testManagedBlockMatches() {
         let text = """
         127.0.0.1 localhost
         # BEGIN SILO MANAGED HOSTS
-        127.0.0.10 dev.msw.test
-        127.0.0.11 playgrounds.msw.test
-        127.0.0.12 personal.msw.test
+        127.0.0.10 dev.silo.test
+        127.0.0.11 playgrounds.silo.test
+        127.0.0.12 personal.silo.test
         # END SILO MANAGED HOSTS
         """
-        XCTAssertTrue(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
-    }
-
-    func testLegacyBlockMatches() {
-        let text = """
-        127.0.0.1 localhost
-        # BEGIN MSW WORKSPACES
-        127.0.0.10 dev.msw.test
-        127.0.0.11 playgrounds.msw.test
-        127.0.0.12 personal.msw.test
-        # END MSW WORKSPACES
-        """
-        XCTAssertTrue(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+        XCTAssertTrue(SiloHostRepairVerifier.managedHostsMatch(text, expected: expected))
     }
 
     func testMissingBlockFails() {
         let text = """
         127.0.0.1 localhost
-        127.0.0.10 dev.msw.test
+        127.0.0.10 dev.silo.test
         """
-        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+        XCTAssertFalse(SiloHostRepairVerifier.managedHostsMatch(text, expected: expected))
     }
 
     func testMismatchedRecordsFail() {
         let text = """
-        # BEGIN MSW WORKSPACES
-        127.0.0.10 dev.msw.test
-        127.0.0.11 playgrounds.msw.local
-        127.0.0.12 personal.msw.test
-        # END MSW WORKSPACES
+        # BEGIN SILO MANAGED HOSTS
+        127.0.0.10 dev.silo.test
+        127.0.0.11 playgrounds.silo.local
+        127.0.0.12 personal.silo.test
+        # END SILO MANAGED HOSTS
         """
-        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+        XCTAssertFalse(SiloHostRepairVerifier.managedHostsMatch(text, expected: expected))
     }
 
     func testReorderedRecordsFail() {
         let text = """
         # BEGIN SILO MANAGED HOSTS
-        127.0.0.12 personal.msw.test
-        127.0.0.10 dev.msw.test
-        127.0.0.11 playgrounds.msw.test
+        127.0.0.12 personal.silo.test
+        127.0.0.10 dev.silo.test
+        127.0.0.11 playgrounds.silo.test
         # END SILO MANAGED HOSTS
         """
-        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
-    }
-
-    func testMixedDialectsFail() {
-        let text = """
-        # BEGIN SILO MANAGED HOSTS
-        127.0.0.10 dev.msw.test
-        # END SILO MANAGED HOSTS
-        # BEGIN MSW WORKSPACES
-        127.0.0.11 playgrounds.msw.test
-        # END MSW WORKSPACES
-        """
-        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+        XCTAssertFalse(SiloHostRepairVerifier.managedHostsMatch(text, expected: expected))
     }
 
     func testDuplicateManagedBlocksFail() {
         let text = """
         # BEGIN SILO MANAGED HOSTS
-        127.0.0.10 dev.msw.test
+        127.0.0.10 dev.silo.test
         # END SILO MANAGED HOSTS
         # BEGIN SILO MANAGED HOSTS
-        127.0.0.11 playgrounds.msw.test
+        127.0.0.11 playgrounds.silo.test
         # END SILO MANAGED HOSTS
         """
-        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+        XCTAssertFalse(SiloHostRepairVerifier.managedHostsMatch(text, expected: expected))
     }
 
-    func testStrayForeignMarkerFails() {
+    func testStrayManagedMarkerFails() {
         let text = """
         # BEGIN SILO MANAGED HOSTS
-        127.0.0.10 dev.msw.test
-        127.0.0.11 playgrounds.msw.test
-        127.0.0.12 personal.msw.test
+        127.0.0.10 dev.silo.test
+        127.0.0.11 playgrounds.silo.test
+        127.0.0.12 personal.silo.test
         # END SILO MANAGED HOSTS
-        # END MSW WORKSPACES
+        # END SILO MANAGED HOSTS
         """
-        XCTAssertFalse(MSWHostRepairVerifier.managedHostsMatch(text, expected: expected))
+        XCTAssertFalse(SiloHostRepairVerifier.managedHostsMatch(text, expected: expected))
     }
 }

@@ -106,7 +106,7 @@ struct GitHubAuthorizationCommitResult: Sendable, Equatable {
 enum GitHubFeatureAvailability {
     static let unavailableNotice = "GitHub connection couldn’t start."
 
-    static func isAvailable(configuration: MSWConnectConfiguration) -> Bool {
+    static func isAvailable(configuration: SiloConnectConfiguration) -> Bool {
         configuration.isConfigured && configuration.hasTrustedScopeAttestation
     }
 }
@@ -142,7 +142,7 @@ struct GitHubWorkspaceAccessPresentation: Equatable {
             return GitHubWorkspaceAccessPresentation(
                 workspace: workspace,
                 status: "Service unavailable",
-                reason: "MSW Connect could not renew \(workspace)'s verified grant. Existing access remains blocked; retry does not open a browser.",
+                reason: "Silo Connect could not renew \(workspace)'s verified grant. Existing access remains blocked; retry does not open a browser.",
                 action: .retry
             )
         }
@@ -288,13 +288,13 @@ actor GitHubAuthorizationCoordinator {
     }
 
     private let broker: CredentialBroker
-    private let connect: MSWConnectClient
+    private let connect: SiloConnectClient
     private let tokenRefreshCoordinator: TokenRefreshCoordinator
     /// Explicit dependency-injection seam for protocol tests whose fake grant
     /// payloads predate signed attestations. Production call sites keep the
     /// default false; UI fixtures bypass the coordinator entirely.
     private let allowsUnattestedTestConfiguration: Bool
-    private let mswClient: MSWClient?
+    private let siloClient: SiloClient?
     private let now: @Sendable () -> Date
     private let journalURL: URL?
     private var pending: [UUID: PendingAuthorization] = [:]
@@ -303,10 +303,10 @@ actor GitHubAuthorizationCoordinator {
 
     init(
         broker: CredentialBroker,
-        connect: MSWConnectClient = MSWConnectClient(),
+        connect: SiloConnectClient = SiloConnectClient(),
         tokenRefreshCoordinator: TokenRefreshCoordinator? = nil,
         allowsUnattestedTestConfiguration: Bool = false,
-        mswClient: MSWClient? = nil,
+        siloClient: SiloClient? = nil,
         now: @escaping @Sendable () -> Date = Date.init,
         journalURL: URL? = nil
     ) {
@@ -317,7 +317,7 @@ actor GitHubAuthorizationCoordinator {
             connect: connect
         )
         self.allowsUnattestedTestConfiguration = allowsUnattestedTestConfiguration
-        self.mswClient = mswClient
+        self.siloClient = siloClient
         self.now = now
         self.journalURL = journalURL ?? Self.defaultJournalURL()
         self.configuredWorkspaces = BootstrapStateStore.persistedWorkspaceConfigurations().map(\.name)
@@ -334,7 +334,7 @@ actor GitHubAuthorizationCoordinator {
     /// create grants for every configured workspace; no workspace credential exists
     /// until commitPolicy has reviewed and applied the complete set.
     func beginAuthorization(
-        browser: (any MSWConnectBrowserAuthenticating)? = nil
+        browser: (any SiloConnectBrowserAuthenticating)? = nil
     ) async throws -> GitHubAuthorizationDiscovery {
         guard isAvailable else {
             throw GitHubAuthorizationError.invalidAppConfiguration
@@ -349,11 +349,11 @@ actor GitHubAuthorizationCoordinator {
         } catch {
             throw error
         }
-        let authenticatingBrowser: any MSWConnectBrowserAuthenticating
+        let authenticatingBrowser: any SiloConnectBrowserAuthenticating
         if let browser {
             authenticatingBrowser = browser
         } else {
-            authenticatingBrowser = await MainActor.run { MSWConnectBrowser.shared }
+            authenticatingBrowser = await MainActor.run { SiloConnectBrowser.shared }
         }
         do {
             let discovery = try await connect.authorize(browser: authenticatingBrowser)
@@ -362,29 +362,29 @@ actor GitHubAuthorizationCoordinator {
                 expiresAt: now().addingTimeInterval(15 * 60)
             )
             return discovery
-        } catch MSWConnectError.installationUnavailable,
-                MSWConnectError.installationRemoved {
+        } catch SiloConnectError.installationUnavailable,
+                SiloConnectError.installationRemoved {
             throw GitHubAuthorizationError.ownerNotInstalled
-        } catch MSWConnectError.repositoryNotAllowed,
-                MSWConnectError.accountBoundaryViolation {
+        } catch SiloConnectError.repositoryNotAllowed,
+                SiloConnectError.accountBoundaryViolation {
             throw GitHubAuthorizationError.repositoryNotAllowed
-        } catch MSWConnectError.transportUnavailable,
-                MSWConnectError.httpStatus,
-                MSWConnectError.rateLimited,
-                MSWConnectError.sessionCleanupFailed {
+        } catch SiloConnectError.transportUnavailable,
+                SiloConnectError.httpStatus,
+                SiloConnectError.rateLimited,
+                SiloConnectError.sessionCleanupFailed {
             throw GitHubAuthorizationError.serviceUnavailable
-        } catch MSWConnectError.sessionExpired, MSWConnectError.callbackExpired {
+        } catch SiloConnectError.sessionExpired, SiloConnectError.callbackExpired {
             throw GitHubAuthorizationError.authorizationSessionExpired
-        } catch MSWConnectError.cancelled {
+        } catch SiloConnectError.cancelled {
             throw GitHubAuthorizationError.authorizationCancelled
-        } catch MSWConnectError.authorizationDenied(let reason) {
+        } catch SiloConnectError.authorizationDenied(let reason) {
             throw GitHubAuthorizationError.authorizationDenied(reason)
-        } catch MSWConnectError.invalidConfiguration {
+        } catch SiloConnectError.invalidConfiguration {
             throw GitHubAuthorizationError.invalidAppConfiguration
-        } catch MSWConnectError.malformedResponse,
-                MSWConnectError.invalidCallback,
-                MSWConnectError.callbackStateMismatch,
-                MSWConnectError.callbackReplayed {
+        } catch SiloConnectError.malformedResponse,
+                SiloConnectError.invalidCallback,
+                SiloConnectError.callbackStateMismatch,
+                SiloConnectError.callbackReplayed {
             throw GitHubAuthorizationError.authorizationFailed
         }
         catch {
@@ -396,11 +396,11 @@ actor GitHubAuthorizationCoordinator {
     /// app is relaunched. This never opens a browser and never creates a grant.
     func resumeAuthorization() async throws -> GitHubAuthorizationDiscovery? {
         try await recoverPendingAuthorization()
-        let session: MSWConnectSession
+        let session: SiloConnectSession
         do {
             guard let restored = try await connect.restoreSession() else { return nil }
             session = restored
-        } catch MSWConnectError.sessionExpired {
+        } catch SiloConnectError.sessionExpired {
             throw GitHubAuthorizationError.authorizationSessionExpired
         } catch {
             throw GitHubAuthorizationError.serviceUnavailable
@@ -417,16 +417,16 @@ actor GitHubAuthorizationCoordinator {
                 expiresAt: min(session.expiresAt, now().addingTimeInterval(15 * 60))
             )
             return discovery
-        } catch MSWConnectError.installationUnavailable,
-                MSWConnectError.installationRemoved {
+        } catch SiloConnectError.installationUnavailable,
+                SiloConnectError.installationRemoved {
             throw GitHubAuthorizationError.ownerNotInstalled
-        } catch MSWConnectError.repositoryNotAllowed,
-                MSWConnectError.accountBoundaryViolation {
+        } catch SiloConnectError.repositoryNotAllowed,
+                SiloConnectError.accountBoundaryViolation {
             throw GitHubAuthorizationError.repositoryNotAllowed
-        } catch MSWConnectError.transportUnavailable,
-                MSWConnectError.httpStatus,
-                MSWConnectError.rateLimited,
-                MSWConnectError.sessionCleanupFailed {
+        } catch SiloConnectError.transportUnavailable,
+                SiloConnectError.httpStatus,
+                SiloConnectError.rateLimited,
+                SiloConnectError.sessionCleanupFailed {
             throw GitHubAuthorizationError.serviceUnavailable
         } catch {
             throw GitHubAuthorizationError.serviceUnavailable
@@ -451,12 +451,12 @@ actor GitHubAuthorizationCoordinator {
             return repositories
         } catch let error as GitHubAuthorizationError {
             throw error
-        } catch MSWConnectError.installationUnavailable,
-                MSWConnectError.installationRemoved,
-                MSWConnectError.httpStatus(404) {
+        } catch SiloConnectError.installationUnavailable,
+                SiloConnectError.installationRemoved,
+                SiloConnectError.httpStatus(404) {
             throw GitHubAuthorizationError.ownerNotInstalled
 
-        } catch MSWConnectError.accountBoundaryViolation {
+        } catch SiloConnectError.accountBoundaryViolation {
             throw GitHubAuthorizationError.repositoryNotAllowed
 
         } catch {
@@ -527,11 +527,11 @@ actor GitHubAuthorizationCoordinator {
             )
         }
 
-        var createdGrants: [(workspace: String, role: CredentialRole, grant: MSWConnectGrant)] = []
+        var createdGrants: [(workspace: String, role: CredentialRole, grant: SiloConnectGrant)] = []
         var plannedCommits: [(
             partition: GitHubGrantPartition,
             role: CredentialRole,
-            grant: MSWConnectGrant,
+            grant: SiloConnectGrant,
             verificationRepository: String
         )] = []
         var committed: [(workspace: String, role: CredentialRole)] = []
@@ -718,7 +718,7 @@ actor GitHubAuthorizationCoordinator {
                 throw GitHubAuthorizationError.revocationFailed
             }
             throw error
-        } catch MSWConnectError.scopeMismatch {
+        } catch SiloConnectError.scopeMismatch {
             journal.phase = .rollingBack
             journal.updatedAt = now()
             try? persistJournal(journal)
@@ -755,7 +755,7 @@ actor GitHubAuthorizationCoordinator {
                 markVerificationRollback("Recovery is incomplete; affected access was quarantined.")
                 throw GitHubAuthorizationError.revocationFailed
             }
-            if let connectError = error as? MSWConnectError {
+            if let connectError = error as? SiloConnectError {
                 switch connectError {
                 case .sessionExpired, .sessionCleanupFailed:
                     throw GitHubAuthorizationError.authorizationSessionExpired
@@ -810,14 +810,14 @@ actor GitHubAuthorizationCoordinator {
     /// Preserve Connect-mode's existing identity path. Local onboarding uses
     /// `GitHubLocalProvider` so identity and policy reconciliation share one
     /// mutation coordinator.
-    func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> MSWIdentityResult {
-        guard let mswClient else { throw GitHubAuthorizationError.serviceUnavailable }
+    func setIdentity(name: String, email: String, workspace: String? = nil) async throws -> SiloIdentityResult {
+        guard let siloClient else { throw GitHubAuthorizationError.serviceUnavailable }
         let expected = workspace.map { [$0] } ?? configuredWorkspaces
         guard !expected.isEmpty,
               expected.allSatisfy({ configuredWorkspaces.contains($0) }) else {
             throw GitHubAuthorizationError.invalidSelection
         }
-        let response = try await mswClient.setIdentity(name: name, email: email, workspace: workspace)
+        let response = try await siloClient.setIdentity(name: name, email: email, workspace: workspace)
         guard let result = response.result else { throw GitHubAuthorizationError.authorizationFailed }
         guard Set(result.workspaces) == Set(expected) else {
             throw GitHubAuthorizationError.verificationFailed(
@@ -831,7 +831,7 @@ actor GitHubAuthorizationCoordinator {
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: configurations) {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
         }
-        try await mswClient?.reloadWorkspaceConfiguration(configurations)
+        try await siloClient?.reloadWorkspaceConfiguration(configurations)
         configuredWorkspaces = configurations.map(\.name)
         latestVerifications.removeAll { !configuredWorkspaces.contains($0.workspace) }
     }
@@ -969,7 +969,7 @@ actor GitHubAuthorizationCoordinator {
             try await broker.removeAllRoles(workspace: workspace)
         } catch {
             let state: CredentialRecoveryState
-            if let connectError = error as? MSWConnectError {
+            if let connectError = error as? SiloConnectError {
                 switch connectError {
                 case .grantNotFound, .grantRevoked:
                     state = .revoked
@@ -998,7 +998,7 @@ actor GitHubAuthorizationCoordinator {
     /// Disables GitHub access for one workspace so a later bootstrap can
     /// complete without it: unbinds the host-side credential binding even when
     /// no local metadata remains (the host may still expect a credential, as
-    /// with `MSW_GITHUB_RECONNECT_REQUIRED`), revokes every remaining remote
+    /// with `SILO_GITHUB_RECONNECT_REQUIRED`), revokes every remaining remote
     /// grant, then removes local credential metadata. Any step that cannot be
     /// proven leaves the affected roles quarantined and throws
     /// `revocationFailed`, so setup keeps its review gate closed rather than
@@ -1025,7 +1025,7 @@ actor GitHubAuthorizationCoordinator {
             try await broker.removeAllRoles(workspace: workspace)
         } catch {
             let state: CredentialRecoveryState
-            if let connectError = error as? MSWConnectError {
+            if let connectError = error as? SiloConnectError {
                 switch connectError {
                 case .grantNotFound, .grantRevoked:
                     state = .revoked
@@ -1070,7 +1070,7 @@ actor GitHubAuthorizationCoordinator {
             try await connect.clearSession()
         } catch {
             let state: CredentialRecoveryState
-            if let connectError = error as? MSWConnectError {
+            if let connectError = error as? SiloConnectError {
                 switch connectError {
                 case .installationUnavailable, .installationRemoved:
                     state = .installationRemoved
@@ -1094,14 +1094,14 @@ actor GitHubAuthorizationCoordinator {
         }
     }
 
-    /// Proves that MSW removed the host-side workspace binding. Callers must
+    /// Proves that Silo removed the host-side workspace binding. Callers must
     /// complete this step before revoking remote grants or deleting local
     /// credentials so an unverified host secret can never be orphaned.
     private func unbindGitHubCredentialsVerified(workspace: String) async throws {
-        guard let mswClient else {
+        guard let siloClient else {
             throw GitHubAuthorizationError.serviceUnavailable
         }
-        let response = try await mswClient.unbindGitHubCredentials(workspace: workspace)
+        let response = try await siloClient.unbindGitHubCredentials(workspace: workspace)
         guard let result = response.result,
               result.workspace == workspace,
               result.unbound else {
@@ -1119,8 +1119,8 @@ actor GitHubAuthorizationCoordinator {
         accessMode: String,
         scope: [GitHubRepositoryPolicy],
         verificationRepository: String
-    ) async throws -> MSWConnectGrant {
-        let request = MSWConnectGrantAssignment(
+    ) async throws -> SiloConnectGrant {
+        let request = SiloConnectGrantAssignment(
             workspace: partition.workspace,
             role: role,
             owner: partition.ownerLogin,
@@ -1132,22 +1132,22 @@ actor GitHubAuthorizationCoordinator {
         )
         do {
             return try await connect.createGrant(request)
-        } catch MSWConnectError.scopeMismatch {
+        } catch SiloConnectError.scopeMismatch {
             throw GitHubAuthorizationError.scopeMismatch
-        } catch MSWConnectError.sessionExpired {
+        } catch SiloConnectError.sessionExpired {
             throw GitHubAuthorizationError.authorizationSessionExpired
-        } catch MSWConnectError.installationUnavailable,
-                MSWConnectError.installationRemoved {
+        } catch SiloConnectError.installationUnavailable,
+                SiloConnectError.installationRemoved {
             throw GitHubAuthorizationError.ownerNotInstalled
-        } catch MSWConnectError.accountBoundaryViolation {
+        } catch SiloConnectError.accountBoundaryViolation {
             throw GitHubAuthorizationError.repositoryNotAllowed
-        } catch MSWConnectError.transportUnavailable, MSWConnectError.httpStatus {
+        } catch SiloConnectError.transportUnavailable, SiloConnectError.httpStatus {
             throw GitHubAuthorizationError.serviceUnavailable
         }
     }
 
     private func commit(
-        _ grant: MSWConnectGrant,
+        _ grant: SiloConnectGrant,
         workspace: String,
         role: CredentialRole,
         partition: GitHubGrantPartition,
@@ -1171,8 +1171,8 @@ actor GitHubAuthorizationCoordinator {
                 scopeDigest: grant.scopeDigest
             )
             stored = true
-            if let mswClient {
-                let response = try await mswClient.bindGitHubCredentials(
+            if let siloClient {
+                let response = try await siloClient.bindGitHubCredentials(
                     workspace: workspace,
                     accessMode: accessMode,
                     verificationRepository: verificationRepository
@@ -1185,7 +1185,7 @@ actor GitHubAuthorizationCoordinator {
                         verificationRepository: verificationRepository,
                         verified: false,
                         lifecycleRestored: false,
-                        safetyResult: "MSW returned no verification result; rollback is required."
+                        safetyResult: "Silo returned no verification result; rollback is required."
                     )
                     recordVerification(verification)
                     throw GitHubAuthorizationError.verificationFailed(workspace)
@@ -1219,7 +1219,7 @@ actor GitHubAuthorizationCoordinator {
                     verificationRepository: verificationRepository,
                     verified: false,
                     lifecycleRestored: false,
-                    safetyResult: "The MSW verification service is unavailable; rollback is required."
+                    safetyResult: "The Silo verification service is unavailable; rollback is required."
                 )
                 recordVerification(verification)
                 throw GitHubAuthorizationError.verificationUnavailable(workspace)
@@ -1236,7 +1236,7 @@ actor GitHubAuthorizationCoordinator {
                     verificationRepository: verificationRepository,
                     verified: false,
                     lifecycleRestored: false,
-                    safetyResult: "Verification failed before MSW returned a final result; rollback is required."
+                    safetyResult: "Verification failed before Silo returned a final result; rollback is required."
                 ))
             }
             if stored {
@@ -1290,7 +1290,7 @@ actor GitHubAuthorizationCoordinator {
     }
 
     private func rollback(
-        createdGrants: [(workspace: String, role: CredentialRole, grant: MSWConnectGrant)],
+        createdGrants: [(workspace: String, role: CredentialRole, grant: SiloConnectGrant)],
         committed: [(workspace: String, role: CredentialRole)],
         previous: [String: PreviousCredential],
         journal: inout TransactionJournal
@@ -1346,7 +1346,7 @@ actor GitHubAuthorizationCoordinator {
             }
         }
         if succeeded, !intendedBindings.isEmpty {
-            guard let mswClient else {
+            guard let siloClient else {
                 succeeded = false
                 return await finishRollback(succeeded: succeeded, workspaceKeys: workspaceKeys)
             }
@@ -1362,7 +1362,7 @@ actor GitHubAuthorizationCoordinator {
                 for (workspace, role, bundle) in intendedBindings {
                     let accessMode = role == .host ? "host-write" : "read-only"
                     let verificationRepository = bundle.metadata.verificationRepository ?? ""
-                    let response = try await mswClient.bindGitHubCredentials(
+                    let response = try await siloClient.bindGitHubCredentials(
                         workspace: workspace,
                         accessMode: accessMode,
                         verificationRepository: verificationRepository
@@ -1454,7 +1454,7 @@ actor GitHubAuthorizationCoordinator {
             return false
         }
         if verified == workspaces { return true }
-        guard let mswClient else {
+        guard let siloClient else {
             _ = await quarantineJournalRoles(journal)
             journal.updatedAt = now()
             try? persistJournal(journal)
@@ -1462,7 +1462,7 @@ actor GitHubAuthorizationCoordinator {
         }
         for workspace in workspaces.sorted() where !verified.contains(workspace) {
             do {
-                let response = try await mswClient.unbindGitHubCredentials(workspace: workspace)
+                let response = try await siloClient.unbindGitHubCredentials(workspace: workspace)
                 guard let result = response.result,
                       result.workspace == workspace,
                       result.unbound else {
@@ -1485,7 +1485,7 @@ actor GitHubAuthorizationCoordinator {
     private func revokeGrant(_ grantID: UUID) async throws {
         do {
             _ = try await connect.revokeGrant(grantID: grantID)
-        } catch MSWConnectError.grantNotFound, MSWConnectError.grantRevoked, MSWConnectError.httpStatus(404) {
+        } catch SiloConnectError.grantNotFound, SiloConnectError.grantRevoked, SiloConnectError.httpStatus(404) {
             // DELETE is intentionally idempotent for transaction recovery: a
             // grant that is already gone or already revoked counts as revoked.
         }

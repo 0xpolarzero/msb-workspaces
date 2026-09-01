@@ -1,14 +1,14 @@
 import Foundation
 
-struct MSWWorkspaceNetworkRecord: Codable, Equatable, Sendable {
+struct SiloWorkspaceNetworkRecord: Codable, Equatable, Sendable {
     let address: String
     let hostname: String
 }
 
-enum MSWWorkspaceNetwork {
-    static func records(for workspaceNames: [String]) -> [MSWWorkspaceNetworkRecord] {
+enum SiloWorkspaceNetwork {
+    static func records(for workspaceNames: [String]) -> [SiloWorkspaceNetworkRecord] {
         workspaceNames.enumerated().map { index, name in
-            MSWWorkspaceNetworkRecord(address: "127.0.0.\(10 + index)", hostname: "\(name).msw.test")
+            SiloWorkspaceNetworkRecord(address: "127.0.0.\(10 + index)", hostname: "\(name).silo.test")
         }
     }
 

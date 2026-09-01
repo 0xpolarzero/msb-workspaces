@@ -35,17 +35,17 @@ if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
 fi
 
 typeset -a connectSettings
-if [[ -n "${MSW_CONNECT_BASE_URL:-}" ]]; then
-  connectSettings+=("MSW_CONNECT_BASE_URL=${MSW_CONNECT_BASE_URL}")
+if [[ -n "${SILO_CONNECT_BASE_URL:-}" ]]; then
+  connectSettings+=("SILO_CONNECT_BASE_URL=${SILO_CONNECT_BASE_URL}")
 fi
-if [[ -n "${MSW_CONNECT_CLIENT_ID:-}" ]]; then
-  connectSettings+=("MSW_CONNECT_CLIENT_ID=${MSW_CONNECT_CLIENT_ID}")
+if [[ -n "${SILO_CONNECT_CLIENT_ID:-}" ]]; then
+  connectSettings+=("SILO_CONNECT_CLIENT_ID=${SILO_CONNECT_CLIENT_ID}")
 fi
-if [[ -n "${MSW_CONNECT_INSTALLATION_URL:-}" ]]; then
-  connectSettings+=("MSW_CONNECT_INSTALLATION_URL=${MSW_CONNECT_INSTALLATION_URL}")
+if [[ -n "${SILO_CONNECT_INSTALLATION_URL:-}" ]]; then
+  connectSettings+=("SILO_CONNECT_INSTALLATION_URL=${SILO_CONNECT_INSTALLATION_URL}")
 fi
-if [[ -n "${MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY:-}" ]]; then
-  connectSettings+=("MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY=${MSW_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY}")
+if [[ -n "${SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY:-}" ]]; then
+  connectSettings+=("SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY=${SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY}")
 fi
 
 xcodebuild \

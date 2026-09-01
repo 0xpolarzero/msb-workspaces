@@ -1,33 +1,33 @@
 import Foundation
 
-protocol MSWUserIntegrationControlling: Sendable {
+protocol SiloUserIntegrationControlling: Sendable {
     func configureUserIntegrationIfAvailable() async throws
 }
 
-struct MSWUserIntegrationService: MSWUserIntegrationControlling, Sendable {
+struct SiloUserIntegrationService: SiloUserIntegrationControlling, Sendable {
     enum Failure: Error, LocalizedError, Sendable, Equatable {
         case failed(String)
 
         var errorDescription: String? {
             switch self {
             case .failed(let message):
-                return message.isEmpty ? "The MSW host integration command failed." : message
+                return message.isEmpty ? "The Silo host integration command failed." : message
             }
         }
     }
 
-    private let runner: MSWCommandRunner
+    private let runner: SiloCommandRunner
 
-    init(runner: MSWCommandRunner = MSWCommandRunner()) {
+    init(runner: SiloCommandRunner = SiloCommandRunner()) {
         self.runner = runner
     }
 
     func configureUserIntegrationIfAvailable() async throws {
-        let command: MSWCommand
+        let command: SiloCommand
         do {
-            command = try await runner.makeMSWCommand(
+            command = try await runner.makeSiloCommand(
                 arguments: ["host", "repair"],
-                environment: ["MSW_SKIP_HOST_REPAIR": "1"],
+                environment: ["SILO_SKIP_HOST_REPAIR": "1"],
                 timeout: .seconds(5 * 60)
             )
         } catch {
@@ -36,11 +36,11 @@ struct MSWUserIntegrationService: MSWUserIntegrationControlling, Sendable {
         _ = try await run(command)
     }
 
-    private func run(_ command: MSWCommand) async throws -> MSWCommandResult {
-        let result: MSWCommandResult
+    private func run(_ command: SiloCommand) async throws -> SiloCommandResult {
+        let result: SiloCommandResult
         do {
             result = try await runner.run(command)
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             throw Failure.failed(error.localizedDescription)
         } catch {
             throw Failure.failed(error.localizedDescription)

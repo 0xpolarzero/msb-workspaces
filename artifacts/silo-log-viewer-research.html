@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MSW Monitor Log Viewer — UX Research and Direction</title>
+<title>Silo Log Viewer — UX Research and Direction</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -107,7 +107,7 @@
 </head>
 <body>
 <main>
-  <div class="eyebrow">MSW Monitor · Log viewer research</div>
+  <div class="eyebrow">Silo · Log viewer research</div>
   <h1>Logs should behave like a native data browser, not a centered text poster.</h1>
   <p class="lede">The current screen has the right raw ingredients—workspace filters, monospaced messages, and copy—but the interaction hierarchy is wrong. Mature desktop log tools use a dense, top-aligned row model with native selection, search, context actions, and structured details.</p>
 
@@ -128,7 +128,7 @@
   <section>
     <h2>Reference patterns</h2>
     <table>
-      <thead><tr><th>Reference</th><th>Pattern worth copying</th><th>MSW implication</th></tr></thead>
+      <thead><tr><th>Reference</th><th>Pattern worth copying</th><th>Silo implication</th></tr></thead>
       <tbody>
         <tr><td><strong>Apple Console</strong></td><td>Tabular messages, standard selection, Command-C, Command-F, and a separate information pane.</td><td>Use a native table and inspector. Do not invent mobile selection controls.</td></tr>
         <tr><td><strong>Apple HIG</strong></td><td>macOS tables use familiar row selection, sortable/resizable columns where useful, and system focus/accent behavior.</td><td>Let AppKit/SwiftUI own selection and inactive-window styling.</td></tr>
@@ -140,7 +140,7 @@
   </section>
 
   <section>
-    <h2>Recommended MSW layout</h2>
+    <h2>Recommended Silo layout</h2>
     <div class="mock" aria-label="Recommended log viewer mockup">
       <div class="toolbar">
         <div class="search">Search logs…</div>
@@ -170,7 +170,7 @@
 
   <section>
     <h2>Data contract required</h2>
-    <div class="callout"><p><strong>The current model discards per-line timestamps.</strong> The adapter emits <code>observedAt</code>, but <code>MSWLogEntry</code> only retains workspace, message, and display safety. A credible table needs at least timestamp, workspace, message, and optional severity/source. Preserve timestamp before redesigning the table; otherwise it cannot sort or merge workspace streams correctly.</p></div>
+    <div class="callout"><p><strong>The current model discards per-line timestamps.</strong> The adapter emits <code>observedAt</code>, but <code>SiloLogEntry</code> only retains workspace, message, and display safety. A credible table needs at least timestamp, workspace, message, and optional severity/source. Preserve timestamp before redesigning the table; otherwise it cannot sort or merge workspace streams correctly.</p></div>
   </section>
 
   <section>
@@ -214,7 +214,7 @@
     </ul>
   </section>
 
-  <footer>Prepared for the MSW Monitor native macOS app. Recommendation prioritizes familiar desktop interaction, compact scanability, and explicit copy semantics.</footer>
+  <footer>Prepared for the Silo native macOS app. Recommendation prioritizes familiar desktop interaction, compact scanability, and explicit copy semantics.</footer>
 </main>
 </body>
 </html>

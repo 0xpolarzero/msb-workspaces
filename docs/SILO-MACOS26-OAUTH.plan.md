@@ -6,7 +6,7 @@
 
 **Working product name:** Silo
 
-**Decision summary:** Build a real, signed macOS application that owns first-run setup, GitHub authorization, workspace configuration, monitoring, and guarded daily operations. Keep `msw` as the policy and mutation boundary. Use a native `NSStatusItem`/`NSPopover` shell with SwiftUI content, a separate detail window, a resumable setup assistant, and a narrowly scoped privileged host helper. Use expiring GitHub App user access tokens obtained through Device Flow; do not ask users to create or paste fine-grained PATs in the normal path.
+**Decision summary:** Build a real, signed macOS application that owns first-run setup, GitHub authorization, workspace configuration, monitoring, and guarded daily operations. Keep `silo` as the policy and mutation boundary. Use a native `NSStatusItem`/`NSPopover` shell with SwiftUI content, a separate detail window, a resumable setup assistant, and a narrowly scoped privileged host helper. Use expiring GitHub App user access tokens obtained through Device Flow; do not ask users to create or paste fine-grained PATs in the normal path.
 
 This plan intentionally replaces the previous terminal-first direction. A terminal remains an explicit escape hatch for arbitrary commands and recovery, not a prerequisite for installation or normal setup.
 
@@ -18,7 +18,7 @@ This plan intentionally replaces the previous terminal-first direction. A termin
 
 After downloading and launching the app, the user can:
 
-1. Install or repair the MSW host toolchain without opening a terminal.
+1. Install or repair the Silo host toolchain without opening a terminal.
 2. Create and verify the three persistent workspaces: `dev`, `playgrounds`, and `personal`.
 3. Connect GitHub through a browser-based authorization flow instead of manually creating tokens.
 4. See trustworthy workspace state in the menu bar without waking stopped VMs.
@@ -32,7 +32,7 @@ After downloading and launching the app, the user can:
 These are requirements, not suggestions:
 
 - The app never starts a VM merely because it launched, opened its popover, or is polling.
-- `msw` remains the authority for lifecycle validation, quarantine, GitHub secret binding, host-only pushes, path validation, backup/restore transactions, and other policy-bearing mutations.
+- `silo` remains the authority for lifecycle validation, quarantine, GitHub secret binding, host-only pushes, path validation, backup/restore transactions, and other policy-bearing mutations.
 - The app never invokes `msb` directly for a mutation.
 - The app never interpolates user input into a shell command. Every child process uses an executable URL plus an argument array.
 - Guest read credentials and host push credentials are separate capabilities. A write-capable credential must never be placed in a guest environment or MicroSandbox secret binding.
@@ -51,7 +51,7 @@ The first release will not:
 - Embed a GitHub App private key or any other publisher secret.
 - Claim that a signed desktop app makes tokens non-extractable from a compromised macOS account.
 - Provide data-loss prevention against an internet-enabled agent that can read source files.
-- Expose arbitrary `msw exec` commands inside a custom terminal view.
+- Expose arbitrary `silo exec` commands inside a custom terminal view.
 - Silently run `clean --volumes`, `restore`, force pushes, reset/recreate operations, or guest upgrades.
 - Depend on App Store distribution. The required child-process, host-integration, and privileged-helper model is a Developer ID product.
 - Make a single global write-capable GitHub token available to all three trust domains.
@@ -60,21 +60,21 @@ The first release will not:
 
 ## 2. Repository baseline and constraints
 
-The repository is MSW 3.1.0 and currently defines three fixed workspaces with separate MicroSandbox VMs, persistent `/workspace` and Docker runtime volumes, distinct loopback addresses/hostnames, and separate GitHub credential state.
+The repository is Silo 3.1.0 and currently defines three fixed workspaces with separate MicroSandbox VMs, persistent `/workspace` and Docker runtime volumes, distinct loopback addresses/hostnames, and separate GitHub credential state.
 
 Observed baseline:
 
 - Workspace defaults and resource ceilings are in `config.sh`.
-- The installer installs tools, writes the user MSW configuration, repairs host integration, builds a reusable snapshot, creates all three workspaces, and runs a deep check (`setup.sh:38-98`, `setup.sh:130-160`, `setup.sh:251-317`).
-- `msw` discovers configuration from `~/.config/msw/config.sh` and tools primarily through `PATH` (`bin/msw:4-31`). A Finder-launched app cannot assume the interactive shell PATH.
-- `msw status` is human-readable and combines a MicroSandbox process table with port text (`bin/msw:563-567`).
-- `msw metrics` currently enters a blocking `--watch` table (`bin/msw:569-574`). It is not an app telemetry contract.
-- `msw logs` is a passthrough to `msb` (`bin/msw:576-580`).
-- `msw repos`, `disk`, `pull`, `clone`, `identity`, and several other commands call `ensure_running`, so a stopped VM can be started by an apparently read-only-looking detail action.
-- `msw host repair` changes loopback aliases, `/etc/hosts`, a LaunchDaemon, SSH keys/configuration, and uses an interactive administrator boundary (`bin/msw:655-741`).
-- `msw github setup` currently asks for two fine-grained PATs, stores them in separate Keychain services, binds only the read token into the guest, verifies guest push rejection and host push success, and rolls back or quarantines on failure (`bin/msw:1204-1319`).
-- `msw push` transfers a verified Git bundle through the host, uses an isolated temporary Git home, preserves fast-forward/force-with-lease rules, and prompts for `PUSH` (`bin/msw:984-1099`).
-- Backups exclude Keychain tokens; restore validates archive paths, maintains rollback state, leaves VMs stopped, and does not change Keychain credentials (`bin/msw:1480-1749`).
+- The installer installs tools, writes the user Silo configuration, repairs host integration, builds a reusable snapshot, creates all three workspaces, and runs a deep check (`setup.sh:38-98`, `setup.sh:130-160`, `setup.sh:251-317`).
+- `silo` discovers configuration from `~/.config/silo/config.sh` and tools primarily through `PATH` (`bin/silo:4-31`). A Finder-launched app cannot assume the interactive shell PATH.
+- `silo status` is human-readable and combines a MicroSandbox process table with port text (`bin/silo:563-567`).
+- `silo metrics` currently enters a blocking `--watch` table (`bin/silo:569-574`). It is not an app telemetry contract.
+- `silo logs` is a passthrough to `msb` (`bin/silo:576-580`).
+- `silo repos`, `disk`, `pull`, `clone`, `identity`, and several other commands call `ensure_running`, so a stopped VM can be started by an apparently read-only-looking detail action.
+- `silo host repair` changes loopback aliases, `/etc/hosts`, a LaunchDaemon, SSH keys/configuration, and uses an interactive administrator boundary (`bin/silo:655-741`).
+- `silo github setup` currently asks for two fine-grained PATs, stores them in separate Keychain services, binds only the read token into the guest, verifies guest push rejection and host push success, and rolls back or quarantines on failure (`bin/silo:1204-1319`).
+- `silo push` transfers a verified Git bundle through the host, uses an isolated temporary Git home, preserves fast-forward/force-with-lease rules, and prompts for `PUSH` (`bin/silo:984-1099`).
+- Backups exclude Keychain tokens; restore validates archive paths, maintains rollback state, leaves VMs stopped, and does not change Keychain credentials (`bin/silo:1480-1749`).
 - The test suite has 46 release scenarios covering the current CLI, GitHub boundaries, quarantine, rollback, backup/restore, Git LFS, and failure paths (`docs/TEST-REPORT.md`).
 
 The app plan must extend these invariants rather than bypass them.
@@ -115,9 +115,9 @@ To preserve the repository's existing three trust domains without operating a ba
 
 | Trust domain | Guest app | Host app | Guest permissions | Host permissions |
 |---|---|---|---|---|
-| `dev` | `MSW Dev Guest` | `MSW Dev Host` | Metadata read, Contents read | Metadata read, Contents read/write |
-| `playgrounds` | `MSW Playgrounds Guest` | `MSW Playgrounds Host` | Metadata read, Contents read | Metadata read, Contents read/write |
-| `personal` | `MSW Personal Guest` | `MSW Personal Host` | Metadata read, Contents read | Metadata read, Contents read/write |
+| `dev` | `Silo Dev Guest` | `Silo Dev Host` | Metadata read, Contents read | Metadata read, Contents read/write |
+| `playgrounds` | `Silo Playgrounds Guest` | `Silo Playgrounds Host` | Metadata read, Contents read | Metadata read, Contents read/write |
+| `personal` | `Silo Personal Guest` | `Silo Personal Host` | Metadata read, Contents read | Metadata read, Contents read/write |
 
 Rules:
 
@@ -146,7 +146,7 @@ For each required guest/host app:
 6. If the app is not installed on the requested owner, guide the user to the GitHub installation page, then refresh installations. If organization policy or SAML blocks access, show the exact GitHub recovery action.
 7. Let the user select the owner, installation, repositories, and verification repository. Do not ask the user to copy a token.
 8. Import the access/refresh pair into the credential broker through a pipe or XPC request, never argv or a persisted intermediate file.
-9. Run the MSW transactional configure/verify operation and show its stage-by-stage result.
+9. Run the Silo transactional configure/verify operation and show its stage-by-stage result.
 
 Access and refresh tokens are stored together in one versioned Keychain record per workspace/role; they are never split across separate Keychain items. A refresh operation holds the per-profile lock, asks GitHub for the replacement pair, validates it, then writes the complete record in one Keychain item update/replace before publishing the new generation to file metadata. `SecItem` does not provide a transaction spanning multiple items, which is why the pair is one item.
 
@@ -156,8 +156,8 @@ GitHub invalidates the old pair as soon as it accepts a refresh. If the app cras
 
 The current MicroSandbox secret contract reads a host environment variable when starting/configuring a sandbox. Until MicroSandbox provides a credential-handle or live broker API, the following is the safest compatible design:
 
-- `msw-auth` owns one versioned access/refresh Keychain record per profile and refreshes it under a per-profile lock.
-- `msw` asks `msw-auth` for a valid short-lived guest token immediately before `msb modify --secret` and `msb start/restart`. The token exists transiently in the tightly scoped `msw`/`msb` process environment only because the current `msb` API requires that source environment; it is never logged, placed in argv, written to the guest filesystem, or persisted in MSW metadata.
+- `silo-auth` owns one versioned access/refresh Keychain record per profile and refreshes it under a per-profile lock.
+- `silo` asks `silo-auth` for a valid short-lived guest token immediately before `msb modify --secret` and `msb start/restart`. The token exists transiently in the tightly scoped `silo`/`msb` process environment only because the current `msb` API requires that source environment; it is never logged, placed in argv, written to the guest filesystem, or persisted in Silo metadata.
 - The host push path obtains a valid host token through the askpass/broker pipe. The host token is never bound as `GH_TOKEN` in a guest.
 - If a guest access token is refreshed while a VM is running and the runtime does not dynamically re-resolve the secret, the app must not silently restart the VM. It marks the credential as `Ready after restart`, shows the expiry, and offers an explicit restart with impact disclosure. A stopped workspace can be rebound without a user-visible restart.
 - If a refresh or rebind fails, the VM remains in its observed state, GitHub status becomes `Needs authorization` or `Needs restart`, and the app does not guess.
@@ -177,7 +177,7 @@ Show:
 - The three workspaces and their purposes.
 - The fact that each VM has its own repositories, Docker state, credentials, processes, and internet connection.
 - The guest-read/host-write GitHub boundary in plain language.
-- What the app will install or modify: host tools, MSW files, MicroSandbox state, loopback names, SSH integration, workspace volumes, and optional GitHub access.
+- What the app will install or modify: host tools, Silo files, MicroSandbox state, loopback names, SSH integration, workspace volumes, and optional GitHub access.
 - What remains unavoidable: GitHub browser authorization/install approval and macOS administrator consent for host networking integration.
 
 The user can continue without GitHub and connect a workspace later.
@@ -192,18 +192,18 @@ Check without starting a workspace:
 - Memory pressure and the aggregate default live memory budget.
 - Virtualization/MicroSandbox prerequisites.
 - Network access to the configured release and GitHub endpoints.
-- Existing `msw`, `msb`, `git`, `git-lfs`, `zstd`, and tar capabilities.
-- Existing MSW config, snapshot, workspaces, Keychain credential presence, quarantine markers, and host integration.
+- Existing `silo`, `msb`, `git`, `git-lfs`, `zstd`, and tar capabilities.
+- Existing Silo config, snapshot, workspaces, Keychain credential presence, quarantine markers, and host integration.
 
 Every check reports `Pass`, `Needs action`, or `Unavailable`; a missing status result is not silently treated as a clean machine.
 
-### Phase C: host toolchain and MSW installation
+### Phase C: host toolchain and Silo installation
 
 The app must not execute `curl | sh` or rely on a shell profile to install itself.
 
 Preferred distribution model:
 
-- Ship or download an arm64, pinned, signed MSW toolchain bundle described by a signed manifest: `msb`, MicroSandbox runtime components, `zstd`, GNU tar where required, Git LFS, the MSW CLI, SSH proxy, askpass helper, bootstrap scripts, and documentation.
+- Ship or download an arm64, pinned, signed Silo toolchain bundle described by a signed manifest: `msb`, MicroSandbox runtime components, `zstd`, GNU tar where required, Git LFS, the Silo CLI, SSH proxy, askpass helper, bootstrap scripts, and documentation.
 - Verify the manifest signature, each artifact checksum, architecture, and expected code signature before execution.
 - Install versioned toolchain files under an app-managed support directory and expose stable user-level links/configuration for terminal compatibility.
 - Use the system Git when present; show a native install/repair path for Command Line Tools if absent. Do not silently install unrelated developer tools.
@@ -214,12 +214,12 @@ The app streams structured progress such as `Downloading`, `Verifying`, `Install
 
 ### Phase D: host integration
 
-Split `msw host repair` into a user-space portion and an authorized host portion:
+Split `silo host repair` into a user-space portion and an authorized host portion:
 
-- User-space: SSH key/configuration, MSW config, docs, and per-user directories.
-- Privileged helper: only the fixed loopback aliases, the MSW-managed `/etc/hosts` block, and the required launchd record.
+- User-space: SSH key/configuration, Silo config, docs, and per-user directories.
+- Privileged helper: only the fixed loopback aliases, the Silo-managed `/etc/hosts` block, and the required launchd record.
 
-Use a separately signed `SMWHostAgent` registered as an `SMAppService` launch daemon. The helper exposes a versioned XPC interface with typed methods such as `inspect`, `ensureFixedLoopbackAliases`, and `installFixedHostRecords`. It accepts no arbitrary command, path, script, environment, or file-write request. It validates all inputs again, performs atomic bounded writes, and has no Keychain access.
+Use a separately signed `SiloHostAgent` registered as an `SMAppService` launch daemon. The helper exposes a versioned XPC interface with typed methods such as `inspect`, `ensureFixedLoopbackAliases`, and `installFixedHostRecords`. It accepts no arbitrary command, path, script, environment, or file-write request. It validates all inputs again, performs atomic bounded writes, and has no Keychain access.
 
 The app displays the macOS administrator approval UI through the supported ServiceManagement path. If approval is denied, setup remains resumable with an exact explanation; it does not open a terminal and does not retry in a loop.
 
@@ -260,7 +260,7 @@ If verification fails, show the failed stage and the final safety result: previo
 
 ### Phase G: identity and finish
 
-Offer per-workspace Git identity fields, prefilled from the GitHub account only when available and clearly editable. Save only the chosen name/email through `msw identity`; never infer or store a GitHub token in preferences.
+Offer per-workspace Git identity fields, prefilled from the GitHub account only when available and clearly editable. Save only the chosen name/email through `silo identity`; never infer or store a GitHub token in preferences.
 
 The finish screen confirms:
 
@@ -291,7 +291,7 @@ Every state also has localized text and a tooltip with aggregate status and obse
 
 Use a fixed-width, keyboard-navigable popover around 380–420 points wide. The first view is intentionally calm:
 
-1. Header: `MSW`, aggregate health, last updated/stale age, Refresh, Activity, Settings, and Quit.
+1. Header: `Silo`, aggregate health, last updated/stale age, Refresh, Activity, Settings, and Quit.
 2. Three fixed-order workspace cards: `dev`, `playgrounds`, `personal`.
 3. A compact footer with `Open Details` and `Diagnostics` when relevant.
 
@@ -331,7 +331,7 @@ The Repositories view is a first-class daily workflow, not just a list:
 - A worktree status scan reports `clean`, `localChanges`, `detached`, or `unavailable`; a separate destination state reports `absent`, `upToDate`, `ahead`, `behind`, `diverged`, or `unavailable`. A missing `upstreamRef` is reported independently and does not imply that the same-name destination is absent. For `localChanges`, show staged, modified, deleted, and untracked counts. For `ahead` or `diverged`, show ahead/behind counts and the local/remote commit IDs needed for a push plan. Never collect file contents or diffs into the app's activity store.
 - A dirty worktree does not by itself disable `Push`. If committed `HEAD` is ahead and ordinary push preconditions are valid, show `Push N commits` with a prominent `Uncommitted changes will not be included` warning. `Review changes` opens the repository in Zed or opens Ghostty with an exact safe handoff; the app does not auto-commit, discard, stash, or invent a commit message.
 - A repository whose committed `HEAD` is ahead and whose remote state is pushable gets a prominent `Push N commits` action even when untracked or modified files exist. The push sheet shows branch, commit range/subjects, local SHA, current remote SHA, fast-forward status, repository path, the exact host-only effect, and the warning that only committed `HEAD` transfers. After the push, the app re-observes the repository and displays the resulting worktree/remote state.
-- A repository whose destination state is `absent` gets a separate `Publish branch` action; `upstreamRef == null` alone never triggers it. If a same-name destination exists, label and gate the action from its actual `upToDate`/`ahead`/`behind`/`diverged` relation. Block ordinary push only for detached/unknown state, diverged or non-fast-forward destinations, unavailable authorization, quarantine, or another MSW policy failure. `Review ready pushes` can select several repositories whose committed `HEAD` is pushable, including dirty worktrees; it presents one plan row and one uncommitted-change warning per repository, applies them in a fixed order, and reports independent success/failure. It is never a blind `push all` shortcut and never bypasses per-repository preconditions.
+- A repository whose destination state is `absent` gets a separate `Publish branch` action; `upstreamRef == null` alone never triggers it. If a same-name destination exists, label and gate the action from its actual `upToDate`/`ahead`/`behind`/`diverged` relation. Block ordinary push only for detached/unknown state, diverged or non-fast-forward destinations, unavailable authorization, quarantine, or another Silo policy failure. `Review ready pushes` can select several repositories whose committed `HEAD` is pushable, including dirty worktrees; it presents one plan row and one uncommitted-change warning per repository, applies them in a fixed order, and reports independent success/failure. It is never a blind `push all` shortcut and never bypasses per-repository preconditions.
 The UI therefore distinguishes uncommitted local changes from committed changes that have not reached the remote. Both are visible; uncommitted changes do not block pushing a pushable committed `HEAD`, and they are never included in the host-only transfer.
 
 ### 5.4 Settings
@@ -341,63 +341,63 @@ Use a native Settings scene and `OpenSettingsAction`/`SettingsLink`:
 - General: launch at login, polling cadence, appearance, reduced-motion behavior, and quit behavior.
 - Workspaces: resource defaults, favorite ports, browser scheme, and per-workspace identity.
 - GitHub: connected account/installations, repository scope, expiration, reauthorize, verify, rotate, and remove.
-- Integrations: Ghostty path, Zed path, MSW executable/toolchain path.
+- Integrations: Ghostty path, Zed path, Silo executable/toolchain path.
 - Notifications: explicit opt-in categories and current authorization state.
 - Backup: default destination and retention policy (path only, never archive contents).
 - Diagnostics: versions, host integration, copy-redacted diagnostics, open docs.
-- About: app/MSW/MicroSandbox versions, release notes, support links.
+- About: app/Silo/MicroSandbox versions, release notes, support links.
 
 No raw token field is present in normal Settings. A legacy PAT presence is shown as `Legacy credential configured`; migration is a guided replacement, not a token display.
 
 ---
 
-## 6. Complete MSW capability matrix
+## 6. Complete Silo capability matrix
 
-The app must classify every command in `msw help`. No command is silently omitted.
+The app must classify every command in `silo help`. No command is silently omitted.
 
 | Command | Native surface | Guard and behavior | Required contract/notes |
 |---|---|---|---|
-| `msw dev [PATH]`, `playgrounds`, `personal`, `shell` | Workspace card `Open Terminal` | Launch Ghostty with a validated argv; the shell itself remains interactive in Ghostty. | Do not invoke the SSH TTY from a non-TTY app process. |
-| `msw zed WORKSPACE [PATH]` | Card/repository `Open in Zed` | Explicit user action; MSW validates workspace-relative path and starts the VM if needed. | Invoke the installed Zed CLI or exact supported `msw zed` argv; no shell string. |
-| `msw exec WORKSPACE COMMAND…` | Terminal escape hatch only | Arbitrary guest command execution is not exposed as a GUI text field. | Offer a copyable exact command and `Open in Ghostty`; never build a mini-terminal. |
-| `msw clone WORKSPACE OWNER/REPO [PATH]` | Repositories → Clone | Repository picker, validated relative destination, explicit confirmation, per-result progress. | Requires structured repository scope and a noninteractive stdin/FD contract. |
-| `msw repos WORKSPACE` | Repositories tab | On-demand repository listing and worktree-status scan; disclose that the current implementation starts a stopped VM, while the app contract's `--if-running` probe never does. | Return repository path, remote, branch, nullable `upstreamRef`, destination state, dirty counts, ahead/behind, freshness, and `needsStart`; no file contents or diffs. |
-| `msw pull WORKSPACE [PATH\|all]` | Repository row or bulk action | Fast-forward-only; explicit action, per-repository result, no force mode. | Add JSON results and stable path errors. |
-| `msw push WORKSPACE PATH` | Repository push review sheet | Show `Push N commits` when committed `HEAD` is ahead and the destination state is pushable, even if the worktree is dirty; show `Uncommitted changes will not be included`. Show `Publish branch` only when the same-name destination state is `absent`; a missing `upstreamRef` alone is not enough. Block detached, unknown, diverged, non-fast-forward, quarantined, or unauthorized states. Review workspace, canonical repo, path, branch, SHA, remote SHA, commits, and fast-forward status; require `PUSH`. | App must not pass `--yes`; add plan/apply or FD confirmation bound to the reviewed SHA. |
-| `msw push … --force-with-lease` | Advanced push review | Separate higher-risk choice; exact remote SHA lease is displayed and revalidated. | Never combine with ordinary push button. |
-| `msw identity NAME EMAIL [TARGET]` | Settings → Workspaces | Direct field-based edit; show target workspaces before applying. | Structured success/failure; no token handling. |
-| `msw github setup …` | Setup/GitHub wizard replacement | No PAT prompt in app. Device Flow, installation selection, credential import, transactional verification. | Add `msw app github configure`/equivalent; preserve human `github setup` compatibility. |
-| `msw github verify WORKSPACE [REPO]` | GitHub Access → Verify | Explicit confirmation because it creates/pushes/deletes a temporary remote branch. | JSON progress and final safety state. |
-| `msw github status [WORKSPACE\|all]` | Popover badges and GitHub Settings | Show provider, account, installation, access mode, expiry, verification age, and quarantine; never values. | Add versioned JSON. |
-| `msw github remove WORKSPACE` | GitHub Settings | Explain guest secret removal, host credential removal, possible restart, and quarantine on uncertain cleanup; require workspace-name confirmation. | Metadata is revoked before fallible cleanup. |
-| `msw open WORKSPACE [PORT] [SCHEME]` | Card `Open Site` | Explicit click may start a stopped VM; show that effect and use `msw start` then `msw url`. | Validate the returned HTTP(S) URL before opening. |
-| `msw url WORKSPACE [PORT] [SCHEME]` | Ports and favorite links | Read-only URL resolution; only HTTP/HTTPS and configured/tunnel ports. | Add JSON URL/result and do not reconstruct policy in Swift. |
-| `msw ports [WORKSPACE\|all]` | Ports tab | Distinguish configured/published from active/listening. | Add JSON; current text is not parseable safely. |
-| `msw tunnel WORKSPACE REMOTE [LOCAL]` | Ports → Tunnels | Validate both ports; tracked process with visible lifetime and Stop; explicit action may start VM. | Run a non-TTY-safe tracked variant or launch Ghostty when interactive SSH is required. |
-| `msw start [TARGET]` | Per-card Start; separate Start All | Safe explicit action; no implicit starts from polling. | JSON progress/result; per-workspace lock. |
-| `msw stop [TARGET]` | Card Stop; global menu | Confirm effect on active processes; stronger confirmation for all. | Preserve no-force graceful timeout and observed final state. |
-| `msw restart [TARGET]` | Card Restart; global menu | Confirm interruption; show pending GitHub secret rebind if required. | JSON progress/result; do not claim success before refresh. |
-| `msw status` / alias `ps` | Background polling and Refresh | Must never start a VM. Preserve last good snapshot as stale on error. | Add schema-versioned JSON envelope. |
-| `msw metrics [TARGET]` | Metrics tab/card summary | One-shot snapshots when visible; streaming only while the view is visible. | Add `--format json --once` and `--follow`; never parse `--watch` table. |
-| `msw logs WORKSPACE [OPTIONS]` | Logs tab | Bounded, searchable, pausable, memory-safe; raw output behind explicit disclosure/copy. | Add sanitized JSONL adapter; cap bytes/lines and redact capture boundary. |
-| `msw disk [TARGET]` | Diagnostics/Resources | On-demand and clearly labeled as starting stopped VMs under current behavior. | Add structured filesystem/Docker usage and effect metadata. |
-| `msw resize WORKSPACE MEMORY [CPUS]` | Resources | Show configured ceilings and aggregate host pressure; confirm before mutation. | Return normalized requested/effective/max resources. |
-| `msw clean [TARGET]` | Maintenance | Confirmation; preserve volumes by default. | Structured preview/result. |
-| `msw clean … --volumes` | Maintenance advanced | Typed `DELETE VOLUMES` confirmation; explain unused database volumes are deleted. | Never expose as the default cleanup button. |
-| `msw upgrade [TARGET]` | Maintenance advanced | Confirm guest package changes and duration; show per-VM progress. | Structured phases; no hidden apt output. |
-| `msw update` | Maintenance → Runtime update | Confirm host runtime update; keep separate from app update and guest upgrade. | Signed toolchain compatibility check, progress, rollback guidance. |
-| `msw check` | Diagnostics | Quick check can be a native action; result must identify each failed subsystem. | Add JSON checks and recovery actions. |
-| `msw check --deep` | Diagnostics advanced | Explicit confirmation because it starts VMs and creates test services/containers. | Progress and cleanup result; preserve previous running set. |
-| `msw host repair` | Setup/Recovery | Native helper path; no terminal prerequisite. | Split helper and user-space work; typed XPC contract. |
-| `msw backup [DIRECTORY]` | Backup wizard | Show destination, archive sensitivity, running set, temporary stops, checksum, and restart result. | Structured paths/results; never include Keychain tokens. |
-| `msw restore ARCHIVE [--yes]` | Recovery window only | Validate archive/checksum/path safety, preview replacement, require typed `RESTORE`, leave VMs stopped. | App invokes a confirmation-bound API, not `--yes`. |
-| `msw docs [TOPIC]` | Settings → Documentation | Open installed guides in a native reader or external viewer. | No setup dependency; preserve docs installation. |
-| `msw version` | Settings → About/Diagnostics | Show MSW, MicroSandbox, toolchain, and app versions. | Machine-readable handshake includes versions. |
-| `msw help` | Settings → Help | Show command reference and exact terminal handoffs. | Never expose internal transaction command. |
+| `silo dev [PATH]`, `playgrounds`, `personal`, `shell` | Workspace card `Open Terminal` | Launch Ghostty with a validated argv; the shell itself remains interactive in Ghostty. | Do not invoke the SSH TTY from a non-TTY app process. |
+| `silo zed WORKSPACE [PATH]` | Card/repository `Open in Zed` | Explicit user action; Silo validates workspace-relative path and starts the VM if needed. | Invoke the installed Zed CLI or exact supported `silo zed` argv; no shell string. |
+| `silo exec WORKSPACE COMMAND…` | Terminal escape hatch only | Arbitrary guest command execution is not exposed as a GUI text field. | Offer a copyable exact command and `Open in Ghostty`; never build a mini-terminal. |
+| `silo clone WORKSPACE OWNER/REPO [PATH]` | Repositories → Clone | Repository picker, validated relative destination, explicit confirmation, per-result progress. | Requires structured repository scope and a noninteractive stdin/FD contract. |
+| `silo repos WORKSPACE` | Repositories tab | On-demand repository listing and worktree-status scan; disclose that the current implementation starts a stopped VM, while the app contract's `--if-running` probe never does. | Return repository path, remote, branch, nullable `upstreamRef`, destination state, dirty counts, ahead/behind, freshness, and `needsStart`; no file contents or diffs. |
+| `silo pull WORKSPACE [PATH\|all]` | Repository row or bulk action | Fast-forward-only; explicit action, per-repository result, no force mode. | Add JSON results and stable path errors. |
+| `silo push WORKSPACE PATH` | Repository push review sheet | Show `Push N commits` when committed `HEAD` is ahead and the destination state is pushable, even if the worktree is dirty; show `Uncommitted changes will not be included`. Show `Publish branch` only when the same-name destination state is `absent`; a missing `upstreamRef` alone is not enough. Block detached, unknown, diverged, non-fast-forward, quarantined, or unauthorized states. Review workspace, canonical repo, path, branch, SHA, remote SHA, commits, and fast-forward status; require `PUSH`. | App must not pass `--yes`; add plan/apply or FD confirmation bound to the reviewed SHA. |
+| `silo push … --force-with-lease` | Advanced push review | Separate higher-risk choice; exact remote SHA lease is displayed and revalidated. | Never combine with ordinary push button. |
+| `silo identity NAME EMAIL [TARGET]` | Settings → Workspaces | Direct field-based edit; show target workspaces before applying. | Structured success/failure; no token handling. |
+| `silo github setup …` | Setup/GitHub wizard replacement | No PAT prompt in app. Device Flow, installation selection, credential import, transactional verification. | Add `silo app github configure`/equivalent; preserve human `github setup` compatibility. |
+| `silo github verify WORKSPACE [REPO]` | GitHub Access → Verify | Explicit confirmation because it creates/pushes/deletes a temporary remote branch. | JSON progress and final safety state. |
+| `silo github status [WORKSPACE\|all]` | Popover badges and GitHub Settings | Show provider, account, installation, access mode, expiry, verification age, and quarantine; never values. | Add versioned JSON. |
+| `silo github remove WORKSPACE` | GitHub Settings | Explain guest secret removal, host credential removal, possible restart, and quarantine on uncertain cleanup; require workspace-name confirmation. | Metadata is revoked before fallible cleanup. |
+| `silo open WORKSPACE [PORT] [SCHEME]` | Card `Open Site` | Explicit click may start a stopped VM; show that effect and use `silo start` then `silo url`. | Validate the returned HTTP(S) URL before opening. |
+| `silo url WORKSPACE [PORT] [SCHEME]` | Ports and favorite links | Read-only URL resolution; only HTTP/HTTPS and configured/tunnel ports. | Add JSON URL/result and do not reconstruct policy in Swift. |
+| `silo ports [WORKSPACE\|all]` | Ports tab | Distinguish configured/published from active/listening. | Add JSON; current text is not parseable safely. |
+| `silo tunnel WORKSPACE REMOTE [LOCAL]` | Ports → Tunnels | Validate both ports; tracked process with visible lifetime and Stop; explicit action may start VM. | Run a non-TTY-safe tracked variant or launch Ghostty when interactive SSH is required. |
+| `silo start [TARGET]` | Per-card Start; separate Start All | Safe explicit action; no implicit starts from polling. | JSON progress/result; per-workspace lock. |
+| `silo stop [TARGET]` | Card Stop; global menu | Confirm effect on active processes; stronger confirmation for all. | Preserve no-force graceful timeout and observed final state. |
+| `silo restart [TARGET]` | Card Restart; global menu | Confirm interruption; show pending GitHub secret rebind if required. | JSON progress/result; do not claim success before refresh. |
+| `silo status` / alias `ps` | Background polling and Refresh | Must never start a VM. Preserve last good snapshot as stale on error. | Add schema-versioned JSON envelope. |
+| `silo metrics [TARGET]` | Metrics tab/card summary | One-shot snapshots when visible; streaming only while the view is visible. | Add `--format json --once` and `--follow`; never parse `--watch` table. |
+| `silo logs WORKSPACE [OPTIONS]` | Logs tab | Bounded, searchable, pausable, memory-safe; raw output behind explicit disclosure/copy. | Add sanitized JSONL adapter; cap bytes/lines and redact capture boundary. |
+| `silo disk [TARGET]` | Diagnostics/Resources | On-demand and clearly labeled as starting stopped VMs under current behavior. | Add structured filesystem/Docker usage and effect metadata. |
+| `silo resize WORKSPACE MEMORY [CPUS]` | Resources | Show configured ceilings and aggregate host pressure; confirm before mutation. | Return normalized requested/effective/max resources. |
+| `silo clean [TARGET]` | Maintenance | Confirmation; preserve volumes by default. | Structured preview/result. |
+| `silo clean … --volumes` | Maintenance advanced | Typed `DELETE VOLUMES` confirmation; explain unused database volumes are deleted. | Never expose as the default cleanup button. |
+| `silo upgrade [TARGET]` | Maintenance advanced | Confirm guest package changes and duration; show per-VM progress. | Structured phases; no hidden apt output. |
+| `silo update` | Maintenance → Runtime update | Confirm host runtime update; keep separate from app update and guest upgrade. | Signed toolchain compatibility check, progress, rollback guidance. |
+| `silo check` | Diagnostics | Quick check can be a native action; result must identify each failed subsystem. | Add JSON checks and recovery actions. |
+| `silo check --deep` | Diagnostics advanced | Explicit confirmation because it starts VMs and creates test services/containers. | Progress and cleanup result; preserve previous running set. |
+| `silo host repair` | Setup/Recovery | Native helper path; no terminal prerequisite. | Split helper and user-space work; typed XPC contract. |
+| `silo backup [DIRECTORY]` | Backup wizard | Show destination, archive sensitivity, running set, temporary stops, checksum, and restart result. | Structured paths/results; never include Keychain tokens. |
+| `silo restore ARCHIVE [--yes]` | Recovery window only | Validate archive/checksum/path safety, preview replacement, require typed `RESTORE`, leave VMs stopped. | App invokes a confirmation-bound API, not `--yes`. |
+| `silo docs [TOPIC]` | Settings → Documentation | Open installed guides in a native reader or external viewer. | No setup dependency; preserve docs installation. |
+| `silo version` | Settings → About/Diagnostics | Show Silo, MicroSandbox, toolchain, and app versions. | Machine-readable handshake includes versions. |
+| `silo help` | Settings → Help | Show command reference and exact terminal handoffs. | Never expose internal transaction command. |
 | `./setup.sh` and installer flags | Setup/Advanced Recovery | Normal app setup uses the structured bootstrap coordinator; rebuild/recreate/reset are explicit advanced actions. | Keep shell wrapper; app does not parse its human output. |
 | `__github-verify-transaction` | Never | Internal implementation detail. | Exclude from UI, docs command palette, and app allowlist. |
 
-`msb` remains an implementation dependency. The app may use `msb` read-only JSON through the MSW adapter during diagnostics or while bootstrapping, but it must not expose raw `msb modify`, `remove`, `volume`, `snapshot`, `doctor --fix`, or arbitrary `exec` as unguarded app actions.
+`msb` remains an implementation dependency. The app may use `msb` read-only JSON through the Silo adapter during diagnostics or while bootstrapping, but it must not expose raw `msb modify`, `remove`, `volume`, `snapshot`, `doctor --fix`, or arbitrary `exec` as unguarded app actions.
 
 ---
 
@@ -407,26 +407,26 @@ Human CLI output remains for terminals. The app gets a parallel, versioned contr
 
 ### 7.1 Command namespace
 
-Add a stable `msw app` namespace or equivalent machine mode:
+Add a stable `silo app` namespace or equivalent machine mode:
 
 ```text
-msw app handshake --format json
-msw app state [--workspace WORKSPACE] --format json
-msw app metrics --workspace WORKSPACE --format json --once
-msw app metrics --workspace WORKSPACE --format json --follow
-msw app logs --workspace WORKSPACE --format jsonl
-msw app repositories --workspace WORKSPACE --if-running --format json
-msw app repositories --workspace WORKSPACE --include-worktree-status --format json
-msw app push-plan --workspace WORKSPACE --repositories PATH... --format json
-msw app ports [--workspace WORKSPACE] --format json
-msw app github-state [--workspace WORKSPACE] --format json
-msw app plan ACTION ... --format json
-msw app apply PLAN_ID --confirmation-fd FD --format json
-msw app bootstrap --resume --workspace-config-fd FD [--events-fd FD] --format json
+silo app handshake --format json
+silo app state [--workspace WORKSPACE] --format json
+silo app metrics --workspace WORKSPACE --format json --once
+silo app metrics --workspace WORKSPACE --format json --follow
+silo app logs --workspace WORKSPACE --format jsonl
+silo app repositories --workspace WORKSPACE --if-running --format json
+silo app repositories --workspace WORKSPACE --include-worktree-status --format json
+silo app push-plan --workspace WORKSPACE --repositories PATH... --format json
+silo app ports [--workspace WORKSPACE] --format json
+silo app github-state [--workspace WORKSPACE] --format json
+silo app plan ACTION ... --format json
+silo app apply PLAN_ID --confirmation-fd FD --format json
+silo app bootstrap --resume --workspace-config-fd FD [--events-fd FD] --format json
 ```
 
 The `logs` stream classifies records by session ORIGIN, never by message
-content: the MSW adapter removes every record of a session that carries the
+content: the Silo adapter removes every record of a session that carries the
 reserved internal-session marker (control conn-id 0, length 1, payload "H" —
 the GitHub relay heartbeat frame) and emits only unmarked workload sessions.
 Directory, repository, setup, storage, health, and relay exec sessions emit
@@ -461,8 +461,8 @@ Failure response:
   "ok": false,
   "command": "state",
   "error": {
-    "code": "MSW_CONFIG_MISSING",
-    "message": "MSW configuration is not installed.",
+    "code": "SILO_CONFIG_MISSING",
+    "message": "Silo configuration is not installed.",
     "recovery": "Run Setup in Silo.",
     "workspace": null,
     "retryable": false
@@ -495,12 +495,12 @@ Events include `progress`, `notice`, `warning`, `requiresConfirmation`, `complet
 
 `state` includes:
 
-- `schemaVersion`, MSW version, MicroSandbox version, capability flags.
+- `schemaVersion`, Silo version, MicroSandbox version, capability flags.
 - Workspace ID, purpose, observed lifecycle, configured resources, port mappings, quarantine state, and last observation timestamp.
 - Separate `statusObservedAt`, `metricsObservedAt`, `githubObservedAt`, and `activityObservedAt` values.
 - GitHub provider/account/installation/access-mode metadata, verification age, expiry, and `needsRestart`; no credential value.
 - `fresh`, `stale`, `unknown`, or `unavailable` freshness state.
-- Action capabilities calculated by MSW, not inferred by SwiftUI.
+- Action capabilities calculated by Silo, not inferred by SwiftUI.
 - Repository snapshots when requested: workspace-relative path, canonical remote, branch, nullable `upstreamRef`, independent `worktreeState` and `destinationState` (`absent`, `upToDate`, `ahead`, `behind`, `diverged`, or `unavailable`), staged/modified/deleted/untracked counts, ahead/behind counts, local/remote commit IDs, `pushability`, `needsStart`, `freshness`, and `checkedAt`; never file contents or diffs.
 
 ### 7.5 Exit status taxonomy
@@ -546,21 +546,21 @@ app/Silo/
     SetupWindow.swift
     DetailWindow.swift
     SettingsView.swift
-  Sources/MSWCore/
-    MSWClient.swift
-    MSWCommandRunner.swift
-    MSWJSONProtocol.swift
-    MSWModels.swift
-    MSWOperationCoordinator.swift
-    MSWActivityStore.swift
-    MSWDiagnostics.swift
-  Sources/MSWAuth/
+  Sources/SiloCore/
+    SiloClient.swift
+    SiloCommandRunner.swift
+    SiloJSONProtocol.swift
+    SiloModels.swift
+    SiloOperationCoordinator.swift
+    SiloActivityStore.swift
+    SiloDiagnostics.swift
+  Sources/SiloAuth/
     GitHubDeviceFlow.swift
     GitHubAPIClient.swift
     CredentialBroker.swift
     KeychainStore.swift
     TokenRefreshCoordinator.swift
-  Sources/MSWInstaller/
+  Sources/SiloInstaller/
     BootstrapCoordinator.swift
     ToolchainInstaller.swift
     HostAgentClient.swift
@@ -572,7 +572,7 @@ app/Silo/
   Resources/
     ToolchainManifest.json
     Localizable.xcstrings
-    LaunchDaemons/com.msw.monitor.host-agent.plist
+    LaunchDaemons/com.silo.monitor.host-agent.plist
 ```
 
 Keep the app target arm64-only for the first release because the repository and installer target Apple Silicon. Add universal builds only if distribution requirements change.
@@ -588,7 +588,7 @@ Use a regular macOS application (`LSUIElement=false`) so macOS presents a standa
 ### 8.3 State and process layers
 
 - `@MainActor` `AppModel`: UI-facing snapshots, operation summaries, settings, status-item severity, and navigation.
-- `MSWClient` actor: typed calls to the machine-readable `msw app` interface.
+- `SiloClient` actor: typed calls to the machine-readable `silo app` interface.
 - `ProcessRunner` actor: executable discovery, sanitized environment, concurrent stdout/stderr draining, JSON framing, bounded buffers, command-specific deadlines, process-group cancellation, and credential-shaped redaction at capture time.
 - `OperationCoordinator`: one mutation per workspace; global operations acquire affected workspaces in fixed order; reads are coalesced.
 - `CredentialBroker`: Keychain access, Device Flow token import, refresh, expiry, and profile locking. It is not a generic secret printer.
@@ -598,7 +598,7 @@ Use a regular macOS application (`LSUIElement=false`) so macOS presents a standa
 
 ### 8.4 Process rules
 
-- Resolve `~/.local/bin/msw`, the app-managed toolchain, and explicitly configured absolute paths. Do not trust Finder PATH.
+- Resolve `~/.local/bin/silo`, the app-managed toolchain, and explicitly configured absolute paths. Do not trust Finder PATH.
 - Construct a deterministic environment with explicit `HOME`, `PATH`, `NO_COLOR=1`, locale, and only the variables required for a specific operation.
 - Never pass user input through `/bin/sh -c`, zsh, AppleScript, or shell quoting.
 - Drain stdout and stderr concurrently to avoid deadlocks.
@@ -613,8 +613,8 @@ The privileged helper:
 
 - Is separately signed, bundled, and code-signing-identity constrained on both XPC sides.
 - Has no Keychain access, network client, arbitrary subprocess API, or user-provided path write API.
-- Writes only the MSW-owned host records and loopback aliases.
-- Makes atomic edits and preserves non-MSW host content.
+- Writes only the Silo-owned host records and loopback aliases.
+- Makes atomic edits and preserves non-Silo host content.
 - Returns structured errors and does not log request payloads containing user paths or credentials.
 - Has an explicit unregister/uninstall path and is tested after app removal.
 
@@ -649,7 +649,7 @@ Raw `access_token` and `refresh_token` values live together in one Keychain reco
 
 Store each workspace/role's complete token pair in one versioned Keychain generic-password record:
 
-- `msw.github.app.<workspace>.<role>.tokens` — one item containing the access token, refresh token, access expiry, refresh expiry, schema version, and generation.
+- `silo.github.app.<workspace>.<role>.tokens` — one item containing the access token, refresh token, access expiry, refresh expiry, schema version, and generation.
 
 The broker uses a stable nonsecret account/label to locate the record and writes the complete payload with one `SecItemUpdate` or one-item replacement. `SecItem` has no transaction spanning multiple items, so separate access and refresh records are prohibited. The app never treats two independent Keychain writes as a committed token rotation.
 
@@ -657,7 +657,7 @@ The refresh path must account for GitHub's remote state: GitHub invalidates the 
 
 Use `SecItem` APIs with a designated requirement/access group that is stable across app updates and the signed helper tools. Do not call `security -w` from the app to print credentials.
 
-The existing `msw.github.read` and `msw.github.write` items remain detectable for migration but are never displayed or copied.
+The existing `silo.github.read` and `silo.github.write` items remain detectable for migration but are never displayed or copied.
 
 ### 9.3 Legacy PAT migration
 
@@ -678,7 +678,7 @@ The rollback language above applies only to legacy PAT migration before the new 
 
 - Require a workspace-name confirmation.
 - Revoke app metadata and host-write capability first.
-- Remove the guest secret binding and Keychain items through the transactional MSW path.
+- Remove the guest secret binding and Keychain items through the transactional Silo path.
 - Preserve quarantine if deletion, inspection, or stopped-state proof fails.
 - Explain that the app cannot silently revoke every GitHub authorization without the credentials required by GitHub's revocation endpoint; provide an explicit `Open GitHub authorization settings` action for remote revocation.
 
@@ -777,8 +777,8 @@ Build requirements:
 Keep three update channels separate:
 
 1. Silo app update.
-2. Host MicroSandbox/toolchain update (`msw update`).
-3. Guest Ubuntu package update (`msw upgrade`).
+2. Host MicroSandbox/toolchain update (`silo update`).
+3. Guest Ubuntu package update (`silo upgrade`).
 
 The app may show update availability and release notes. It must not silently run the latter two. Use signed manifests and compatibility checks. A future signed app update feed can use a mature updater, but v1 must at minimum support a verified Developer ID/notarized replacement with rollback guidance.
 
@@ -793,7 +793,7 @@ Use `SMAppService` for an opt-in login item and expose registration status plus 
 ### M0 — contracts and security freeze
 
 - Record current CLI behavior and trust invariants as fixtures.
-- Add the `msw app` envelope, schema version, capabilities/handshake, stable exits, and JSON/JSONL progress channel.
+- Add the `silo app` envelope, schema version, capabilities/handshake, stable exits, and JSON/JSONL progress channel.
 - Add schema rejection tests and command-inventory completeness tests.
 - Define six GitHub App registrations and client-ID configuration strategy.
 - Build the credential broker/keychain schema and redaction library before UI uses secrets.
@@ -804,7 +804,7 @@ Use `SMAppService` for an opt-in login item and expose registration status plus 
 
 - Create the macOS 26 Xcode project and signed Developer ID build pipeline.
 - Implement setup window, preflight, resumable activity, toolchain manifest verification, and user-space installation.
-- Implement and test the `SMWHostAgent` spike/XPC helper.
+- Implement and test the `SiloHostAgent` spike/XPC helper.
 - Refactor `setup.sh` to share the structured bootstrap implementation.
 
 **Exit:** clean-machine setup completes without a terminal, with explicit macOS/GitHub user approvals and all VMs left in the documented final state.
@@ -855,7 +855,7 @@ Use `SMAppService` for an opt-in login item and expose registration status plus 
 | Organization approval/SAML/policy blocks access | Setup can appear to “hang” or partially authorize | Enumerate installations, show GitHub-specific recovery, never retry blindly. |
 | Current `msb --secret` requires source environment | A short-lived token must exist in a process environment | Keep it transient and tightly scoped; no logs/argv/guest storage. Replace when MSB offers a handle/broker API. |
 | Host repair needs privileged writes | GUI setup cannot safely run arbitrary root shell | Typed signed XPC helper, no arbitrary command API, clean-machine spike before implementation. |
-| Current CLI output is human-oriented | Fragile parsing could report false state | Add schema-versioned MSW JSON/JSONL before UI; reject unknown schema. |
+| Current CLI output is human-oriented | Fragile parsing could report false state | Add schema-versioned Silo JSON/JSONL before UI; reject unknown schema. |
 | Finder PATH differs from shell PATH | App works in terminal but not after launch | Explicit executable discovery and toolchain manifest; show resolved paths in Diagnostics. |
 | App crashes during setup or mutation | State may be uncertain | Durable nonsecret phase state, authoritative reconciliation, no automatic replay, fail-closed credential transactions. |
 | No App Sandbox | Larger blast radius if app is compromised | Developer ID only, Hardened Runtime, code-signing constrained helper, no arbitrary command/path APIs, minimize entitlements. |
@@ -876,7 +876,7 @@ Extend the existing Python/fake-MicroSandbox suite with:
 - JSONL progress framing with split lines, huge output, interleaved stdout/stderr, hangs, SIGTERM, and cancellation races.
 - No-start polling tests: repeated status/metrics/launch/idle cycles on stopped VMs prove zero `start` events.
 - State freshness tests for malformed output, timeout, unavailable MSB, out-of-order responses, and stale snapshots.
-- Command-inventory coverage asserting every `msw help` command has a classification.
+- Command-inventory coverage asserting every `silo help` command has a classification.
 - Plan/apply stale-state and confirmation-binding tests.
 
 ### 15.2 GitHub auth/security tests
@@ -921,7 +921,7 @@ Use SwiftUI unit tests, controlled state fixtures, and manual macOS accessibilit
 - Visible metrics/log load with bounded memory and backpressure.
 - Concurrent actions against one workspace are serialized; independent workspace actions remain responsive.
 - Verify signing, nested code, Hardened Runtime, notarization, Gatekeeper, update verification, and rollback.
-- Test the app with missing CLI, missing config, missing Ghostty/Zed, missing Git LFS, unavailable network, and incompatible MSW schema.
+- Test the app with missing CLI, missing config, missing Ghostty/Zed, missing Git LFS, unavailable network, and incompatible Silo schema.
 
 ---
 
@@ -945,13 +945,13 @@ Implementation cannot finalize the GitHub OAuth wizard until the six app client 
 ### Repository evidence
 
 - `README.md` — three workspaces, resource defaults, trust boundary.
-- `docs/MSW-CHEATSHEET.md` — complete user command inventory.
+- `docs/Silo-CHEATSHEET.md` — complete user command inventory.
 - `docs/SETUP-GUIDE.md` — installer lifecycle, maintenance, backup/restore, boundaries.
 - `docs/GITHUB-SETUP.md` — current guest-read/host-write model, token storage, verification, and limitations.
 - `docs/TEST-REPORT.md` — existing release scenarios and security coverage.
 - `config.sh` — workspace resources, loopback hosts, ports, secret-host policy.
 - `setup.sh` — installation and workspace creation behavior.
-- `bin/msw` — command dispatch, lifecycle, credential transaction, quarantine, host-only push, backup/restore.
+- `bin/silo` — command dispatch, lifecycle, credential transaction, quarantine, host-only push, backup/restore.
 - `tests/test_suite.py` and `tests/fake_msb.py` — current simulator and failure-path contracts.
 
 ### Official Apple sources
@@ -981,4 +981,4 @@ Implementation cannot finalize the GitHub OAuth wizard until the six app client 
 
 ## Final recommendation
 
-Build the app as a native macOS 26 product, not as a graphical wrapper around a terminal. Make setup, OAuth, and routine workspace operations first-class native experiences. Preserve the current safety boundary with six per-trust-domain GitHub Apps, expiring user tokens, transactional MSW credential handling, a narrow host helper, typed machine interfaces, and explicit confirmation for irreversible actions. Keep the terminal as a reliable escape hatch, never as a prerequisite.
+Build the app as a native macOS 26 product, not as a graphical wrapper around a terminal. Make setup, OAuth, and routine workspace operations first-class native experiences. Preserve the current safety boundary with six per-trust-domain GitHub Apps, expiring user tokens, transactional Silo credential handling, a narrow host helper, typed machine interfaces, and explicit confirmation for irreversible actions. Keep the terminal as a reliable escape hatch, never as a prerequisite.

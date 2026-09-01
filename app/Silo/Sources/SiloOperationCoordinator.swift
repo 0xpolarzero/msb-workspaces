@@ -1,17 +1,17 @@
 import Foundation
 
-struct MSWLifecycleApplyReceipt: Sendable {
-    let result: MSWApplyResult
+struct SiloLifecycleApplyReceipt: Sendable {
+    let result: SiloApplyResult
     let observedAt: Date?
 }
 
 /// Serializes mutations per workspace and refuses to present an operation as
-/// complete until the MSW plan/apply response reports reconciliation.
-actor MSWOperationCoordinator {
+/// complete until the Silo plan/apply response reports reconciliation.
+actor SiloOperationCoordinator {
     enum CoordinatorError: Error, LocalizedError, Sendable, Equatable {
         case busy(workspace: String)
         case invalidWorkspace
-        case confirmationRequired(MSWLifecyclePlan)
+        case confirmationRequired(SiloLifecyclePlan)
         case unreconciled(workspace: String, action: String)
 
         var errorDescription: String? {
@@ -21,39 +21,39 @@ actor MSWOperationCoordinator {
             case .confirmationRequired(let plan):
                 return "\(plan.effects) Confirm \(plan.confirmationPhrase) to continue."
             case .unreconciled(let workspace, let action):
-                return "MSW did not reconcile \(action) for \(workspace); refresh before retrying."
+                return "Silo did not reconcile \(action) for \(workspace); refresh before retrying."
             }
         }
     }
 
-    private let client: MSWClient
+    private let client: SiloClient
     private var activeWorkspaces: Set<String> = []
 
-    init(client: MSWClient) {
+    init(client: SiloClient) {
         self.client = client
     }
 
     func lifecycle(
-        _ action: MSWLifecycleAction,
+        _ action: SiloLifecycleAction,
         workspace: String,
         confirmation: String? = nil,
-        reviewedPlan: MSWLifecyclePlan? = nil
-    ) async throws -> MSWLifecycleApplyReceipt {
+        reviewedPlan: SiloLifecyclePlan? = nil
+    ) async throws -> SiloLifecycleApplyReceipt {
         guard WorkspaceID.isValid(workspace) else { throw CoordinatorError.invalidWorkspace }
         guard activeWorkspaces.insert(workspace).inserted else {
             throw CoordinatorError.busy(workspace: workspace)
         }
         defer { activeWorkspaces.remove(workspace) }
 
-        let plan: MSWLifecyclePlan
+        let plan: SiloLifecyclePlan
         if let reviewedPlan {
             guard reviewedPlan.workspace == workspace, reviewedPlan.action == action.rawValue else {
-                throw MSWClientError.invalidArguments
+                throw SiloClientError.invalidArguments
             }
             plan = reviewedPlan
         } else {
             guard let prepared = try await client.prepareLifecyclePlan(action: action, workspace: workspace).result else {
-                throw MSWClientError.missingResult(command: "plan")
+                throw SiloClientError.missingResult(command: "plan")
             }
             plan = prepared
         }
@@ -62,27 +62,27 @@ actor MSWOperationCoordinator {
         }
         let phrase = confirmation ?? plan.confirmationPhrase
         let response = try await client.applyLifecyclePlan(plan, confirmation: phrase)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "apply") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "apply") }
         guard result.reconciled else {
             throw CoordinatorError.unreconciled(workspace: workspace, action: action.rawValue)
         }
-        return MSWLifecycleApplyReceipt(result: result, observedAt: response.observedAt)
+        return SiloLifecycleApplyReceipt(result: result, observedAt: response.observedAt)
     }
 
     func isBusy(workspace: String) -> Bool {
         activeWorkspaces.contains(workspace)
     }
 
-    func applyPushPlan(_ plan: MSWPushPlan, confirmation: String) async throws -> MSWPushApplyResult {
+    func applyPushPlan(_ plan: SiloPushPlan, confirmation: String) async throws -> SiloPushApplyResult {
         let workspace = plan.workspace
         guard WorkspaceID.isValid(workspace) else { throw CoordinatorError.invalidWorkspace }
         guard activeWorkspaces.insert(workspace).inserted else {
             throw CoordinatorError.busy(workspace: workspace)
         }
         defer { activeWorkspaces.remove(workspace) }
-        guard confirmation == plan.confirmationPhrase else { throw MSWClientError.invalidArguments }
+        guard confirmation == plan.confirmationPhrase else { throw SiloClientError.invalidArguments }
         let response = try await client.applyPushPlan(plan, confirmation: confirmation)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "apply") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "apply") }
         return result
     }
 
@@ -99,22 +99,22 @@ enum WorkspaceID {
     }
 }
 
-actor MSWActivityStore {
+actor SiloActivityStore {
     private let limit: Int
-    private var activities: [MSWActivity] = []
+    private var activities: [SiloActivity] = []
 
     init(limit: Int = 200) {
         self.limit = max(10, limit)
     }
 
-    func append(_ activity: MSWActivity) {
+    func append(_ activity: SiloActivity) {
         activities.append(activity)
         if activities.count > limit {
             activities.removeFirst(activities.count - limit)
         }
     }
 
-    func recent(limit requestedLimit: Int = 50) -> [MSWActivity] {
+    func recent(limit requestedLimit: Int = 50) -> [SiloActivity] {
         Array(activities.suffix(max(0, requestedLimit)))
     }
 

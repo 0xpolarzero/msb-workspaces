@@ -1,6 +1,6 @@
 import Foundation
 
-struct MSWHostRecordSnapshot: Codable, Sendable, Equatable {
+struct SiloHostRecordSnapshot: Codable, Sendable, Equatable {
     let fixedAliases: [String]
     let hostsBlockInstalled: Bool
     let launchDaemonRegistered: Bool
@@ -15,9 +15,9 @@ enum SiloHostAgentError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .unavailable: return "The privileged MSW host helper is unavailable."
-        case .timeout: return "The privileged MSW host helper did not respond within 10 seconds."
-        case .authorizationDenied: return "Administrator approval for the MSW host helper was denied."
+        case .unavailable: return "The privileged Silo host helper is unavailable."
+        case .timeout: return "The privileged Silo host helper did not respond within 10 seconds."
+        case .authorizationDenied: return "Administrator approval for the Silo host helper was denied."
         case .invalidInput: return "The host integration request was invalid."
         case .rejected(let message): return message
         }
@@ -31,20 +31,20 @@ enum SiloHostAgentError: Error, LocalizedError, Sendable, Equatable {
     func uninstall(_ configuration: Data, reply: @escaping (Data?, String?) -> Void)
 }
 protocol SiloHostAgentControlling: Sendable {
-    func inspect(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
-    func ensureFixedLoopbackAliases(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
-    func installFixedHostRecords(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
-    func uninstall(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot
+    func inspect(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot
+    func ensureFixedLoopbackAliases(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot
+    func installFixedHostRecords(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot
+    func uninstall(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot
 }
 
 
 private final class SiloHostAgentCompletion: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<MSWHostRecordSnapshot, Error>?
+    private var continuation: CheckedContinuation<SiloHostRecordSnapshot, Error>?
     private var timeoutTask: Task<Void, Never>?
     private var timeoutHandler: (() -> Void)?
 
-    init(_ continuation: CheckedContinuation<MSWHostRecordSnapshot, Error>) {
+    init(_ continuation: CheckedContinuation<SiloHostRecordSnapshot, Error>) {
         self.continuation = continuation
     }
 
@@ -70,7 +70,7 @@ private final class SiloHostAgentCompletion: @unchecked Sendable {
     }
 
     func finish(
-        _ result: Result<MSWHostRecordSnapshot, Error>,
+        _ result: Result<SiloHostRecordSnapshot, Error>,
         retiresConnection: Bool = false
     ) {
         lock.lock()
@@ -92,30 +92,30 @@ actor HostAgentClient: SiloHostAgentControlling {
     private var connection: NSXPCConnection?
     private var connectionGeneration: String?
 
-    init(machServiceName: String = "org.microsandbox.Silo.host-agent") {
+    init(machServiceName: String = "org.silo.Silo.host-agent") {
         self.machServiceName = machServiceName
     }
 
-    func inspect(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func inspect(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         try await call(records: records) { proxy, data, reply in proxy.inspect(data, reply: reply) }
     }
 
-    func ensureFixedLoopbackAliases(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func ensureFixedLoopbackAliases(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         try await call(records: records) { proxy, data, reply in proxy.ensureFixedLoopbackAliases(data, reply: reply) }
     }
 
-    func installFixedHostRecords(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func installFixedHostRecords(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         try await call(records: records) { proxy, data, reply in proxy.installFixedHostRecords(data, reply: reply) }
     }
 
-    func uninstall(records: [MSWWorkspaceNetworkRecord]) async throws -> MSWHostRecordSnapshot {
+    func uninstall(records: [SiloWorkspaceNetworkRecord]) async throws -> SiloHostRecordSnapshot {
         try await call(records: records) { proxy, data, reply in proxy.uninstall(data, reply: reply) }
     }
 
     private func call(
-        records: [MSWWorkspaceNetworkRecord],
+        records: [SiloWorkspaceNetworkRecord],
         _ invoke: @escaping (SiloHostAgentProtocol, Data, @escaping (Data?, String?) -> Void) -> Void
-    ) async throws -> MSWHostRecordSnapshot {
+    ) async throws -> SiloHostRecordSnapshot {
         guard let configuration = try? JSONEncoder().encode(records), configuration.count <= 16 * 1024 else {
             throw SiloHostAgentError.invalidInput
         }
@@ -144,7 +144,7 @@ actor HostAgentClient: SiloHostAgentControlling {
                     if let errorMessage {
                         completion.finish(.failure(SiloHostAgentError.rejected(errorMessage)))
                     } else if let data,
-                              let snapshot = try? JSONDecoder().decode(MSWHostRecordSnapshot.self, from: data) {
+                              let snapshot = try? JSONDecoder().decode(SiloHostRecordSnapshot.self, from: data) {
                         completion.finish(.success(snapshot))
                     } else {
                         completion.finish(.failure(SiloHostAgentError.unavailable))

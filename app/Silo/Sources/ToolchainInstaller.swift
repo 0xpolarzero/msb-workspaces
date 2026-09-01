@@ -34,42 +34,42 @@ enum ToolchainInstallerError: Error, LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .bundledPayloadUnavailable:
-            return "The bundled MSW payload is unavailable."
+            return "The bundled Silo payload is unavailable."
         case .invalidManifest:
-            return "The bundled MSW manifest is invalid."
+            return "The bundled Silo manifest is invalid."
         case .checksumMismatch(let artifact):
-            return "The bundled MSW checksum did not match for \(artifact)."
+            return "The bundled Silo checksum did not match for \(artifact)."
         case .unsafeArtifact(let artifact):
-            return "The bundled MSW artifact is missing or unsafe: \(artifact)."
+            return "The bundled Silo artifact is missing or unsafe: \(artifact)."
         case .invalidPermissions(let artifact):
-            return "The bundled MSW artifact has invalid permissions: \(artifact)."
+            return "The bundled Silo artifact has invalid permissions: \(artifact)."
         case .handshakeFailed:
-            return "The bundled MSW command failed its version handshake."
+            return "The bundled Silo command failed its version handshake."
         case .installFailed:
-            return "The bundled MSW payload could not be activated atomically."
+            return "The bundled Silo payload could not be activated atomically."
         }
     }
 }
 
 enum ToolchainLayout {
-    static let bundledDirectoryName = "MSWToolchain"
+    static let bundledDirectoryName = "SiloToolchain"
     static let manifestName = "manifest.json"
     static let payloadDirectoryName = "payload"
     static let requiredArtifacts: [String: Bool] = [
         "VERSION": false,
         "MANIFEST.txt": false,
         "config.sh": true,
-        "bin/msw": true,
-        "bin/msw-git-askpass": true,
-        "bin/msw-github-host-token": true,
-        "bin/msw-github-proxy": true,
-        "bin/msw-keychain-bridge": true,
-        "bin/msw-ssh-proxy": true,
-        "launchd/org.microsandbox.Silo.github-proxy.plist": false,
+        "bin/silo": true,
+        "bin/silo-git-askpass": true,
+        "bin/silo-github-host-token": true,
+        "bin/silo-github-proxy": true,
+        "bin/silo-keychain-bridge": true,
+        "bin/silo-ssh-proxy": true,
+        "launchd/org.silo.Silo.github-proxy.plist": false,
         "lib/bootstrap-base.sh": true,
-        "lib/msw-github-relay.py": true,
-        "lib/msw-github-shuttle.py": true,
-        "lib/msw-port-forwarder.py": true,
+        "lib/silo-github-relay.py": true,
+        "lib/silo-github-shuttle.py": true,
+        "lib/silo-port-forwarder.py": true,
         "lib/proxy-upstream.py": true,
         "lib/proxycore.py": true,
         "lib/vendor/h11/LICENSE.txt": false,
@@ -193,9 +193,9 @@ enum ToolchainValidator {
             .trimmingCharacters(in: .whitespacesAndNewlines) == manifest.version else {
             throw ToolchainInstallerError.invalidManifest
         }
-        let executable = payloadRoot.appendingPathComponent("bin/msw")
+        let executable = payloadRoot.appendingPathComponent("bin/silo")
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw ToolchainInstallerError.invalidPermissions("bin/msw")
+            throw ToolchainInstallerError.invalidPermissions("bin/silo")
         }
         return ValidatedToolchain(manifest: manifest, executable: executable)
     }
@@ -249,10 +249,10 @@ enum ToolchainValidator {
             throw ToolchainInstallerError.handshakeFailed
         }
         guard process.terminationReason == .exit, process.terminationStatus == 0,
-              let envelope = try? MSWProtocolDecoder.decodeStrictHandshake(data),
+              let envelope = try? SiloProtocolDecoder.decodeStrictHandshake(data),
               let handshake = envelope.result,
               handshake.protocolVersion == 1,
-              handshake.mswVersion == toolchain.manifest.version,
+              handshake.siloVersion == toolchain.manifest.version,
               handshake.capabilities.isComplete else {
             throw ToolchainInstallerError.handshakeFailed
         }

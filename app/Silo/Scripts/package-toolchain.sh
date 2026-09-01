@@ -9,7 +9,7 @@ fi
 SCRIPT_DIR=${0:A:h}
 APP_DIR=${SCRIPT_DIR:h}
 REPOSITORY_ROOT=${APP_DIR:h:h}
-OUTPUT_ROOT=${1:A}/MSWToolchain
+OUTPUT_ROOT=${1:A}/SiloToolchain
 PAYLOAD_ROOT=$OUTPUT_ROOT/payload
 MANIFEST=$OUTPUT_ROOT/manifest.json
 
@@ -17,17 +17,17 @@ typeset -a artifacts=(
   VERSION
   MANIFEST.txt
   config.sh
-  bin/msw
-  bin/msw-git-askpass
-  bin/msw-github-host-token
-  bin/msw-github-proxy
-  bin/msw-keychain-bridge
-  bin/msw-ssh-proxy
-  launchd/org.microsandbox.Silo.github-proxy.plist
+  bin/silo
+  bin/silo-git-askpass
+  bin/silo-github-host-token
+  bin/silo-github-proxy
+  bin/silo-keychain-bridge
+  bin/silo-ssh-proxy
+  launchd/org.silo.Silo.github-proxy.plist
   lib/bootstrap-base.sh
-  lib/msw-github-relay.py
-  lib/msw-github-shuttle.py
-  lib/msw-port-forwarder.py
+  lib/silo-github-relay.py
+  lib/silo-github-shuttle.py
+  lib/silo-port-forwarder.py
   lib/proxy-upstream.py
   lib/proxycore.py
   lib/vendor/h11/LICENSE.txt
@@ -48,7 +48,7 @@ typeset -a artifacts=(
 for relative in $artifacts; do
   source=$REPOSITORY_ROOT/$relative
   if [[ ! -f $source || -L $source ]]; then
-    print -u2 "required bundled MSW artifact is absent or unsafe: $relative"
+    print -u2 "required bundled Silo artifact is absent or unsafe: $relative"
     exit 1
   fi
   if [[ $relative != MANIFEST.txt ]]; then
@@ -66,8 +66,8 @@ if [[ $version != <->.<->.<-> ]]; then
   print -u2 'VERSION must contain one semantic version'
   exit 1
 fi
-if ! /usr/bin/grep -Fqx "MSW_CLI_VERSION=\"$version\"" $REPOSITORY_ROOT/bin/msw; then
-  print -u2 'bin/msw identity does not match VERSION'
+if ! /usr/bin/grep -Fqx "SILO_CLI_VERSION=\"$version\"" $REPOSITORY_ROOT/bin/silo; then
+  print -u2 'bin/silo identity does not match VERSION'
   exit 1
 fi
 
@@ -105,7 +105,7 @@ for relative in $artifacts; do
   if [[ -x $REPOSITORY_ROOT/$relative ]]; then executable=true; else executable=false; fi
   entry="{\"path\":\"$relative\",\"sha256\":\"$actual\",\"executable\":$executable}"
   /usr/bin/grep -Fq -- $entry $MANIFEST || {
-    print -u2 "bundled MSW hash verification failed: $relative"
+    print -u2 "bundled Silo hash verification failed: $relative"
     exit 1
   }
 done

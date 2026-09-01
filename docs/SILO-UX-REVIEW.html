@@ -167,7 +167,7 @@
     <div class="flow" aria-label="Recommended product journey">
       <div class="flow-step"><div class="num">01</div><h3>Welcome</h3><p>Explain the three isolated workspaces, resource model, and trust boundary.</p></div>
       <div class="flow-step"><div class="num">02</div><h3>Check</h3><p>Preflight the Mac; disclose admin, host-helper, VM, and time effects.</p></div>
-      <div class="flow-step"><div class="num">03</div><h3>Verify</h3><p>Install and verify MSW with live phase, elapsed time, and retry-from-phase guidance.</p></div>
+      <div class="flow-step"><div class="num">03</div><h3>Verify</h3><p>Install and verify Silo with live phase, elapsed time, and retry-from-phase guidance.</p></div>
       <div class="flow-step"><div class="num">04</div><h3>Access</h3><p>Optionally connect GitHub with explicit per-workspace guest-read and host-write scopes.</p></div>
       <div class="flow-step"><div class="num">05</div><h3>Identity</h3><p>Collect Git identity and show what will be configured where.</p></div>
       <div class="flow-step"><div class="num">06</div><h3>Finish</h3><p>Show a final recap; only an explicit Done marks onboarding complete.</p></div>
@@ -226,7 +226,7 @@
       <article class="card finding p1-card span-6">
         <div class="title"><h3>7. Replace “start first” friction with truthful compound actions</h3><span class="priority p1">P1</span></div>
         <p class="why">The documented CLI auto-starts a stopped workspace for terminal, Zed, and site entry, but the app disables all three unless already running. “Open Terminal” appears as passive next-action text rather than the useful primary button. Site is fixed to port 3000.</p>
-        <div class="evidence"><strong>Observed</strong><span class="ref">MonitorView.swift:170-212</span> gates actions on running/fresh state. <span class="ref">AppModel.swift:214-299</span> rejects stopped workspaces. The documented behavior is in <span class="ref">docs/MSW-CHEATSHEET.md:171</span>.</div>
+        <div class="evidence"><strong>Observed</strong><span class="ref">MonitorView.swift:170-212</span> gates actions on running/fresh state. <span class="ref">AppModel.swift:214-299</span> rejects stopped workspaces. The documented behavior is in <span class="ref">docs/Silo-CHEATSHEET.md:171</span>.</div>
         <p class="fix"><strong>Change:</strong> make the card’s best next action a button. Use “Start dev and open Terminal,” “Start and open in Zed,” and “Start and open site,” each with an effect preview and progress. Add project-path and favorite/active-port selection; retain a separate no-start URL probe.</p>
       </article>
       <article class="card finding p1-card span-6">
@@ -344,7 +344,7 @@
     <div class="card">
       <ul>
         <li><strong>Build:</strong> <code>app/Silo/Scripts/build.sh</code> passed and produced <code>app/Silo/build/Silo.app</code>. Log: <code>app/Silo/build/logs/build.log</code>.</li>
-        <li><strong>Installation URL input:</strong> a synthetic valid installation URL passed through <code>MSW_CONNECT_INSTALLATION_URL</code> into the built <code>MSWConnectInstallationURL</code> key; a following default build produced an empty value. The release slug remains intentionally unset until an approved value is supplied.</li>
+        <li><strong>Installation URL input:</strong> a synthetic valid installation URL passed through <code>SILO_CONNECT_INSTALLATION_URL</code> into the built <code>SiloConnectInstallationURL</code> key; a following default build produced an empty value. The release slug remains intentionally unset until an approved value is supplied.</li>
         <li><strong>Unit tests:</strong> <code>app/Silo/Scripts/test.sh</code> passed: 57 tests, 0 failures. Log: <code>app/Silo/build/logs/test.log</code>. Result: <code>app/Silo/build/DerivedData/Tests/Logs/Test/Test-Silo-2026.08.14_16-06-46-+0200.xcresult</code>.</li>
         <li><strong>UI smoke:</strong> <code>app/Silo/Scripts/smoke-test.sh</code> passed 6 UI tests with 0 failures against the rebuilt canonical bundle in fixture modes. Log: <code>app/Silo/build/logs/smoke-ui.log</code>. Result: <code>app/Silo/build/DerivedData/Smoke/Logs/Test/Test-Silo-2026.08.14_16-07-12-+0200.xcresult</code>.</li>
         <li><strong>Runtime cleanup:</strong> the UI flow clicked <code>quit.button</code>; the subsequent <code>pgrep -x Silo</code> check returned no remaining instance.</li>

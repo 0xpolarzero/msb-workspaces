@@ -18,7 +18,7 @@ enum CredentialRecoveryState: String, Codable, Sendable, Equatable {
 }
 
 /// The only credential material that may be stored for a workspace. This is a
-/// short-lived GitHub App installation token minted by MSW Connect. It is not
+/// short-lived GitHub App installation token minted by Silo Connect. It is not
 /// a GitHub user token and has no refresh capability.
 struct ScopedInstallationCredential: Codable, Sendable, Equatable {
     static let currentSchemaVersion = 3
@@ -195,7 +195,7 @@ enum CredentialBrokerError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-struct MSWAuthorizationAuditEvent: Codable, Sendable, Equatable, Identifiable {
+struct SiloAuthorizationAuditEvent: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     let createdAt: Date
     let event: String
@@ -207,7 +207,7 @@ struct MSWAuthorizationAuditEvent: Codable, Sendable, Equatable, Identifiable {
 
 /// Persists only grant lifecycle facts. Token bytes, repository names, and
 /// authorization codes never enter this file.
-final class MSWAuthorizationAuditStore: @unchecked Sendable {
+final class SiloAuthorizationAuditStore: @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
 
@@ -225,7 +225,7 @@ final class MSWAuthorizationAuditStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var events = load()
-        events.append(MSWAuthorizationAuditEvent(
+        events.append(SiloAuthorizationAuditEvent(
             id: UUID(),
             createdAt: Date(),
             event: event,
@@ -251,17 +251,17 @@ final class MSWAuthorizationAuditStore: @unchecked Sendable {
         }
     }
 
-    func recent(limit: Int = 50) -> [MSWAuthorizationAuditEvent] {
+    func recent(limit: Int = 50) -> [SiloAuthorizationAuditEvent] {
         lock.lock()
         defer { lock.unlock() }
         return Array(load().suffix(max(0, min(limit, 200))))
     }
 
-    private func load() -> [MSWAuthorizationAuditEvent] {
+    private func load() -> [SiloAuthorizationAuditEvent] {
         guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([MSWAuthorizationAuditEvent].self, from: data)) ?? []
+        return (try? decoder.decode([SiloAuthorizationAuditEvent].self, from: data)) ?? []
     }
 }
 
@@ -270,21 +270,21 @@ actor CredentialBroker {
     private let keychain: any CredentialKeychainStoring
     private let metadataURL: URL
     private let keychainServiceOverride: String?
-    private let audit: MSWAuthorizationAuditStore
+    private let audit: SiloAuthorizationAuditStore
     private var metadata: [String: WorkspaceCredentialMetadata]
 
     init(
         keychain: any CredentialKeychainStoring = KeychainStore(),
         metadataURL: URL? = nil,
         keychainService: String = "",
-        auditStore: MSWAuthorizationAuditStore? = nil
+        auditStore: SiloAuthorizationAuditStore? = nil
     ) throws {
         self.keychain = keychain
         self.keychainServiceOverride = keychainService.isEmpty ? nil : keychainService
         let defaultURL = try Self.defaultMetadataURL()
         let resolvedMetadataURL = metadataURL ?? defaultURL
         self.metadataURL = resolvedMetadataURL
-        self.audit = auditStore ?? MSWAuthorizationAuditStore(
+        self.audit = auditStore ?? SiloAuthorizationAuditStore(
             url: resolvedMetadataURL.deletingLastPathComponent().appendingPathComponent("authorization-events.json")
         )
         let loaded = try Self.readMetadata(from: resolvedMetadataURL)
@@ -701,7 +701,7 @@ actor CredentialBroker {
 
     func removeAllRoles(workspace: String) throws {
         // Remove both roles unconditionally: `remove` also deletes the legacy
-        // Keychain records (msw.github.read/.write) for the workspace, so a
+        // Keychain records (silo.github.read/.write) for the workspace, so a
         // workspace that only ever had legacy credentials must not short-circuit
         // on missing schema-3 metadata and leave those records behind.
         for role in CredentialRole.allCases {
@@ -855,12 +855,12 @@ actor CredentialBroker {
 
 
     private static func legacyService(for role: CredentialRole) -> String {
-        role == .guest ? "msw.github.read" : "msw.github.write"
+        role == .guest ? "silo.github.read" : "silo.github.write"
     }
 
     private func service(for workspace: String, role: CredentialRole) -> String {
         if let keychainServiceOverride { return keychainServiceOverride }
-        return "msw.github.app.\(workspace).\(role.rawValue).tokens"
+        return "silo.github.app.\(workspace).\(role.rawValue).tokens"
     }
 
     private func account(for workspace: String, role: CredentialRole) -> String {

@@ -6,7 +6,7 @@ REBUILD_BASE=0
 RECREATE_WORKSPACES=0
 RESET_CONFIG=0
 SKIP_WORKSPACES=0
-TEST_MODE="${MSW_TEST_MODE:-0}"
+TEST_MODE="${SILO_TEST_MODE:-0}"
 
 usage() {
   cat <<'HELP'
@@ -15,7 +15,7 @@ Usage: ./setup.sh [OPTIONS]
 Options:
   --rebuild-base         Rebuild the reusable development snapshot.
   --recreate-workspaces  Recreate VM roots; repository and Docker volumes survive.
-  --reset-config         Replace ~/.config/msw/config.sh with packaged defaults.
+  --reset-config         Replace ~/.config/silo/config.sh with packaged defaults.
   --skip-workspaces      Install dependencies and the base snapshot only.
   -h, --help             Show this help.
 HELP
@@ -43,13 +43,13 @@ if [[ "$TEST_MODE" != 1 ]]; then
   [[ "$(uname -m)" == arm64 ]] || fatal "an Apple Silicon Mac is required"
 fi
 
-# ~/.local/state/msw must exist (private) BEFORE the GitHub proxy and
+# ~/.local/state/silo must exist (private) BEFORE the GitHub proxy and
 # port-forwarder launch agents are rendered/loaded: their launchd plists
 # point StandardOutPath/StandardErrorPath into it, and a missing directory
 # makes the jobs fail immediately on a clean home. setup.sh verifies every
 # loaded job stays alive before reporting success.
-mkdir -p "$HOME/.local/bin" "$HOME/.local/libexec" "$HOME/.config/msw" "$HOME/.local/share/msw/docs" "$HOME/.local/state/msw"
-chmod 0700 "$HOME/.local/state/msw"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/libexec" "$HOME/.config/silo" "$HOME/.local/share/silo/docs" "$HOME/.local/state/silo"
+chmod 0700 "$HOME/.local/state/silo"
 ensure_line 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zprofile"
 ensure_line 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc"
 export PATH="$HOME/.local/bin:$PATH"
@@ -78,30 +78,30 @@ if [[ "$TEST_MODE" != 1 ]]; then
   fi
 fi
 
-MSB_BIN="${MSW_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
+MSB_BIN="${SILO_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 [[ -n "$MSB_BIN" && -x "$MSB_BIN" ]] || fatal "msb is unavailable"
-PYTHON_BIN="${MSW_PYTHON_BIN:-/usr/bin/python3}"
+PYTHON_BIN="${SILO_PYTHON_BIN:-/usr/bin/python3}"
 [[ -x "$PYTHON_BIN" ]] || fatal "python3 is unavailable"
 
-log "Installing the MSW CLI and documentation"
-if [[ "$RESET_CONFIG" == 1 || ! -f "$HOME/.config/msw/config.sh" ]]; then
-  install -m 0644 "$SCRIPT_DIR/config.sh" "$HOME/.config/msw/config.sh"
+log "Installing the Silo CLI and documentation"
+if [[ "$RESET_CONFIG" == 1 || ! -f "$HOME/.config/silo/config.sh" ]]; then
+  install -m 0644 "$SCRIPT_DIR/config.sh" "$HOME/.config/silo/config.sh"
 else
-  echo "Keeping existing $HOME/.config/msw/config.sh"
+  echo "Keeping existing $HOME/.config/silo/config.sh"
 fi
-install -m 0755 "$SCRIPT_DIR/lib/bootstrap-base.sh" "$HOME/.config/msw/bootstrap-base.sh"
-install -m 0755 "$SCRIPT_DIR/bin/msw" "$HOME/.local/bin/msw"
-install -m 0755 "$SCRIPT_DIR/bin/msw-ssh-proxy" "$HOME/.local/bin/msw-ssh-proxy"
-install -m 0755 "$SCRIPT_DIR/bin/msw-git-askpass" "$HOME/.local/libexec/msw-git-askpass"
-install -m 0755 "$SCRIPT_DIR/bin/msw-github-host-token" "$HOME/.local/libexec/msw-github-host-token"
-install -m 0755 "$SCRIPT_DIR/bin/msw-keychain-bridge" "$HOME/.local/libexec/msw-keychain-bridge"
-install -m 0755 "$SCRIPT_DIR/lib/msw-github-relay.py" "$HOME/.local/libexec/msw-github-relay.py"
-install -m 0755 "$SCRIPT_DIR/lib/msw-github-shuttle.py" "$HOME/.local/libexec/msw-github-shuttle.py"
-install -m 0755 "$SCRIPT_DIR/lib/msw-port-forwarder.py" "$HOME/.local/libexec/msw-port-forwarder.py"
+install -m 0755 "$SCRIPT_DIR/lib/bootstrap-base.sh" "$HOME/.config/silo/bootstrap-base.sh"
+install -m 0755 "$SCRIPT_DIR/bin/silo" "$HOME/.local/bin/silo"
+install -m 0755 "$SCRIPT_DIR/bin/silo-ssh-proxy" "$HOME/.local/bin/silo-ssh-proxy"
+install -m 0755 "$SCRIPT_DIR/bin/silo-git-askpass" "$HOME/.local/libexec/silo-git-askpass"
+install -m 0755 "$SCRIPT_DIR/bin/silo-github-host-token" "$HOME/.local/libexec/silo-github-host-token"
+install -m 0755 "$SCRIPT_DIR/bin/silo-keychain-bridge" "$HOME/.local/libexec/silo-keychain-bridge"
+install -m 0755 "$SCRIPT_DIR/lib/silo-github-relay.py" "$HOME/.local/libexec/silo-github-relay.py"
+install -m 0755 "$SCRIPT_DIR/lib/silo-github-shuttle.py" "$HOME/.local/libexec/silo-github-shuttle.py"
+install -m 0755 "$SCRIPT_DIR/lib/silo-port-forwarder.py" "$HOME/.local/libexec/silo-port-forwarder.py"
 # Path C §4 proxy stack: wrapper + core + upstream + vendored h11. The
 # wrapper resolves ../lib relative to its own location, so these exact
 # destinations keep it working unchanged.
-install -m 0755 "$SCRIPT_DIR/bin/msw-github-proxy" "$HOME/.local/bin/msw-github-proxy"
+install -m 0755 "$SCRIPT_DIR/bin/silo-github-proxy" "$HOME/.local/bin/silo-github-proxy"
 install -d -m 0755 "$HOME/.local/lib"
 install -m 0644 "$SCRIPT_DIR/lib/proxycore.py" "$HOME/.local/lib/proxycore.py"
 install -m 0644 "$SCRIPT_DIR/lib/proxy-upstream.py" "$HOME/.local/lib/proxy-upstream.py"
@@ -111,7 +111,7 @@ if [[ -d "$SCRIPT_DIR/lib/vendor/h11" ]]; then
   # hash gate rejects as unlisted files. Populate a fresh tree, then swap.
   # Stage beside the destination so the final swap is a same-filesystem
   # atomic rename (mktemp under TMPDIR can be a different volume).
-  h11_tmp="$HOME/.local/lib/.msw-h11.$$"
+  h11_tmp="$HOME/.local/lib/.silo-h11.$$"
   rm -rf "$h11_tmp"
   mkdir -p "$h11_tmp" || fatal "could not stage the vendored h11 tree"
   (
@@ -124,14 +124,14 @@ if [[ -d "$SCRIPT_DIR/lib/vendor/h11" ]]; then
   mkdir -p "$HOME/.local/lib/vendor" || { rm -rf "$h11_tmp"; fatal "could not install the vendored h11 tree"; }
   mv "$h11_tmp" "$HOME/.local/lib/vendor/h11" || { rm -rf "$h11_tmp"; fatal "could not install the vendored h11 tree"; }
 fi
-install -m 0644 "$SCRIPT_DIR/launchd/org.microsandbox.Silo.github-proxy.plist" "$HOME/.local/share/msw/github-proxy.plist"
-install -m 0644 "$SCRIPT_DIR/docs/"*.md "$HOME/.local/share/msw/docs/"
-install -m 0644 "$SCRIPT_DIR/README.md" "$HOME/.local/share/msw/README.md"
+install -m 0644 "$SCRIPT_DIR/launchd/org.silo.Silo.github-proxy.plist" "$HOME/.local/share/silo/github-proxy.plist"
+install -m 0644 "$SCRIPT_DIR/docs/"*.md "$HOME/.local/share/silo/docs/"
+install -m 0644 "$SCRIPT_DIR/README.md" "$HOME/.local/share/silo/README.md"
 
 # shellcheck source=/dev/null
-source "$HOME/.config/msw/config.sh"
+source "$HOME/.config/silo/config.sh"
 
-MSW_WORKSPACES_FILE="${MSW_WORKSPACES_FILE:-$HOME/.config/msw/workspaces.json}"
+SILO_WORKSPACES_FILE="${SILO_WORKSPACES_FILE:-$HOME/.config/silo/workspaces.json}"
 workspace_config_valid() {
   [[ -f "$1" && ! -L "$1" && $(wc -c <"$1") -le 262144 ]] || return 1
   jq -e '
@@ -155,46 +155,46 @@ workspace_config_valid() {
   ' "$1" >/dev/null 2>&1
 }
 
-if [[ ! -f "$MSW_WORKSPACES_FILE" ]]; then
-  default_workspace_config="$(mktemp "$HOME/.config/msw/.workspaces-default.XXXXXX")"
+if [[ ! -f "$SILO_WORKSPACES_FILE" ]]; then
+  default_workspace_config="$(mktemp "$HOME/.config/silo/.workspaces-default.XXXXXX")"
   jq -n \
-    --argjson devCPU "$MSW_DEV_CPUS" --argjson devMaxCPU "$MSW_DEV_MAX_CPUS" \
-    --argjson devMemory "${MSW_DEV_MEMORY%G}" --argjson devMaxMemory "${MSW_DEV_MAX_MEMORY%G}" \
-    --argjson devWorkspace "${MSW_DEV_WORKSPACE_SIZE%G}" --argjson devRuntime "${MSW_DEV_RUNTIME_SIZE%G}" \
-    --argjson playgroundsCPU "$MSW_PLAYGROUNDS_CPUS" --argjson playgroundsMaxCPU "$MSW_PLAYGROUNDS_MAX_CPUS" \
-    --argjson playgroundsMemory "${MSW_PLAYGROUNDS_MEMORY%G}" --argjson playgroundsMaxMemory "${MSW_PLAYGROUNDS_MAX_MEMORY%G}" \
-    --argjson playgroundsWorkspace "${MSW_PLAYGROUNDS_WORKSPACE_SIZE%G}" --argjson playgroundsRuntime "${MSW_PLAYGROUNDS_RUNTIME_SIZE%G}" \
-    --argjson personalCPU "$MSW_PERSONAL_CPUS" --argjson personalMaxCPU "$MSW_PERSONAL_MAX_CPUS" \
-    --argjson personalMemory "${MSW_PERSONAL_MEMORY%G}" --argjson personalMaxMemory "${MSW_PERSONAL_MAX_MEMORY%G}" \
-    --argjson personalWorkspace "${MSW_PERSONAL_WORKSPACE_SIZE%G}" --argjson personalRuntime "${MSW_PERSONAL_RUNTIME_SIZE%G}" \
+    --argjson devCPU "$SILO_DEV_CPUS" --argjson devMaxCPU "$SILO_DEV_MAX_CPUS" \
+    --argjson devMemory "${SILO_DEV_MEMORY%G}" --argjson devMaxMemory "${SILO_DEV_MAX_MEMORY%G}" \
+    --argjson devWorkspace "${SILO_DEV_WORKSPACE_SIZE%G}" --argjson devRuntime "${SILO_DEV_RUNTIME_SIZE%G}" \
+    --argjson playgroundsCPU "$SILO_PLAYGROUNDS_CPUS" --argjson playgroundsMaxCPU "$SILO_PLAYGROUNDS_MAX_CPUS" \
+    --argjson playgroundsMemory "${SILO_PLAYGROUNDS_MEMORY%G}" --argjson playgroundsMaxMemory "${SILO_PLAYGROUNDS_MAX_MEMORY%G}" \
+    --argjson playgroundsWorkspace "${SILO_PLAYGROUNDS_WORKSPACE_SIZE%G}" --argjson playgroundsRuntime "${SILO_PLAYGROUNDS_RUNTIME_SIZE%G}" \
+    --argjson personalCPU "$SILO_PERSONAL_CPUS" --argjson personalMaxCPU "$SILO_PERSONAL_MAX_CPUS" \
+    --argjson personalMemory "${SILO_PERSONAL_MEMORY%G}" --argjson personalMaxMemory "${SILO_PERSONAL_MAX_MEMORY%G}" \
+    --argjson personalWorkspace "${SILO_PERSONAL_WORKSPACE_SIZE%G}" --argjson personalRuntime "${SILO_PERSONAL_RUNTIME_SIZE%G}" \
     '{schemaVersion:1,workspaces:[
       {name:"dev",cpu:$devCPU,cpuCeiling:$devMaxCPU,memoryGiB:$devMemory,memoryCeilingGiB:$devMaxMemory,workspaceStorageGiB:$devWorkspace,runtimeStorageGiB:$devRuntime},
       {name:"playgrounds",cpu:$playgroundsCPU,cpuCeiling:$playgroundsMaxCPU,memoryGiB:$playgroundsMemory,memoryCeilingGiB:$playgroundsMaxMemory,workspaceStorageGiB:$playgroundsWorkspace,runtimeStorageGiB:$playgroundsRuntime},
       {name:"personal",cpu:$personalCPU,cpuCeiling:$personalMaxCPU,memoryGiB:$personalMemory,memoryCeilingGiB:$personalMaxMemory,workspaceStorageGiB:$personalWorkspace,runtimeStorageGiB:$personalRuntime}
     ]}' >"$default_workspace_config"
   chmod 0600 "$default_workspace_config"
-  mv "$default_workspace_config" "$MSW_WORKSPACES_FILE"
+  mv "$default_workspace_config" "$SILO_WORKSPACES_FILE"
 fi
-workspace_config_valid "$MSW_WORKSPACES_FILE" || fatal "invalid persisted workspace configuration"
+workspace_config_valid "$SILO_WORKSPACES_FILE" || fatal "invalid persisted workspace configuration"
 WORKSPACES=()
-while IFS= read -r box; do WORKSPACES+=("$box"); done < <(jq -r '.workspaces[].name' "$MSW_WORKSPACES_FILE")
+while IFS= read -r box; do WORKSPACES+=("$box"); done < <(jq -r '.workspaces[].name' "$SILO_WORKSPACES_FILE")
 workspace_config_value() {
-  jq -er --arg workspace "$1" --arg field "$2" '.workspaces[] | select(.name == $workspace) | .[$field]' "$MSW_WORKSPACES_FILE"
+  jq -er --arg workspace "$1" --arg field "$2" '.workspaces[] | select(.name == $workspace) | .[$field]' "$SILO_WORKSPACES_FILE"
 }
-workspace_host() { printf '%s.msw.test\n' "$1"; }
+workspace_host() { printf '%s.silo.test\n' "$1"; }
 
 # Path C §1: mode defaults to local; validate before any workspace work.
-: "${MSW_GITHUB_MODE:=local}"
-: "${MSW_GITHUB_PROXY_PORT:=18446}"
-case "$MSW_GITHUB_MODE" in
+: "${SILO_GITHUB_MODE:=local}"
+: "${SILO_GITHUB_PROXY_PORT:=18446}"
+case "$SILO_GITHUB_MODE" in
   local|connect) ;;
-  *) fatal "invalid MSW_GITHUB_MODE '$MSW_GITHUB_MODE' (expected local or connect)" ;;
+  *) fatal "invalid SILO_GITHUB_MODE '$SILO_GITHUB_MODE' (expected local or connect)" ;;
 esac
 
 verify_installed_proxy_hashes() {
   # Fail-closed: every installed proxy-stack file must match MANIFEST.txt.
   local entry sha actual
-  for entry in bin/msw-github-proxy lib/proxycore.py lib/proxy-upstream.py; do
+  for entry in bin/silo-github-proxy lib/proxycore.py lib/proxy-upstream.py; do
     sha="$(awk -v p="$entry" '$2 == p {print $1}' "$SCRIPT_DIR/MANIFEST.txt")"
     [[ -n "$sha" ]] || fatal "MANIFEST.txt is missing an entry for $entry"
     actual="$("/usr/bin/shasum" -a 256 "$HOME/.local/$entry" 2>/dev/null | awk '{print $1}')"
@@ -237,16 +237,16 @@ verify_launchd_job_alive() {
 
 log "Verifying the installed proxy and vendored h11"
 verify_installed_proxy_hashes
-MSW_VENDOR_H11_DIR="$HOME/.local/lib/vendor/h11" MSW_MANIFEST_FILE="$SCRIPT_DIR/MANIFEST.txt" \
-  "$HOME/.local/bin/msw" __verify-vendored-h11 || fatal "installed vendored h11 failed verification"
+SILO_VENDOR_H11_DIR="$HOME/.local/lib/vendor/h11" SILO_MANIFEST_FILE="$SCRIPT_DIR/MANIFEST.txt" \
+  "$HOME/.local/bin/silo" __verify-vendored-h11 || fatal "installed vendored h11 failed verification"
 
 log "Rendering the GitHub proxy launch agent"
-"$HOME/.local/bin/msw" __proxy-plist-render || fatal "could not render the GitHub proxy launch agent plist"
-if [[ "$TEST_MODE" != 1 && "$MSW_GITHUB_MODE" == local ]]; then
-  "$HOME/.local/bin/msw" github proxy install || fatal "could not install the GitHub proxy launch agent"
+"$HOME/.local/bin/silo" __proxy-plist-render || fatal "could not render the GitHub proxy launch agent plist"
+if [[ "$TEST_MODE" != 1 && "$SILO_GITHUB_MODE" == local ]]; then
+  "$HOME/.local/bin/silo" github proxy install || fatal "could not install the GitHub proxy launch agent"
   # Socket-activated agent (Wait=false): a loaded, registered job owns the
   # 127.0.0.1:18446 listener, so loaded == idle-valid and live.
-  verify_launchd_job_alive org.microsandbox.Silo.github-proxy socket \
+  verify_launchd_job_alive org.silo.Silo.github-proxy socket \
     || fatal "the GitHub proxy launch agent is not loaded; check ~/Library/Logs/Silo/github-proxy.log"
 fi
 
@@ -257,12 +257,12 @@ if ! "$MSB_BIN" doctor; then
 fi
 
 log "Configuring browser names, loopback addresses, and SSH"
-"$HOME/.local/bin/msw" host repair
+"$HOME/.local/bin/silo" host repair
 
-HOST_CPUS="${MSW_TEST_HOST_CPUS:-}"
+HOST_CPUS="${SILO_TEST_HOST_CPUS:-}"
 if [[ -z "$HOST_CPUS" ]]; then HOST_CPUS="$(/usr/sbin/sysctl -n hw.logicalcpu)"; fi
 cap_cpu() { local requested="$1"; (( requested > HOST_CPUS )) && printf '%s\n' "$HOST_CPUS" || printf '%s\n' "$requested"; }
-snapshot_exists() { "$MSB_BIN" snapshot inspect "$MSW_BASE_SNAPSHOT" >/dev/null 2>&1; }
+snapshot_exists() { "$MSB_BIN" snapshot inspect "$SILO_BASE_SNAPSHOT" >/dev/null 2>&1; }
 sandbox_exists() { workspace_msb "$1" inspect "$1" >/dev/null 2>&1; }
 workspace_msb() {
   local box="$1" token="" status
@@ -276,9 +276,9 @@ workspace_msb() {
     unset token
     return "$status"
   fi
-  if [[ -f "$HOME/.config/msw/github/${box}.conf" || -f "$HOME/.config/msw/github/${box}.quarantine" ]]; then
-    if [[ "$MSW_GITHUB_MODE" == local ]]; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: msw github migrate $box, then msw github auth (or connect GitHub in Silo)"
+  if [[ -f "$HOME/.config/silo/github/${box}.conf" || -f "$HOME/.config/silo/github/${box}.quarantine" ]]; then
+    if [[ "$SILO_GITHUB_MODE" == local ]]; then
+      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: silo github migrate $box, then silo github auth (or connect GitHub in Silo)"
     else
       fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
     fi
@@ -381,7 +381,7 @@ ext4_geometry_is_valid() {
 
 fresh_ext4_image_finalize_fd() {
   local path="$1" requested_size="$2"
-  [[ "${MSW_FAKE_FRESH_EXT4_FINALIZE_FAIL:-0}" != 1 ]] || return 1
+  [[ "${SILO_FAKE_FRESH_EXT4_FINALIZE_FAIL:-0}" != 1 ]] || return 1
   "$PYTHON_BIN" - "$path" "$requested_size" <<'PY'
 import fcntl
 import os
@@ -457,7 +457,7 @@ finalize_fresh_ext4_volume() {
   format="$(volume_inspect_field Format)"
   filesystem="$(volume_inspect_field Filesystem)"
   [[ "$kind" == disk && "$format" == raw && "$filesystem" == ext4 ]] || return 1
-  if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
+  if [[ "$TEST_MODE" == 1 && "${SILO_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
     magic="$(volume_inspect_field Magic)"
     [[ -z "$magic" || "$magic" == 53ef ]]
     return
@@ -476,7 +476,7 @@ ext4_volume_status() {
   kind="$(volume_inspect_field Kind)"
   filesystem="$(volume_inspect_field Filesystem)"
   [[ "$kind" == disk && "$filesystem" == ext4 ]] || return 3
-  if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
+  if [[ "$TEST_MODE" == 1 && "${SILO_TEST_VALIDATE_RAW_DISKS:-0}" != 1 ]]; then
     magic="$(volume_inspect_field Magic)"
     [[ -z "$magic" || "$magic" == 53ef ]] || return 3
     return 0
@@ -507,8 +507,8 @@ ensure_ext4_volume() {
   fi
 }
 
-BASE_STAMP="$HOME/.config/msw/base-version"
-if [[ -f "$BASE_STAMP" && "$(cat "$BASE_STAMP")" != "$MSW_VERSION" ]]; then
+BASE_STAMP="$HOME/.config/silo/base-version"
+if [[ -f "$BASE_STAMP" && "$(cat "$BASE_STAMP")" != "$SILO_VERSION" ]]; then
   warn "base version changed; rebuilding VM roots while preserving data volumes"
   REBUILD_BASE=1
   RECREATE_WORKSPACES=1
@@ -517,7 +517,7 @@ fi
 validate_ports() {
   local token start end port seen=" "
   local old_ifs="$IFS"; IFS=','
-  for token in $MSW_PUBLISHED_PORTS; do
+  for token in $SILO_PUBLISHED_PORTS; do
     if [[ "$token" == *-* ]]; then start="${token%-*}"; end="${token#*-}"; else start="$token"; end="$token"; fi
     [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || fatal "invalid port token: $token"
     (( start >= 1 && end <= 65535 && start <= end )) || fatal "invalid port range: $token"
@@ -532,39 +532,39 @@ validate_ports
 
 if [[ "$REBUILD_BASE" == 1 ]] && snapshot_exists; then
   log "Removing the old base snapshot"
-  "$MSB_BIN" snapshot rm "$MSW_BASE_SNAPSHOT" --force
+  "$MSB_BIN" snapshot rm "$SILO_BASE_SNAPSHOT" --force
 fi
 
 if ! snapshot_exists; then
   log "Building the reusable Ubuntu development base"
-  sandbox_exists "$MSW_BASE_BUILDER" && "$MSB_BIN" rm -f "$MSW_BASE_BUILDER" || true
-  volume_exists msw-base-runtime-temporary && "$MSB_BIN" volume rm msw-base-runtime-temporary || true
-  ensure_ext4_volume msw-base-runtime-temporary 24G
+  sandbox_exists "$SILO_BASE_BUILDER" && "$MSB_BIN" rm -f "$SILO_BASE_BUILDER" || true
+  volume_exists silo-base-runtime-temporary && "$MSB_BIN" volume rm silo-base-runtime-temporary || true
+  ensure_ext4_volume silo-base-runtime-temporary 24G
 
   BASE_CPUS="$(cap_cpu 8)"
   BASE_MAX_CPUS="$(cap_cpu 12)"
   (( BASE_CPUS > BASE_MAX_CPUS )) && BASE_CPUS="$BASE_MAX_CPUS"
 
-  "$MSB_BIN" create "$MSW_BASE_IMAGE" \
-    --name "$MSW_BASE_BUILDER" \
+  "$MSB_BIN" create "$SILO_BASE_IMAGE" \
+    --name "$SILO_BASE_BUILDER" \
     --cpus "$BASE_CPUS" --max-cpus "$BASE_MAX_CPUS" \
     --memory 16G --max-memory 24G \
-    --root-disk "$MSW_ROOT_DISK" \
-    --mount-named "msw-base-runtime-temporary:/var/lib/msw-runtime:kind=disk,size=24G" \
-    --mkdir /workspace --mkdir /var/lib/msw-runtime \
+    --root-disk "$SILO_ROOT_DISK" \
+    --mount-named "silo-base-runtime-temporary:/var/lib/silo-runtime:kind=disk,size=24G" \
+    --mkdir /workspace --mkdir /var/lib/silo-runtime \
     --workdir /workspace --init auto --security default --net public \
-    --label msw.role=base-builder
+    --label silo.role=base-builder
 
-  "$MSB_BIN" exec --no-tty "$MSW_BASE_BUILDER" -- bash -s <"$HOME/.config/msw/bootstrap-base.sh"
-  "$MSB_BIN" stop -t 120 "$MSW_BASE_BUILDER"
-  "$MSB_BIN" snapshot create "$MSW_BASE_SNAPSHOT" --from "$MSW_BASE_BUILDER" --integrity --label msw.role=development-base
-  "$MSB_BIN" snapshot verify "$MSW_BASE_SNAPSHOT"
-  "$MSB_BIN" rm "$MSW_BASE_BUILDER"
-  "$MSB_BIN" volume rm msw-base-runtime-temporary
-  printf '%s\n' "$MSW_VERSION" >"$BASE_STAMP"
+  "$MSB_BIN" exec --no-tty "$SILO_BASE_BUILDER" -- bash -s <"$HOME/.config/silo/bootstrap-base.sh"
+  "$MSB_BIN" stop -t 120 "$SILO_BASE_BUILDER"
+  "$MSB_BIN" snapshot create "$SILO_BASE_SNAPSHOT" --from "$SILO_BASE_BUILDER" --integrity --label silo.role=development-base
+  "$MSB_BIN" snapshot verify "$SILO_BASE_SNAPSHOT"
+  "$MSB_BIN" rm "$SILO_BASE_BUILDER"
+  "$MSB_BIN" volume rm silo-base-runtime-temporary
+  printf '%s\n' "$SILO_VERSION" >"$BASE_STAMP"
 else
-  echo "Using existing base snapshot: $MSW_BASE_SNAPSHOT"
-  [[ -f "$BASE_STAMP" ]] || printf '%s\n' "$MSW_VERSION" >"$BASE_STAMP"
+  echo "Using existing base snapshot: $SILO_BASE_SNAPSHOT"
+  [[ -f "$BASE_STAMP" ]] || printf '%s\n' "$SILO_VERSION" >"$BASE_STAMP"
 fi
 
 # Raw-disk tail-discard compatibility gate.
@@ -581,12 +581,12 @@ fi
 # ext4-declared length and that the disk mounts again after a restart. A
 # failed probe removes its disposable state and stops setup before any
 # managed workspace volume exists.
-MSW_COMPAT_PROBE_PREFIX="msw-compat-probe"
-MSW_COMPAT_PROBE_SB=""
-MSW_COMPAT_PROBE_VOL=""
-MSW_COMPAT_PROBE_MOUNT="/mnt/msw-compat-probe"
-MSW_COMPAT_PROBE_SIZE="2G"
-MSW_COMPAT_CACHE="$HOME/.config/msw/runtime-compat-cache"
+SILO_COMPAT_PROBE_PREFIX="silo-compat-probe"
+SILO_COMPAT_PROBE_SB=""
+SILO_COMPAT_PROBE_VOL=""
+SILO_COMPAT_PROBE_MOUNT="/mnt/silo-compat-probe"
+SILO_COMPAT_PROBE_SIZE="2G"
+SILO_COMPAT_CACHE="$HOME/.config/silo/runtime-compat-cache"
 
 COMPAT_PROBE_FAILURE=""
 COMPAT_PROBE_SB_CREATED=""
@@ -595,10 +595,10 @@ COMPAT_PROBE_VOL_CREATED=""
 compat_probe_cleanup() {
   local failed=0
   if [[ -n "$COMPAT_PROBE_SB_CREATED" ]]; then
-    "$MSB_BIN" rm -f "$MSW_COMPAT_PROBE_SB" >/dev/null 2>&1 || failed=1
+    "$MSB_BIN" rm -f "$SILO_COMPAT_PROBE_SB" >/dev/null 2>&1 || failed=1
   fi
   if [[ -n "$COMPAT_PROBE_VOL_CREATED" ]]; then
-    remove_owned_volume "$MSW_COMPAT_PROBE_VOL" >/dev/null 2>&1 || failed=1
+    remove_owned_volume "$SILO_COMPAT_PROBE_VOL" >/dev/null 2>&1 || failed=1
   fi
   return "$failed"
 }
@@ -610,27 +610,27 @@ compat_probe_fail() {
 run_compat_probe() {
   local attempt=0 path="" raw_len="" declared_len="" output="" validate_geometry=1
   local probe_bytes=$((2 * 1024 * 1024 * 1024))
-  if [[ "$TEST_MODE" == 1 && "${MSW_TEST_VALIDATE_COMPAT_PROBE:-0}" != 1 ]]; then
+  if [[ "$TEST_MODE" == 1 && "${SILO_TEST_VALIDATE_COMPAT_PROBE:-0}" != 1 ]]; then
     validate_geometry=0
   fi
   COMPAT_PROBE_FAILURE=""
   COMPAT_PROBE_SB_CREATED=""
   COMPAT_PROBE_VOL_CREATED=""
-  ensure_ext4_volume "$MSW_COMPAT_PROBE_VOL" "$MSW_COMPAT_PROBE_SIZE"
+  ensure_ext4_volume "$SILO_COMPAT_PROBE_VOL" "$SILO_COMPAT_PROBE_SIZE"
   COMPAT_PROBE_VOL_CREATED=1
   "$MSB_BIN" run --detach \
-    --name "$MSW_COMPAT_PROBE_SB" --from-snapshot "$MSW_BASE_SNAPSHOT" \
+    --name "$SILO_COMPAT_PROBE_SB" --from-snapshot "$SILO_BASE_SNAPSHOT" \
     --cpus "$(cap_cpu 2)" --max-cpus "$(cap_cpu 2)" \
     --memory 4G --max-memory 4G \
-    --mount-named "$MSW_COMPAT_PROBE_VOL:${MSW_COMPAT_PROBE_MOUNT}:kind=disk,size=${MSW_COMPAT_PROBE_SIZE}" \
+    --mount-named "$SILO_COMPAT_PROBE_VOL:${SILO_COMPAT_PROBE_MOUNT}:kind=disk,size=${SILO_COMPAT_PROBE_SIZE}" \
     --workdir / --init auto --security default --net public \
-    --label msw.role=compat-probe \
+    --label silo.role=compat-probe \
     -- sleep infinity \
     || { compat_probe_fail "the disposable probe sandbox could not be created"; return 1; }
   COMPAT_PROBE_SB_CREATED=1
   # wait_for_guest_systemd aborts via fatal without probe cleanup, so the
   # readiness wait is inlined here with cleanup on failure.
-  until workspace_msb "$MSW_COMPAT_PROBE_SB" exec --no-tty "$MSW_COMPAT_PROBE_SB" -- systemctl daemon-reload >/dev/null 2>&1; do
+  until workspace_msb "$SILO_COMPAT_PROBE_SB" exec --no-tty "$SILO_COMPAT_PROBE_SB" -- systemctl daemon-reload >/dev/null 2>&1; do
     attempt=$((attempt + 1))
     (( attempt < 120 )) \
       || { compat_probe_fail "the disposable probe guest systemd did not become ready"; return 1; }
@@ -642,10 +642,10 @@ run_compat_probe() {
     # read; the disposable probe still exercises the full command sequence.
     :
   else
-    volume_probe "$MSW_COMPAT_PROBE_VOL" \
+    volume_probe "$SILO_COMPAT_PROBE_VOL" \
       || { compat_probe_fail "the disposable probe disk could not be inspected"; return 1; }
     path="$(volume_inspect_field Path)"
-    [[ "$path" == "$HOME/.microsandbox/volumes/$MSW_COMPAT_PROBE_VOL/disk.raw" && -f "$path" && ! -L "$path" ]] \
+    [[ "$path" == "$HOME/.microsandbox/volumes/$SILO_COMPAT_PROBE_VOL/disk.raw" && -f "$path" && ! -L "$path" ]] \
       || { compat_probe_fail "the disposable probe disk is not a regular raw image at the expected path"; return 1; }
     raw_len="$(file_size_bytes "$path")" \
       || { compat_probe_fail "the disposable probe disk length could not be read"; return 1; }
@@ -654,9 +654,9 @@ run_compat_probe() {
     (( raw_len == probe_bytes && declared_len == probe_bytes )) \
       || { compat_probe_fail "the disposable probe disk was not created at the requested geometry (raw ${raw_len}, ext4 ${declared_len}, requested ${probe_bytes})"; return 1; }
   fi
-  "$MSB_BIN" exec --no-tty "$MSW_COMPAT_PROBE_SB" -- fstrim -v "$MSW_COMPAT_PROBE_MOUNT" \
+  "$MSB_BIN" exec --no-tty "$SILO_COMPAT_PROBE_SB" -- fstrim -v "$SILO_COMPAT_PROBE_MOUNT" \
     || { compat_probe_fail "guest fstrim on the disposable probe disk failed"; return 1; }
-  "$MSB_BIN" stop -t 90 "$MSW_COMPAT_PROBE_SB" \
+  "$MSB_BIN" stop -t 90 "$SILO_COMPAT_PROBE_SB" \
     || { compat_probe_fail "the disposable probe sandbox could not be stopped"; return 1; }
   if (( validate_geometry == 0 )); then
     :
@@ -668,9 +668,9 @@ run_compat_probe() {
     (( raw_len == probe_bytes && declared_len == probe_bytes )) \
       || { compat_probe_fail "the disposable probe disk changed length after guest fstrim (raw ${raw_len}, ext4 ${declared_len}, requested ${probe_bytes}); the runtime truncated the raw image"; return 1; }
   fi
-  "$MSB_BIN" start "$MSW_COMPAT_PROBE_SB" \
+  "$MSB_BIN" start "$SILO_COMPAT_PROBE_SB" \
     || { compat_probe_fail "the disposable probe sandbox could not be restarted"; return 1; }
-  if ! output="$("$MSB_BIN" exec --no-tty "$MSW_COMPAT_PROBE_SB" -- findmnt -n -o FSTYPE "$MSW_COMPAT_PROBE_MOUNT" 2>/dev/null)" || [[ "$output" != ext4 ]]; then
+  if ! output="$("$MSB_BIN" exec --no-tty "$SILO_COMPAT_PROBE_SB" -- findmnt -n -o FSTYPE "$SILO_COMPAT_PROBE_MOUNT" 2>/dev/null)" || [[ "$output" != ext4 ]]; then
     compat_probe_fail "the disposable probe disk did not mount as ext4 after restart"
     return 1
   fi
@@ -680,15 +680,15 @@ run_compat_probe() {
 verify_runtime_discard_safety() {
   local box sha="" cache_tmp="" probe_id=""
   for box in "${WORKSPACES[@]}"; do
-    if [[ "$box" == msw-compat-probe* || "$box" == compat-probe* ]]; then
-      fatal "workspace name '$box' collides with the disposable runtime-probe prefix '$MSW_COMPAT_PROBE_PREFIX'; rename the workspace before running setup"
+    if [[ "$box" == silo-compat-probe* || "$box" == compat-probe* ]]; then
+      fatal "workspace name '$box' collides with the disposable runtime-probe prefix '$SILO_COMPAT_PROBE_PREFIX'; rename the workspace before running setup"
     fi
   done
   sha="$(/usr/bin/shasum -a 256 "$MSB_BIN" | awk '{print $1}')" || fatal "could not hash the installed msb binary"
-  probe_id="${MSW_COMPAT_PROBE_PREFIX}-$$-${sha:0:8}"
-  MSW_COMPAT_PROBE_SB="${probe_id}-sb"
-  MSW_COMPAT_PROBE_VOL="${probe_id}-vol"
-  if [[ -f "$MSW_COMPAT_CACHE" && ! -L "$MSW_COMPAT_CACHE" && "$(<"$MSW_COMPAT_CACHE")" == "$sha" ]]; then
+  probe_id="${SILO_COMPAT_PROBE_PREFIX}-$$-${sha:0:8}"
+  SILO_COMPAT_PROBE_SB="${probe_id}-sb"
+  SILO_COMPAT_PROBE_VOL="${probe_id}-vol"
+  if [[ -f "$SILO_COMPAT_CACHE" && ! -L "$SILO_COMPAT_CACHE" && "$(<"$SILO_COMPAT_CACHE")" == "$sha" ]]; then
     echo "Raw-disk discard safety already attested for this msb binary; skipping the disposable probe"
     return 0
   fi
@@ -701,9 +701,9 @@ verify_runtime_discard_safety() {
   fi
   compat_probe_cleanup || fatal "the disposable probe state could not be removed after a successful attestation"
   trap - INT TERM HUP
-  cache_tmp="$(mktemp "$HOME/.config/msw/.runtime-compat-cache.XXXXXX")" || fatal "could not stage the runtime attestation cache"
+  cache_tmp="$(mktemp "$HOME/.config/silo/.runtime-compat-cache.XXXXXX")" || fatal "could not stage the runtime attestation cache"
   printf '%s\n' "$sha" >"$cache_tmp" && chmod 0600 "$cache_tmp" || { rm -f "$cache_tmp" || true; fatal "could not write the runtime attestation cache"; }
-  mv "$cache_tmp" "$MSW_COMPAT_CACHE" || { rm -f "$cache_tmp" || true; fatal "could not persist the runtime attestation cache"; }
+  mv "$cache_tmp" "$SILO_COMPAT_CACHE" || { rm -f "$cache_tmp" || true; fatal "could not persist the runtime attestation cache"; }
   log "Raw-disk discard safety attested for $(basename "$MSB_BIN")"
 }
 
@@ -712,7 +712,7 @@ if [[ "$SKIP_WORKSPACES" != 1 ]]; then
 fi
 
 # Published ports are NOT passed to msb (see create_workspace): they are
-# forwarded host-side over SSH by lib/msw-port-forwarder.py, which probes the
+# forwarded host-side over SSH by lib/silo-port-forwarder.py, which probes the
 # bind address at runtime and skips occupied ports with a warning instead of
 # ever failing or recreating a workspace.
 
@@ -728,17 +728,17 @@ wait_for_guest_systemd() {
 configure_workspace_guest() {
   local box="$1" browser_host="$2"
   wait_for_guest_systemd "$box"
-  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" "$MSW_GITHUB_MODE" <<'GUEST'
+  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" "$SILO_GITHUB_MODE" <<'GUEST'
 set -Eeuo pipefail
 workspace="$1"; browser_host="$2"; github_mode="$3"
-mkdir -p /workspace /var/lib/msw-runtime/docker /var/lib/msw-runtime/containerd
-printf 'export MSW_WORKSPACE=%q\nexport MSW_BROWSER_HOST=%q\nexport HOST=%q\nexport BIND_ADDRESS=%q\nexport __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=%q\n' \
+mkdir -p /workspace /var/lib/silo-runtime/docker /var/lib/silo-runtime/containerd
+printf 'export SILO_WORKSPACE=%q\nexport SILO_BROWSER_HOST=%q\nexport HOST=%q\nexport BIND_ADDRESS=%q\nexport __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=%q\n' \
   "$workspace" "$browser_host" "0.0.0.0" "0.0.0.0" "$browser_host" \
-  >/etc/profile.d/msw-workspace.sh
-chmod 0644 /etc/profile.d/msw-workspace.sh
-hostnamectl set-hostname "msw-$workspace"
-printf '%s\n' "$workspace" >/workspace/.msw-workspace
-printf 'MicroSandbox workspace: %s\n\n  Code:       /workspace\n  Browser:    http://%s:<published-port>\n  Docker:     docker compose up --build\n  Runtimes:   mise use <tool>@<version>\n  Python:     uv sync / uv run ...\n' \
+  >/etc/profile.d/silo-workspace.sh
+chmod 0644 /etc/profile.d/silo-workspace.sh
+hostnamectl set-hostname "silo-$workspace"
+printf '%s\n' "$workspace" >/workspace/.silo-workspace
+printf 'Silo workspace: %s\n\n  Code:       /workspace\n  Browser:    http://%s:<published-port>\n  Docker:     docker compose up --build\n  Runtimes:   mise use <tool>@<version>\n  Python:     uv sync / uv run ...\n' \
   "$workspace" "$browser_host" >/etc/motd
 if [ "$github_mode" = local ]; then
   cat >>/etc/motd <<'MOTD'
@@ -751,23 +751,23 @@ systemctl enable containerd.service docker.service
 systemctl restart containerd.service docker.service
 timeout 120 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
 docker run --rm alpine:latest true
-mkdir -p /workspace/.msw-docker-smoke
-printf 'host\n' >/workspace/.msw-docker-smoke/in
-docker run --rm -v /workspace/.msw-docker-smoke:/work alpine:latest sh -ceu 'grep -qx host /work/in; printf "container\n" >/work/out'
-grep -qx container /workspace/.msw-docker-smoke/out
-rm -rf /workspace/.msw-docker-smoke
+mkdir -p /workspace/.silo-docker-smoke
+printf 'host\n' >/workspace/.silo-docker-smoke/in
+docker run --rm -v /workspace/.silo-docker-smoke:/work alpine:latest sh -ceu 'grep -qx host /work/in; printf "container\n" >/work/out'
+grep -qx container /workspace/.silo-docker-smoke/out
+rm -rf /workspace/.silo-docker-smoke
 sync
 GUEST
 }
 
 keychain_read_token() {
   local box="$1"
-  if [[ -n "${MSW_TEST_KEYCHAIN_DIR:-}" ]]; then
-    local file="$MSW_TEST_KEYCHAIN_DIR/msw.github.read__${box}"
+  if [[ -n "${SILO_TEST_KEYCHAIN_DIR:-}" ]]; then
+    local file="$SILO_TEST_KEYCHAIN_DIR/silo.github.read__${box}"
     [[ -f "$file" ]] || return 1
     cat "$file"
   else
-    /usr/bin/security find-generic-password -w -s msw.github.read -a "$box" 2>/dev/null
+    /usr/bin/security find-generic-password -w -s silo.github.read -a "$box" 2>/dev/null
   fi
 }
 
@@ -781,39 +781,39 @@ create_workspace() {
     warn "recreating $box root; its repository and Docker volumes are preserved"
     workspace_msb "$box" rm -f "$box"
     # A recreated VM regenerates its host keys; drop the stale entry from the
-    # dedicated MSW known-hosts file (never ~/.ssh/known_hosts) so the next
+    # dedicated Silo known-hosts file (never ~/.ssh/known_hosts) so the next
     # SSH connection accepts the new key. Only this box's entry is removed.
-    if [[ -f "$HOME/.ssh/msw_known_hosts" ]]; then
-      ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/msw_known_hosts" >/dev/null 2>&1 || true
+    if [[ -f "$HOME/.ssh/silo_known_hosts" ]]; then
+      ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/silo_known_hosts" >/dev/null 2>&1 || true
     fi
   fi
 
   if ! sandbox_exists "$box"; then
     log "Creating workspace: $box"
-    ensure_ext4_volume "msw-${box}-workspace" "$workspace_size"
-    ensure_ext4_volume "msw-${box}-runtime" "$runtime_size"
-    run_args+=(--name "$box" --from-snapshot "$MSW_BASE_SNAPSHOT")
+    ensure_ext4_volume "silo-${box}-workspace" "$workspace_size"
+    ensure_ext4_volume "silo-${box}-runtime" "$runtime_size"
+    run_args+=(--name "$box" --from-snapshot "$SILO_BASE_SNAPSHOT")
     run_args+=(--cpus "$effective_cpus" --max-cpus "$effective_max")
     run_args+=(--memory "$memory" --max-memory "$max_memory")
-    run_args+=(--mount-named "msw-${box}-workspace:/workspace:kind=disk,size=${workspace_size}")
-    run_args+=(--mount-named "msw-${box}-runtime:/var/lib/msw-runtime:kind=disk,size=${runtime_size}")
+    run_args+=(--mount-named "silo-${box}-workspace:/workspace:kind=disk,size=${workspace_size}")
+    run_args+=(--mount-named "silo-${box}-runtime:/var/lib/silo-runtime:kind=disk,size=${runtime_size}")
     run_args+=(--workdir /workspace --init auto --security default --net public --tls-intercept)
-    run_args+=(--label "msw.managed=true" --label "msw.workspace=${box}")
-    run_args+=(--env "MSW_WORKSPACE=${box}" --env "MSW_BROWSER_HOST=${browser_host}")
+    run_args+=(--label "silo.managed=true" --label "silo.workspace=${box}")
+    run_args+=(--env "SILO_WORKSPACE=${box}" --env "SILO_BROWSER_HOST=${browser_host}")
     run_args+=(--env 'PATH=/root/.local/bin:/root/.local/share/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
     run_args+=(--env SHELL=/usr/bin/zsh --env LANG=en_US.UTF-8)
     run_args+=(--env HOST=0.0.0.0 --env BIND_ADDRESS=0.0.0.0)
     run_args+=(--env "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${browser_host}")
     run_args+=(-- sleep infinity)
     # Ports are NOT passed to msb: published ports are forwarded host-side
-    # over SSH by lib/msw-port-forwarder.py, which skips occupied ports with
+    # over SSH by lib/silo-port-forwarder.py, which skips occupied ports with
     # a warning instead of ever failing or recreating the workspace.
     "$MSB_BIN" run --detach "${run_args[@]}"
-    "$HOME/.local/bin/msw" __workspace-state-init "$box" || warn "could not record the workspace state for $box"
+    "$HOME/.local/bin/silo" __workspace-state-init "$box" || warn "could not record the workspace state for $box"
     configure_workspace_guest "$box" "$browser_host"
-    if [[ "$MSW_GITHUB_MODE" == connect ]]; then
+    if [[ "$SILO_GITHUB_MODE" == connect ]]; then
       if token="$(keychain_read_token "$box" 2>/dev/null)"; then
-        workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
+        workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
         unset token
       fi
     fi
@@ -836,18 +836,18 @@ fi
 if [[ "$TEST_MODE" != 1 && "$SKIP_WORKSPACES" != 1 ]]; then
   log "Starting the host-managed published-port forwarders"
   for box in "${WORKSPACES[@]}"; do
-    "$HOME/.local/bin/msw" __port-forwarder-start "$box" || warn "could not start the port forwarder for $box"
+    "$HOME/.local/bin/silo" __port-forwarder-start "$box" || warn "could not start the port forwarder for $box"
   done
   log "Verifying the host-managed published-port forwarders"
   for box in "${WORKSPACES[@]}"; do
-    verify_launchd_job_alive "org.microsandbox.Silo.port-forwarder.$box" \
-      || fatal "the published-port forwarder for $box did not stay loaded and running; inspect $HOME/.local/state/msw/port-forwarder-$box.log"
+    verify_launchd_job_alive "org.silo.Silo.port-forwarder.$box" \
+      || fatal "the published-port forwarder for $box did not stay loaded and running; inspect $HOME/.local/state/silo/port-forwarder-$box.log"
   done
 fi
 
 if [[ "$SKIP_WORKSPACES" != 1 ]]; then
   log "Running the complete local VM, Docker, SSH, internet, and browser-port test"
-  "$HOME/.local/bin/msw" check --deep
+  "$HOME/.local/bin/silo" check --deep
 fi
 
 cat <<'DONE'
@@ -856,17 +856,17 @@ Setup complete. The installer has already run the full local end-to-end test.
 
 Next:
   1. exec zsh -l
-  2. msw identity "YOUR NAME" YOUR_EMAIL@example.com
+  2. silo identity "YOUR NAME" YOUR_EMAIL@example.com
   3. Connect GitHub per workspace: open Silo -> GitHub -> Connect,
      then tick the repositories each workspace may access. The installer
      installs the `gh` CLI (Homebrew), so a clean Mac signs in with gh's web
-     OAuth flow and msw reuses the authenticated session automatically.
-     CLI fallbacks: msw github auth | msw github status
+     OAuth flow and silo reuses the authenticated session automatically.
+     CLI fallbacks: silo github auth | silo github status
 
 Daily use:
-  msw dev
-  msw zed dev PATH
-  msw open dev 3000
-  msw backup
-  msw help
+  silo dev
+  silo zed dev PATH
+  silo open dev 3000
+  silo backup
+  silo help
 DONE

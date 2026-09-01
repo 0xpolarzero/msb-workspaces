@@ -1,7 +1,7 @@
 #!/usr/bin/python3
-"""Comprehensive release tests for MicroSandbox Workspaces.
+"""Comprehensive release tests for Silo.
 
-The suite installs the package into a clean fake home, drives the real `msw`
+The suite installs the package into a clean fake home, drives the real `silo`
 CLI, uses a stateful MicroSandbox simulator, and uses real local Git/bare
 repositories for clone, pull, bundle, push, force-with-lease, and LFS flows.
 """
@@ -96,7 +96,7 @@ class ReleaseBase:
 
     @classmethod
     def create(cls) -> None:
-        cls.root = Path(tempfile.mkdtemp(prefix="msw-release-base-"))
+        cls.root = Path(tempfile.mkdtemp(prefix="silo-release-base-"))
         cls.home = cls.root / "home"
         cls.home.mkdir()
         (cls.root / "remotes").mkdir()
@@ -112,26 +112,26 @@ class ReleaseBase:
         env.update(
             {
                 "HOME": str(home),
-                "MSW_TEST_MODE": "1",
+                "SILO_TEST_MODE": "1",
                 # Phase 0 suite exercises the legacy Connect flow; Path C
                 # local-mode tests (GitHubProxyContractTests) set
-                # MSW_GITHUB_MODE=local explicitly.
-                "MSW_GITHUB_MODE": "connect",
-                "MSW_TEST_HOST_CPUS": "12",
-                "MSW_FAKE_STATE": str(home / ".microsandbox"),
-                "MSW_MSB_BIN": str(FAKE_MSB),
-                "MSW_SSH_BIN": str(FAKE_SSH),
-                "MSW_CURL_BIN": str(FAKE_CURL),
-                "MSW_OPEN_BIN": str(FAKE_OPEN),
-                "MSW_ZED_BIN": str(FAKE_ZED),
-                "MSW_TEST_KEYCHAIN_DIR": str(root / "keychain"),
-                "MSW_TEST_GITHUB_REMOTE_ROOT": str(root / "remotes"),
-                "MSW_GTAR_BIN": SYSTEM_TAR,
-                "MSW_ZSTD_BIN": SYSTEM_ZSTD,
-                "MSW_SHASUM_BIN": SYSTEM_SHASUM,
-                "MSW_GIT_BIN": SYSTEM_GIT,
-                "MSW_FAKE_LOG": str(root / "fake.log"),
-                "MSW_ASSUME_YES": "1",
+                # SILO_GITHUB_MODE=local explicitly.
+                "SILO_GITHUB_MODE": "connect",
+                "SILO_TEST_HOST_CPUS": "12",
+                "SILO_FAKE_STATE": str(home / ".microsandbox"),
+                "SILO_MSB_BIN": str(FAKE_MSB),
+                "SILO_SSH_BIN": str(FAKE_SSH),
+                "SILO_CURL_BIN": str(FAKE_CURL),
+                "SILO_OPEN_BIN": str(FAKE_OPEN),
+                "SILO_ZED_BIN": str(FAKE_ZED),
+                "SILO_TEST_KEYCHAIN_DIR": str(root / "keychain"),
+                "SILO_TEST_GITHUB_REMOTE_ROOT": str(root / "remotes"),
+                "SILO_GTAR_BIN": SYSTEM_TAR,
+                "SILO_ZSTD_BIN": SYSTEM_ZSTD,
+                "SILO_SHASUM_BIN": SYSTEM_SHASUM,
+                "SILO_GIT_BIN": SYSTEM_GIT,
+                "SILO_FAKE_LOG": str(root / "fake.log"),
+                "SILO_ASSUME_YES": "1",
                 "LC_ALL": "C",
                 "LANG": "C",
             }
@@ -141,7 +141,7 @@ class ReleaseBase:
 
     @classmethod
     def clone(cls, label: str) -> "TestEnv":
-        root = Path(tempfile.mkdtemp(prefix=f"msw-{label}-"))
+        root = Path(tempfile.mkdtemp(prefix=f"silo-{label}-"))
         home = root / "home"
         shutil.copytree(cls.home, home, symlinks=True)
         (root / "remotes").mkdir()
@@ -155,7 +155,7 @@ class ReleaseBase:
 
         env = cls.make_env(root, home)
         test_env = TestEnv(root, home, env)
-        test_env.msw("host", "repair")
+        test_env.silo("host", "repair")
         return test_env
 
 
@@ -251,7 +251,7 @@ class TestEnv:
         self.root = root
         self.home = home
         self.env = env
-        self.msw_bin = Path(env.get("MSW_TEST_CLI", home / ".local" / "bin" / "msw"))
+        self.silo_bin = Path(env.get("SILO_TEST_CLI", home / ".local" / "bin" / "silo"))
 
     def cleanup(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
@@ -263,14 +263,14 @@ class TestEnv:
             env.update(extra_env)
         return run_cmd(args, env=env, input_text=input_text, check=check, timeout=timeout)
 
-    def msw(self, *args: str, check: bool = True, input_text: str | None = None,
+    def silo(self, *args: str, check: bool = True, input_text: str | None = None,
             extra_env: dict[str, str] | None = None, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-        return self.run(self.msw_bin, *args, check=check, input_text=input_text,
+        return self.run(self.silo_bin, *args, check=check, input_text=input_text,
                         extra_env=extra_env, timeout=timeout)
 
     def app_bootstrap(self, *, check: bool = True, timeout: int = 90) -> subprocess.CompletedProcess[str]:
-        workspace_input = (self.home / ".config/msw/workspaces.json").read_text()
-        return self.msw(
+        workspace_input = (self.home / ".config/silo/workspaces.json").read_text()
+        return self.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=workspace_input, check=check, timeout=timeout,
         )
@@ -309,20 +309,20 @@ class TestEnv:
         read = read or f"github_pat_READ_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
         write = write or f"github_pat_WRITE_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
         env = {
-            "MSW_GITHUB_READ_TOKEN_INPUT": read,
-            "MSW_GITHUB_WRITE_TOKEN_INPUT": write,
+            "SILO_GITHUB_READ_TOKEN_INPUT": read,
+            "SILO_GITHUB_WRITE_TOKEN_INPUT": write,
         }
         if extra_env:
             env.update(extra_env)
-        return self.msw("github", "setup", box, repo, extra_env=env, check=check, timeout=90)
+        return self.silo("github", "setup", box, repo, extra_env=env, check=check, timeout=90)
     def configure_read_only(self, box: str, repo: str, *, read: str | None = None,
                             extra_env: dict[str, str] | None = None,
                             check: bool = True) -> subprocess.CompletedProcess[str]:
         read = read or f"github_pat_READ_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
-        env = {"MSW_GITHUB_READ_TOKEN_INPUT": read}
+        env = {"SILO_GITHUB_READ_TOKEN_INPUT": read}
         if extra_env:
             env.update(extra_env)
-        return self.msw("github", "setup", box, repo, "--read-only",
+        return self.silo("github", "setup", box, repo, "--read-only",
                         extra_env=env, check=check, timeout=90)
 
     def init_remote(self, owner: str = "acme", repo: str = "demo", *, files: dict[str, str] | None = None) -> Path:
@@ -346,7 +346,7 @@ class TestEnv:
         hook.write_text(
             "#!/bin/sh\n"
             "set -eu\n"
-            "if [ \"${MSW_GUEST_READ_ONLY:-}\" = 1 ]; then echo 'guest token is read-only' >&2; exit 1; fi\n"
+            "if [ \"${SILO_GUEST_READ_ONLY:-}\" = 1 ]; then echo 'guest token is read-only' >&2; exit 1; fi\n"
             "if [ -f deny-host ]; then echo 'host push denied for test' >&2; exit 1; fi\n"
             "cat >/dev/null\n"
         )
@@ -358,7 +358,7 @@ class TestEnv:
         env.update(
             {
                 "HOME": str(self.state()["sandboxes"]["dev"]["root"] + "/home"),
-                "MSW_GUEST_READ_ONLY": "1",
+                "SILO_GUEST_READ_ONLY": "1",
                 "GIT_TERMINAL_PROMPT": "0",
             }
         )
@@ -386,7 +386,7 @@ class TestEnv:
         """Start the stateful fake GitHub server (tests/fake_github.py) for this env.
 
         Binds an ephemeral port on 127.0.0.1, points the server at this env's
-        on-disk bare remote root (the MSW_TEST_GITHUB_REMOTE_ROOT layout), and
+        on-disk bare remote root (the SILO_TEST_GITHUB_REMOTE_ROOT layout), and
         yields a handle exposing .port / .base_url / .state_dir / .requests() /
         .set_control(). The server process is terminated on exit; its state
         dir lives under this env's root and is removed with it. See the env
@@ -395,14 +395,14 @@ class TestEnv:
         """
         state_dir = self.root / "fake-github"
         state_dir.mkdir(parents=True, exist_ok=True)
-        remote_root = self.env.get("MSW_TEST_GITHUB_REMOTE_ROOT") or str(self.root / "remotes")
+        remote_root = self.env.get("SILO_TEST_GITHUB_REMOTE_ROOT") or str(self.root / "remotes")
         err_log = (state_dir / "server.err").open("ab")
         env = self.env.copy()
         env.update(
             {
-                "MSW_FAKE_GITHUB_PORT": "0",
-                "MSW_FAKE_GITHUB_STATE": str(state_dir),
-                "MSW_FAKE_GITHUB_REMOTE_ROOT": remote_root,
+                "SILO_FAKE_GITHUB_PORT": "0",
+                "SILO_FAKE_GITHUB_STATE": str(state_dir),
+                "SILO_FAKE_GITHUB_REMOTE_ROOT": remote_root,
             }
         )
         if extra_env:
@@ -437,7 +437,7 @@ def materialize_ext4_raw_images(test_env: TestEnv) -> None:
     test_env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
-class MSWTestCase(unittest.TestCase):
+class SiloTestCase(unittest.TestCase):
     env: TestEnv
 
     def setUp(self) -> None:
@@ -452,77 +452,77 @@ class MSWTestCase(unittest.TestCase):
             self.assertIn(text, proc.stdout + proc.stderr)
 
 
-class SyntaxAndStaticTests(MSWTestCase):
+class SyntaxAndStaticTests(SiloTestCase):
     def test_shell_python_syntax_and_port_config(self) -> None:
-        for script in [PACKAGE / "setup.sh", PACKAGE / "bin/msw", PACKAGE / "lib/bootstrap-base.sh"]:
+        for script in [PACKAGE / "setup.sh", PACKAGE / "bin/silo", PACKAGE / "lib/bootstrap-base.sh"]:
             run_cmd(["bash", "-n", script])
-        for script in [PACKAGE / "bin/msw-ssh-proxy", PACKAGE / "bin/msw-git-askpass",
-                       PACKAGE / "bin/msw-github-proxy", PACKAGE / "bin/msw-github-host-token"]:
+        for script in [PACKAGE / "bin/silo-ssh-proxy", PACKAGE / "bin/silo-git-askpass",
+                       PACKAGE / "bin/silo-github-proxy", PACKAGE / "bin/silo-github-host-token"]:
             run_cmd(["sh", "-n", script])
         run_cmd(["/usr/bin/python3", "-m", "py_compile", FAKE_MSB, FAKE_CURL, FAKE_SECURITY, FAKE_GITHUB,
                  FAKE_GH, FAKE_API_CURL, FAKE_SSH_FORWARDER,
-                 PACKAGE / "bin/msw-keychain-bridge",
+                 PACKAGE / "bin/silo-keychain-bridge",
                  PACKAGE / "lib/proxycore.py", PACKAGE / "lib/proxy-upstream.py",
-                 PACKAGE / "lib/msw-port-forwarder.py"])
-        plist = PACKAGE / "launchd" / "org.microsandbox.Silo.github-proxy.plist"
+                 PACKAGE / "lib/silo-port-forwarder.py"])
+        plist = PACKAGE / "launchd" / "org.silo.Silo.github-proxy.plist"
         run_cmd(["/usr/bin/plutil", "-lint", plist])
         config = (PACKAGE / "config.sh").read_text()
         self.assertIn("24678-24679", config)
         self.assertIn("3000-3010", config)
         self.assertIn("5173-5180", config)
-        self.assertIn('MSW_GITHUB_SECRET_HOSTS="github.com,api.github.com"', config)
+        self.assertIn('SILO_GITHUB_SECRET_HOSTS="github.com,api.github.com"', config)
         self.assertNotIn("githubusercontent", config)
-        self.assertNotRegex((PACKAGE / "bin/msw").read_text(), r"(?:declare|local) -A|mapfile|readarray")
+        self.assertNotRegex((PACKAGE / "bin/silo").read_text(), r"(?:declare|local) -A|mapfile|readarray")
         docs = "\n".join(
             (PACKAGE / name).read_text()
             for name in [
                 "README.md",
                 "docs/SETUP-GUIDE.md",
                 "docs/GITHUB-SETUP.md",
-                "docs/MSW-CHEATSHEET.md",
+                "docs/Silo-CHEATSHEET.md",
             ]
         )
-        for stale in ("msw auth", "msw selftest", "--skip-update", "msw github setup dev"):
+        for stale in ("silo auth", "silo selftest", "--skip-update", "silo github setup dev"):
             self.assertNotIn(stale, docs)
         self.assertIn("Connect GitHub", docs)
         self.assertIn("Silo", docs)
-        self.assertIn("msw push dev", docs)
-        self.assertIn("msw backup", docs)
+        self.assertIn("silo push dev", docs)
+        self.assertIn("silo backup", docs)
 
     def test_static_security_invariants(self) -> None:
-        msw = (PACKAGE / "bin/msw").read_text()
+        silo = (PACKAGE / "bin/silo").read_text()
         setup = (PACKAGE / "setup.sh").read_text()
-        proxy = (PACKAGE / "bin/msw-ssh-proxy").read_text()
+        proxy = (PACKAGE / "bin/silo-ssh-proxy").read_text()
         self.assertIn('"$MSB_BIN" run --detach', setup)
         self.assertIn("-- sleep infinity", setup)
         self.assertIn("wait_for_guest_systemd", setup)
         self.assertIn("--tls-intercept", setup)
         # Setup's completion text must describe the local-mode GitHub UX, not
         # the retired connect-mode per-workspace command.
-        self.assertNotIn("msw github setup dev", setup)
-        # Recreated VMs regenerate host keys; only the dedicated MSW file is
+        self.assertNotIn("silo github setup dev", setup)
+        # Recreated VMs regenerate host keys; only the dedicated Silo file is
         # ever touched, and only for the box being recreated.
-        self.assertIn('ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/msw_known_hosts"', setup)
-        self.assertIn("msw_known_hosts", msw)
+        self.assertIn('ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/silo_known_hosts"', setup)
+        self.assertIn("silo_known_hosts", silo)
         # No code path may touch the GLOBAL ~/.ssh/known_hosts. Both setup and
         # the typed workspace-reconciliation path may remove only the named
-        # workspace from MSW's dedicated known-hosts file.
-        reconcile_removal = 'ssh-keygen -R "${old_box}.msb" -f "$HOME/.ssh/msw_known_hosts"'
-        self.assertIn(reconcile_removal, msw)
-        self.assertNotIn("ssh-keygen -R", msw.replace(reconcile_removal, ""))
+        # workspace from Silo's dedicated known-hosts file.
+        reconcile_removal = 'ssh-keygen -R "${old_box}.msb" -f "$HOME/.ssh/silo_known_hosts"'
+        self.assertIn(reconcile_removal, silo)
+        self.assertNotIn("ssh-keygen -R", silo.replace(reconcile_removal, ""))
         self.assertNotIn("ssh-keygen -R", setup.replace(
-            'ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/msw_known_hosts"', ""))
-        # Fresh-home release blocker: ~/.local/state/msw is created (mode
+            'ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/silo_known_hosts"', ""))
+        # Fresh-home release blocker: ~/.local/state/silo is created (mode
         # 0700) BEFORE the proxy/forwarder launch agents are rendered or
         # loaded (their launchd plists log into it), and setup verifies every
         # loaded job stays alive (socket agent: idle-valid) before success.
-        state_mkdir = setup.index('"$HOME/.local/state/msw"')
+        state_mkdir = setup.index('"$HOME/.local/state/silo"')
         self.assertLess(state_mkdir, setup.index("__proxy-plist-render"))
         self.assertLess(state_mkdir, setup.index("__port-forwarder-start"))
-        self.assertIn('chmod 0700 "$HOME/.local/state/msw"', setup)
+        self.assertIn('chmod 0700 "$HOME/.local/state/silo"', setup)
         self.assertIn("verify_launchd_job_alive", setup)
         self.assertIn("did not stay loaded and running", setup)
-        self.assertIn("verify_launchd_job_alive org.microsandbox.Silo.github-proxy socket", setup)
+        self.assertIn("verify_launchd_job_alive org.silo.Silo.github-proxy socket", setup)
         # Host prerequisite: the GitHub CLI is installed with the other
         # Homebrew tools so a clean Mac can sign in via gh web OAuth; no
         # OAuth client ID is invented in the installer or config.
@@ -530,35 +530,35 @@ class SyntaxAndStaticTests(MSWTestCase):
         config_text = (PACKAGE / "config.sh").read_text()
         self.assertIn("gh", config_text)
         self.assertNotRegex(config_text, r"[Cc]lient.?[Ii]d\s*[=:]|[Ii]d\s*[=:]\s*[A-Za-z0-9]{8,}")
-        self.assertIn('--secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}" --restart', msw)
-        self.assertIn("--secret-rm GH_TOKEN --restart", msw)
-        self.assertIn("env -i", msw)
-        self.assertIn("GIT_CONFIG_NOSYSTEM=1", msw)
-        self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", msw)
-        self.assertIn("--force-with-lease=$ref:$remote_sha", msw)
-        self.assertIn("failed SHA-256 verification", msw)
-        self.assertIn('"$LOCKF_BIN" -s -t 0 9', msw)
-        self.assertIn('"$MSB_BIN" "$@" 9>&-', msw)
-        self.assertIn("MSW_GITHUB_VERIFY_INHERITED=1", msw)
-        self.assertNotIn("tar -x", msw[msw.index("copy_lfs_objects"):msw.index("cmd_github_setup")])
+        self.assertIn('--secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}" --restart', silo)
+        self.assertIn("--secret-rm GH_TOKEN --restart", silo)
+        self.assertIn("env -i", silo)
+        self.assertIn("GIT_CONFIG_NOSYSTEM=1", silo)
+        self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", silo)
+        self.assertIn("--force-with-lease=$ref:$remote_sha", silo)
+        self.assertIn("failed SHA-256 verification", silo)
+        self.assertIn('"$LOCKF_BIN" -s -t 0 9', silo)
+        self.assertIn('"$MSB_BIN" "$@" 9>&-', silo)
+        self.assertIn("SILO_GITHUB_VERIFY_INHERITED=1", silo)
+        self.assertNotIn("tar -x", silo[silo.index("copy_lfs_objects"):silo.index("cmd_github_setup")])
         self.assertNotIn("ForwardAgent", setup + proxy)
         self.assertNotIn("/var/run/docker.sock", setup)
-        self.assertIn('--secret "GH_TOKEN@${MSW_GITHUB_SECRET_HOSTS}"', msw + setup)
-        push_body = msw[msw.index("push_impl()") : msw.index("cmd_push()")]
+        self.assertIn('--secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}"', silo + setup)
+        push_body = silo[silo.index("push_impl()") : silo.index("cmd_push()")]
         self.assertNotIn("write_token_for_workspace", push_body)
         bootstrap = (PACKAGE / "lib/bootstrap-base.sh").read_text()
         self.assertIn("url.https://github.com/.insteadOf", bootstrap)
         self.assertIn("gh config set git_protocol https", bootstrap)
-        self.assertIn('"$MSB_BIN" self update', msw)
+        self.assertIn('"$MSB_BIN" self update', silo)
     def test_askpass_uses_login_keychain_with_isolated_git_home(self) -> None:
         state_path = self.env.root / "askpass-security.json"
-        service = "msw.github.write"
+        service = "silo.github.write"
         account = "dev"
         value = "diagnostic-write-token"
         security_env = self.env.env.copy()
         security_env.update({
-            "MSW_FAKE_SECURITY_STATE": str(state_path),
-            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+            "SILO_FAKE_SECURITY_STATE": str(state_path),
+            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
         })
         run_cmd(
             [FAKE_SECURITY, "add-generic-password", "-s", service, "-a", account, "-w", value],
@@ -569,20 +569,20 @@ class SyntaxAndStaticTests(MSWTestCase):
         askpass_env = security_env.copy()
         askpass_env.update({
             "HOME": str(isolated_home),
-            "MSW_TEST_KEYCHAIN_DIR": "",
-            "MSW_KEYCHAIN_SERVICE": service,
-            "MSW_KEYCHAIN_ACCOUNT": account,
-            "MSW_KEYCHAIN_HOME": str(self.env.home),
-            "MSW_FAKE_SECURITY_HOME": str(self.env.home),
+            "SILO_TEST_KEYCHAIN_DIR": "",
+            "SILO_KEYCHAIN_SERVICE": service,
+            "SILO_KEYCHAIN_ACCOUNT": account,
+            "SILO_KEYCHAIN_HOME": str(self.env.home),
+            "SILO_FAKE_SECURITY_HOME": str(self.env.home),
         })
         proc = run_cmd(
-            [PACKAGE / "bin/msw-git-askpass", "Password for https://github.com:"],
+            [PACKAGE / "bin/silo-git-askpass", "Password for https://github.com:"],
             env=askpass_env,
         )
         self.assertEqual(proc.stdout, value + "\n")
     def test_askpass_reads_schema3_installation_token(self) -> None:
         state_path = self.env.root / "askpass-app-security.json"
-        service = "msw.github.app.dev.host.tokens"
+        service = "silo.github.app.dev.host.tokens"
         raw = json.dumps({
             "schemaVersion": 3,
             "grantID": "00000000-0000-0000-0000-000000000001",
@@ -592,8 +592,8 @@ class SyntaxAndStaticTests(MSWTestCase):
         })
         security_env = self.env.env.copy()
         security_env.update({
-            "MSW_FAKE_SECURITY_STATE": str(state_path),
-            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
+            "SILO_FAKE_SECURITY_STATE": str(state_path),
+            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
         })
         run_cmd(
             [FAKE_SECURITY, "add-generic-password", "-s", service, "-a", "profile", "-w", raw],
@@ -601,31 +601,31 @@ class SyntaxAndStaticTests(MSWTestCase):
         )
         askpass_env = security_env.copy()
         askpass_env.update({
-            "MSW_TEST_KEYCHAIN_DIR": "",
-            "MSW_APP_KEYCHAIN_SERVICE": service,
-            "MSW_APP_KEYCHAIN_ACCOUNT": "profile",
-            "MSW_JQ_BIN": shutil.which("jq") or "",
-            "MSW_KEYCHAIN_HOME": str(self.env.home),
-            "MSW_FAKE_SECURITY_HOME": str(self.env.home),
+            "SILO_TEST_KEYCHAIN_DIR": "",
+            "SILO_APP_KEYCHAIN_SERVICE": service,
+            "SILO_APP_KEYCHAIN_ACCOUNT": "profile",
+            "SILO_JQ_BIN": shutil.which("jq") or "",
+            "SILO_KEYCHAIN_HOME": str(self.env.home),
+            "SILO_FAKE_SECURITY_HOME": str(self.env.home),
         })
         proc = run_cmd(
-            [PACKAGE / "bin/msw-git-askpass", "Password for https://github.com:"],
+            [PACKAGE / "bin/silo-git-askpass", "Password for https://github.com:"],
             env=askpass_env,
         )
         self.assertEqual(proc.stdout, "ghs_host_installation_token\n")
 
 
-class InstallerAndDailyTests(MSWTestCase):
+class InstallerAndDailyTests(SiloTestCase):
     def test_fresh_install_state_resources_volumes_and_ports(self) -> None:
         state = self.env.state()
         self.assertEqual(set(state["sandboxes"]), {"dev", "playgrounds", "personal"})
         self.assertEqual(set(state["volumes"]), {
-            "msw-dev-workspace", "msw-dev-runtime",
-            "msw-playgrounds-workspace", "msw-playgrounds-runtime",
-            "msw-personal-workspace", "msw-personal-runtime",
+            "silo-dev-workspace", "silo-dev-runtime",
+            "silo-playgrounds-workspace", "silo-playgrounds-runtime",
+            "silo-personal-workspace", "silo-personal-runtime",
         })
-        self.assertEqual(set(state["snapshots"]), {"msw-base-v1"})
-        self.assertTrue(state["snapshots"]["msw-base-v1"]["integrity"])
+        self.assertEqual(set(state["snapshots"]), {"silo-base-v1"})
+        self.assertTrue(state["snapshots"]["silo-base-v1"]["integrity"])
         expected_memory = {
             "dev": ("32G", "48G"),
             "playgrounds": ("32G", "48G"),
@@ -636,16 +636,16 @@ class InstallerAndDailyTests(MSWTestCase):
             self.assertFalse(sb["running"])
             self.assertTrue(sb["configured"])
             # Published ports are forwarded host-side over SSH
-            # (lib/msw-port-forwarder.py): msb is never given --port args.
+            # (lib/silo-port-forwarder.py): msb is never given --port args.
             self.assertEqual(sb["ports"], [])
             self.assertNotIn("--port", sb["args"])
-            self.assertEqual(sb["labels"]["msw.managed"], "true")
+            self.assertEqual(sb["labels"]["silo.managed"], "true")
             args = sb["args"]
             self.assertEqual(args[args.index("--memory") + 1], expected_memory[box][0])
             self.assertEqual(args[args.index("--max-memory") + 1], expected_memory[box][1])
             # Every create records the desired port list for the forwarder.
             record = json.loads((
-                self.env.home / ".config" / "msw" / "workspace-state" / f"{box}.json"
+                self.env.home / ".config" / "silo" / "workspace-state" / f"{box}.json"
             ).read_text())
             self.assertEqual(record["schemaVersion"], 1)
             self.assertIn(f"{ip}:3000:3000", record["desiredPorts"])
@@ -654,9 +654,9 @@ class InstallerAndDailyTests(MSWTestCase):
             self.assertIn(f"{ip}:24679:24679", record["desiredPorts"])
             self.assertEqual(record["skippedPorts"], [])
         # Release blocker regression: the proxy and port-forwarder launch
-        # agents log into ~/.local/state/msw, which setup.sh must create
+        # agents log into ~/.local/state/silo, which setup.sh must create
         # (mode 0700) on a fresh home before any agent is rendered/loaded.
-        state_dir = self.env.home / ".local" / "state" / "msw"
+        state_dir = self.env.home / ".local" / "state" / "silo"
         self.assertTrue(state_dir.is_dir())
         self.assertEqual(oct(state_dir.stat().st_mode & 0o777), "0o700")
 
@@ -664,7 +664,7 @@ class InstallerAndDailyTests(MSWTestCase):
         materialize_ext4_raw_images(self.env)
         state = self.env.state()
         for role in ("workspace", "runtime"):
-            name = f"msw-personal-{role}"
+            name = f"silo-personal-{role}"
             path = Path(state["volumes"].pop(name)["path"])
             shutil.rmtree(path, ignore_errors=True)
         state["sandboxes"].pop("personal")
@@ -672,8 +672,8 @@ class InstallerAndDailyTests(MSWTestCase):
         self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
 
         proc = self.env.setup(extra_env={
-            "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
-            "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+            "SILO_FAKE_TRUNCATED_EXT4_CREATE": "1",
+            "SILO_TEST_VALIDATE_RAW_DISKS": "1",
         })
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
@@ -684,7 +684,7 @@ class InstallerAndDailyTests(MSWTestCase):
             if event.get("event") == "create" and event.get("box") == "personal"
         )
         for role in ("workspace", "runtime"):
-            name = f"msw-personal-{role}"
+            name = f"silo-personal-{role}"
             image = Path(after["volumes"][name]["path"])
             with image.open("rb") as handle:
                 handle.seek(1028)
@@ -700,7 +700,7 @@ class InstallerAndDailyTests(MSWTestCase):
 
     def test_recreate_cleans_stale_host_key_from_dedicated_known_hosts(self) -> None:
         # Recreated VMs regenerate their host keys: the stale entry must be
-        # removed from the DEDICATED MSW known-hosts file only, and only for
+        # removed from the DEDICATED Silo known-hosts file only, and only for
         # the box that is actually recreated — never from ~/.ssh/known_hosts
         # and never for other boxes or unrelated hosts.
         ssh_dir = self.env.home / ".ssh"
@@ -710,7 +710,7 @@ class InstallerAndDailyTests(MSWTestCase):
         key_dir.mkdir()
         run_cmd(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key_dir / "id")], env=self.env.env)
         pub = (key_dir / "id.pub").read_text().strip()
-        known_hosts = ssh_dir / "msw_known_hosts"
+        known_hosts = ssh_dir / "silo_known_hosts"
         known_hosts.write_text(
             f"dev.msb {pub} stale-dev\n"
             f"playgrounds.msb {pub} stale-playgrounds\n"
@@ -734,11 +734,11 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertIn("playgrounds.msb", remaining)
         self.assertIn("unrelated.example", remaining)
         self.assertEqual(hashlib.sha256(global_hosts.read_bytes()).hexdigest(), global_sha)
-        # The ssh config routes MSW host keys to the dedicated file, which
+        # The ssh config routes Silo host keys to the dedicated file, which
         # host repair creates mode 0600.
-        config = (ssh_dir / "config.d" / "msw.conf").read_text()
+        config = (ssh_dir / "config.d" / "silo.conf").read_text()
         self.assertIn("UserKnownHostsFile", config)
-        self.assertIn("msw_known_hosts", config)
+        self.assertIn("silo_known_hosts", config)
         self.assertEqual(oct(known_hosts.stat().st_mode & 0o777), "0o600")
 
     def test_setup_is_idempotent(self) -> None:
@@ -756,7 +756,7 @@ class InstallerAndDailyTests(MSWTestCase):
         # msb-imago 0.1.1 defect) must fail the attestation, remove the
         # disposable probe state, and stop setup before any managed
         # workspace volume is created or attached.
-        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        cache = self.env.home / ".config/silo" / "runtime-compat-cache"
         cache.unlink(missing_ok=True)
         before = self.env.state()
         before_events = len(before["events"])
@@ -764,8 +764,8 @@ class InstallerAndDailyTests(MSWTestCase):
         before_sandboxes = set(before["sandboxes"])
 
         proc = self.env.setup(check=False, extra_env={
-            "MSW_TEST_VALIDATE_COMPAT_PROBE": "1",
-            "MSW_FAKE_TAIL_DISCARD": "unsafe",
+            "SILO_TEST_VALIDATE_COMPAT_PROBE": "1",
+            "SILO_FAKE_TAIL_DISCARD": "unsafe",
         })
         self.assertFailed(proc, "truncated the raw image")
         self.assertIn("2015371264", proc.stdout + proc.stderr)
@@ -779,29 +779,29 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertFalse(cache.exists())
         self.assertEqual(set(after["volumes"]), before_volumes)
         self.assertEqual(set(after["sandboxes"]), before_sandboxes)
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["volumes"]))
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["sandboxes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in after["volumes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in after["sandboxes"]))
         self.assertEqual(
             [
                 e for e in probe_events
                 if e.get("event") == "create"
-                and not e.get("box", "").startswith("msw-compat-probe-")
+                and not e.get("box", "").startswith("silo-compat-probe-")
             ],
             [],
         )
         probe_root = self.env.home / ".microsandbox/volumes"
-        self.assertEqual(list(probe_root.glob("msw-compat-probe-*")), [])
+        self.assertEqual(list(probe_root.glob("silo-compat-probe-*")), [])
 
     def test_setup_safe_runtime_attests_once_and_removes_probe_state(self) -> None:
-        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        cache = self.env.home / ".config/silo" / "runtime-compat-cache"
         cache.unlink(missing_ok=True)
         expected_sha = hashlib.sha256(FAKE_MSB.read_bytes()).hexdigest()
         before = self.env.state()
         before_events = len(before["events"])
 
         proc = self.env.setup(extra_env={
-            "MSW_TEST_VALIDATE_COMPAT_PROBE": "1",
-            "MSW_FAKE_TAIL_DISCARD": "safe",
+            "SILO_TEST_VALIDATE_COMPAT_PROBE": "1",
+            "SILO_FAKE_TAIL_DISCARD": "safe",
         })
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("Raw-disk discard safety attested", proc.stdout)
@@ -818,28 +818,28 @@ class InstallerAndDailyTests(MSWTestCase):
         probe_creates = [
             e for e in probe_events
             if e.get("event") == "volume-create"
-            and e.get("volume", "").startswith("msw-compat-probe-")
+            and e.get("volume", "").startswith("silo-compat-probe-")
         ]
         self.assertEqual(len(probe_creates), 1)
         # The probe ran before any managed workspace work and left nothing
         # behind: no probe artifact remains in state or on disk.
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["volumes"]))
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["sandboxes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in after["volumes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in after["sandboxes"]))
         probe_root = self.env.home / ".microsandbox/volumes"
-        self.assertEqual(list(probe_root.glob("msw-compat-probe-*")), [])
+        self.assertEqual(list(probe_root.glob("silo-compat-probe-*")), [])
         # No managed workspace was created or attached (the probe's own
         # disposable sandbox create is expected).
         self.assertEqual(
             [
                 e for e in probe_events
                 if e.get("event") == "create"
-                and not e.get("box", "").startswith("msw-compat-probe-")
+                and not e.get("box", "").startswith("silo-compat-probe-")
             ],
             [],
         )
 
     def test_setup_cached_attestation_skips_the_probe(self) -> None:
-        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        cache = self.env.home / ".config/silo" / "runtime-compat-cache"
         self.assertTrue(cache.is_file())
         expected_sha = hashlib.sha256(FAKE_MSB.read_bytes()).hexdigest()
         self.assertEqual(cache.read_text().strip(), expected_sha)
@@ -853,18 +853,18 @@ class InstallerAndDailyTests(MSWTestCase):
         after = self.env.state()
         new_events = after["events"][before_events:]
         self.assertEqual(
-            [e for e in new_events if "msw-compat-probe" in json.dumps(e)],
+            [e for e in new_events if "silo-compat-probe" in json.dumps(e)],
             [],
         )
         self.assertEqual(cache.read_text().strip(), expected_sha)
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["volumes"]))
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in after["sandboxes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in after["volumes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in after["sandboxes"]))
 
     def test_setup_rejects_workspace_names_that_collide_with_the_probe_prefix(self) -> None:
         # No managed name may match the disposable probe prefix: a workspace
-        # named compat-probe-* would own volumes named msw-compat-probe-*
+        # named compat-probe-* would own volumes named silo-compat-probe-*
         # and a sandbox under the probe prefix.
-        config = self.env.home / ".config/msw" / "workspaces.json"
+        config = self.env.home / ".config/silo" / "workspaces.json"
         desired = json.loads(config.read_text())
         desired["workspaces"].append({
             "name": "compat-probe-x", "cpu": 4, "cpuCeiling": 8,
@@ -877,13 +877,13 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertFailed(proc, "collides with the disposable runtime-probe")
         state = self.env.state()
         self.assertNotIn("compat-probe-x", state["sandboxes"])
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in state["volumes"]))
-        self.assertFalse(any(name.startswith("msw-compat-probe-") for name in state["sandboxes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in state["volumes"]))
+        self.assertFalse(any(name.startswith("silo-compat-probe-") for name in state["sandboxes"]))
 
     def test_recreate_github_workspace_rebinds_secret_from_keychain(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        proc = self.env.setup("--recreate-workspaces", extra_env={"MSW_FAKE_REQUIRE_SECRET_SOURCE": "1"})
+        proc = self.env.setup("--recreate-workspaces", extra_env={"SILO_FAKE_REQUIRE_SECRET_SOURCE": "1"})
         self.assertNotIn("host source GH_TOKEN missing", proc.stdout + proc.stderr)
         state = self.env.state()
         self.assertIn("GH_TOKEN", state["sandboxes"]["dev"]["secrets"])
@@ -907,59 +907,59 @@ class InstallerAndDailyTests(MSWTestCase):
 
     def test_version_migration_rebuilds_roots_and_preserves_both_data_volumes(self) -> None:
         self._seed_volume_sentinels()
-        (self.env.home / ".config/msw/base-version").write_text("0.0.0\n")
+        (self.env.home / ".config/silo/base-version").write_text("0.0.0\n")
         self.env.setup()
         self._assert_volume_sentinels()
-        self.assertEqual((self.env.home / ".config/msw/base-version").read_text().strip(), "3.2.2")
+        self.assertEqual((self.env.home / ".config/silo/base-version").read_text().strip(), "3.2.2")
 
     def test_reset_config_and_rebuild_base(self) -> None:
-        config = self.env.home / ".config/msw/config.sh"
-        config.write_text(config.read_text().replace('MSW_ROOT_DISK="48G"', 'MSW_ROOT_DISK="broken"'))
+        config = self.env.home / ".config/silo/config.sh"
+        config.write_text(config.read_text().replace('SILO_ROOT_DISK="48G"', 'SILO_ROOT_DISK="broken"'))
         self.env.setup("--reset-config", "--rebuild-base")
-        self.assertIn('MSW_ROOT_DISK="48G"', config.read_text())
+        self.assertIn('SILO_ROOT_DISK="48G"', config.read_text())
         state = self.env.state()
-        self.assertTrue(state["snapshots"]["msw-base-v1"]["integrity"])
+        self.assertTrue(state["snapshots"]["silo-base-v1"]["integrity"])
 
     def test_urls_open_zed_shell_and_tunnel(self) -> None:
-        self.assertEqual(self.env.msw("url", "dev", "3000").stdout.strip(), "http://dev.msw.test:3000")
-        self.env.msw("open", "personal", "5173")
-        self.env.msw("zed", "playgrounds", "nested/app")
-        self.env.msw("dev", "nested/app")
-        self.env.msw("tunnel", "dev", "12345", "12346")
+        self.assertEqual(self.env.silo("url", "dev", "3000").stdout.strip(), "http://dev.silo.test:3000")
+        self.env.silo("open", "personal", "5173")
+        self.env.silo("zed", "playgrounds", "nested/app")
+        self.env.silo("dev", "nested/app")
+        self.env.silo("tunnel", "dev", "12345", "12346")
         for bad in ("0", "65536", "not-a-port"):
-            self.assertFailed(self.env.msw("tunnel", "dev", bad, check=False), "port")
-        self.assertFailed(self.env.msw("tunnel", "dev", "3000", "65536", check=False), "local port")
+            self.assertFailed(self.env.silo("tunnel", "dev", bad, check=False), "port")
+        self.assertFailed(self.env.silo("tunnel", "dev", "3000", "65536", check=False), "local port")
         log = (self.env.root / "fake.log").read_text()
-        self.assertIn("open http://personal.msw.test:5173", log)
+        self.assertIn("open http://personal.silo.test:5173", log)
         self.assertIn("zed ssh://root@playgrounds.msb/workspace/nested/app", log)
         self.assertIn("ssh -t dev.msb", log)
         self.assertIn("-L 12346:127.0.0.1:12345", log)
-        self.assertFailed(self.env.msw("url", "dev", "9999", check=False), "not pre-published")
+        self.assertFailed(self.env.silo("url", "dev", "9999", check=False), "not pre-published")
 
     def test_clean_preserves_volumes_unless_explicitly_requested(self) -> None:
         before = len(self.env.state()["events"])
-        self.env.msw("clean", "dev")
+        self.env.silo("clean", "dev")
         first = self.env.state()["events"][before:]
         system_prunes = [e["args"] for e in first if e["event"] == "docker" and e["args"][:2] == ["system", "prune"]]
         self.assertEqual(system_prunes, [["system", "prune", "-af"]])
 
         before = len(self.env.state()["events"])
-        self.env.msw("clean", "dev", "--volumes")
+        self.env.silo("clean", "dev", "--volumes")
         second = self.env.state()["events"][before:]
         system_prunes = [e["args"] for e in second if e["event"] == "docker" and e["args"][:2] == ["system", "prune"]]
         self.assertEqual(system_prunes, [["system", "prune", "-af", "--volumes"]])
-        self.assertFailed(self.env.msw("clean", "dev", "personal", check=False), "only one cleanup target")
+        self.assertFailed(self.env.silo("clean", "dev", "personal", check=False), "only one cleanup target")
 
     def test_update_uses_supported_self_update_flow(self) -> None:
-        cache = self.env.home / ".config/msw" / "runtime-compat-cache"
+        cache = self.env.home / ".config/silo" / "runtime-compat-cache"
         self.assertTrue(cache.is_file())
         before = len(self.env.state().get("events", []))
-        proc = self.env.msw("update")
+        proc = self.env.silo("update")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         events = self.env.state().get("events", [])[before:]
         self.assertTrue(any(event.get("event") == "self-update" for event in events), events)
         self.assertFalse(cache.exists())
-        start = self.env.msw("start", "dev", check=False)
+        start = self.env.silo("start", "dev", check=False)
         self.assertFailed(start, "has not passed the raw-disk discard safety check")
 
     def test_start_rejects_unattested_runtime_binary(self) -> None:
@@ -969,16 +969,16 @@ class InstallerAndDailyTests(MSWTestCase):
             handle.write("\n")
         changed_msb.chmod(0o755)
 
-        start = self.env.msw(
+        start = self.env.silo(
             "start",
             "dev",
             check=False,
-            extra_env={"MSW_MSB_BIN": str(changed_msb)},
+            extra_env={"SILO_MSB_BIN": str(changed_msb)},
         )
         self.assertFailed(start, "has not passed the raw-disk discard safety check")
 
     def test_app_bootstrap_runs_deep_verification_and_restores_running_set(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         before = {
             box: self.env.state()["sandboxes"][box]["running"]
             for box in ("dev", "playgrounds", "personal")
@@ -1005,27 +1005,27 @@ class InstallerAndDailyTests(MSWTestCase):
                 "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
             }],
         }
-        rejected = self.env.msw(
+        rejected = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(invalid), check=False, timeout=90,
         )
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "MSW_WORKSPACE_CONFIGURATION_FAILED")
+        self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "SILO_WORKSPACE_CONFIGURATION_FAILED")
         self.assertFalse(marker.exists())
 
         previous_configuration = json.loads(
-            (self.env.home / ".config/msw/workspaces.json").read_text()
+            (self.env.home / ".config/silo/workspaces.json").read_text()
         )
         unknown_field = json.loads(json.dumps(previous_configuration))
-        unknown_field["workspaces"][0]["host"] = f"dev.msw.test; touch {marker}"
-        rejected = self.env.msw(
+        unknown_field["workspaces"][0]["host"] = f"dev.silo.test; touch {marker}"
+        rejected = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(unknown_field), check=False, timeout=90,
         )
         self.assertNotEqual(rejected.returncode, 0)
-        self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "MSW_WORKSPACE_CONFIGURATION_FAILED")
+        self.assertEqual(json.loads(rejected.stdout)["error"]["code"], "SILO_WORKSPACE_CONFIGURATION_FAILED")
         self.assertEqual(
-            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            json.loads((self.env.home / ".config/silo/workspaces.json").read_text()),
             previous_configuration,
         )
         self.assertFalse(marker.exists())
@@ -1042,13 +1042,13 @@ class InstallerAndDailyTests(MSWTestCase):
         }))
         stale_forwarder = (
             self.env.home / "Library/LaunchAgents/"
-            "org.microsandbox.Silo.port-forwarder.playgrounds.plist"
+            "org.silo.Silo.port-forwarder.playgrounds.plist"
         )
         stale_forwarder.parent.mkdir(parents=True, exist_ok=True)
         stale_forwarder.write_text("stale fixture")
         initial_state = self.env.state()
-        personal_workspace = Path(initial_state["volumes"]["msw-personal-workspace"]["path"])
-        personal_runtime = Path(initial_state["volumes"]["msw-personal-runtime"]["path"])
+        personal_workspace = Path(initial_state["volumes"]["silo-personal-workspace"]["path"])
+        personal_runtime = Path(initial_state["volumes"]["silo-personal-runtime"]["path"])
         (personal_workspace / "repository-data").write_text("preserved")
         (personal_runtime / "runtime-data").write_text("preserved")
 
@@ -1066,7 +1066,7 @@ class InstallerAndDailyTests(MSWTestCase):
                  "workspaceStorageGiB": 100, "runtimeStorageGiB": 80},
             ],
         }
-        proc = self.env.msw(
+        proc = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(desired), timeout=90,
         )
@@ -1079,71 +1079,71 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertEqual(personal_args[personal_args.index("--max-cpus") + 1], "8")
         self.assertEqual(personal_args[personal_args.index("--memory") + 1], "16G")
         self.assertEqual(personal_args[personal_args.index("--max-memory") + 1], "32G")
-        self.assertIn("msw-personal-workspace:/workspace:kind=disk,size=80G", personal_args)
-        self.assertIn("msw-personal-runtime:/var/lib/msw-runtime:kind=disk,size=60G", personal_args)
-        self.assertEqual(state["volumes"]["msw-personal-workspace"]["size"], "80G")
-        self.assertEqual(state["volumes"]["msw-personal-runtime"]["size"], "60G")
+        self.assertIn("silo-personal-workspace:/workspace:kind=disk,size=80G", personal_args)
+        self.assertIn("silo-personal-runtime:/var/lib/silo-runtime:kind=disk,size=60G", personal_args)
+        self.assertEqual(state["volumes"]["silo-personal-workspace"]["size"], "80G")
+        self.assertEqual(state["volumes"]["silo-personal-runtime"]["size"], "60G")
         self.assertEqual((personal_workspace / "repository-data").read_text(), "preserved")
         self.assertEqual((personal_runtime / "runtime-data").read_text(), "preserved")
-        self.assertNotIn("msw-personal-workspace-resize", state["volumes"])
-        self.assertNotIn("msw-personal-runtime-resize", state["volumes"])
-        persisted = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        self.assertNotIn("silo-personal-workspace-resize", state["volumes"])
+        self.assertNotIn("silo-personal-runtime-resize", state["volumes"])
+        persisted = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         self.assertEqual(persisted, desired)
         self.assertEqual(set(json.loads(policy_file.read_text())["workspaces"]), {"personal"})
         self.assertFalse(stale_forwarder.exists())
-        self.assertIn("Host *.msb", (self.env.home / ".ssh/config.d/msw.conf").read_text())
-        test_hosts = (self.env.home / ".config/msw/test-host/hosts").read_text()
-        self.assertIn("127.0.0.10 development.msw.test", test_hosts)
-        self.assertIn("127.0.0.11 personal.msw.test", test_hosts)
-        self.assertIn("127.0.0.12 lab.msw.test", test_hosts)
-        self.assertNotIn("playgrounds.msw.test", test_hosts)
+        self.assertIn("Host *.msb", (self.env.home / ".ssh/config.d/silo.conf").read_text())
+        test_hosts = (self.env.home / ".config/silo/test-host/hosts").read_text()
+        self.assertIn("127.0.0.10 development.silo.test", test_hosts)
+        self.assertIn("127.0.0.11 personal.silo.test", test_hosts)
+        self.assertIn("127.0.0.12 lab.silo.test", test_hosts)
+        self.assertNotIn("playgrounds.silo.test", test_hosts)
 
-        observed = json.loads(self.env.msw("app", "state", "--format", "json").stdout)
+        observed = json.loads(self.env.silo("app", "state", "--format", "json").stdout)
         self.assertEqual(
             [workspace["id"] for workspace in observed["result"]["workspaces"]],
             ["development", "personal", "lab"],
         )
-        relaunched = self.env.msw("app", "handshake", "--format", "json")
+        relaunched = self.env.silo("app", "handshake", "--format", "json")
         self.assertEqual(json.loads(relaunched.stdout)["result"]["capabilities"]["workspaceCount"], 3)
 
     def test_app_bootstrap_typed_reconnect_error_when_github_credential_missing(self) -> None:
-        meta = self.env.home / ".config/msw/github/dev.conf"
+        meta = self.env.home / ".config/silo/github/dev.conf"
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
         proc = self.env.app_bootstrap(check=False)
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "MSW_GITHUB_RECONNECT_REQUIRED")
+        self.assertEqual(envelope["error"]["code"], "SILO_GITHUB_RECONNECT_REQUIRED")
         self.assertEqual(envelope["error"]["workspace"], "dev")
         self.assertIn("Connect GitHub for 'dev'", envelope["error"]["recovery"])
         self.assertTrue(envelope["error"]["retryable"])
         # An already-running workspace is verified without a false reconnect error.
         meta.unlink()
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
         proc = self.env.app_bootstrap()
         self.assertTrue(json.loads(proc.stdout)["ok"])
         meta.unlink()
         # Other verification failures carry the sanitized check output so the
         # user can see why verification failed instead of a generic message.
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         quarantine.write_text("failed setup transaction\n")
         proc = self.env.app_bootstrap(check=False)
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "MSW_BOOTSTRAP_VERIFICATION_FAILED")
+        self.assertEqual(envelope["error"]["code"], "SILO_BOOTSTRAP_VERIFICATION_FAILED")
         self.assertIn("Verification reported:", envelope["error"]["recovery"])
         self.assertIn("quarantined", envelope["error"]["recovery"])
         quarantine.unlink()
 
     def test_app_github_unbind_clears_legacy_metadata_so_bootstrap_completes(self) -> None:
-        meta = self.env.home / ".config/msw/github/dev.conf"
+        meta = self.env.home / ".config/silo/github/dev.conf"
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        read_record = self.env.key_file("msw.github.read", "dev")
-        write_record = self.env.key_file("msw.github.write", "dev")
+        read_record = self.env.key_file("silo.github.read", "dev")
+        write_record = self.env.key_file("silo.github.write", "dev")
         read_record.write_text("legacy-read-token")
         write_record.write_text("legacy-write-token")
         # The reconnect scenario is a configured workspace whose read
@@ -1152,7 +1152,7 @@ class InstallerAndDailyTests(MSWTestCase):
         proc = self.env.app_bootstrap(check=False)
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
-        self.assertEqual(envelope["error"]["code"], "MSW_GITHUB_RECONNECT_REQUIRED")
+        self.assertEqual(envelope["error"]["code"], "SILO_GITHUB_RECONNECT_REQUIRED")
         self.assertEqual(envelope["error"]["workspace"], "dev")
 
         # A failing security backend proves the cleanup is fail-closed: the
@@ -1160,18 +1160,18 @@ class InstallerAndDailyTests(MSWTestCase):
         # success while legacy records are still present.
         state_path = self.env.root / "fake-security-unbind-state.json"
         failed_env = {
-            "MSW_TEST_KEYCHAIN_DIR": "",
-            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
-            "MSW_FAKE_SECURITY_STATE": str(state_path),
-            "MSW_FAKE_SECURITY_MODE": "delete-failure",
+            "SILO_TEST_KEYCHAIN_DIR": "",
+            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
+            "SILO_FAKE_SECURITY_STATE": str(state_path),
+            "SILO_FAKE_SECURITY_MODE": "delete-failure",
         }
-        failed = json.loads(self.env.msw(
+        failed = json.loads(self.env.silo(
             "app", "github-unbind", "--workspace", "dev", "--format", "json",
             check=False, extra_env=failed_env,
         ).stdout)
         self.assertFalse(failed["ok"], failed)
-        self.assertEqual(failed["error"]["code"], "MSW_GITHUB_LEGACY_CLEANUP_FAILED")
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        self.assertEqual(failed["error"]["code"], "SILO_GITHUB_LEGACY_CLEANUP_FAILED")
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         self.assertTrue(quarantine.exists(), "a failed unbind must quarantine the workspace")
         self.assertTrue(
             write_record.exists(),
@@ -1183,7 +1183,7 @@ class InstallerAndDailyTests(MSWTestCase):
         # verification no longer dies at assert_not_quarantined), and lets the
         # next bootstrap reach .complete — the app's "Continue without GitHub"
         # can then unblock Done.
-        unbind = json.loads(self.env.msw(
+        unbind = json.loads(self.env.silo(
             "app", "github-unbind", "--workspace", "dev", "--format", "json"
         ).stdout)
         self.assertTrue(unbind["ok"], unbind)
@@ -1192,25 +1192,25 @@ class InstallerAndDailyTests(MSWTestCase):
         self.assertFalse(read_record.exists(), "the legacy read record must be removed")
         self.assertFalse(write_record.exists(), "the legacy host-write record must be removed")
         self.assertFalse(quarantine.exists(), "a successful unbind must clear the quarantine")
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         proc = self.env.app_bootstrap()
         envelope = json.loads(proc.stdout)
         self.assertTrue(envelope["ok"], envelope.get("error"))
         self.assertEqual(envelope["result"]["phase"], "complete")
 
     def test_lifecycle_resize_restart_token_guard_and_proxy(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
-        self.env.msw("resize", "dev", "32G", "10")
+        self.env.silo("resize", "dev", "32G", "10")
         self.assertEqual(self.env.state()["sandboxes"]["dev"]["memory"], "32G")
         self.assertEqual(self.env.state()["sandboxes"]["dev"]["cpus"], "10")
-        self.env.msw("stop", "dev")
+        self.env.silo("stop", "dev")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-        meta = self.env.home / ".config/msw/github/dev.conf"
+        meta = self.env.home / ".config/silo/github/dev.conf"
         meta.parent.mkdir(parents=True, exist_ok=True)
         meta.write_text("verification_repo=acme/demo\n")
-        self.assertFailed(self.env.msw("restart", "dev", check=False), "read token is missing")
-        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        self.assertFailed(self.env.silo("restart", "dev", check=False), "read token is missing")
+        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
         self.assertFailed(self.env.run(proxy, "dev.msb", check=False), "read token is missing")
         meta.unlink()
         self.env.run(proxy, "dev.msb")
@@ -1219,10 +1219,10 @@ class InstallerAndDailyTests(MSWTestCase):
     def test_nested_clone_direct_inside_repo_listing_identity_and_pull(self) -> None:
         bare = self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        self.env.msw("clone", "dev", "acme/demo", "clients/acme/backend")
+        self.env.silo("clone", "dev", "acme/demo", "clients/acme/backend")
         self.assertTrue((self.env.guest_repo("dev", "clients/acme/backend") / ".git").is_dir())
-        self.assertIn("clients/acme/backend", self.env.msw("repos", "dev").stdout)
-        self.env.msw("identity", "Alice Example", "alice@example.invalid", "dev")
+        self.assertIn("clients/acme/backend", self.env.silo("repos", "dev").stdout)
+        self.env.silo("identity", "Alice Example", "alice@example.invalid", "dev")
         repo = self.env.guest_repo("dev", "clients/acme/backend")
         self.assertEqual(self.env.git(repo, "config", "user.name").stdout.strip(), "Alice Example")
 
@@ -1235,33 +1235,33 @@ class InstallerAndDailyTests(MSWTestCase):
         run_cmd([SYSTEM_GIT, "-C", updater, "commit", "-m", "Remote update"], env=self.env.env)
         run_cmd([SYSTEM_GIT, "-C", updater, "push", "origin", "main"], env=self.env.env)
 
-        self.env.msw("pull", "dev", "clients/acme/backend")
+        self.env.silo("pull", "dev", "clients/acme/backend")
         self.assertEqual((repo / "remote.txt").read_text(), "remote\n")
 
         # The user can also clone directly from an interactive/exec shell.
-        self.env.msw("exec", "dev", "bash", "-lc", "mkdir -p /workspace/direct && cd /workspace/direct && git clone https://github.com/acme/demo.git second")
+        self.env.silo("exec", "dev", "bash", "-lc", "mkdir -p /workspace/direct && cd /workspace/direct && git clone https://github.com/acme/demo.git second")
         self.assertTrue((self.env.guest_repo("dev", "direct/second") / ".git").is_dir())
 
     def test_path_containment_and_duplicate_destination(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
         for bad in ("../escape", "/absolute", "a//b", "a/./b", "a/../b"):
-            self.assertFailed(self.env.msw("clone", "dev", "acme/demo", bad, check=False), "path")
-        self.env.msw("clone", "dev", "acme/demo", "safe/repo")
-        self.assertFailed(self.env.msw("clone", "dev", "acme/demo", "safe/repo", check=False), "already exists")
+            self.assertFailed(self.env.silo("clone", "dev", "acme/demo", bad, check=False), "path")
+        self.env.silo("clone", "dev", "acme/demo", "safe/repo")
+        self.assertFailed(self.env.silo("clone", "dev", "acme/demo", "safe/repo", check=False), "already exists")
         outside = self.env.root / "outside"
         outside.mkdir()
         (self.env.workspace("dev") / "link").symlink_to(outside)
-        self.assertFailed(self.env.msw("push", "dev", "link", "--yes", check=False), "escapes /workspace")
+        self.assertFailed(self.env.silo("push", "dev", "link", "--yes", check=False), "escapes /workspace")
 
     def test_clone_and_pull_ignore_connect_repository_names_gate(self) -> None:
         """Local-mode clone/pull ignore dormant Connect repositoryNames.
 
         With the SAME Connect-style dev.guest metadata (credentials.json with
-        repositoryNames EXCLUDING acme/demo), default MSW_GITHUB_MODE=connect
+        repositoryNames EXCLUDING acme/demo), default SILO_GITHUB_MODE=connect
         still enforces the metadata gate: the clone must fail with "not
         assigned", because Connect mode places a guest token in the VM and
-        cannot prove anonymous forwarding. Explicit MSW_GITHUB_MODE=local
+        cannot prove anonymous forwarding. Explicit SILO_GITHUB_MODE=local
         reads NO Connect grants, so the dormant metadata must not gate the
         anonymous clone or the subsequent fast-forward pull -- the old
         repositoryNames gate fataled here.
@@ -1300,13 +1300,13 @@ class InstallerAndDailyTests(MSWTestCase):
         # Connect mode (default in this suite) still enforces the metadata
         # gate: acme/demo is not in repositoryNames, so the clone fails.
         self.assertFailed(
-            self.env.msw("clone", "dev", "acme/demo", "clients/acme/connect-blocked",
+            self.env.silo("clone", "dev", "acme/demo", "clients/acme/connect-blocked",
                          check=False),
             "not assigned")
         # acme/demo is NOT in repositoryNames: the old require_repository_access
         # gate fataled here; the read paths now clone anonymously.
-        self.env.msw("clone", "dev", "acme/demo", "clients/acme/backend",
-                     extra_env={"MSW_GITHUB_MODE": "local"})
+        self.env.silo("clone", "dev", "acme/demo", "clients/acme/backend",
+                     extra_env={"SILO_GITHUB_MODE": "local"})
         repo = self.env.guest_repo("dev", "clients/acme/backend")
         self.assertTrue((repo / ".git").is_dir())
 
@@ -1321,16 +1321,16 @@ class InstallerAndDailyTests(MSWTestCase):
         run_cmd([SYSTEM_GIT, "-C", updater, "commit", "-m", "Remote update"], env=self.env.env)
         run_cmd([SYSTEM_GIT, "-C", updater, "push", "origin", "main"], env=self.env.env)
 
-        self.env.msw("pull", "dev", "clients/acme/backend",
-                     extra_env={"MSW_GITHUB_MODE": "local"})
+        self.env.silo("pull", "dev", "clients/acme/backend",
+                     extra_env={"SILO_GITHUB_MODE": "local"})
         self.assertEqual((repo / "remote.txt").read_text(), "remote\n")
 
 
-class PublishedPortWarningTests(MSWTestCase):
+class PublishedPortWarningTests(SiloTestCase):
     """Warn-and-skip for published ports under host-managed forwarding.
 
-    msb is never given --port args; lib/msw-port-forwarder.py forwards free
-    ports over SSH and persists occupied ones as skippedPorts. MSW_TEST_PORT_CONFLICTS
+    msb is never given --port args; lib/silo-port-forwarder.py forwards free
+    ports over SSH and persists occupied ones as skippedPorts. SILO_TEST_PORT_CONFLICTS
     (ip:port pairs) restricts the forwarder's real probe to the port the
     fixture pre-binds, so these tests never depend on what else happens to
     listen on the host; a start without the seam probes nothing (test mode).
@@ -1357,7 +1357,7 @@ class PublishedPortWarningTests(MSWTestCase):
                 sock.close()
 
     def _state_record(self, box: str = "dev") -> dict:
-        path = self.env.home / ".config" / "msw" / "workspace-state" / f"{box}.json"
+        path = self.env.home / ".config" / "silo" / "workspace-state" / f"{box}.json"
         return json.loads(path.read_text())
 
     def _wait_for_state(self, predicate, timeout: int = 20) -> bool:
@@ -1372,7 +1372,7 @@ class PublishedPortWarningTests(MSWTestCase):
         return False
 
     def _root_marker(self) -> Path:
-        return self.env.home / ".microsandbox" / "guests" / "dev" / "rootfs" / "msw-root-marker"
+        return self.env.home / ".microsandbox" / "guests" / "dev" / "rootfs" / "silo-root-marker"
 
     def _event_names(self, since: int = 0) -> list[str]:
         return [e.get("event") for e in self.env.state().get("events", [])[since:]]
@@ -1383,14 +1383,14 @@ class PublishedPortWarningTests(MSWTestCase):
         with self._bound_port():
             proc = self.env.setup(
                 "--recreate-workspaces",
-                extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
+                extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
             )
             # Create never fails or warns about ports: msb binds none.
             self.assertNotIn("skipping published ports", proc.stdout + proc.stderr)
             # The deep check at the end of setup boots the VM and kicks the
             # forwarder, which surfaces the occupied port immediately.
             self.assertTrue(self._wait_for_state(lambda r: r["skippedPorts"] == [3000]))
-            self.env.msw("start", "dev", extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"})
+            self.env.silo("start", "dev", extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"})
             self.assertTrue(self._wait_for_state(lambda r: r["skippedPorts"] == [3000]))
 
         state = self.env.state()
@@ -1410,7 +1410,7 @@ class PublishedPortWarningTests(MSWTestCase):
         self.assertEqual(self._state_record("playgrounds")["skippedPorts"], [])
         self.assertEqual(self._state_record("personal")["skippedPorts"], [])
 
-        document = json.loads(self.env.msw("app", "state", "--format", "json").stdout)
+        document = json.loads(self.env.silo("app", "state", "--format", "json").stdout)
         self.assertTrue(document["ok"])
         workspaces = {w["id"]: w for w in document["result"]["workspaces"]}
         self.assertEqual(workspaces["dev"]["skippedPorts"], [3000])
@@ -1428,9 +1428,9 @@ class PublishedPortWarningTests(MSWTestCase):
         marker.write_text("root survives\n")
         before_events = len(self.env.state().get("events", []))
         with self._bound_port():
-            proc = self.env.msw(
+            proc = self.env.silo(
                 "start", "dev",
-                extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
+                extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
             )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         state = self.env.state()
@@ -1451,9 +1451,9 @@ class PublishedPortWarningTests(MSWTestCase):
         marker.write_text("root survives\n")
         before_events = len(self.env.state().get("events", []))
         with self._bound_port():
-            proc = self.env.msw(
+            proc = self.env.silo(
                 "restart", "dev",
-                extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
+                extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
             )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         state = self.env.state()
@@ -1467,15 +1467,15 @@ class PublishedPortWarningTests(MSWTestCase):
         with self._bound_port():
             self.env.setup(
                 "--recreate-workspaces",
-                extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
+                extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"},
             )
-            self.env.msw("start", "dev", extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"})
+            self.env.silo("start", "dev", extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"})
         self.assertTrue(self._wait_for_state(lambda r: r["skippedPorts"] == [3000]))
         self.assertIn("127.0.0.10:3000:3000", self._state_record()["desiredPorts"])
         before_events = len(self.env.state().get("events", []))
         # Port is free now: the next start (no seam -> nothing probed) must
         # restore the mapping with no sandbox changes.
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         self.assertTrue(self._wait_for_state(lambda r: r["skippedPorts"] == []))
         record = self._state_record()
         self.assertEqual(record["stillInUse"], [])
@@ -1484,7 +1484,7 @@ class PublishedPortWarningTests(MSWTestCase):
         self.assertTrue(state["sandboxes"]["dev"]["running"])
         self.assertEqual(state["sandboxes"]["dev"]["ports"], [])
         self.assertEqual(self._event_names(before_events), [])
-        document = json.loads(self.env.msw("app", "state", "--format", "json").stdout)
+        document = json.loads(self.env.silo("app", "state", "--format", "json").stdout)
         workspaces = {w["id"]: w for w in document["result"]["workspaces"]}
         self.assertEqual(workspaces["dev"]["skippedPorts"], [])
 
@@ -1502,21 +1502,21 @@ class PublishedPortWarningTests(MSWTestCase):
 
 
 class PortForwarderHelperTests(unittest.TestCase):
-    """Unit tests for lib/msw-port-forwarder.py with fake ssh and fake msb.
+    """Unit tests for lib/silo-port-forwarder.py with fake ssh and fake msb.
 
-    The real probe is gated by MSW_TEST_PORT_CONFLICTS (ip:port) so the suite
-    never depends on what else listens on the host; MSW_TEST_PORT_CONFLICTS_FILE
+    The real probe is gated by SILO_TEST_PORT_CONFLICTS (ip:port) so the suite
+    never depends on what else listens on the host; SILO_TEST_PORT_CONFLICTS_FILE
     flips the occupied set deterministically to exercise the live reconcile.
     """
 
     def setUp(self) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="msw-forwarder-"))
+        self.root = Path(tempfile.mkdtemp(prefix="silo-forwarder-"))
         self.home = self.root / "home"
-        (self.home / ".config" / "msw").mkdir(parents=True)
-        (self.home / ".config" / "msw" / "config.sh").write_text(
-            'MSW_PUBLISHED_PORTS="3000,5173,8080"\n'
+        (self.home / ".config" / "silo").mkdir(parents=True)
+        (self.home / ".config" / "silo" / "config.sh").write_text(
+            'SILO_PUBLISHED_PORTS="3000,5173,8080"\n'
         )
-        (self.home / ".config" / "msw" / "workspaces.json").write_text(json.dumps({
+        (self.home / ".config" / "silo" / "workspaces.json").write_text(json.dumps({
             "schemaVersion": 1,
             "workspaces": [{
                 "name": "dev", "cpu": 4, "cpuCeiling": 8,
@@ -1524,7 +1524,7 @@ class PortForwarderHelperTests(unittest.TestCase):
                 "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
             }],
         }))
-        self.state_file = self.home / ".config" / "msw" / "workspace-state" / "dev.json"
+        self.state_file = self.home / ".config" / "silo" / "workspace-state" / "dev.json"
         self.ssh_log = self.root / "ssh.log"
         self.ssh_pidfile = self.root / "ssh.pid"
         self.ssh_err = self.root / "ssh.err"
@@ -1540,15 +1540,15 @@ class PortForwarderHelperTests(unittest.TestCase):
     def _env(self, **extra) -> dict:
         env = {
             "HOME": str(self.home),
-            "MSW_CONFIG_FILE": str(self.home / ".config" / "msw" / "config.sh"),
-            "MSW_FAKE_STATE": str(self.msb_state),
-            "MSW_MSB_BIN": str(FAKE_MSB),
-            "MSW_SSH_BIN": str(FAKE_SSH_FORWARDER),
-            "MSW_TEST_MODE": "1",
-            "MSW_PORT_FORWARDER_INTERVAL": "0.2",
-            "MSW_PORT_FORWARDER_SSH_ERR": str(self.ssh_err),
-            "MSW_FAKE_SSH_LOG": str(self.ssh_log),
-            "MSW_FAKE_SSH_PIDFILE": str(self.ssh_pidfile),
+            "SILO_CONFIG_FILE": str(self.home / ".config" / "silo" / "config.sh"),
+            "SILO_FAKE_STATE": str(self.msb_state),
+            "SILO_MSB_BIN": str(FAKE_MSB),
+            "SILO_SSH_BIN": str(FAKE_SSH_FORWARDER),
+            "SILO_TEST_MODE": "1",
+            "SILO_PORT_FORWARDER_INTERVAL": "0.2",
+            "SILO_PORT_FORWARDER_SSH_ERR": str(self.ssh_err),
+            "SILO_FAKE_SSH_LOG": str(self.ssh_log),
+            "SILO_FAKE_SSH_PIDFILE": str(self.ssh_pidfile),
             "PATH": "/usr/bin:/bin",
         }
         env.update(extra)
@@ -1593,11 +1593,11 @@ class PortForwarderHelperTests(unittest.TestCase):
         return False
 
     def _run_oneshot(self, extra_env: dict | None = None):
-        env = self._env(MSW_PORT_FORWARDER_ONESHOT="1")
+        env = self._env(SILO_PORT_FORWARDER_ONESHOT="1")
         if extra_env:
             env.update(extra_env)
         return run_cmd(
-            ["/usr/bin/python3", str(PACKAGE / "lib/msw-port-forwarder.py"), "dev"],
+            ["/usr/bin/python3", str(PACKAGE / "lib/silo-port-forwarder.py"), "dev"],
             env=env,
             check=False,
             timeout=60,
@@ -1623,7 +1623,7 @@ class PortForwarderHelperTests(unittest.TestCase):
 
     def test_oneshot_skips_bound_port_and_records_state(self) -> None:
         with self._bound_port():
-            proc = self._run_oneshot(extra_env={"MSW_TEST_PORT_CONFLICTS": "127.0.0.10:3000"})
+            proc = self._run_oneshot(extra_env={"SILO_TEST_PORT_CONFLICTS": "127.0.0.10:3000"})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         state = self._state()
         self.assertEqual(state["skippedPorts"], [3000])
@@ -1635,8 +1635,8 @@ class PortForwarderHelperTests(unittest.TestCase):
     def test_manager_reconciles_forwarder_without_touching_the_sandbox(self) -> None:
         self.simulated.write_text("3000\n")
         proc = subprocess.Popen(
-            ["/usr/bin/python3", str(PACKAGE / "lib/msw-port-forwarder.py"), "dev"],
-            env=self._env(MSW_TEST_PORT_CONFLICTS_FILE=str(self.simulated)),
+            ["/usr/bin/python3", str(PACKAGE / "lib/silo-port-forwarder.py"), "dev"],
+            env=self._env(SILO_TEST_PORT_CONFLICTS_FILE=str(self.simulated)),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1687,7 +1687,7 @@ class PortForwarderHelperTests(unittest.TestCase):
     def test_manager_waits_when_vm_stopped_and_never_starts_it(self) -> None:
         self._msb(["stop", "dev"])
         proc = subprocess.Popen(
-            ["/usr/bin/python3", str(PACKAGE / "lib/msw-port-forwarder.py"), "dev"],
+            ["/usr/bin/python3", str(PACKAGE / "lib/silo-port-forwarder.py"), "dev"],
             env=self._env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1712,10 +1712,10 @@ class PortForwarderHelperTests(unittest.TestCase):
 
 class InstalledProxyPackagingTests(unittest.TestCase):
     """Fresh-install proof (Path C §4/§6 packaging): a clean HOME installed
-    from the repo in MSW_TEST_MODE runs the proxy stack from ~/.local ONLY —
+    from the repo in SILO_TEST_MODE runs the proxy stack from ~/.local ONLY —
     checkout absent from PATH/PYTHONPATH/imports — and a real git clone works
     through the INSTALLED proxy against the fake GitHub + a seeded policy.
-    Also proves the rendered launch agent has no __MSW_ROOT__ placeholder."""
+    Also proves the rendered launch agent has no __SILO_ROOT__ placeholder."""
 
     def _install_env(self, root: Path, home: Path) -> dict:
         (root / "remotes").mkdir()
@@ -1723,23 +1723,23 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         env = os.environ.copy()
         env.update({
             "HOME": str(home),
-            "MSW_TEST_MODE": "1",
-            "MSW_GITHUB_MODE": "local",
-            "MSW_TEST_HOST_CPUS": "12",
-            "MSW_FAKE_STATE": str(home / ".microsandbox"),
-            "MSW_MSB_BIN": str(FAKE_MSB),
-            "MSW_SSH_BIN": str(FAKE_SSH),
-            "MSW_CURL_BIN": str(FAKE_CURL),
-            "MSW_OPEN_BIN": str(FAKE_OPEN),
-            "MSW_ZED_BIN": str(FAKE_ZED),
-            "MSW_TEST_KEYCHAIN_DIR": str(root / "keychain"),
-            "MSW_TEST_GITHUB_REMOTE_ROOT": str(root / "remotes"),
-            "MSW_GTAR_BIN": SYSTEM_TAR,
-            "MSW_ZSTD_BIN": SYSTEM_ZSTD,
-            "MSW_SHASUM_BIN": SYSTEM_SHASUM,
-            "MSW_GIT_BIN": SYSTEM_GIT,
-            "MSW_FAKE_LOG": str(root / "fake.log"),
-            "MSW_ASSUME_YES": "1",
+            "SILO_TEST_MODE": "1",
+            "SILO_GITHUB_MODE": "local",
+            "SILO_TEST_HOST_CPUS": "12",
+            "SILO_FAKE_STATE": str(home / ".microsandbox"),
+            "SILO_MSB_BIN": str(FAKE_MSB),
+            "SILO_SSH_BIN": str(FAKE_SSH),
+            "SILO_CURL_BIN": str(FAKE_CURL),
+            "SILO_OPEN_BIN": str(FAKE_OPEN),
+            "SILO_ZED_BIN": str(FAKE_ZED),
+            "SILO_TEST_KEYCHAIN_DIR": str(root / "keychain"),
+            "SILO_TEST_GITHUB_REMOTE_ROOT": str(root / "remotes"),
+            "SILO_GTAR_BIN": SYSTEM_TAR,
+            "SILO_ZSTD_BIN": SYSTEM_ZSTD,
+            "SILO_SHASUM_BIN": SYSTEM_SHASUM,
+            "SILO_GIT_BIN": SYSTEM_GIT,
+            "SILO_FAKE_LOG": str(root / "fake.log"),
+            "SILO_ASSUME_YES": "1",
             "LC_ALL": "C",
             "LANG": "C",
         })
@@ -1773,7 +1773,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         self._stop_proxy()
         err = err_path.open("ab")
         proc = subprocess.Popen(
-            [str(installed / "bin" / "msw-github-proxy"), "--listen", "0"],
+            [str(installed / "bin" / "silo-github-proxy"), "--listen", "0"],
             env=proxy_env,
             cwd="/tmp",
             stdout=subprocess.PIPE,
@@ -1812,7 +1812,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
                         "repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
             },
         }))
-        # §5 host credential record via the MSW_TEST_KEYCHAIN_DIR seam (the
+        # §5 host credential record via the SILO_TEST_KEYCHAIN_DIR seam (the
         # proxy's outbound leg needs it even for reads).
         keychain_name = (
             re.sub(r"[^A-Za-z0-9_.-]", "_", HOST_KEYCHAIN_SERVICE)
@@ -1852,14 +1852,14 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             "HOME": str(home),
             "PATH": "/usr/bin:/bin",
             "PYTHONPATH": "",
-            "MSW_GITHUB_MODE": "local",
-            "MSW_POLICY_FILE": str(home / "Library/Application Support/Silo/github-policy.json"),
-            "MSW_PROXY_UPSTREAM_ROOT": fake_base_url,
-            "MSW_PROXY_LOG_FILE": str(root / "proxy.log"),
-            "MSW_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
-            "MSW_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
-            "MSW_TEST_KEYCHAIN_DIR": str(root / "keychain"),
-            "MSW_HOST_META_FILE": str(home / "Library/Application Support/Silo/github-host.json"),
+            "SILO_GITHUB_MODE": "local",
+            "SILO_POLICY_FILE": str(home / "Library/Application Support/Silo/github-policy.json"),
+            "SILO_PROXY_UPSTREAM_ROOT": fake_base_url,
+            "SILO_PROXY_LOG_FILE": str(root / "proxy.log"),
+            "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
+            "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
+            "SILO_TEST_KEYCHAIN_DIR": str(root / "keychain"),
+            "SILO_HOST_META_FILE": str(home / "Library/Application Support/Silo/github-host.json"),
         }
 
     def _clone_through_installed_proxy(self, fake, installed: Path, root: Path, home: Path,
@@ -1874,7 +1874,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
                    "GIT_CONFIG_NOSYSTEM": "1", "PATH": "/usr/bin:/bin"}
         url = f"http://127.0.0.1:{port}/github.com/acme/demo.git"
         clone = run_cmd(
-            [SYSTEM_GIT, "-c", f"http.extraHeader=X-MSW-Capability: {DEV_CAP}",
+            [SYSTEM_GIT, "-c", f"http.extraHeader=X-Silo-Capability: {DEV_CAP}",
              "clone", url, str(root / f"cloned-{tag}")],
             env=git_env,
             timeout=120,
@@ -1890,7 +1890,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         launchd-owned socket — no --listen. The installed proxy must handle
         it. Bootout + cleanup happen in finally."""
         uid = os.getuid()
-        label = f"org.microsandbox.Silo.github-proxy.test{os.getpid()}"
+        label = f"org.silo.Silo.github-proxy.test{os.getpid()}"
         plist = root / f"test-proxy-{os.getpid()}.plist"
         # A free port for the socket-activated listener.
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1898,33 +1898,33 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         launchd_port = probe.getsockname()[1]
         probe.close()
         extra_env = "\n".join([
-            f"MSW_POLICY_FILE={home / 'Library/Application Support/Silo/github-policy.json'}",
-            f"MSW_PROXY_UPSTREAM_ROOT={fake_base_url}",
-            f"MSW_HOST_KEYCHAIN_SERVICE={HOST_KEYCHAIN_SERVICE}",
-            f"MSW_HOST_KEYCHAIN_ACCOUNT={HOST_KEYCHAIN_ACCOUNT}",
-            f"MSW_TEST_KEYCHAIN_DIR={root / 'keychain'}",
+            f"SILO_POLICY_FILE={home / 'Library/Application Support/Silo/github-policy.json'}",
+            f"SILO_PROXY_UPSTREAM_ROOT={fake_base_url}",
+            f"SILO_HOST_KEYCHAIN_SERVICE={HOST_KEYCHAIN_SERVICE}",
+            f"SILO_HOST_KEYCHAIN_ACCOUNT={HOST_KEYCHAIN_ACCOUNT}",
+            f"SILO_TEST_KEYCHAIN_DIR={root / 'keychain'}",
             # launchd's HOME is the real home, not the test home: the
             # activation-metadata path must be explicit.
-            f"MSW_HOST_META_FILE={home / 'Library/Application Support/Silo/github-host.json'}",
-            f"MSW_PROXY_LOG_FILE={root / 'proxy-launchd.log'}",
+            f"SILO_HOST_META_FILE={home / 'Library/Application Support/Silo/github-host.json'}",
+            f"SILO_PROXY_LOG_FILE={root / 'proxy-launchd.log'}",
         ])
         render_env = {
             "HOME": str(home),
             "PATH": "/usr/bin:/bin",
-            "MSW_MSB_BIN": str(FAKE_MSB),
-            "MSW_PROXY_PLIST_FILE": str(plist),
-            "MSW_PROXY_PLIST_LABEL": label,
-            "MSW_PROXY_PLIST_ROOT": str(installed),
-            "MSW_PROXY_PLIST_LOG": str(root / "proxy-launchd.stderr.log"),
-            "MSW_PROXY_PLIST_EXTRA_ENV": extra_env,
-            "MSW_PROXY_PLIST_PORT": str(launchd_port),
+            "SILO_MSB_BIN": str(FAKE_MSB),
+            "SILO_PROXY_PLIST_FILE": str(plist),
+            "SILO_PROXY_PLIST_LABEL": label,
+            "SILO_PROXY_PLIST_ROOT": str(installed),
+            "SILO_PROXY_PLIST_LOG": str(root / "proxy-launchd.stderr.log"),
+            "SILO_PROXY_PLIST_EXTRA_ENV": extra_env,
+            "SILO_PROXY_PLIST_PORT": str(launchd_port),
         }
-        run_cmd([str(installed / "bin" / "msw"), "__proxy-plist-render"], env=render_env)
+        run_cmd([str(installed / "bin" / "silo"), "__proxy-plist-render"], env=render_env)
         text = plist.read_text()
-        self.assertNotIn("__MSW_ROOT__", text)
-        self.assertIn(f"{installed}/bin/msw-github-proxy", text)
+        self.assertNotIn("__SILO_ROOT__", text)
+        self.assertIn(f"{installed}/bin/silo-github-proxy", text)
         self.assertIn(f"<string>{launchd_port}</string>", text)
-        self.assertIn("MSW_PROXY_UPSTREAM_ROOT", text)
+        self.assertIn("SILO_PROXY_UPSTREAM_ROOT", text)
         self.assertIn("<false/>", text)  # Wait=false: launchd accepts, proxy reads stdin/stdout
         run_cmd(["/usr/bin/plutil", "-lint", str(plist)], env={"PATH": "/usr/bin:/bin"})
         subprocess.run(["/bin/launchctl", "bootout", f"gui/{uid}/{label}"],
@@ -1939,7 +1939,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             request = (
                 f"GET /github.com/acme/demo.git/info/refs?service=git-upload-pack HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{launchd_port}\r\n"
-                f"X-MSW-Capability: {DEV_CAP}\r\n"
+                f"X-Silo-Capability: {DEV_CAP}\r\n"
                 "Connection: close\r\n\r\n"
             ).encode("ascii")
             sock.sendall(request)
@@ -1990,7 +1990,7 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         job stays loaded/alive before setup success" release blocker."""
         uid = os.getuid()
         helpers = self._launchd_helpers()
-        root = Path(tempfile.mkdtemp(prefix="msw-launchd-verify-"))
+        root = Path(tempfile.mkdtemp(prefix="silo-launchd-verify-"))
         state_dir = root / "state"
         state_dir.mkdir()
 
@@ -2046,9 +2046,9 @@ class InstalledProxyPackagingTests(unittest.TestCase):
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         pid_suffix = os.getpid()
-        alive = f"org.microsandbox.Silo.port-forwarder.test-alive-{pid_suffix}"
-        crashing = f"org.microsandbox.Silo.port-forwarder.test-crash-{pid_suffix}"
-        socket_label = f"org.microsandbox.Silo.github-proxy.test-socket-{pid_suffix}"
+        alive = f"org.silo.Silo.port-forwarder.test-alive-{pid_suffix}"
+        crashing = f"org.silo.Silo.port-forwarder.test-crash-{pid_suffix}"
+        socket_label = f"org.silo.Silo.github-proxy.test-socket-{pid_suffix}"
         try:
             # Live KeepAlive job (what a healthy port forwarder looks like):
             # loaded AND stays alive (stable pid across the grace period).
@@ -2079,30 +2079,30 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_fresh_install_runs_proxy_stack_from_installed_paths(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="msw-installed-"))
+        root = Path(tempfile.mkdtemp(prefix="silo-installed-"))
         home = root / "home"
         home.mkdir()
         try:
             env = self._install_env(root, home)
             run_cmd([PACKAGE / "setup.sh"], env=env, timeout=240)
             installed = home / ".local"
-            for rel in ("bin/msw-github-proxy", "lib/proxycore.py", "lib/proxy-upstream.py",
+            for rel in ("bin/silo-github-proxy", "lib/proxycore.py", "lib/proxy-upstream.py",
                         "lib/vendor/h11/__init__.py", "lib/vendor/h11/LICENSE.txt",
-                        "libexec/msw-port-forwarder.py", "share/msw/github-proxy.plist"):
+                        "libexec/silo-port-forwarder.py", "share/silo/github-proxy.plist"):
                 self.assertTrue((installed / rel).is_file(), rel)
 
             # Release blocker regression: on a fresh home the launch agents'
             # log directory must exist (0700) after setup — the port
             # forwarder plists point StandardOutPath/StandardErrorPath there.
-            state_dir = home / ".local" / "state" / "msw"
+            state_dir = home / ".local" / "state" / "silo"
             self.assertTrue(state_dir.is_dir())
             self.assertEqual(oct(state_dir.stat().st_mode & 0o777), "0o700")
 
             # Rendered launch agent: no placeholder, absolute paths, port, lint.
-            plist = home / "Library/LaunchAgents/org.microsandbox.Silo.github-proxy.plist"
+            plist = home / "Library/LaunchAgents/org.silo.Silo.github-proxy.plist"
             text = plist.read_text()
-            self.assertNotIn("__MSW_ROOT__", text)
-            self.assertIn(f"{installed}/bin/msw-github-proxy", text)
+            self.assertNotIn("__SILO_ROOT__", text)
+            self.assertIn(f"{installed}/bin/silo-github-proxy", text)
             self.assertIn(str(home / "Library/Logs/Silo/github-proxy.log"), text)
             self.assertIn("<string>18446</string>", text)
             run_cmd(["/usr/bin/plutil", "-lint", str(plist)], env={"PATH": "/usr/bin:/bin"})
@@ -2179,11 +2179,11 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
-class GitHubAndPushTests(MSWTestCase):
+class GitHubAndPushTests(SiloTestCase):
     def prepare(self, *, box: str = "dev", nested: str = "clients/acme/demo") -> tuple[Path, Path]:
         bare = self.env.init_remote()
         self.env.configure_tokens(box, "acme/demo")
-        self.env.msw("clone", box, "acme/demo", nested)
+        self.env.silo("clone", box, "acme/demo", nested)
         repo = self.env.guest_repo(box, nested)
         self.env.git(repo, "config", "user.name", "Agent")
         self.env.git(repo, "config", "user.email", "agent@example.invalid")
@@ -2201,8 +2201,8 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertIn("TLS interception disabled", output)
         self.assertIn("./setup.sh --recreate-workspaces", output)
         self.assertNotIn("Paste the READ-ONLY token:", output)
-        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
     def test_github_setup_rejects_empty_verification_repository(self) -> None:
         bare = self.env.root / "remotes" / "acme" / "empty.git"
         bare.parent.mkdir(parents=True, exist_ok=True)
@@ -2219,25 +2219,25 @@ class GitHubAndPushTests(MSWTestCase):
             env=self.env.env,
         ).stdout
         self.assertEqual(refs.strip(), "")
-        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
 
     def test_github_setup_end_to_end_secret_hidden_and_remove(self) -> None:
         bare = self.env.init_remote()
         proc = self.env.configure_tokens("dev", "acme/demo")
         self.assertIn("guest push rejected", proc.stdout)
         self.assertIn("host push and cleanup succeeded", proc.stdout)
-        refs = run_cmd([SYSTEM_GIT, "--git-dir", bare, "for-each-ref", "--format=%(refname)", "refs/heads/msw-permission-test-*"], env=self.env.env).stdout
+        refs = run_cmd([SYSTEM_GIT, "--git-dir", bare, "for-each-ref", "--format=%(refname)", "refs/heads/silo-permission-test-*"], env=self.env.env).stdout
         self.assertEqual(refs.strip(), "")
         state_text = self.env.state_file.read_text()
         self.assertNotIn("github_pat_READ", state_text)
         self.assertNotIn("github_pat_WRITE", state_text)
         self.assertEqual(self.env.state()["sandboxes"]["dev"]["secrets"]["GH_TOKEN"], "GH_TOKEN@github.com,api.github.com")
-        status_out = self.env.msw("github", "status", "dev").stdout
+        status_out = self.env.silo("github", "status", "dev").stdout
         self.assertIn("present", status_out)
-        self.env.msw("github", "remove", "dev")
-        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+        self.env.silo("github", "remove", "dev")
+        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
         self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
 
     def test_github_setup_preserves_secret_source_for_verifier_cli(self) -> None:
@@ -2247,8 +2247,8 @@ class GitHubAndPushTests(MSWTestCase):
             "dev",
             "acme/demo",
             extra_env={
-                "MSW_FAKE_REQUIRE_SECRET_SOURCE": "1",
-                "MSW_FAKE_LOCK_FD_MARKER": str(marker),
+                "SILO_FAKE_REQUIRE_SECRET_SOURCE": "1",
+                "SILO_FAKE_LOCK_FD_MARKER": str(marker),
             },
         )
         self.assertIn("GitHub configured for dev", proc.stdout)
@@ -2259,21 +2259,21 @@ class GitHubAndPushTests(MSWTestCase):
     def test_github_secret_source_survives_fresh_clone_exec_and_remove(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        guard = {"MSW_FAKE_REQUIRE_SECRET_SOURCE": "1"}
+        guard = {"SILO_FAKE_REQUIRE_SECRET_SOURCE": "1"}
 
-        self.env.msw("clone", "dev", "acme/demo", "fresh/repo", extra_env=guard)
+        self.env.silo("clone", "dev", "acme/demo", "fresh/repo", extra_env=guard)
         self.assertTrue(self.env.guest_repo("dev", "fresh/repo").joinpath(".git").is_dir())
-        self.env.msw("exec", "dev", "true", extra_env=guard)
-        self.env.run(self.env.home / ".local/bin/msw-ssh-proxy", "dev.msb", extra_env=guard)
-        self.env.msw("github", "remove", "dev", extra_env=guard)
+        self.env.silo("exec", "dev", "true", extra_env=guard)
+        self.env.run(self.env.home / ".local/bin/silo-ssh-proxy", "dev.msb", extra_env=guard)
+        self.env.silo("github", "remove", "dev", extra_env=guard)
 
-        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("msw.github.write", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
         self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
 
     def test_stale_github_lock_is_reclaimed(self) -> None:
         self.env.init_remote()
-        stale_lock = self.env.home / ".config/msw/github/dev.lock"
+        stale_lock = self.env.home / ".config/silo/github/dev.lock"
         stale_lock.mkdir(parents=True)
         (stale_lock / "pid").write_text("99999999\n")
 
@@ -2281,7 +2281,7 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertIn("GitHub configured for dev", configured.stdout)
         self.assertTrue(stale_lock.is_file())
 
-        self.env.msw("github", "remove", "dev")
+        self.env.silo("github", "remove", "dev")
         stale_lock.unlink()
         stale_lock.mkdir()
         configured = self.env.configure_tokens("dev", "acme/demo")
@@ -2293,9 +2293,9 @@ class GitHubAndPushTests(MSWTestCase):
         self.env.configure_tokens("dev", "acme/demo")
         pause_file = self.env.root / "verify-lock.ready"
         env = self.env.env.copy()
-        env["MSW_FAKE_VERIFY_PAUSE_FILE"] = str(pause_file)
+        env["SILO_FAKE_VERIFY_PAUSE_FILE"] = str(pause_file)
         proc = subprocess.Popen(
-            [str(self.env.msw_bin), "github", "verify", "dev"],
+            [str(self.env.silo_bin), "github", "verify", "dev"],
             env=env,
             text=True,
             stdout=subprocess.DEVNULL,
@@ -2309,7 +2309,7 @@ class GitHubAndPushTests(MSWTestCase):
                 time.sleep(0.05)
             else:
                 self.fail("verification did not reach the injected pause")
-            blocked = self.env.msw("github", "remove", "dev", check=False)
+            blocked = self.env.silo("github", "remove", "dev", check=False)
             self.assertFailed(blocked, "already in progress")
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=15)
@@ -2318,7 +2318,7 @@ class GitHubAndPushTests(MSWTestCase):
             if proc.poll() is None:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=5)
-        self.env.msw("github", "remove", "dev")
+        self.env.silo("github", "remove", "dev")
 
     def test_orphaned_setup_verifier_keeps_remove_locked_after_parent_sigkill(self) -> None:
         self.env.init_remote()
@@ -2326,13 +2326,13 @@ class GitHubAndPushTests(MSWTestCase):
         env = self.env.env.copy()
         env.update(
             {
-                "MSW_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_dev_abcdefghijklmnopqrstuvwxyz0123456789",
-                "MSW_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789",
-                "MSW_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
+                "SILO_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_dev_abcdefghijklmnopqrstuvwxyz0123456789",
+                "SILO_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789",
+                "SILO_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
             }
         )
         proc = subprocess.Popen(
-            [str(self.env.msw_bin), "github", "setup", "dev", "acme/demo"],
+            [str(self.env.silo_bin), "github", "setup", "dev", "acme/demo"],
             env=env,
             text=True,
             stdout=subprocess.DEVNULL,
@@ -2348,12 +2348,12 @@ class GitHubAndPushTests(MSWTestCase):
                 self.fail("setup verification did not reach the injected pause")
             os.kill(proc.pid, signal.SIGKILL)
             proc.wait(timeout=15)
-            blocked = self.env.msw("github", "remove", "dev", check=False)
+            blocked = self.env.silo("github", "remove", "dev", check=False)
             self.assertFailed(blocked, "already in progress")
             os.killpg(proc.pid, signal.SIGKILL)
             pause_file.unlink(missing_ok=True)
             for _ in range(100):
-                removed = self.env.msw("github", "remove", "dev", check=False)
+                removed = self.env.silo("github", "remove", "dev", check=False)
                 if removed.returncode == 0:
                     break
                 time.sleep(0.05)
@@ -2374,36 +2374,36 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertIn("guest push rejected", proc.stdout)
         self.assertIn("Read-only GitHub access verified", proc.stdout)
         self.assertNotIn("host-only push", proc.stdout)
-        self.assertTrue(self.env.key_file("msw.github.read", "playgrounds").exists())
-        self.assertFalse(self.env.key_file("msw.github.write", "playgrounds").exists())
-        metadata = (self.env.home / ".config/msw/github/playgrounds.conf").read_text()
+        self.assertTrue(self.env.key_file("silo.github.read", "playgrounds").exists())
+        self.assertFalse(self.env.key_file("silo.github.write", "playgrounds").exists())
+        metadata = (self.env.home / ".config/silo/github/playgrounds.conf").read_text()
         self.assertIn("verification_repo=acme/demo", metadata)
         self.assertIn("access=read-only", metadata)
         self.assertEqual(
             self.env.state()["sandboxes"]["playgrounds"]["secrets"]["GH_TOKEN"],
             "GH_TOKEN@github.com,api.github.com",
         )
-        self.assertIn("playgrounds   present    missing", self.env.msw("github", "status", "playgrounds").stdout)
-        verify = self.env.msw("github", "verify", "playgrounds")
+        self.assertIn("playgrounds   present    missing", self.env.silo("github", "status", "playgrounds").stdout)
+        verify = self.env.silo("github", "verify", "playgrounds")
         self.assertIn("Read-only GitHub access verified", verify.stdout)
         self.assertFailed(
-            self.env.msw("push", "playgrounds", "repo", "--yes", check=False),
+            self.env.silo("push", "playgrounds", "repo", "--yes", check=False),
             "host write token missing",
         )
 
     def test_read_only_metadata_blocks_stale_write_token(self) -> None:
         bare = self.env.init_remote()
         self.env.configure_read_only("playgrounds", "acme/demo")
-        self.env.key_file("msw.github.write", "playgrounds").write_text("stale-write-token")
-        self.env.msw("clone", "playgrounds", "acme/demo", "repo")
+        self.env.key_file("silo.github.write", "playgrounds").write_text("stale-write-token")
+        self.env.silo("clone", "playgrounds", "acme/demo", "repo")
         before = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
-        proc = self.env.msw("push", "playgrounds", "repo", "--yes", check=False)
+        proc = self.env.silo("push", "playgrounds", "repo", "--yes", check=False)
         self.assertFailed(proc, "workspace is read-only")
         after = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
         self.assertEqual(after, before)
 
     def test_keychain_delete_security_outcomes(self) -> None:
-        command = 'source "$1"; keychain_delete "msw.github.write" "dev"'
+        command = 'source "$1"; keychain_delete "silo.github.write" "dev"'
         cases = (
             ("delete-failure", True, "could not delete Keychain item"),
             ("post-delete-lookup-failure", True, "could not verify Keychain item removal"),
@@ -2413,21 +2413,21 @@ class GitHubAndPushTests(MSWTestCase):
         state_path = self.env.root / "fake-security-state.json"
         for mode, should_fail, message in cases:
             with self.subTest(mode=mode):
-                items = {} if mode == "missing-item" else {"msw.github.write/dev": "write-token"}
+                items = {} if mode == "missing-item" else {"silo.github.write/dev": "write-token"}
                 state_path.write_text(json.dumps(items))
                 proc = self.env.run(
                     "bash",
                     "-c",
                     command,
-                    "msw-keychain-test",
-                    str(PACKAGE / "bin/msw"),
+                    "silo-keychain-test",
+                    str(PACKAGE / "bin/silo"),
                     check=False,
                     extra_env={
-                        "MSW_SOURCE_ONLY": "1",
-                        "MSW_TEST_KEYCHAIN_DIR": "",
-                        "MSW_SECURITY_BIN": str(FAKE_SECURITY),
-                        "MSW_FAKE_SECURITY_STATE": str(state_path),
-                        "MSW_FAKE_SECURITY_MODE": mode,
+                        "SILO_SOURCE_ONLY": "1",
+                        "SILO_TEST_KEYCHAIN_DIR": "",
+                        "SILO_SECURITY_BIN": str(FAKE_SECURITY),
+                        "SILO_FAKE_SECURITY_STATE": str(state_path),
+                        "SILO_FAKE_SECURITY_MODE": mode,
                     },
                 )
                 if should_fail:
@@ -2440,53 +2440,53 @@ class GitHubAndPushTests(MSWTestCase):
         self.env.init_remote()
         state_path = self.env.root / "fake-security-remove-state.json"
         fake_env = {
-            "MSW_TEST_KEYCHAIN_DIR": "",
-            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
-            "MSW_FAKE_SECURITY_STATE": str(state_path),
-            "MSW_FAKE_SECURITY_MODE": "normal",
+            "SILO_TEST_KEYCHAIN_DIR": "",
+            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
+            "SILO_FAKE_SECURITY_STATE": str(state_path),
+            "SILO_FAKE_SECURITY_MODE": "normal",
         }
         self.env.configure_tokens("dev", "acme/demo", extra_env=fake_env)
-        self.env.msw("clone", "dev", "acme/demo", "repo", extra_env=fake_env)
-        metadata = self.env.home / ".config/msw/github/dev.conf"
+        self.env.silo("clone", "dev", "acme/demo", "repo", extra_env=fake_env)
+        metadata = self.env.home / ".config/silo/github/dev.conf"
         self.assertIn("access=host-write", metadata.read_text())
 
-        failed_env = {**fake_env, "MSW_FAKE_SECURITY_MODE": "delete-failure"}
-        proc = self.env.msw("github", "remove", "dev", check=False, extra_env=failed_env)
+        failed_env = {**fake_env, "SILO_FAKE_SECURITY_MODE": "delete-failure"}
+        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=failed_env)
         self.assertFailed(proc, "could not delete Keychain item")
         self.assertFalse(metadata.exists())
-        self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
+        self.assertIn("silo.github.write/dev", json.loads(state_path.read_text()))
 
-        push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
+        push = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
         self.assertFailed(push, "quarantined")
 
     def test_setup_rollback_failure_revokes_metadata_first(self) -> None:
         self.env.init_remote()
         state_path = self.env.root / "fake-security-rollback-state.json"
         fake_env = {
-            "MSW_TEST_KEYCHAIN_DIR": "",
-            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
-            "MSW_FAKE_SECURITY_STATE": str(state_path),
-            "MSW_FAKE_SECURITY_MODE": "delete-failure",
-            "MSW_FAKE_GUEST_PUSH_ALLOWED": "1",
-            "MSW_FAKE_SECRET_REMOVE_FAIL": "1",
+            "SILO_TEST_KEYCHAIN_DIR": "",
+            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
+            "SILO_FAKE_SECURITY_STATE": str(state_path),
+            "SILO_FAKE_SECURITY_MODE": "delete-failure",
+            "SILO_FAKE_GUEST_PUSH_ALLOWED": "1",
+            "SILO_FAKE_SECRET_REMOVE_FAIL": "1",
         }
         proc = self.env.configure_tokens("dev", "acme/demo", extra_env=fake_env, check=False)
         self.assertFailed(proc, "guest token can push")
-        metadata = self.env.home / ".config/msw/github/dev.conf"
+        metadata = self.env.home / ".config/silo/github/dev.conf"
         self.assertFalse(metadata.exists())
-        self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
+        self.assertIn("silo.github.write/dev", json.loads(state_path.read_text()))
         state = self.env.state()
         self.assertEqual(state["sandboxes"]["dev"]["secrets"]["GH_TOKEN"], "GH_TOKEN@github.com,api.github.com")
         self.assertFalse(state["sandboxes"]["dev"]["running"])
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         self.assertTrue(quarantine.exists())
-        start = self.env.msw("start", "dev", check=False, extra_env=fake_env)
+        start = self.env.silo("start", "dev", check=False, extra_env=fake_env)
         self.assertFailed(start, "quarantined")
 
-        guest_push = self.env.msw("exec", "dev", "git", "push", "origin", "main", check=False, extra_env=fake_env)
+        guest_push = self.env.silo("exec", "dev", "git", "push", "origin", "main", check=False, extra_env=fake_env)
         self.assertFailed(guest_push, "quarantined")
         metadata.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        host_push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=fake_env)
+        host_push = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=fake_env)
         self.assertFailed(host_push, "quarantined")
         metadata.unlink()
 
@@ -2494,12 +2494,12 @@ class GitHubAndPushTests(MSWTestCase):
     def test_stop_remains_available_for_quarantined_running_workspace(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
 
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         quarantine.write_text("credential cleanup failed\n")
 
-        document = json.loads(self.env.msw(
+        document = json.loads(self.env.silo(
             "app", "state", "--workspace", "dev", "--format", "json"
         ).stdout)
         workspace = document["result"]["workspaces"][0]
@@ -2511,43 +2511,43 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertFalse(workspace["actionCapabilities"]["canOpenTerminal"])
         self.assertFalse(workspace["actionCapabilities"]["canPush"])
 
-        self.env.msw("stop", "dev")
+        self.env.silo("stop", "dev")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_ssh_proxy_blocks_quarantined_workspace_without_starting(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        self.env.msw("stop", "dev")
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        self.env.silo("stop", "dev")
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         quarantine.write_text("credential cleanup failed\n")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
         proc = self.env.run(proxy, "dev.msb", check=False)
         self.assertFailed(proc, "quarantined")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_quarantine_requires_proven_stop(self) -> None:
         command = 'source "$1"; quarantine_workspace "dev" "test quarantine"'
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         cases = (
-            ({"MSW_FAKE_PING_FAIL": "1"}, False, False, ""),
-            ({"MSW_FAKE_STOP_FAIL": "1"}, True, True, "could not stop"),
-            ({"MSW_FAKE_INSPECT_FAIL": "1"}, True, True, "could not inspect"),
+            ({"SILO_FAKE_PING_FAIL": "1"}, False, False, ""),
+            ({"SILO_FAKE_STOP_FAIL": "1"}, True, True, "could not stop"),
+            ({"SILO_FAKE_INSPECT_FAIL": "1"}, True, True, "could not inspect"),
         )
         for overrides, should_fail, should_still_run, expected in cases:
             with self.subTest(overrides=overrides):
                 if quarantine.exists():
                     quarantine.unlink()
-                self.env.msw("start", "dev")
+                self.env.silo("start", "dev")
                 proc = self.env.run(
                     "bash",
                     "-c",
                     command,
-                    "msw-quarantine-test",
-                    str(PACKAGE / "bin/msw"),
+                    "silo-quarantine-test",
+                    str(PACKAGE / "bin/silo"),
                     check=False,
-                    extra_env={"MSW_SOURCE_ONLY": "1", **overrides},
+                    extra_env={"SILO_SOURCE_ONLY": "1", **overrides},
                 )
                 if should_fail:
                     self.assertFailed(proc, expected)
@@ -2558,16 +2558,16 @@ class GitHubAndPushTests(MSWTestCase):
 
     def test_clear_quarantine_fails_on_undeletable_dangling_symlink(self) -> None:
         command = 'source "$1"; clear_quarantine "dev"'
-        quarantine_dir = self.env.home / ".config/msw/github"
+        quarantine_dir = self.env.home / ".config/silo/github"
         quarantine_dir.mkdir(parents=True, exist_ok=True)
         quarantine = quarantine_dir / "dev.quarantine"
         quarantine.symlink_to(quarantine_dir / "missing-target")
         os.chmod(quarantine_dir, 0o500)
         try:
             proc = self.env.run(
-                "bash", "-c", command, "msw-clear-quarantine-test",
-                str(PACKAGE / "bin/msw"), check=False,
-                extra_env={"MSW_SOURCE_ONLY": "1"},
+                "bash", "-c", command, "silo-clear-quarantine-test",
+                str(PACKAGE / "bin/silo"), check=False,
+                extra_env={"SILO_SOURCE_ONLY": "1"},
             )
         finally:
             os.chmod(quarantine_dir, 0o700)
@@ -2587,18 +2587,18 @@ class GitHubAndPushTests(MSWTestCase):
         env = self.env.env.copy()
         env.update(
             {
-                "MSW_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
-                "MSW_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
-                "MSW_TEST_KEYCHAIN_DIR": "",
-                "MSW_SECURITY_BIN": str(FAKE_SECURITY),
-                "MSW_FAKE_SECURITY_STATE": str(state_path),
-                "MSW_FAKE_SECURITY_MODE": "normal",
-                "MSW_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
-                "MSW_FAKE_VERIFY_PAUSE_ONCE": "1",
+                "SILO_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
+                "SILO_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
+                "SILO_TEST_KEYCHAIN_DIR": "",
+                "SILO_SECURITY_BIN": str(FAKE_SECURITY),
+                "SILO_FAKE_SECURITY_STATE": str(state_path),
+                "SILO_FAKE_SECURITY_MODE": "normal",
+                "SILO_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
+                "SILO_FAKE_VERIFY_PAUSE_ONCE": "1",
             }
         )
         proc = subprocess.Popen(
-            [str(self.env.msw_bin), "github", "setup", "dev", "acme/demo"],
+            [str(self.env.silo_bin), "github", "setup", "dev", "acme/demo"],
             env=env,
             text=True,
             stdout=subprocess.DEVNULL,
@@ -2612,10 +2612,10 @@ class GitHubAndPushTests(MSWTestCase):
                 time.sleep(0.05)
             else:
                 self.fail("verification did not reach the injected pause")
-            verification_root = self.env.workspace("dev") / ".msw-verification"
+            verification_root = self.env.workspace("dev") / ".silo-verification"
             verification_entries = list(verification_root.iterdir())
             self.assertEqual(len(verification_entries), 1, f"{verification_root}: {verification_entries}")
-            overlap = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+            overlap = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
             self.assertFailed(overlap, "already in progress")
             os.killpg(proc.pid, signal.SIGTERM)
             pause_file.unlink(missing_ok=True)
@@ -2632,13 +2632,13 @@ class GitHubAndPushTests(MSWTestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(verification_entries, [])
-        quarantine = self.env.home / ".config/msw/github/dev.quarantine"
+        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
         self.assertTrue(quarantine.exists())
-        metadata = self.env.home / ".config/msw/github/dev.conf"
+        metadata = self.env.home / ".config/silo/github/dev.conf"
         self.assertTrue(metadata.exists())
         self.assertIn("access=host-write", metadata.read_text())
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-        self.assertIn("msw.github.read/dev", json.loads(state_path.read_text()))
+        self.assertIn("silo.github.read/dev", json.loads(state_path.read_text()))
         for command in (
             ("start", "dev"),
             ("restart", "dev"),
@@ -2646,13 +2646,13 @@ class GitHubAndPushTests(MSWTestCase):
             ("push", "dev", "repo", "--yes"),
         ):
             with self.subTest(command=command):
-                blocked = self.env.msw(*command, check=False, extra_env=env)
+                blocked = self.env.silo(*command, check=False, extra_env=env)
                 self.assertFailed(blocked, "quarantined")
 
         repair_env = env.copy()
-        repair_env.pop("MSW_GITHUB_READ_TOKEN_INPUT", None)
-        repair_env.pop("MSW_GITHUB_WRITE_TOKEN_INPUT", None)
-        repair_env.pop("MSW_FAKE_VERIFY_PAUSE_FILE", None)
+        repair_env.pop("SILO_GITHUB_READ_TOKEN_INPUT", None)
+        repair_env.pop("SILO_GITHUB_WRITE_TOKEN_INPUT", None)
+        repair_env.pop("SILO_FAKE_VERIFY_PAUSE_FILE", None)
         failed_repair = self.env.configure_tokens(
             "dev",
             "acme/missing",
@@ -2665,8 +2665,8 @@ class GitHubAndPushTests(MSWTestCase):
         self.assertTrue(quarantine.exists())
         self.assertFalse(metadata.exists())
         security_state = json.loads(state_path.read_text())
-        self.assertNotIn("msw.github.read/dev", security_state)
-        self.assertNotIn("msw.github.write/dev", security_state)
+        self.assertNotIn("silo.github.read/dev", security_state)
+        self.assertNotIn("silo.github.write/dev", security_state)
         self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
@@ -2674,22 +2674,22 @@ class GitHubAndPushTests(MSWTestCase):
         self.env.init_remote()
         state_path = self.env.root / "fake-security-read-only-state.json"
         normal_env = {
-            "MSW_TEST_KEYCHAIN_DIR": "",
-            "MSW_SECURITY_BIN": str(FAKE_SECURITY),
-            "MSW_FAKE_SECURITY_STATE": str(state_path),
-            "MSW_FAKE_SECURITY_MODE": "normal",
+            "SILO_TEST_KEYCHAIN_DIR": "",
+            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
+            "SILO_FAKE_SECURITY_STATE": str(state_path),
+            "SILO_FAKE_SECURITY_MODE": "normal",
         }
         self.env.configure_tokens("dev", "acme/demo", extra_env=normal_env)
-        self.env.msw("clone", "dev", "acme/demo", "repo", extra_env=normal_env)
+        self.env.silo("clone", "dev", "acme/demo", "repo", extra_env=normal_env)
 
-        failed_env = {**normal_env, "MSW_FAKE_SECURITY_MODE": "delete-failure"}
+        failed_env = {**normal_env, "SILO_FAKE_SECURITY_MODE": "delete-failure"}
         proc = self.env.configure_read_only("dev", "acme/demo", extra_env=failed_env, check=False)
         self.assertFailed(proc, "could not delete Keychain item")
-        metadata = self.env.home / ".config/msw/github/dev.conf"
+        metadata = self.env.home / ".config/silo/github/dev.conf"
         self.assertFalse(metadata.exists())
-        self.assertIn("msw.github.write/dev", json.loads(state_path.read_text()))
+        self.assertIn("silo.github.write/dev", json.loads(state_path.read_text()))
 
-        push = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
+        push = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
         self.assertFailed(push, "quarantined")
 
     def test_same_token_is_rejected_without_mutation(self) -> None:
@@ -2697,7 +2697,7 @@ class GitHubAndPushTests(MSWTestCase):
         token = "github_pat_IDENTICAL_abcdefghijklmnopqrstuvwxyz0123456789"
         proc = self.env.configure_tokens("dev", "acme/demo", read=token, write=token, check=False)
         self.assertFailed(proc, "two different tokens")
-        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
 
     def test_failed_permission_verification_restores_old_tokens_and_metadata(self) -> None:
         self.env.init_remote(repo="good")
@@ -2711,21 +2711,21 @@ class GitHubAndPushTests(MSWTestCase):
             check=False,
         )
         self.assertFailed(proc, "restoring the previous")
-        self.assertEqual(self.env.key_file("msw.github.read", "dev").read_text(), "github_pat_OLD_READ_abcdefghijklmnopqrstuvwxyz")
-        self.assertEqual(self.env.key_file("msw.github.write", "dev").read_text(), "github_pat_OLD_WRITE_abcdefghijklmnopqrstuvwxyz")
-        self.assertIn("verification_repo=acme/good", (self.env.home / ".config/msw/github/dev.conf").read_text())
+        self.assertEqual(self.env.key_file("silo.github.read", "dev").read_text(), "github_pat_OLD_READ_abcdefghijklmnopqrstuvwxyz")
+        self.assertEqual(self.env.key_file("silo.github.write", "dev").read_text(), "github_pat_OLD_WRITE_abcdefghijklmnopqrstuvwxyz")
+        self.assertIn("verification_repo=acme/good", (self.env.home / ".config/silo/github/dev.conf").read_text())
 
     def test_guest_token_with_write_permission_is_detected_and_rolled_back(self) -> None:
         bare = self.env.init_remote()
         proc = self.env.configure_tokens(
             "dev", "acme/demo",
-            extra_env={"MSW_FAKE_GUEST_PUSH_ALLOWED": "1"},
+            extra_env={"SILO_FAKE_GUEST_PUSH_ALLOWED": "1"},
             check=False,
         )
         self.assertFailed(proc, "guest token can push")
-        refs = run_cmd([SYSTEM_GIT, "--git-dir", bare, "for-each-ref", "--format=%(refname)", "refs/heads/msw-permission-test-*"], env=self.env.env).stdout
+        refs = run_cmd([SYSTEM_GIT, "--git-dir", bare, "for-each-ref", "--format=%(refname)", "refs/heads/silo-permission-test-*"], env=self.env.env).stdout
         self.assertEqual(refs.strip(), "")
-        self.assertFalse(self.env.key_file("msw.github.read", "dev").exists())
+        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
 
     def test_normal_new_branch_push_only_committed_current_branch(self) -> None:
         bare, repo = self.prepare()
@@ -2735,7 +2735,7 @@ class GitHubAndPushTests(MSWTestCase):
         self.env.git(repo, "commit", "-m", "Feature")
         (repo / "dirty.txt").write_text("not committed\n")
         self.env.git(repo, "tag", "local-only-tag")
-        self.env.msw("push", "dev", "clients/acme/demo", "--yes")
+        self.env.silo("push", "dev", "clients/acme/demo", "--yes")
         remote_sha = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/feature/one"], env=self.env.env).stdout.strip()
         local_sha = self.env.git(repo, "rev-parse", "HEAD").stdout.strip()
         self.assertEqual(remote_sha, local_sha)
@@ -2749,11 +2749,11 @@ class GitHubAndPushTests(MSWTestCase):
         (repo / "one.txt").write_text("one\n")
         self.env.git(repo, "add", "one.txt")
         self.env.git(repo, "commit", "-m", "One")
-        self.env.msw("push", "dev", "clients/acme/demo", "--yes")
+        self.env.silo("push", "dev", "clients/acme/demo", "--yes")
         (repo / "two.txt").write_text("two\n")
         self.env.git(repo, "add", "two.txt")
         self.env.git(repo, "commit", "-m", "Two")
-        self.env.msw("push", "dev", "clients/acme/demo", "--yes")
+        self.env.silo("push", "dev", "clients/acme/demo", "--yes")
         remote = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
         tracking = self.env.git(repo, "rev-parse", "refs/remotes/origin/main").stdout.strip()
         self.assertEqual(remote, tracking)
@@ -2773,9 +2773,9 @@ class GitHubAndPushTests(MSWTestCase):
         run_cmd([SYSTEM_GIT, "-C", updater, "commit", "-m", "Remote divergent"], env=self.env.env)
         run_cmd([SYSTEM_GIT, "-C", updater, "push", "origin", "main"], env=self.env.env)
 
-        self.assertFailed(self.env.msw("push", "dev", "clients/acme/demo", "--yes", check=False), "not a fast-forward")
+        self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False), "not a fast-forward")
         local_sha = self.env.git(repo, "rev-parse", "HEAD").stdout.strip()
-        self.env.msw("push", "dev", "clients/acme/demo", "--force-with-lease", "--yes")
+        self.env.silo("push", "dev", "clients/acme/demo", "--force-with-lease", "--yes")
         remote_sha = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "main"], env=self.env.env).stdout.strip()
         self.assertEqual(remote_sha, local_sha)
 
@@ -2785,13 +2785,13 @@ class GitHubAndPushTests(MSWTestCase):
         self.env.git(repo, "add", "local.txt")
         self.env.git(repo, "commit", "-m", "Local")
         marker = self.env.root / "race-fired"
-        proc = self.env.msw(
+        proc = self.env.silo(
             "push", "dev", "clients/acme/demo", "--force-with-lease", "--yes",
             check=False,
             extra_env={
-                "MSW_FAKE_ADVANCE_REMOTE_ON_BUNDLE": str(bare),
-                "MSW_FAKE_RACE_REF": "refs/heads/main",
-                "MSW_FAKE_RACE_ONCE_FILE": str(marker),
+                "SILO_FAKE_ADVANCE_REMOTE_ON_BUNDLE": str(bare),
+                "SILO_FAKE_RACE_REF": "refs/heads/main",
+                "SILO_FAKE_RACE_ONCE_FILE": str(marker),
             },
         )
         self.assertFailed(proc, "stale info")
@@ -2801,18 +2801,18 @@ class GitHubAndPushTests(MSWTestCase):
     def test_detached_head_bad_origin_missing_token_and_cancel(self) -> None:
         _, repo = self.prepare()
         self.env.git(repo, "checkout", "--detach")
-        self.assertFailed(self.env.msw("push", "dev", "clients/acme/demo", "--yes", check=False), "detached HEAD")
+        self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False), "detached HEAD")
         self.env.git(repo, "switch", "main")
         self.env.git(repo, "remote", "set-url", "origin", "https://example.com/nope.git")
-        self.assertFailed(self.env.msw("push", "dev", "clients/acme/demo", "--yes", check=False), "origin must point to github.com")
+        self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False), "origin must point to github.com")
         self.env.git(repo, "remote", "set-url", "origin", "https://github.com/acme/demo.git")
-        self.env.key_file("msw.github.write", "dev").unlink()
-        self.assertFailed(self.env.msw("push", "dev", "clients/acme/demo", "--yes", check=False), "host write token missing")
-        self.env.key_file("msw.github.write", "dev").write_text("github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789")
+        self.env.key_file("silo.github.write", "dev").unlink()
+        self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False), "host write token missing")
+        self.env.key_file("silo.github.write", "dev").write_text("github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789")
         (repo / "cancel.txt").write_text("cancel\n")
         self.env.git(repo, "add", "cancel.txt")
         self.env.git(repo, "commit", "-m", "Cancel")
-        self.assertFailed(self.env.msw("push", "dev", "clients/acme/demo", check=False, input_text="NO\n"), "push cancelled")
+        self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", check=False, input_text="NO\n"), "push cancelled")
 
     def test_host_git_config_isolation(self) -> None:
         bare, repo = self.prepare()
@@ -2825,7 +2825,7 @@ class GitHubAndPushTests(MSWTestCase):
         (repo / "isolated.txt").write_text("safe\n")
         self.env.git(repo, "add", "isolated.txt")
         self.env.git(repo, "commit", "-m", "Isolated")
-        self.env.msw("push", "dev", "clients/acme/demo", "--yes")
+        self.env.silo("push", "dev", "clients/acme/demo", "--yes")
         self.assertEqual(run_cmd([SYSTEM_GIT, "--git-dir", bare, "show", "main:isolated.txt"], env=self.env.env).stdout, "safe\n")
 
     def _add_lfs_pointer(self, repo: Path, content: bytes, *, valid: bool = True, object_present: bool = True) -> str:
@@ -2848,7 +2848,7 @@ class GitHubAndPushTests(MSWTestCase):
         bare, repo = self.prepare()
         log = self.env.install_fake_git_lfs()
         oid = self._add_lfs_pointer(repo, b"large-content-for-lfs-test")
-        self.env.msw("push", "dev", "clients/acme/demo", "--yes")
+        self.env.silo("push", "dev", "clients/acme/demo", "--yes")
         lfs_log = log.read_text()
         self.assertIn("push --object-id origin --stdin", lfs_log)
         self.assertIn(oid, lfs_log)
@@ -2858,7 +2858,7 @@ class GitHubAndPushTests(MSWTestCase):
                               extra: dict[str, str], expected: str) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        self.env.msw("clone", "dev", "acme/demo", "repo")
+        self.env.silo("clone", "dev", "acme/demo", "repo")
         repo = self.env.guest_repo("dev", "repo")
         self.env.git(repo, "config", "user.name", "Agent")
         self.env.git(repo, "config", "user.email", "agent@example.invalid")
@@ -2876,7 +2876,7 @@ class GitHubAndPushTests(MSWTestCase):
             obj.write_bytes(content)
         self.env.git(repo, "add", "asset.bin")
         self.env.git(repo, "commit", "-m", label)
-        proc = self.env.msw("push", "dev", "repo", "--yes", check=False, extra_env=extra)
+        proc = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=extra)
         self.assertFailed(proc, expected)
 
     def test_lfs_invalid_pointer_is_rejected(self) -> None:
@@ -2888,27 +2888,27 @@ class GitHubAndPushTests(MSWTestCase):
     def test_lfs_corrupt_transfer_is_rejected(self) -> None:
         self._run_lfs_failure_case(
             "corrupt", valid=True, object_present=True,
-            extra={"MSW_FAKE_COPY_CORRUPT_LFS": "1"},
+            extra={"SILO_FAKE_COPY_CORRUPT_LFS": "1"},
             expected="failed SHA-256 verification",
         )
 
     def test_lfs_symlink_transfer_is_rejected(self) -> None:
         self._run_lfs_failure_case(
             "symlink", valid=True, object_present=True,
-            extra={"MSW_FAKE_COPY_SYMLINK_LFS": "1"},
+            extra={"SILO_FAKE_COPY_SYMLINK_LFS": "1"},
             expected="not a regular file",
         )
 
 
-class BackupRestoreTests(MSWTestCase):
+class BackupRestoreTests(SiloTestCase):
     def _backup(self) -> Path:
-        proc = self.env.msw("backup", str(self.env.root / "backups"), timeout=90)
+        proc = self.env.silo("backup", str(self.env.root / "backups"), timeout=90)
         archives = [Path(line) for line in proc.stdout.splitlines() if line.endswith(".tar.zst")]
         self.assertEqual(len(archives), 1, proc.stdout)
         return archives[0]
 
     def test_backup_schema_cutover_quarantines_stale_records_once_and_rejects_current_corruption(self) -> None:
-        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        operation_root = self.env.home / ".local/state/silo/backup-operations"
         operation_root.mkdir(parents=True)
         stale = operation_root / "stale-operation-0001.json"
         stale.write_text(json.dumps({
@@ -2921,7 +2921,7 @@ class BackupRestoreTests(MSWTestCase):
         stale_log.write_text("first legacy log\n")
         stale_stdout.write_text("first legacy stdout\n")
 
-        first = self.env.msw("app", "backup-list", "--format", "json")
+        first = self.env.silo("app", "backup-list", "--format", "json")
         self.assertEqual(json.loads(first.stdout)["result"], [])
         quarantined = operation_root / ".incompatible-v2/stale-operation-0001.json"
         self.assertTrue(quarantined.is_file())
@@ -2937,7 +2937,7 @@ class BackupRestoreTests(MSWTestCase):
         marker = operation_root / ".schema-v2-activated"
         self.assertEqual(marker.read_text(), "schemaVersion=2\n")
 
-        second = self.env.msw("app", "backup-list", "--format", "json")
+        second = self.env.silo("app", "backup-list", "--format", "json")
         self.assertEqual(json.loads(second.stdout)["result"], [])
         self.assertTrue(quarantined.is_file())
 
@@ -2947,7 +2947,7 @@ class BackupRestoreTests(MSWTestCase):
             "operationId": "late-stale-operation-0002", "state": "completed",
         }))
         late_stale.chmod(0o600)
-        after_activation = self.env.msw("app", "backup-list", "--format", "json")
+        after_activation = self.env.silo("app", "backup-list", "--format", "json")
         self.assertEqual(json.loads(after_activation.stdout)["result"], [])
         self.assertFalse(late_stale.exists())
         self.assertTrue(
@@ -2960,7 +2960,7 @@ class BackupRestoreTests(MSWTestCase):
         }))
         stale_log.write_text("second legacy log\n")
         stale_stdout.write_text("second legacy stdout\n")
-        collision = self.env.msw("app", "backup-list", "--format", "json")
+        collision = self.env.silo("app", "backup-list", "--format", "json")
         self.assertEqual(json.loads(collision.stdout)["result"], [])
         collision_records = list(
             (operation_root / ".incompatible-v2").glob(
@@ -2985,13 +2985,13 @@ class BackupRestoreTests(MSWTestCase):
             "operationId": "current-corrupt-0002", "state": "completed",
         }))
         current_corrupt.chmod(0o600)
-        rejected = self.env.msw(
+        rejected = self.env.silo(
             "app", "backup-list", "--format", "json", check=False,
         )
         self.assertEqual(rejected.returncode, 78)
         self.assertEqual(
             json.loads(rejected.stdout)["error"]["code"],
-            "MSW_BACKUP_RECORD_INVALID",
+            "SILO_BACKUP_RECORD_INVALID",
         )
         self.assertTrue(current_corrupt.exists())
 
@@ -2999,23 +2999,23 @@ class BackupRestoreTests(MSWTestCase):
         malformed_current = operation_root / "current-malformed-0003.json"
         malformed_current.write_text('{"schemaVersion":2,"kind":"backup"')
         malformed_current.chmod(0o600)
-        malformed_rejected = self.env.msw(
+        malformed_rejected = self.env.silo(
             "app", "backup-list", "--format", "json", check=False,
         )
         self.assertEqual(malformed_rejected.returncode, 78)
         self.assertEqual(
             json.loads(malformed_rejected.stdout)["error"]["code"],
-            "MSW_BACKUP_RECORD_INVALID",
+            "SILO_BACKUP_RECORD_INVALID",
         )
         self.assertTrue(malformed_current.exists())
 
     def test_backup_restores_only_previous_running_set_and_excludes_keychain(self) -> None:
-        self.env.msw("start", "dev")
-        self.env.msw("start", "personal")
-        self.env.key_file("msw.github.read", "dev").write_text("super-secret-token")
+        self.env.silo("start", "dev")
+        self.env.silo("start", "personal")
+        self.env.key_file("silo.github.read", "dev").write_text("super-secret-token")
         # §9: the §5 host credential record lives only in the keychain (or the
-        # MSW_TEST_KEYCHAIN_DIR seam) and must never appear in a backup.
-        self.env.key_file("org.microsandbox.Silo.github-host.v2", "user").write_text(
+        # SILO_TEST_KEYCHAIN_DIR seam) and must never appear in a backup.
+        self.env.key_file("org.silo.Silo.github-host.v2", "user").write_text(
             json.dumps({"schemaVersion": 1, "accessToken": "gho_backup_secret_token",
                         "accountLogin": "fake-user"}))
         archive = self._backup()
@@ -3043,28 +3043,28 @@ class BackupRestoreTests(MSWTestCase):
 
         workspace_file.write_text("mutated\n")
         runtime_file.write_text("mutated\n")
-        config = self.env.home / ".config/msw/config.sh"
-        config.write_text(config.read_text() + "\nMSW_TEST_MUTATION=broken\n")
-        proc = self.env.msw("restore", str(archive), "--yes", timeout=90)
+        config = self.env.home / ".config/silo/config.sh"
+        config.write_text(config.read_text() + "\nSILO_TEST_MUTATION=broken\n")
+        proc = self.env.silo("restore", str(archive), "--yes", timeout=90)
         self.assertIn("restore complete", proc.stdout)
         self.assertEqual(workspace_file.read_text(), "backed-up-workspace\n")
         self.assertEqual(runtime_file.read_text(), "backed-up-runtime\n")
-        restored_config = (self.env.home / ".config/msw/config.sh").read_text()
-        self.assertIn("MSW_VERSION=", restored_config)
-        self.assertNotIn("MSW_TEST_MUTATION", restored_config)
+        restored_config = (self.env.home / ".config/silo/config.sh").read_text()
+        self.assertIn("SILO_VERSION=", restored_config)
+        self.assertNotIn("SILO_TEST_MUTATION", restored_config)
         state = self.env.state()
         self.assertTrue(all(not sb["running"] for sb in state["sandboxes"].values()))
-        rollbacks = list(self.env.home.glob(".msw-restore-rollback-*"))
+        rollbacks = list(self.env.home.glob(".silo-restore-rollback-*"))
         self.assertEqual(len(rollbacks), 1)
-        self.assertTrue(os.access(self.env.home / ".local/bin/msw", os.X_OK))
+        self.assertTrue(os.access(self.env.home / ".local/bin/silo", os.X_OK))
 
     def test_sparse_archive_contract_preserves_holes_and_payload(self) -> None:
         source = self.env.home / ".microsandbox" / "sparse-performance-contract.img"
         logical_size = 512 * 1024 * 1024
         with source.open("wb") as handle:
-            handle.write(b"MSW-SPARSE-START")
-            handle.seek(logical_size - len(b"MSW-SPARSE-END"))
-            handle.write(b"MSW-SPARSE-END")
+            handle.write(b"Silo-SPARSE-START")
+            handle.seek(logical_size - len(b"Silo-SPARSE-END"))
+            handle.write(b"Silo-SPARSE-END")
         self.assertEqual(source.stat().st_size, logical_size)
         self.assertLess(source.stat().st_blocks * 512, logical_size // 8)
 
@@ -3079,32 +3079,32 @@ class BackupRestoreTests(MSWTestCase):
         self.assertEqual(restored.stat().st_size, logical_size)
         self.assertLess(restored.stat().st_blocks * 512, logical_size // 8)
         with restored.open("rb") as handle:
-            self.assertEqual(handle.read(len(b"MSW-SPARSE-START")), b"MSW-SPARSE-START")
-            handle.seek(logical_size - len(b"MSW-SPARSE-END"))
-            self.assertEqual(handle.read(), b"MSW-SPARSE-END")
+            self.assertEqual(handle.read(len(b"Silo-SPARSE-START")), b"Silo-SPARSE-START")
+            handle.seek(logical_size - len(b"Silo-SPARSE-END"))
+            self.assertEqual(handle.read(), b"Silo-SPARSE-END")
 
     def test_backup_restore_preserves_safe_relative_managed_symlink(self) -> None:
-        target = self.env.home / ".config/msw/relative-link-target"
-        link = self.env.home / ".config/msw/relative-link"
+        target = self.env.home / ".config/silo/relative-link-target"
+        link = self.env.home / ".config/silo/relative-link"
         target.write_text("managed-relative-link-payload")
         link.symlink_to(target.name)
 
         archive = self._backup()
         link.unlink()
         target.unlink()
-        self.env.msw("restore", str(archive), "--yes", timeout=90)
+        self.env.silo("restore", str(archive), "--yes", timeout=90)
 
         self.assertTrue(link.is_symlink())
         self.assertEqual(os.readlink(link), target.name)
         self.assertEqual(link.read_text(), "managed-relative-link-payload")
 
     def test_corrupt_checksum_is_rejected_before_mutation(self) -> None:
-        marker = self.env.home / ".config/msw/current-marker"
+        marker = self.env.home / ".config/silo/current-marker"
         marker.write_text("current")
         archive = self._backup()
         with archive.open("ab") as f:
             f.write(b"corruption")
-        proc = self.env.msw("restore", str(archive), "--yes", check=False)
+        proc = self.env.silo("restore", str(archive), "--yes", check=False)
         self.assertFailed(proc, "checksum failed")
         self.assertEqual(marker.read_text(), "current")
 
@@ -3127,14 +3127,14 @@ class BackupRestoreTests(MSWTestCase):
 
     def _required_tar_members(self) -> list[tarfile.TarInfo]:
         names = [
-            ".microsandbox", ".config/msw", ".local/bin/msw", ".local/bin/msw-ssh-proxy",
-            ".local/libexec/msw-git-askpass", ".local/share/msw", ".ssh/msw_ed25519",
-            ".ssh/msw_ed25519.pub", ".ssh/config.d/msw.conf",
+            ".microsandbox", ".config/silo", ".local/bin/silo", ".local/bin/silo-ssh-proxy",
+            ".local/libexec/silo-git-askpass", ".local/share/silo", ".ssh/silo_ed25519",
+            ".ssh/silo_ed25519.pub", ".ssh/config.d/silo.conf",
         ]
         result = []
         for name in names:
             info = tarfile.TarInfo(name)
-            if name in {".microsandbox", ".config/msw", ".local/share/msw"}:
+            if name in {".microsandbox", ".config/silo", ".local/share/silo"}:
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o755
             else:
@@ -3151,7 +3151,7 @@ class BackupRestoreTests(MSWTestCase):
         variants.append(("traversal", traversal, "unsafe or unexpected"))
 
         duplicate = self._required_tar_members()
-        dup = tarfile.TarInfo(".local/bin/msw"); dup.type = tarfile.REGTYPE
+        dup = tarfile.TarInfo(".local/bin/silo"); dup.type = tarfile.REGTYPE
         duplicate.append(dup)
         variants.append(("duplicate", duplicate, "duplicate archive member"))
 
@@ -3173,49 +3173,49 @@ class BackupRestoreTests(MSWTestCase):
         for label, members, expected in variants:
             with self.subTest(label=label):
                 archive = self._write_malicious_archive(members)
-                proc = self.env.msw("restore", str(archive), "--yes", check=False)
+                proc = self.env.silo("restore", str(archive), "--yes", check=False)
                 self.assertFailed(proc, expected)
                 self.assertFalse((self.env.root / "escape").exists())
 
     def test_failed_restore_health_rolls_back_current_state(self) -> None:
-        backup_marker = self.env.home / ".config/msw/backup-marker"
+        backup_marker = self.env.home / ".config/silo/backup-marker"
         backup_marker.write_text("from-backup")
         archive = self._backup()
         backup_marker.write_text("current-state")
-        current_only = self.env.home / ".config/msw/current-only"
+        current_only = self.env.home / ".config/silo/current-only"
         current_only.write_text("preserve-me")
-        proc = self.env.msw(
+        proc = self.env.silo(
             "restore", str(archive), "--yes", check=False,
-            extra_env={"MSW_FAKE_RESTORE_HEALTH_FAIL": "1"},
+            extra_env={"SILO_FAKE_RESTORE_HEALTH_FAIL": "1"},
         )
         self.assertFailed(proc, "rolling back")
         self.assertEqual(backup_marker.read_text(), "current-state")
         self.assertEqual(current_only.read_text(), "preserve-me")
 
     def test_backup_pipeline_failure_restarts_vms_and_leaves_no_partial_artifacts(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         fake_zstd = self.env.root / "tools/failing-zstd"
         fake_zstd.write_text("#!/bin/sh\nexit 42\n")
         fake_zstd.chmod(0o755)
         dest = self.env.root / "failed-backups"
-        proc = self.env.msw("backup", str(dest), check=False, extra_env={"MSW_ZSTD_BIN": str(fake_zstd)})
+        proc = self.env.silo("backup", str(dest), check=False, extra_env={"SILO_ZSTD_BIN": str(fake_zstd)})
         self.assertFailed(proc)
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
         self.assertEqual(list(dest.glob("*")), [])
-        self.assertFailed(self.env.msw("backup", str(self.env.home / ".microsandbox/backups"), check=False), "may not be inside managed state")
+        self.assertFailed(self.env.silo("backup", str(self.env.home / ".microsandbox/backups"), check=False), "may not be inside managed state")
 
 
-class PackagedBehaviorTests(MSWTestCase):
+class PackagedBehaviorTests(SiloTestCase):
     def _apply_start(
         self,
         workspace: str = "dev",
         *,
         extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        plan = json.loads(self.env.msw(
+        plan = json.loads(self.env.silo(
             "app", "plan", "start", "--workspace", workspace, "--format", "json",
         ).stdout)["result"]
-        return self.env.msw(
+        return self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text=f"START {workspace}\n", check=False, extra_env=extra_env,
         )
@@ -3223,24 +3223,24 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_new_blank_workspace_disks_initialize_ext4_once_before_attach(self) -> None:
         materialize_ext4_raw_images(self.env)
 
-        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         desired["workspaces"].append({
             "name": "lab", "cpu": 4, "cpuCeiling": 8,
             "memoryGiB": 16, "memoryCeilingGiB": 32,
             "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
         })
         request = json.dumps(desired)
-        first = self.env.msw(
+        first = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
             extra_env={
-                "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
-                "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+                "SILO_FAKE_TRUNCATED_EXT4_CREATE": "1",
+                "SILO_TEST_VALIDATE_RAW_DISKS": "1",
             },
         )
         self.assertTrue(json.loads(first.stdout)["ok"], first.stdout + first.stderr)
         state = self.env.state()
-        for volume in ("msw-lab-workspace", "msw-lab-runtime"):
+        for volume in ("silo-lab-workspace", "silo-lab-runtime"):
             self.assertEqual(state["volumes"][volume]["filesystem"], "ext4")
             self.assertEqual(state["volumes"][volume]["magic"], "53ef")
             self.assertEqual(state["volumes"][volume]["formatCount"], 1)
@@ -3264,46 +3264,46 @@ class PackagedBehaviorTests(MSWTestCase):
             "memoryGiB": 16, "memoryCeilingGiB": 32,
             "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
         })
-        rejected = self.env.msw(
+        rejected = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(failed), check=False, timeout=90,
             extra_env={
-                "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
-                "MSW_TEST_VALIDATE_RAW_DISKS": "1",
-                "MSW_FAKE_FRESH_EXT4_FINALIZE_FAIL": "1",
+                "SILO_FAKE_TRUNCATED_EXT4_CREATE": "1",
+                "SILO_TEST_VALIDATE_RAW_DISKS": "1",
+                "SILO_FAKE_FRESH_EXT4_FINALIZE_FAIL": "1",
             },
         )
         self.assertEqual(rejected.returncode, 69, rejected.stdout + rejected.stderr)
         error = json.loads(rejected.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_RUNTIME_UNAVAILABLE")
+        self.assertEqual(error["code"], "SILO_RUNTIME_UNAVAILABLE")
         self.assertTrue(error["retryable"])
         failed_state = self.env.state()
-        self.assertNotIn("msw-broken-workspace", failed_state["volumes"])
-        self.assertNotIn("msw-broken-runtime", failed_state["volumes"])
+        self.assertNotIn("silo-broken-workspace", failed_state["volumes"])
+        self.assertNotIn("silo-broken-runtime", failed_state["volumes"])
         self.assertNotIn("broken", failed_state["sandboxes"])
 
     def test_capacity_replacement_corrects_fresh_ext4_before_copying_data(self) -> None:
         materialize_ext4_raw_images(self.env)
         source = (
-            self.env.home / ".microsandbox/volumes/msw-personal-workspace/guest-data"
+            self.env.home / ".microsandbox/volumes/silo-personal-workspace/guest-data"
         )
         (source / "repository-data").write_text("preserved")
-        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         personal = next(item for item in desired["workspaces"] if item["name"] == "personal")
         personal["workspaceStorageGiB"] = 80
 
-        proc = self.env.msw(
+        proc = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(desired), timeout=90,
             extra_env={
-                "MSW_FAKE_TRUNCATED_EXT4_CREATE": "1",
-                "MSW_TEST_VALIDATE_RAW_DISKS": "1",
+                "SILO_FAKE_TRUNCATED_EXT4_CREATE": "1",
+                "SILO_TEST_VALIDATE_RAW_DISKS": "1",
             },
         )
         self.assertTrue(json.loads(proc.stdout)["ok"], proc.stdout + proc.stderr)
 
         state = self.env.state()
-        name = "msw-personal-workspace"
+        name = "silo-personal-workspace"
         image = Path(state["volumes"][name]["path"])
         with image.open("rb") as handle:
             handle.seek(1028)
@@ -3315,17 +3315,17 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn(f"{name}-resize", state["volumes"])
 
     def test_app_bootstrap_waits_for_delayed_guest_systemd_readiness(self) -> None:
-        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         desired["workspaces"].append({
             "name": "lab", "cpu": 4, "cpuCeiling": 8,
             "memoryGiB": 16, "memoryCeilingGiB": 32,
             "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
         })
         request = json.dumps(desired)
-        proc = self.env.msw(
+        proc = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
-            extra_env={"MSW_FAKE_GUEST_READY_ATTEMPTS": "3"},
+            extra_env={"SILO_FAKE_GUEST_READY_ATTEMPTS": "3"},
         )
         self.assertTrue(json.loads(proc.stdout)["ok"], proc.stdout + proc.stderr)
         state = self.env.state()
@@ -3340,16 +3340,16 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertGreaterEqual(lab.get("wrapped_control_execs", 0), 4)
         self.assertTrue(lab["configured"])
         self.assertEqual(
-            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            json.loads((self.env.home / ".config/silo/workspaces.json").read_text()),
             desired,
         )
         journal = json.loads(
-            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+            (self.env.home / ".config/silo/workspace-config/lab.json").read_text()
         )
         self.assertEqual(journal["state"], "configured")
 
     def test_app_bootstrap_systemd_timeout_is_typed_retryable_and_never_commits(self) -> None:
-        before = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        before = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         desired = json.loads(json.dumps(before))
         desired["workspaces"].append({
             "name": "lab", "cpu": 4, "cpuCeiling": 8,
@@ -3358,18 +3358,18 @@ class PackagedBehaviorTests(MSWTestCase):
         })
         request = json.dumps(desired)
         never_ready = {
-            "MSW_FAKE_GUEST_READY_ATTEMPTS": "100",
-            "MSW_FAKE_GUEST_READY_BOUND": "3",
-            "MSW_FAKE_GUEST_READY_SLEEP": "0",
+            "SILO_FAKE_GUEST_READY_ATTEMPTS": "100",
+            "SILO_FAKE_GUEST_READY_BOUND": "3",
+            "SILO_FAKE_GUEST_READY_SLEEP": "0",
         }
-        proc = self.env.msw(
+        proc = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, check=False, timeout=90, extra_env=never_ready,
         )
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "MSW_WORKSPACE_STARTUP_TIMEOUT")
+        self.assertEqual(envelope["error"]["code"], "SILO_WORKSPACE_STARTUP_TIMEOUT")
         self.assertTrue(envelope["error"]["retryable"])
         self.assertEqual(envelope["error"]["workspace"], "lab")
         # Raw guest stderr stays out of the typed envelope and workload logs:
@@ -3378,13 +3378,13 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn("Failed to connect to bus", proc.stderr)
         # No premature commit: the requested configuration is not recorded.
         self.assertEqual(
-            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            json.loads((self.env.home / ".config/silo/workspaces.json").read_text()),
             before,
         )
         # Explicit retryable state: the failed box keeps a needs-configuration
         # journal naming the failing stage.
         journal = json.loads(
-            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+            (self.env.home / ".config/silo/workspace-config/lab.json").read_text()
         )
         self.assertEqual(journal["state"], "needs-configuration")
         self.assertIn("systemd", journal["error"])
@@ -3393,7 +3393,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn("lab", self.env.state()["sandboxes"])
 
         # A subsequent bootstrap with a healthy bus retries and succeeds.
-        retry = self.env.msw(
+        retry = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
         )
@@ -3402,11 +3402,11 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertIn("lab", state["sandboxes"])
         self.assertTrue(state["sandboxes"]["lab"]["configured"])
         self.assertEqual(
-            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            json.loads((self.env.home / ".config/silo/workspaces.json").read_text()),
             desired,
         )
         journal = json.loads(
-            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+            (self.env.home / ".config/silo/workspace-config/lab.json").read_text()
         )
         self.assertEqual(journal["state"], "configured")
 
@@ -3419,7 +3419,7 @@ class PackagedBehaviorTests(MSWTestCase):
             )
 
     def test_app_bootstrap_deep_failure_keeps_old_config_and_marks_boxes_for_retry(self) -> None:
-        before = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        before = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         desired = json.loads(json.dumps(before))
         desired["workspaces"].append({
             "name": "lab", "cpu": 4, "cpuCeiling": 8,
@@ -3427,20 +3427,20 @@ class PackagedBehaviorTests(MSWTestCase):
             "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
         })
         request = json.dumps(desired)
-        proc = self.env.msw(
+        proc = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, check=False, timeout=90,
-            extra_env={"MSW_FAKE_DEEP_CHECK_FAIL": "1"},
+            extra_env={"SILO_FAKE_DEEP_CHECK_FAIL": "1"},
         )
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "MSW_BOOTSTRAP_VERIFICATION_FAILED")
+        self.assertEqual(envelope["error"]["code"], "SILO_BOOTSTRAP_VERIFICATION_FAILED")
         self.assertTrue(envelope["error"]["retryable"])
         # The previously committed configuration stays byte-identical; the
         # staged configuration was never committed.
         self.assertEqual(
-            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            json.loads((self.env.home / ".config/silo/workspaces.json").read_text()),
             before,
         )
         # The new VM exists but is explicitly unverified: its journal says
@@ -3448,14 +3448,14 @@ class PackagedBehaviorTests(MSWTestCase):
         state = self.env.state()
         self.assertIn("lab", state["sandboxes"])
         journal = json.loads(
-            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+            (self.env.home / ".config/silo/workspace-config/lab.json").read_text()
         )
         self.assertEqual(journal["state"], "needs-configuration")
         self.assertIn("verification", journal["error"])
 
         # A subsequent bootstrap with healthy verification recreates the box,
         # commits the configuration, and records it configured.
-        retry = self.env.msw(
+        retry = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
         )
@@ -3463,11 +3463,11 @@ class PackagedBehaviorTests(MSWTestCase):
         state = self.env.state()
         self.assertTrue(state["sandboxes"]["lab"]["configured"])
         self.assertEqual(
-            json.loads((self.env.home / ".config/msw/workspaces.json").read_text()),
+            json.loads((self.env.home / ".config/silo/workspaces.json").read_text()),
             desired,
         )
         journal = json.loads(
-            (self.env.home / ".config/msw/workspace-config/lab.json").read_text()
+            (self.env.home / ".config/silo/workspace-config/lab.json").read_text()
         )
         self.assertEqual(journal["state"], "configured")
 
@@ -3479,7 +3479,7 @@ class PackagedBehaviorTests(MSWTestCase):
             )
 
         creates = lab_create_count()
-        again = self.env.msw(
+        again = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=request, timeout=90,
         )
@@ -3500,31 +3500,31 @@ class PackagedBehaviorTests(MSWTestCase):
             event["event"] == "volume-create" for event in before["events"]
         )
         rejected_start = self._apply_start(
-            extra_env={"MSW_FAKE_VOLUME_INSPECT_ERROR": "1"},
+            extra_env={"SILO_FAKE_VOLUME_INSPECT_ERROR": "1"},
         )
         self.assertEqual(rejected_start.returncode, 69, rejected_start.stdout + rejected_start.stderr)
         start_error = json.loads(rejected_start.stdout)["error"]
-        self.assertEqual(start_error["code"], "MSW_RUNTIME_UNAVAILABLE")
+        self.assertEqual(start_error["code"], "SILO_RUNTIME_UNAVAILABLE")
         self.assertTrue(start_error["retryable"])
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-        desired = json.loads((self.env.home / ".config/msw/workspaces.json").read_text())
+        desired = json.loads((self.env.home / ".config/silo/workspaces.json").read_text())
         desired["workspaces"].append({
             "name": "lab", "cpu": 4, "cpuCeiling": 8,
             "memoryGiB": 16, "memoryCeilingGiB": 32,
             "workspaceStorageGiB": 60, "runtimeStorageGiB": 60,
         })
-        rejected_setup = self.env.msw(
+        rejected_setup = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=json.dumps(desired), check=False,
-            extra_env={"MSW_FAKE_VOLUME_INSPECT_ERROR": "1"},
+            extra_env={"SILO_FAKE_VOLUME_INSPECT_ERROR": "1"},
         )
         self.assertEqual(rejected_setup.returncode, 69, rejected_setup.stdout + rejected_setup.stderr)
         setup_error = json.loads(rejected_setup.stdout)["error"]
-        self.assertEqual(setup_error["code"], "MSW_RUNTIME_UNAVAILABLE")
+        self.assertEqual(setup_error["code"], "SILO_RUNTIME_UNAVAILABLE")
         after = self.env.state()
-        self.assertNotIn("msw-lab-workspace", after["volumes"])
-        self.assertNotIn("msw-lab-runtime", after["volumes"])
+        self.assertNotIn("silo-lab-workspace", after["volumes"])
+        self.assertNotIn("silo-lab-runtime", after["volumes"])
         self.assertEqual(
             sum(event["event"] == "volume-create" for event in after["events"]),
             before_create_count,
@@ -3533,7 +3533,7 @@ class PackagedBehaviorTests(MSWTestCase):
             "lab",
             [
                 item["name"] for item in
-                json.loads((self.env.home / ".config/msw/workspaces.json").read_text())["workspaces"]
+                json.loads((self.env.home / ".config/silo/workspaces.json").read_text())["workspaces"]
             ],
         )
 
@@ -3545,7 +3545,7 @@ class PackagedBehaviorTests(MSWTestCase):
         for label, filesystem, magic in cases:
             with self.subTest(label=label):
                 state = self.env.state()
-                entry = state["volumes"]["msw-dev-workspace"]
+                entry = state["volumes"]["silo-dev-workspace"]
                 entry["filesystem"] = filesystem
                 entry["magic"] = magic
                 sentinel = Path(entry["path"]) / f"{label}.sentinel"
@@ -3557,25 +3557,25 @@ class PackagedBehaviorTests(MSWTestCase):
                 rejected = self._apply_start()
                 self.assertEqual(rejected.returncode, 78, rejected.stdout + rejected.stderr)
                 document = json.loads(rejected.stdout)
-                self.assertEqual(document["error"]["code"], "MSW_WORKSPACE_DISK_INVALID")
+                self.assertEqual(document["error"]["code"], "SILO_WORKSPACE_DISK_INVALID")
                 self.assertFalse(document["error"]["retryable"])
                 after = self.env.state()
                 self.assertEqual(
                     sum(event["event"] == "start" for event in after["events"]),
                     start_count,
                 )
-                self.assertEqual(after["volumes"]["msw-dev-workspace"]["formatCount"], format_count)
+                self.assertEqual(after["volumes"]["silo-dev-workspace"]["formatCount"], format_count)
                 self.assertEqual(sentinel.read_text(), "preserve me\n")
 
-                after["volumes"]["msw-dev-workspace"]["filesystem"] = "ext4"
-                after["volumes"]["msw-dev-workspace"]["magic"] = "53ef"
+                after["volumes"]["silo-dev-workspace"]["filesystem"] = "ext4"
+                after["volumes"]["silo-dev-workspace"]["magic"] = "53ef"
                 self.env.state_file.write_text(json.dumps(after, indent=2, sort_keys=True))
 
     def test_disposable_raw_images_prove_ext4_state_boundary_without_writes(self) -> None:
         state = self.env.state()
         images: dict[str, Path] = {}
         for role in ("workspace", "runtime"):
-            name = f"msw-dev-{role}"
+            name = f"silo-dev-{role}"
             root = self.env.home / ".microsandbox/volumes" / name
             root.mkdir(parents=True, exist_ok=True)
             image = root / "disk.raw"
@@ -3598,7 +3598,7 @@ class PackagedBehaviorTests(MSWTestCase):
                     handle.write(b"\x53\xef")
                 elif kind == "nonblank":
                     handle.seek(4096)
-                    handle.write(b"MSW-DATA")
+                    handle.write(b"Silo-DATA")
                 elif kind == "corrupt":
                     handle.seek(1080)
                     handle.write(b"\xde\xad")
@@ -3606,13 +3606,13 @@ class PackagedBehaviorTests(MSWTestCase):
         for image in images.values():
             write_image(image, "ext4")
         before = {role: hashlib.sha256(path.read_bytes()).hexdigest() for role, path in images.items()}
-        applied = self._apply_start(extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"})
+        applied = self._apply_start(extra_env={"SILO_TEST_VALIDATE_RAW_DISKS": "1"})
         self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
         self.assertEqual(
             {role: hashlib.sha256(path.read_bytes()).hexdigest() for role, path in images.items()},
             before,
         )
-        self.env.msw("stop", "dev")
+        self.env.silo("stop", "dev")
 
         for kind in ("blank", "nonblank", "corrupt", "truncated"):
             write_image(images["workspace"], kind)
@@ -3622,9 +3622,9 @@ class PackagedBehaviorTests(MSWTestCase):
                 running_state = self.env.state()
                 running_state["sandboxes"]["dev"]["running"] = True
                 self.env.state_file.write_text(json.dumps(running_state, indent=2, sort_keys=True))
-                state_document = json.loads(self.env.msw(
+                state_document = json.loads(self.env.silo(
                     "app", "state", "--format", "json",
-                    extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"},
+                    extra_env={"SILO_TEST_VALIDATE_RAW_DISKS": "1"},
                 ).stdout)["result"]
                 dev = next(item for item in state_document["workspaces"] if item["id"] == "dev")
                 self.assertFalse(dev["actionCapabilities"]["canRestart"])
@@ -3632,11 +3632,11 @@ class PackagedBehaviorTests(MSWTestCase):
                 self.assertIn("shorter", dev["actionCapabilities"]["recovery"].lower())
                 running_state["sandboxes"]["dev"]["running"] = False
                 self.env.state_file.write_text(json.dumps(running_state, indent=2, sort_keys=True))
-            rejected = self._apply_start(extra_env={"MSW_TEST_VALIDATE_RAW_DISKS": "1"})
+            rejected = self._apply_start(extra_env={"SILO_TEST_VALIDATE_RAW_DISKS": "1"})
             self.assertEqual(rejected.returncode, 78, (kind, rejected.stdout, rejected.stderr))
             self.assertEqual(
                 json.loads(rejected.stdout)["error"]["code"],
-                "MSW_WORKSPACE_DISK_INVALID",
+                "SILO_WORKSPACE_DISK_INVALID",
             )
             self.assertEqual(hashlib.sha256(images["workspace"].read_bytes()).hexdigest(), digest)
             self.assertEqual(
@@ -3646,11 +3646,11 @@ class PackagedBehaviorTests(MSWTestCase):
 
     def test_help_version_docs_without_msb_and_complete_deep_check(self) -> None:
         env = self.env.env.copy()
-        env["MSW_MSB_BIN"] = "/does/not/exist"
-        self.assertIn("msw 3.2.2", self.env.msw("version", extra_env=env).stdout)
-        self.assertIn("grouped MicroSandbox", self.env.msw("help", extra_env=env).stdout)
-        self.assertIn("MSW", self.env.msw("docs", "cheatsheet", extra_env=env).stdout)
-        proc = self.env.msw("check", "--deep", timeout=90)
+        env["SILO_MSB_BIN"] = "/does/not/exist"
+        self.assertIn("silo 3.2.2", self.env.silo("version", extra_env=env).stdout)
+        self.assertIn("grouped MicroSandbox", self.env.silo("help", extra_env=env).stdout)
+        self.assertIn("Silo", self.env.silo("docs", "cheatsheet", extra_env=env).stdout)
+        proc = self.env.silo("check", "--deep", timeout=90)
         self.assertIn("all live VM, Docker, SSH, internet, and published-port checks passed", proc.stdout)
         state = self.env.state()
         self.assertNotIn("24678", state["sandboxes"]["dev"].get("port_content", {}))
@@ -3684,7 +3684,7 @@ class PackagedBehaviorTests(MSWTestCase):
             },
         }))
 
-        document = json.loads(self.env.msw("app", "github-state", "--format", "json").stdout)
+        document = json.loads(self.env.silo("app", "github-state", "--format", "json").stdout)
         self.assertTrue(document["ok"])
         workspaces = {item["workspace"]: item for item in document["result"]["workspaces"]}
         self.assertEqual(workspaces["dev"]["provider"], "legacy-broad-token")
@@ -3698,8 +3698,8 @@ class PackagedBehaviorTests(MSWTestCase):
     def test_app_polling_contract_never_starts_or_forwards_guest_credentials(self) -> None:
         before = len(self.env.state().get("events", []))
         probe_env = {
-            "MSW_GITHUB_READ_TOKEN_DEV": "ghu_probe_fixture",
-            "MSW_FAKE_RECORD_CREDENTIAL_ENV": "1",
+            "SILO_GITHUB_READ_TOKEN_DEV": "ghu_probe_fixture",
+            "SILO_FAKE_RECORD_CREDENTIAL_ENV": "1",
         }
         commands = [
             ("state", "--workspace", "dev", "--format", "json"),
@@ -3710,7 +3710,7 @@ class PackagedBehaviorTests(MSWTestCase):
         ]
         for command in commands:
             with self.subTest(command=command[0]):
-                self.env.msw("app", *command, extra_env=probe_env)
+                self.env.silo("app", *command, extra_env=probe_env)
 
         events = self.env.state().get("events", [])[before:]
         self.assertFalse(any(event.get("event") == "start" for event in events), events)
@@ -3720,14 +3720,14 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(all(not sandbox["running"] for sandbox in self.env.state()["sandboxes"].values()))
 
     def test_app_ports_reports_per_workspace_listeners_without_starting_guests(self) -> None:
-        self.env.msw("start", "dev")
-        self.env.msw("start", "playgrounds")
+        self.env.silo("start", "dev")
+        self.env.silo("start", "playgrounds")
         before = len(self.env.state().get("events", []))
         fixture = json.dumps({"dev": [5173, 3000], "playgrounds": [3000]})
 
-        document = json.loads(self.env.msw(
+        document = json.loads(self.env.silo(
             "app", "ports", "--format", "json",
-            extra_env={"MSW_FAKE_LISTENING_PORTS": fixture},
+            extra_env={"SILO_FAKE_LISTENING_PORTS": fixture},
         ).stdout)
         self.assertTrue(document["ok"])
         snapshots = {
@@ -3735,7 +3735,7 @@ class PackagedBehaviorTests(MSWTestCase):
         }
         self.assertEqual(set(snapshots), {"dev", "playgrounds", "personal"})
         self.assertEqual(snapshots["dev"]["lifecycle"], "Running")
-        self.assertEqual(snapshots["dev"]["host"], "dev.msw.test")
+        self.assertEqual(snapshots["dev"]["host"], "dev.silo.test")
         dev_ports = {item["port"]: item["listening"] for item in snapshots["dev"]["ports"]}
         self.assertTrue(dev_ports["3000"])
         self.assertTrue(dev_ports["5173"])
@@ -3750,9 +3750,9 @@ class PackagedBehaviorTests(MSWTestCase):
         events = self.env.state().get("events", [])[before:]
         self.assertFalse(any(event.get("event") == "start" for event in events), events)
 
-        degraded = json.loads(self.env.msw(
+        degraded = json.loads(self.env.silo(
             "app", "ports", "--workspace", "dev", "--format", "json",
-            extra_env={"MSW_FAKE_LISTENING_PORTS": "not-json"},
+            extra_env={"SILO_FAKE_LISTENING_PORTS": "not-json"},
         ).stdout)
         dev = degraded["result"]["workspaces"][0]
         self.assertEqual(dev["listeningState"], "unknown")
@@ -3760,21 +3760,21 @@ class PackagedBehaviorTests(MSWTestCase):
 
     def test_app_directory_protocol_is_bounded_safe_and_does_not_start_stopped_workspaces(self) -> None:
         before = len(self.env.state().get("events", []))
-        stopped = self.env.msw(
+        stopped = self.env.silo(
             "app", "directory-list", "--workspace", "dev", "--path", ".",
             "--limit", "100", "--format", "json", check=False,
         )
-        self.assertFailed(stopped, "MSW_WORKSPACE_STOPPED")
-        stopped_target = self.env.msw(
+        self.assertFailed(stopped, "SILO_WORKSPACE_STOPPED")
+        stopped_target = self.env.silo(
             "app", "editor-target", "--workspace", "dev", "--path", ".",
             "--format", "json", check=False,
         )
-        self.assertFailed(stopped_target, "MSW_WORKSPACE_STOPPED")
-        invalid_workspace = self.env.msw(
+        self.assertFailed(stopped_target, "SILO_WORKSPACE_STOPPED")
+        invalid_workspace = self.env.silo(
             "app", "directory-list", "--workspace", "unknown", "--format", "json",
             check=False,
         )
-        self.assertFailed(invalid_workspace, "MSW_INVALID_REQUEST")
+        self.assertFailed(invalid_workspace, "SILO_INVALID_REQUEST")
         self.assertFalse(any(
             event.get("event") == "start"
             for event in self.env.state().get("events", [])[before:]
@@ -3784,19 +3784,19 @@ class PackagedBehaviorTests(MSWTestCase):
             "../outside", "/tmp", "safe//nested", "safe/./nested",
             "bad\x1bpath", "x" * 1025,
         ]:
-            rejected = self.env.msw(
+            rejected = self.env.silo(
                 "app", "directory-list", "--workspace", "dev", "--path", path,
                 "--format", "json", check=False,
             )
-            self.assertFailed(rejected, "MSW_INVALID_REQUEST")
+            self.assertFailed(rejected, "SILO_INVALID_REQUEST")
         for limit in ["0", "201", "not-a-number"]:
-            rejected = self.env.msw(
+            rejected = self.env.silo(
                 "app", "directory-list", "--workspace", "dev", "--limit", limit,
                 "--format", "json", check=False,
             )
-            self.assertFailed(rejected, "MSW_INVALID_REQUEST")
+            self.assertFailed(rejected, "SILO_INVALID_REQUEST")
 
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         root = self.env.workspace("dev")
         (root / "Projects" / "Demo" / "Sources").mkdir(parents=True)
         (root / "Scratch").mkdir()
@@ -3806,7 +3806,7 @@ class PackagedBehaviorTests(MSWTestCase):
         (root / "Escape").symlink_to(outside, target_is_directory=True)
         (root / "ghp_sensitivefixture").mkdir()
 
-        listed = json.loads(self.env.msw(
+        listed = json.loads(self.env.silo(
             "app", "directory-list", "--workspace", "dev", "--path", ".",
             "--limit", "100", "--format", "json",
         ).stdout)
@@ -3831,7 +3831,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertFalse(scratch["hasChildren"])
         self.assertEqual(scratch["children"], [])
 
-        searched = json.loads(self.env.msw(
+        searched = json.loads(self.env.silo(
             "app", "directory-search", "--workspace", "dev", "--path", ".",
             "--query", "demo", "--limit", "10", "--format", "json",
         ).stdout)["result"]
@@ -3841,7 +3841,7 @@ class PackagedBehaviorTests(MSWTestCase):
             ["Projects/Demo", "Projects/Demo/Sources"],
         )
 
-        target = json.loads(self.env.msw(
+        target = json.loads(self.env.silo(
             "app", "editor-target", "--workspace", "dev", "--path", "Projects/Demo",
             "--format", "json",
         ).stdout)["result"]
@@ -3851,24 +3851,24 @@ class PackagedBehaviorTests(MSWTestCase):
             "host": "dev.msb",
         })
 
-        missing = self.env.msw(
+        missing = self.env.silo(
             "app", "directory-list", "--workspace", "dev", "--path", "Missing",
             "--format", "json", check=False,
         )
-        self.assertFailed(missing, "MSW_DIRECTORY_UNAVAILABLE")
-        missing_target = self.env.msw(
+        self.assertFailed(missing, "SILO_DIRECTORY_UNAVAILABLE")
+        missing_target = self.env.silo(
             "app", "editor-target", "--workspace", "dev", "--path", "Missing",
             "--format", "json", check=False,
         )
-        self.assertFailed(missing_target, "MSW_DIRECTORY_UNAVAILABLE")
+        self.assertFailed(missing_target, "SILO_DIRECTORY_UNAVAILABLE")
 
     def test_app_directory_search_rejects_malformed_queries_and_caps_results(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         root = self.env.workspace("dev")
         for index in range(200):
             (root / f"match-{index:03d}").mkdir()
 
-        exact = json.loads(self.env.msw(
+        exact = json.loads(self.env.silo(
             "app", "directory-search", "--workspace", "dev", "--query", "match-",
             "--limit", "200", "--format", "json",
         ).stdout)["result"]
@@ -3877,7 +3877,7 @@ class PackagedBehaviorTests(MSWTestCase):
 
         for index in range(200, 205):
             (root / f"match-{index:03d}").mkdir()
-        bounded = json.loads(self.env.msw(
+        bounded = json.loads(self.env.silo(
             "app", "directory-search", "--workspace", "dev", "--query", "match-",
             "--limit", "200", "--format", "json",
         ).stdout)["result"]
@@ -3885,22 +3885,22 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertTrue(bounded["truncated"])
 
         for query in ["", "x" * 129, "bad\nquery", "bad\x1bquery"]:
-            rejected = self.env.msw(
+            rejected = self.env.silo(
                 "app", "directory-search", "--workspace", "dev", "--query", query,
                 "--format", "json", check=False,
             )
-            self.assertFailed(rejected, "MSW_INVALID_REQUEST")
+            self.assertFailed(rejected, "SILO_INVALID_REQUEST")
 
-        unavailable = self.env.msw(
+        unavailable = self.env.silo(
             "app", "directory-list", "--workspace", "dev", "--format", "json",
-            extra_env={"MSW_FAKE_STATUS_JSON": "not-json"}, check=False,
+            extra_env={"SILO_FAKE_STATUS_JSON": "not-json"}, check=False,
         )
-        self.assertFailed(unavailable, "MSW_STATE_UNAVAILABLE")
+        self.assertFailed(unavailable, "SILO_STATE_UNAVAILABLE")
 
     def test_app_state_preserves_unknown_for_malformed_or_unrecognized_runtime_state(self) -> None:
-        malformed = json.loads(self.env.msw(
+        malformed = json.loads(self.env.silo(
             "app", "state", "--workspace", "dev", "--format", "json",
-            extra_env={"MSW_FAKE_STATUS_JSON": "not-json"},
+            extra_env={"SILO_FAKE_STATUS_JSON": "not-json"},
         ).stdout)
         workspace = malformed["result"]["workspaces"][0]
         self.assertEqual(workspace["lifecycle"], "Unknown")
@@ -3909,22 +3909,22 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertFalse(workspace["actionCapabilities"]["canStart"])
         self.assertTrue(malformed["warnings"])
 
-        unrecognized = json.loads(self.env.msw(
+        unrecognized = json.loads(self.env.silo(
             "app", "state", "--workspace", "dev", "--format", "json",
-            extra_env={"MSW_FAKE_STATUS_JSON": json.dumps({"name": "dev", "status": "Paused"})},
+            extra_env={"SILO_FAKE_STATUS_JSON": json.dumps({"name": "dev", "status": "Paused"})},
         ).stdout)["result"]["workspaces"][0]
         self.assertEqual(unrecognized["lifecycle"], "Unknown")
         self.assertEqual(unrecognized["freshness"], "fresh")
         self.assertNotEqual(unrecognized["lifecycle"], "Stopped")
 
     def test_app_backup_returns_archive_and_reconciled_running_set(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         destination = self.env.root / "app-backups"
         destination.mkdir()
         compressible_source = self.env.home / ".microsandbox" / "backup-size-semantics.bin"
         compressible_source.write_bytes(b"A" * (2 * 1024 * 1024))
 
-        preview = json.loads(self.env.msw(
+        preview = json.loads(self.env.silo(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
         self.assertEqual(set(preview), {
@@ -3937,30 +3937,30 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertIsNone(preview["archiveEstimate"])
         self.assertEqual(preview["runningWorkspaces"], ["dev"])
 
-        preview_with_status_unavailable = json.loads(self.env.msw(
+        preview_with_status_unavailable = json.loads(self.env.silo(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
-            extra_env={"MSW_FAKE_STATUS_FAIL": "1"},
+            extra_env={"SILO_FAKE_STATUS_FAIL": "1"},
         ).stdout)["result"]
         self.assertEqual(preview_with_status_unavailable["runningWorkspaces"], ["dev"])
 
-        rejected = self.env.msw(
+        rejected = self.env.silo(
             "app", "backup-preview", "--directory", str(destination / "missing"),
             "--format", "json", check=False,
         )
         self.assertEqual(rejected.returncode, 64)
         failure = json.loads(rejected.stdout)
-        self.assertEqual(failure["error"]["code"], "MSW_INVALID_REQUEST")
-        self.assertIn("msw app help", failure["error"]["recovery"])
+        self.assertEqual(failure["error"]["code"], "SILO_INVALID_REQUEST")
+        self.assertIn("silo app help", failure["error"]["recovery"])
 
-        started = json.loads(self.env.msw(
+        started = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination),
             "--request-key", "portable-contract-one", "--format", "json",
         ).stdout)["result"]
-        duplicate = json.loads(self.env.msw(
+        duplicate = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination),
             "--request-key", "portable-contract-one", "--format", "json",
         ).stdout)["result"]
-        distinct = json.loads(self.env.msw(
+        distinct = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination),
             "--request-key", "portable-contract-two", "--format", "json",
         ).stdout)["result"]
@@ -3968,20 +3968,20 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotEqual(started["operationId"], distinct["operationId"])
         other_destination = self.env.root / "other-app-backups"
         other_destination.mkdir()
-        conflicting_replay = self.env.msw(
+        conflicting_replay = self.env.silo(
             "app", "backup-start", "--directory", str(other_destination),
             "--request-key", "portable-contract-one", "--format", "json", check=False,
         )
         self.assertEqual(conflicting_replay.returncode, 73)
         self.assertEqual(
             json.loads(conflicting_replay.stdout)["error"]["code"],
-            "MSW_BACKUP_IDEMPOTENCY_CONFLICT",
+            "SILO_BACKUP_IDEMPOTENCY_CONFLICT",
         )
 
         def terminal(operation_id: str) -> dict:
             last = None
             for _ in range(300):
-                last = json.loads(self.env.msw(
+                last = json.loads(self.env.silo(
                     "app", "backup-status", "--operation-id", operation_id,
                     "--format", "json",
                 ).stdout)["result"]
@@ -4010,11 +4010,11 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(result["restartedWorkspaces"], ["dev"])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
         self.assertEqual(completed_distinct["state"], "completed")
-        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        operation_root = self.env.home / ".local/state/silo/backup-operations"
         self.assertEqual(stat.S_IMODE(operation_root.stat().st_mode), 0o700)
         record_path = operation_root / f"{started['operationId']}.json"
         self.assertEqual(stat.S_IMODE(record_path.stat().st_mode), 0o600)
-        listed = json.loads(self.env.msw("app", "backup-list", "--format", "json").stdout)["result"]
+        listed = json.loads(self.env.silo("app", "backup-list", "--format", "json").stdout)["result"]
         self.assertTrue({started["operationId"], distinct["operationId"]}.issubset({item["operationId"] for item in listed}))
 
         corrupt_record = operation_root / "corrupt-record-0001.json"
@@ -4023,12 +4023,12 @@ class PackagedBehaviorTests(MSWTestCase):
             "state": "completed", "result": {"archive": result["archive"]},
         }))
         corrupt_record.chmod(0o600)
-        invalid = self.env.msw(
+        invalid = self.env.silo(
             "app", "backup-status", "--operation-id", "corrupt-record-0001",
             "--format", "json", check=False,
         )
         self.assertEqual(invalid.returncode, 78)
-        self.assertEqual(json.loads(invalid.stdout)["error"]["code"], "MSW_BACKUP_RECORD_INVALID")
+        self.assertEqual(json.loads(invalid.stdout)["error"]["code"], "SILO_BACKUP_RECORD_INVALID")
         corrupt_record.unlink()
 
         valid_record = json.loads(record_path.read_text())
@@ -4036,18 +4036,18 @@ class PackagedBehaviorTests(MSWTestCase):
         missing_archive_bytes["result"].pop("archiveBytes")
         record_path.write_text(json.dumps(missing_archive_bytes))
         record_path.chmod(0o600)
-        invalid_current = self.env.msw(
+        invalid_current = self.env.silo(
             "app", "backup-status", "--operation-id", started["operationId"],
             "--format", "json", check=False,
         )
         self.assertEqual(invalid_current.returncode, 78)
         self.assertEqual(
             json.loads(invalid_current.stdout)["error"]["code"],
-            "MSW_BACKUP_RECORD_INVALID",
+            "SILO_BACKUP_RECORD_INVALID",
         )
         expired = time.time() - 31 * 24 * 60 * 60
         os.utime(record_path, (expired, expired))
-        invalid_list = self.env.msw("app", "backup-list", "--format", "json", check=False)
+        invalid_list = self.env.silo("app", "backup-list", "--format", "json", check=False)
         self.assertEqual(invalid_list.returncode, 78)
         self.assertTrue(record_path.exists(), "corrupt durable records must never be removed automatically")
         record_path.write_text(json.dumps(valid_record))
@@ -4067,7 +4067,7 @@ class PackagedBehaviorTests(MSWTestCase):
         })
         record_path.write_text(json.dumps(interrupted))
         record_path.chmod(0o600)
-        reconciled = json.loads(self.env.msw(
+        reconciled = json.loads(self.env.silo(
             "app", "backup-status", "--operation-id", started["operationId"],
             "--format", "json",
         ).stdout)["result"]
@@ -4077,7 +4077,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertGreaterEqual(reconciled["elapsedSeconds"], 20)
         self.assertIn("verified after owner-process reconciliation", reconciled["message"])
 
-        history_preview = json.loads(self.env.msw(
+        history_preview = json.loads(self.env.silo(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
         estimate = history_preview["archiveEstimate"]
@@ -4088,7 +4088,7 @@ class PackagedBehaviorTests(MSWTestCase):
         original_width = estimate["upperBytes"] - estimate["lowerBytes"]
         changed_source = self.env.home / ".microsandbox" / "changed-after-history.bin"
         changed_source.write_bytes(b"B" * (16 * 1024 * 1024))
-        changed_preview = json.loads(self.env.msw(
+        changed_preview = json.loads(self.env.silo(
             "app", "backup-preview", "--directory", str(destination), "--format", "json",
         ).stdout)["result"]
         changed_estimate = changed_preview["archiveEstimate"]
@@ -4097,17 +4097,17 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertGreaterEqual(changed_estimate["lowerBytes"], 1)
 
     def test_app_backup_reports_archive_when_workspace_restart_is_incomplete(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         destination = self.env.root / "app-backups-partial"
         destination.mkdir()
 
-        started = json.loads(self.env.msw(
+        started = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination), "--request-key", "partial",
-            "--format", "json", extra_env={"MSW_FAKE_START_FAIL": "1"},
+            "--format", "json", extra_env={"SILO_FAKE_START_FAIL": "1"},
         ).stdout)["result"]
         operation = started
         for _ in range(300):
-            operation = json.loads(self.env.msw(
+            operation = json.loads(self.env.silo(
                 "app", "backup-status", "--operation-id", started["operationId"], "--format", "json",
             ).stdout)["result"]
             if operation["state"] in {"completed", "failed"}: break
@@ -4120,17 +4120,17 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(result["restartedWorkspaces"], [])
         self.assertEqual(
             operation["warnings"],
-            ["MSW could not confirm that dev returned to its pre-backup running state"],
+            ["Silo could not confirm that dev returned to its pre-backup running state"],
         )
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_distinct_durable_backups_overlap_and_restore_after_final_participant(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         destination = self.env.root / "overlapping-backups"
         destination.mkdir()
         barrier = self.env.root / "backup-archive-barrier"
         barrier.mkdir()
-        extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+        extra = {"SILO_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
         sparse_source = self.env.home / ".microsandbox" / "overlap-sparse.img"
         sparse_size = 32 * 1024 * 1024
         with sparse_source.open("wb") as handle:
@@ -4139,13 +4139,13 @@ class PackagedBehaviorTests(MSWTestCase):
             handle.write(b"OVERLAP-SPARSE-END")
 
         def start(key: str) -> dict:
-            return json.loads(self.env.msw(
+            return json.loads(self.env.silo(
                 "app", "backup-start", "--directory", str(destination),
                 "--request-key", key, "--format", "json", extra_env=extra,
             ).stdout)["result"]
 
         def status(operation_id: str) -> dict:
-            return json.loads(self.env.msw(
+            return json.loads(self.env.silo(
                 "app", "backup-status", "--operation-id", operation_id,
                 "--format", "json",
             ).stdout)["result"]
@@ -4175,7 +4175,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual((second_writing["state"], second_writing["phase"]),
                          ("running", "archive-writing"))
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        operation_root = self.env.home / ".local/state/silo/backup-operations"
         session_path = operation_root / ".snapshot-session.json"
         wait_until(
             lambda: all("archiveProcessStarted" in member
@@ -4232,21 +4232,21 @@ class PackagedBehaviorTests(MSWTestCase):
             self.assertEqual(handle.read(), b"OVERLAP-SPARSE-END")
 
     def test_dead_shared_snapshot_participant_reconciles_without_restarting_under_live_archive(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         destination = self.env.root / "dead-participant-backups"
         destination.mkdir()
         barrier = self.env.root / "dead-participant-barrier"
         barrier.mkdir()
-        extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+        extra = {"SILO_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
 
         def start(key: str) -> dict:
-            return json.loads(self.env.msw(
+            return json.loads(self.env.silo(
                 "app", "backup-start", "--directory", str(destination),
                 "--request-key", key, "--format", "json", extra_env=extra,
             ).stdout)["result"]
 
         def status(operation_id: str) -> dict:
-            return json.loads(self.env.msw(
+            return json.loads(self.env.silo(
                 "app", "backup-status", "--operation-id", operation_id,
                 "--format", "json",
             ).stdout)["result"]
@@ -4265,7 +4265,7 @@ class PackagedBehaviorTests(MSWTestCase):
                         for item in (dead, live)),
             "participants did not reach the crash barrier",
         )
-        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        operation_root = self.env.home / ".local/state/silo/backup-operations"
         session_path = operation_root / ".snapshot-session.json"
         wait_until(
             lambda: all("archiveProcessStarted" in member
@@ -4308,7 +4308,7 @@ class PackagedBehaviorTests(MSWTestCase):
         wait_until(lambda: status(dead["operationId"])["state"] == "failed",
                    "dead participant was not reconciled")
         self.assertEqual(status(dead["operationId"])["error"]["code"],
-                         "MSW_BACKUP_OWNER_LOST")
+                         "SILO_BACKUP_OWNER_LOST")
         self.assertEqual(status(live["operationId"])["phase"], "archive-writing")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
         remaining = json.loads(session_path.read_text())
@@ -4329,14 +4329,14 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertFalse(session_path.exists())
 
     def test_direct_backup_participates_in_live_durable_snapshot(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         destination = self.env.root / "direct-and-durable-backups"
         destination.mkdir()
         barrier = self.env.root / "direct-and-durable-barrier"
         barrier.mkdir()
-        extra = {"MSW_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
+        extra = {"SILO_TEST_BACKUP_ARCHIVE_BARRIER_DIR": str(barrier)}
 
-        durable = json.loads(self.env.msw(
+        durable = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination),
             "--request-key", "durable-with-direct", "--format", "json",
             extra_env=extra,
@@ -4350,10 +4350,10 @@ class PackagedBehaviorTests(MSWTestCase):
             self.fail("durable archive did not reach the overlap barrier")
 
         direct = subprocess.Popen(
-            [str(self.env.msw_bin), "backup", str(destination)],
+            [str(self.env.silo_bin), "backup", str(destination)],
             env=self.env.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-        operation_root = self.env.home / ".local/state/msw/backup-operations"
+        operation_root = self.env.home / ".local/state/silo/backup-operations"
         session_path = operation_root / ".snapshot-session.json"
         try:
             direct_member = None
@@ -4380,7 +4380,7 @@ class PackagedBehaviorTests(MSWTestCase):
             (barrier / f"{durable['operationId']}.release").touch()
             completed = durable
             for _ in range(600):
-                completed = json.loads(self.env.msw(
+                completed = json.loads(self.env.silo(
                     "app", "backup-status", "--operation-id", durable["operationId"],
                     "--format", "json",
                 ).stdout)["result"]
@@ -4401,27 +4401,27 @@ class PackagedBehaviorTests(MSWTestCase):
                 direct.communicate(timeout=10)
 
     def test_app_backup_pipeline_failure_returns_only_structured_failure(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         destination = self.env.root / "app-backups-failed"
         destination.mkdir()
         fake_zstd = self.env.root / "tools/failing-app-zstd"
         fake_zstd.write_text("#!/bin/sh\nexit 42\n")
         fake_zstd.chmod(0o755)
 
-        started = json.loads(self.env.msw(
+        started = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination), "--request-key", "failure",
-            "--format", "json", extra_env={"MSW_ZSTD_BIN": str(fake_zstd)},
+            "--format", "json", extra_env={"SILO_ZSTD_BIN": str(fake_zstd)},
         ).stdout)["result"]
         operation = started
         for _ in range(300):
-            operation = json.loads(self.env.msw(
+            operation = json.loads(self.env.silo(
                 "app", "backup-status", "--operation-id", started["operationId"], "--format", "json",
             ).stdout)["result"]
             if operation["state"] in {"completed", "failed"}: break
             time.sleep(0.1)
         self.assertEqual(operation["state"], "failed")
         self.assertEqual(operation["phase"], "failed")
-        self.assertEqual(operation["error"]["code"], "MSW_BACKUP_FAILED")
+        self.assertEqual(operation["error"]["code"], "SILO_BACKUP_FAILED")
         self.assertIsNone(operation["result"])
         self.assertEqual(list(destination.glob("*")), [])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
@@ -4459,34 +4459,34 @@ class PackagedBehaviorTests(MSWTestCase):
             },
         }))
         token_env = {
-            "MSW_GITHUB_READ_TOKEN_DEV": "ghs_read_fixture",
-            "MSW_GITHUB_WRITE_TOKEN_DEV": "ghs_write_fixture",
+            "SILO_GITHUB_READ_TOKEN_DEV": "ghs_read_fixture",
+            "SILO_GITHUB_WRITE_TOKEN_DEV": "ghs_write_fixture",
         }
 
-        github = json.loads(self.env.msw(
+        github = json.loads(self.env.silo(
             "app", "github-state", "--workspace", "dev", "--format", "json",
             extra_env=token_env,
         ).stdout)
         self.assertEqual(github["result"]["workspaces"][0]["accessMode"], "host-write")
 
-        state = json.loads(self.env.msw(
+        state = json.loads(self.env.silo(
             "app", "state", "--workspace", "dev", "--format", "json",
             extra_env=token_env,
         ).stdout)["result"]["workspaces"][0]
         self.assertEqual(state["credential"]["state"], "Ready")
         self.assertEqual(state["credential"]["accessMode"], "host-write")
     def test_app_logs_normalizes_and_redacts_jsonl(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         payload = json.dumps({
             "t": "2026-08-25T18:10:01.125Z",
             "s": "stderr",
             "id": 17,
             "e": None,
-            "d": "Authorization: Bearer ghp_secret MSW_GITHUB_READ_TOKEN_DEV=opaque_secret",
+            "d": "Authorization: Bearer ghp_secret SILO_GITHUB_READ_TOKEN_DEV=opaque_secret",
         })
-        document = self.env.msw(
+        document = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": payload},
+            extra_env={"SILO_FAKE_LOGS": payload},
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
         self.assertEqual([line["type"] for line in lines], ["stream-start", "log", "stream-end"])
@@ -4510,10 +4510,10 @@ class PackagedBehaviorTests(MSWTestCase):
         ]
         self.assertEqual(log_events[-1]["args"], ["--json", "--tail", "200000"])
 
-        self.env.msw("stop", "dev")
-        stopped = self.env.msw(
+        self.env.silo("stop", "dev")
+        stopped = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": json.dumps({
+            extra_env={"SILO_FAKE_LOGS": json.dumps({
                 "t": "2026-08-25T18:11:01Z",
                 "s": "system",
                 "id": None,
@@ -4536,7 +4536,7 @@ class PackagedBehaviorTests(MSWTestCase):
         )
 
     def test_app_logs_filters_the_complete_relay_session_by_structured_protocol(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         heartbeat = "\x00\x00\x00\x00\x01H"
         relay_open = "\x00\x00\x00\x00\x02O\x01"
         relay_data = "\x01\x00\x00\x00\x12GET /internal HTTP"
@@ -4553,9 +4553,9 @@ class PackagedBehaviorTests(MSWTestCase):
             {"t": f"2026-08-25T18:11:{index:02d}Z", "s": "stdout", "id": 441, "e": None, "d": message}
             for index, message in enumerate(legitimate)
         )
-        document = self.env.msw(
+        document = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+            extra_env={"SILO_FAKE_LOGS": "\n".join(map(json.dumps, records))},
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
         log_lines = [line for line in lines if line["type"] == "log"]
@@ -4565,27 +4565,27 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertNotIn("GET /internal", document.stdout)
 
     def test_app_logs_fail_closed_for_malformed_or_unsupported_json(self) -> None:
-        self.env.msw("start", "dev")
-        malformed = self.env.msw(
+        self.env.silo("start", "dev")
+        malformed = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": '{"t":"not-a-timestamp"}'},
+            extra_env={"SILO_FAKE_LOGS": '{"t":"not-a-timestamp"}'},
             check=False,
         )
         self.assertEqual(malformed.returncode, 69)
-        self.assertEqual(json.loads(malformed.stdout)["error"]["code"], "MSW_LOGS_UNAVAILABLE")
+        self.assertEqual(json.loads(malformed.stdout)["error"]["code"], "SILO_LOGS_UNAVAILABLE")
         self.assertNotIn('"type":"stream-start"', malformed.stdout)
 
-        unsupported = self.env.msw(
+        unsupported = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS_JSON_FAIL": "1"},
+            extra_env={"SILO_FAKE_LOGS_JSON_FAIL": "1"},
             check=False,
         )
         self.assertEqual(unsupported.returncode, 69)
-        self.assertEqual(json.loads(unsupported.stdout)["error"]["code"], "MSW_LOGS_UNAVAILABLE")
+        self.assertEqual(json.loads(unsupported.stdout)["error"]["code"], "SILO_LOGS_UNAVAILABLE")
         self.assertNotIn('"type":"stream-start"', unsupported.stdout)
 
     def test_app_logs_hides_origin_tagged_control_sessions_but_keeps_identical_user_output(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         marker = "\x00\x00\x00\x00\x01H"
         marker_newline = marker + "\n"
         empty_directory = json.dumps(
@@ -4618,9 +4618,9 @@ class PackagedBehaviorTests(MSWTestCase):
             {"t": "2026-08-25T18:10:16Z", "s": "stdout", "id": 503, "e": None, "d": "3000"},
             {"t": "2026-08-25T18:10:17Z", "s": "stdout", "id": 503, "e": None, "d": '{"event":"build","level":"info","ok":true}'},
         ]
-        document = self.env.msw(
+        document = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+            extra_env={"SILO_FAKE_LOGS": "\n".join(map(json.dumps, records))},
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
         log_lines = [line for line in lines if line["type"] == "log"]
@@ -4637,10 +4637,10 @@ class PackagedBehaviorTests(MSWTestCase):
             )
 
     def test_app_logs_fail_closed_for_incomplete_relay_session_without_heartbeat(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         marker = "\x00\x00\x00\x00\x01H"
         enoent = (
-            "python3: can't open file '/var/lib/msw-runtime/msw-github-relay.py': "
+            "python3: can't open file '/var/lib/silo-runtime/silo-github-relay.py': "
             "[Errno 2] No such file or directory"
         )
         records = [
@@ -4654,9 +4654,9 @@ class PackagedBehaviorTests(MSWTestCase):
             # classification is provenance-based, never content-based.
             {"t": "2026-08-25T18:10:02Z", "s": "stderr", "id": 601, "e": None, "d": enoent},
         ]
-        document = self.env.msw(
+        document = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+            extra_env={"SILO_FAKE_LOGS": "\n".join(map(json.dumps, records))},
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
         log_lines = [line for line in lines if line["type"] == "log"]
@@ -4667,7 +4667,7 @@ class PackagedBehaviorTests(MSWTestCase):
         # bounded classification window, so the marker (the session's first
         # write) is never outside the fetched window the way it would be with
         # a 200-record tail fetch.
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         marker_newline = "\x00\x00\x00\x00\x01H\n"
         base = 18 * 3600 + 10 * 60  # 18:10:00Z
         records = []
@@ -4700,9 +4700,9 @@ class PackagedBehaviorTests(MSWTestCase):
                 "t": "2026-08-25T18:%02d:%02dZ" % (tick // 60 % 60, tick % 60),
                 "s": "stdout", "id": 701, "e": None, "d": payload,
             })
-        document = self.env.msw(
+        document = self.env.silo(
             "app", "logs", "--workspace", "dev", "--format", "jsonl",
-            extra_env={"MSW_FAKE_LOGS": "\n".join(map(json.dumps, records))},
+            extra_env={"SILO_FAKE_LOGS": "\n".join(map(json.dumps, records))},
         )
         lines = [json.loads(line) for line in document.stdout.splitlines() if line.strip()]
         log_lines = [line for line in lines if line["type"] == "log"]
@@ -4718,48 +4718,48 @@ class PackagedBehaviorTests(MSWTestCase):
 
 
     def test_app_lifecycle_plan_requires_exact_confirmation_and_reconciles(self) -> None:
-        plan_document = json.loads(self.env.msw(
+        plan_document = json.loads(self.env.silo(
             "app", "plan", "start", "--workspace", "dev", "--format", "json"
         ).stdout)
         plan = plan_document["result"]
         self.assertEqual(plan["confirmationPhrase"], "START dev")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-        rejected = self.env.msw(
+        rejected = self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text="START playgrounds\n", check=False,
         )
-        self.assertFailed(rejected, "MSW_CONFIRMATION_MISMATCH")
+        self.assertFailed(rejected, "SILO_CONFIRMATION_MISMATCH")
         rejected_document = json.loads(rejected.stdout)
         self.assertEqual(rejected_document["warnings"], [])
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-        applied = json.loads(self.env.msw(
+        applied = json.loads(self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text="START dev\n",
         ).stdout)
         self.assertTrue(applied["result"]["reconciled"])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 
-        replayed = self.env.msw(
+        replayed = self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text="START dev\n", check=False,
         )
         self.assertEqual(replayed.returncode, 78)
-        self.assertFailed(replayed, "MSW_PLAN_NOT_FOUND")
+        self.assertFailed(replayed, "SILO_PLAN_NOT_FOUND")
         replayed_document = json.loads(replayed.stdout)
         self.assertEqual(replayed_document["warnings"], [])
 
     def test_app_lifecycle_failure_returns_actionable_typed_error(self) -> None:
-        plan = json.loads(self.env.msw(
+        plan = json.loads(self.env.silo(
             "app", "plan", "start", "--workspace", "dev", "--format", "json"
         ).stdout)["result"]
-        failed = self.env.msw(
+        failed = self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text="START dev\n", check=False,
             extra_env={
-                "MSW_FAKE_START_FAIL": "1",
-                "MSW_FAKE_LOGS": json.dumps({
+                "SILO_FAKE_START_FAIL": "1",
+                "SILO_FAKE_LOGS": json.dumps({
                     "message": "agentd: disk mount failed for /workspace",
                 }),
             },
@@ -4767,7 +4767,7 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(failed.returncode, 1)
         self.assertTrue(failed.stdout, (failed.stdout, failed.stderr, failed.returncode))
         document = json.loads(failed.stdout)
-        self.assertEqual(document["error"]["code"], "MSW_OPERATION_FAILED")
+        self.assertEqual(document["error"]["code"], "SILO_OPERATION_FAILED")
         self.assertIn("fake start failure", document["error"]["message"])
         self.assertIn("disk mount failed", document["error"]["message"])
         self.assertEqual(
@@ -4777,15 +4777,15 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(document["warnings"], [])
 
     def test_mount_einval_is_typed_as_workspace_disk_failure(self) -> None:
-        plan = json.loads(self.env.msw(
+        plan = json.loads(self.env.silo(
             "app", "plan", "start", "--workspace", "dev", "--format", "json"
         ).stdout)["result"]
-        failed = self.env.msw(
+        failed = self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text="START dev\n", check=False,
             extra_env={
-                "MSW_FAKE_START_FAIL": "1",
-                "MSW_FAKE_LOGS": (
+                "SILO_FAKE_START_FAIL": "1",
+                "SILO_FAKE_LOGS": (
                     "agentd: init failed: disk mount: failed to mount /dev/vdc "
                     "at /workspace as ext4: EINVAL: Invalid argument"
                 ),
@@ -4793,16 +4793,16 @@ class PackagedBehaviorTests(MSWTestCase):
         )
         self.assertEqual(failed.returncode, 78)
         error = json.loads(failed.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_WORKSPACE_DISK_INVALID")
+        self.assertEqual(error["code"], "SILO_WORKSPACE_DISK_INVALID")
         self.assertIn("could not be mounted as ext4", error["message"])
         self.assertIn("/dev/vdc", error["message"])
-        self.assertNotIn("repair the MSW runtime", error["recovery"].lower())
+        self.assertNotIn("repair the Silo runtime", error["recovery"].lower())
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_app_push_apply_reconciles_the_reviewed_commit(self) -> None:
         bare = self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        self.env.msw("clone", "dev", "acme/demo", "repo")
+        self.env.silo("clone", "dev", "acme/demo", "repo")
         repo = self.env.guest_repo("dev", "repo")
         self.env.git(repo, "config", "user.name", "App Contract")
         self.env.git(repo, "config", "user.email", "app-contract@example.invalid")
@@ -4811,14 +4811,14 @@ class PackagedBehaviorTests(MSWTestCase):
         self.env.git(repo, "commit", "-m", "Reviewed app push")
         reviewed_commit = self.env.git(repo, "rev-parse", "HEAD").stdout.strip()
 
-        plan = json.loads(self.env.msw(
+        plan = json.loads(self.env.silo(
             "app", "push-plan", "--workspace", "dev", "--repositories", "repo",
             "--format", "json",
         ).stdout)["result"]
         self.assertEqual(plan["localCommit"], reviewed_commit)
         self.assertEqual(plan["confirmationPhrase"], "PUSH")
 
-        applied = json.loads(self.env.msw(
+        applied = json.loads(self.env.silo(
             "app", "apply", plan["planId"], "--confirmation-fd", "0", "--format", "json",
             input_text="PUSH\n",
         ).stdout)["result"]
@@ -4831,63 +4831,63 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(remote_commit, reviewed_commit)
 
     def test_app_command_inventory_is_dispatched_and_guarded(self) -> None:
-        help_text = self.env.msw("app", "help").stdout
+        help_text = self.env.silo("app", "help").stdout
         for command in (
             "url", "clone", "pull", "identity", "disk", "resize", "clean",
             "upgrade", "update", "check", "backup-preview", "backup", "restore",
             "push-plan",
         ):
-            self.assertIn(f"msw app {command}", help_text)
+            self.assertIn(f"silo app {command}", help_text)
 
-        url = json.loads(self.env.msw(
+        url = json.loads(self.env.silo(
             "app", "url", "--workspace", "dev", "--port", "3000",
             "--scheme", "https", "--format", "json",
         ).stdout)
         self.assertEqual(url["command"], "url")
-        self.assertEqual(url["result"]["url"], "https://dev.msw.test:3000")
+        self.assertEqual(url["result"]["url"], "https://dev.silo.test:3000")
         self.assertFalse(url["result"]["started"])
 
-        invalid_destination = self.env.msw(
+        invalid_destination = self.env.silo(
             "app", "clone", "--workspace", "dev", "--repository", "acme/demo",
             "--destination", "../escape", "--format", "json", check=False,
         )
         self.assertEqual(invalid_destination.returncode, 64)
-        self.assertFailed(invalid_destination, "MSW_INVALID_REQUEST")
+        self.assertFailed(invalid_destination, "SILO_INVALID_REQUEST")
 
-        update_without_confirmation = self.env.msw(
+        update_without_confirmation = self.env.silo(
             "app", "update", "--format", "json", check=False,
         )
         self.assertEqual(update_without_confirmation.returncode, 77)
-        self.assertFailed(update_without_confirmation, "MSW_CONFIRMATION_MISMATCH")
+        self.assertFailed(update_without_confirmation, "SILO_CONFIRMATION_MISMATCH")
 
-        deep_without_confirmation = self.env.msw(
+        deep_without_confirmation = self.env.silo(
             "app", "check", "--deep", "--format", "json", check=False,
         )
         self.assertEqual(deep_without_confirmation.returncode, 77)
-        self.assertFailed(deep_without_confirmation, "MSW_CONFIRMATION_MISMATCH")
+        self.assertFailed(deep_without_confirmation, "SILO_CONFIRMATION_MISMATCH")
 
-        invalid_repository = self.env.msw(
+        invalid_repository = self.env.silo(
             "app", "github-bind", "--workspace", "dev", "--repository", "../escape",
             "--mode", "read-only", "--format", "json", check=False,
         )
         self.assertEqual(invalid_repository.returncode, 64)
-        self.assertFailed(invalid_repository, "MSW_INVALID_REQUEST")
+        self.assertFailed(invalid_repository, "SILO_INVALID_REQUEST")
 
-        invalid_push_path = self.env.msw(
+        invalid_push_path = self.env.silo(
             "app", "push-plan", "--workspace", "dev", "--repositories", "../escape",
             "--format", "json", check=False,
         )
         self.assertEqual(invalid_push_path.returncode, 64)
-        self.assertFailed(invalid_push_path, "MSW_INVALID_REQUEST")
+        self.assertFailed(invalid_push_path, "SILO_INVALID_REQUEST")
 
     def test_app_repository_scan_never_treats_remote_failure_as_absent(self) -> None:
         self.env.init_remote()
         self.env.configure_tokens("dev", "acme/demo")
-        self.env.msw("clone", "dev", "acme/demo", "repo")
+        self.env.silo("clone", "dev", "acme/demo", "repo")
         repo = self.env.guest_repo("dev", "repo")
         self.env.git(repo, "remote", "set-url", "origin", "https://github.com/acme/missing.git")
 
-        result = json.loads(self.env.msw(
+        result = json.loads(self.env.silo(
             "app", "repositories", "--workspace", "dev", "--if-running",
             "--include-worktree-status", "--format", "json",
         ).stdout)["result"]
@@ -4896,10 +4896,10 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual(snapshot["pushability"], "blocked")
 
     def test_app_follow_metrics_normalizes_jsonl_events(self) -> None:
-        self.env.msw("start", "dev")
-        process = self.env.msw(
+        self.env.silo("start", "dev")
+        process = self.env.silo(
             "app", "metrics", "--workspace", "dev", "--format", "json", "--follow",
-            extra_env={"MSW_FAKE_METRICS": '{"cpu":12.5}'},
+            extra_env={"SILO_FAKE_METRICS": '{"cpu":12.5}'},
         )
         events = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
         self.assertEqual([event["type"] for event in events], ["stream-start", "metrics", "stream-end"])
@@ -4914,8 +4914,8 @@ class PackagedBehaviorTests(MSWTestCase):
         self.assertEqual({item["requestId"] for item in events}, {events[0]["requestId"]})
 
 
-PROXY_BIN = PACKAGE / "bin" / "msw-github-proxy"
-HOST_KEYCHAIN_SERVICE = "org.microsandbox.Silo.github-host.v2"
+PROXY_BIN = PACKAGE / "bin" / "silo-github-proxy"
+HOST_KEYCHAIN_SERVICE = "org.silo.Silo.github-host.v2"
 HOST_KEYCHAIN_ACCOUNT = "user"
 DEV_CAP = "a" * 48
 PLAY_CAP = "b" * 48
@@ -4924,10 +4924,10 @@ HOST_TOKEN = "gho_test_token_abcdefghijklmnopqrstuvwxyz0123456789"
 PROXY_HOST = "127.0.0.1:18446"  # default proxy base (socketpair tests send this Host)
 
 
-class GitHubProxyContractTests(MSWTestCase):
-    """Path C proxy contract tests — proxy direct (MSW_TEST_MODE unset).
+class GitHubProxyContractTests(SiloTestCase):
+    """Path C proxy contract tests — proxy direct (SILO_TEST_MODE unset).
 
-    Drives the per-connection proxy (bin/msw-github-proxy +
+    Drives the per-connection proxy (bin/silo-github-proxy +
     lib/proxycore.py + lib/proxy-upstream.py) two ways:
 
     * socketpair: a fresh proxy process per request with the request bytes on
@@ -4946,7 +4946,7 @@ class GitHubProxyContractTests(MSWTestCase):
     injects the host credential (Authorization present upstream); missing/
     malformed policy, unknown/missing capability, unticked repos, and
     read-only writes all go out ANONYMOUSLY and GitHub decides. Host
-    credential per §5 seeded in MSW_TEST_KEYCHAIN_DIR.
+    credential per §5 seeded in SILO_TEST_KEYCHAIN_DIR.
 
     Named cases (contract §9): INGRESS-1..4, TIMEOUT-1, REGRESS-1/2, the
     SMUGGLE matrix (13 framing cases), the policy matrix, identity spoofing,
@@ -4955,8 +4955,8 @@ class GitHubProxyContractTests(MSWTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.env.env.pop("MSW_TEST_MODE", None)
-        self.env.env["MSW_GITHUB_MODE"] = "local"
+        self.env.env.pop("SILO_TEST_MODE", None)
+        self.env.env["SILO_GITHUB_MODE"] = "local"
         self.policy_dir = self.env.root / "policy"
         self.policy_dir.mkdir()
         self.policy_file = self.policy_dir / "github-policy.json"
@@ -4968,10 +4968,10 @@ class GitHubProxyContractTests(MSWTestCase):
                 "personal": {"capability": PERSONAL_CAP, "repos": []},
             },
         }))
-        self.env.env["MSW_POLICY_FILE"] = str(self.policy_file)
-        self.env.env["MSW_PROXY_LOG_FILE"] = str(self.env.root / "proxy.log")
+        self.env.env["SILO_POLICY_FILE"] = str(self.policy_file)
+        self.env.env["SILO_PROXY_LOG_FILE"] = str(self.env.root / "proxy.log")
         self.proxy_log = self.env.root / "proxy.log"
-        # §5 host credential record via the narrow MSW_TEST_KEYCHAIN_DIR seam.
+        # §5 host credential record via the narrow SILO_TEST_KEYCHAIN_DIR seam.
         name = (
             re.sub(r"[^A-Za-z0-9_.-]", "_", HOST_KEYCHAIN_SERVICE)
             + "__"
@@ -5004,14 +5004,14 @@ class GitHubProxyContractTests(MSWTestCase):
             "repoChecks": [],
         }))
         os.chmod(meta_file, 0o600)  # §5: metadata file is 0600
-        self.env.env["MSW_HOST_META_FILE"] = str(meta_file)
+        self.env.env["SILO_HOST_META_FILE"] = str(meta_file)
         self._fake_ctx = None
         self.fake_github: _FakeGitHubHandle | None = None
 
     def _start_fake_github(self) -> _FakeGitHubHandle:
         self._fake_ctx = self.env.start_fake_github()
         self.fake_github = self._fake_ctx.__enter__()
-        self.env.env["MSW_PROXY_UPSTREAM_ROOT"] = self.fake_github.base_url
+        self.env.env["SILO_PROXY_UPSTREAM_ROOT"] = self.fake_github.base_url
         return self.fake_github
 
     def tearDown(self) -> None:
@@ -5026,15 +5026,15 @@ class GitHubProxyContractTests(MSWTestCase):
     def _proxy_env(self, **overrides: str) -> dict[str, str]:
         env = self.env.env.copy()
         env.update({
-            "MSW_GITHUB_MODE": "local",
-            "MSW_POLICY_FILE": str(self.policy_file),
-            "MSW_PROXY_LOG_FILE": str(self.proxy_log),
-            "MSW_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
-            "MSW_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
-            "MSW_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
+            "SILO_GITHUB_MODE": "local",
+            "SILO_POLICY_FILE": str(self.policy_file),
+            "SILO_PROXY_LOG_FILE": str(self.proxy_log),
+            "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
+            "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
+            "SILO_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
         })
         if self.fake_github is not None:
-            env["MSW_PROXY_UPSTREAM_ROOT"] = self.fake_github.base_url
+            env["SILO_PROXY_UPSTREAM_ROOT"] = self.fake_github.base_url
         env.update(overrides)
         return env
 
@@ -5044,7 +5044,7 @@ class GitHubProxyContractTests(MSWTestCase):
                    capability: str | None = DEV_CAP) -> bytes:
         lines = [f"{method} {target} HTTP/{version}", f"Host: {host}"]
         if capability is not None:
-            lines.append(f"X-MSW-Capability: {capability}")
+            lines.append(f"X-Silo-Capability: {capability}")
         lines.extend(f"{name}: {value}" for name, value in headers)
         return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
 
@@ -5141,7 +5141,7 @@ class GitHubProxyContractTests(MSWTestCase):
                   headers: dict[str, str] | None = None, capability: str = DEV_CAP,
                   timeout: int = 60) -> tuple[int, dict[str, str], bytes]:
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-        h = {"Host": f"127.0.0.1:{port}", "X-MSW-Capability": capability}
+        h = {"Host": f"127.0.0.1:{port}", "X-Silo-Capability": capability}
         if headers:
             h.update(headers)
         try:
@@ -5237,7 +5237,7 @@ class GitHubProxyContractTests(MSWTestCase):
             run_cmd([SYSTEM_GIT, "-C", str(work), "commit", "-qm", "big file"], env=env)
             url = f"http://127.0.0.1:{port}/github.com/acme/demo.git"
             push = run_cmd(
-                [SYSTEM_GIT, "-C", str(work), "-c", f"http.extraHeader=X-MSW-Capability: {DEV_CAP}",
+                [SYSTEM_GIT, "-C", str(work), "-c", f"http.extraHeader=X-Silo-Capability: {DEV_CAP}",
                  "push", url, "main"],
                 env=env, timeout=120,
             )
@@ -5270,10 +5270,10 @@ class GitHubProxyContractTests(MSWTestCase):
             u = urllib.parse.urlsplit(upload_href)
             self.assertEqual(u.path, f"/objects.githubusercontent.com/objects/{oid}")
             q = urllib.parse.parse_qs(u.query)
-            for key in ("_msw_repo", "_msw_op", "_msw_exp", "_msw_sig"):
+            for key in ("_silo_repo", "_silo_op", "_silo_exp", "_silo_sig"):
                 self.assertIn(key, q)
-            self.assertEqual(q["_msw_repo"], ["acme/demo"])
-            self.assertEqual(q["_msw_op"], ["upload"])
+            self.assertEqual(q["_silo_repo"], ["acme/demo"])
+            self.assertEqual(q["_silo_op"], ["upload"])
 
             # PUT the object through the stamped URL
             status, _, body = self._http_req(port, "PUT", u.path + "?" + u.query,
@@ -5291,8 +5291,8 @@ class GitHubProxyContractTests(MSWTestCase):
             download_href = json.loads(body)["objects"][0]["actions"]["download"]["href"]
             u2 = urllib.parse.urlsplit(download_href)
             q2 = urllib.parse.parse_qs(u2.query)
-            self.assertEqual(q2["_msw_op"], ["download"])
-            self.assertEqual(q2["_msw_repo"], ["acme/demo"])
+            self.assertEqual(q2["_silo_op"], ["download"])
+            self.assertEqual(q2["_silo_repo"], ["acme/demo"])
             status, _, body = self._http_req(port, "GET", u2.path + "?" + u2.query)
             self.assertEqual(status, 200)
             self.assertEqual(body, payload)
@@ -5302,7 +5302,7 @@ class GitHubProxyContractTests(MSWTestCase):
             self.assertEqual(status, 403)
             # tampered stamp (malformed blob) denied
             bad_q = dict(q2)
-            bad_q["_msw_sig"] = ["0" * 64]
+            bad_q["_silo_sig"] = ["0" * 64]
             status, _, _ = self._http_req(
                 port, "GET", u2.path + "?" + urllib.parse.urlencode(
                     {k: v[0] for k, v in bad_q.items()}))
@@ -5318,11 +5318,11 @@ class GitHubProxyContractTests(MSWTestCase):
                 sys.path[:] = saved_path
             forged_payload = json.dumps({
                 "v": 1, "href": f"{fake.base_url}/objects/{oid}", "headers": {},
-                "op": "download", "repo": "acme/demo", "exp": q2["_msw_exp"][0],
+                "op": "download", "repo": "acme/demo", "exp": q2["_silo_exp"][0],
             }, sort_keys=True).encode()
             forged = proxycore_mod.stamp_encode(b"w" * 32, forged_payload)
             bad_q2 = dict(q2)
-            bad_q2["_msw_sig"] = [urllib.parse.quote(forged, safe="")]
+            bad_q2["_silo_sig"] = [urllib.parse.quote(forged, safe="")]
             status, _, _ = self._http_req(
                 port, "GET", u2.path + "?" + urllib.parse.urlencode(
                     {k: v[0] for k, v in bad_q2.items()}))
@@ -5335,8 +5335,8 @@ class GitHubProxyContractTests(MSWTestCase):
             }, sort_keys=True).encode()
             expired_blob = proxycore_mod.stamp_encode(real_key, expired_payload)
             expired_q = urllib.parse.urlencode({
-                "_msw_repo": "acme/demo", "_msw_op": "download", "_msw_exp": expired,
-                "_msw_sig": urllib.parse.quote(expired_blob, safe=""),
+                "_silo_repo": "acme/demo", "_silo_op": "download", "_silo_exp": expired,
+                "_silo_sig": urllib.parse.quote(expired_blob, safe=""),
             })
             status, _, _ = self._http_req(
                 port, "GET", f"/objects.githubusercontent.com/objects/{oid}?{expired_q}")
@@ -5379,8 +5379,8 @@ class GitHubProxyContractTests(MSWTestCase):
             upload_href = json.loads(body)["objects"][0]["actions"]["upload"]["href"]
             u = urllib.parse.urlsplit(upload_href)
             q_up = urllib.parse.parse_qs(u.query)
-            self.assertEqual(q_up["_msw_op"], ["upload"])
-            self.assertEqual(q_up["_msw_repo"], ["acme/demo"])
+            self.assertEqual(q_up["_silo_op"], ["upload"])
+            self.assertEqual(q_up["_silo_repo"], ["acme/demo"])
             status, _, body = self._http_req(
                 port, "PUT", u.path + "?" + u.query, body=payload,
                 headers={"Content-Type": "application/octet-stream"})
@@ -5398,8 +5398,8 @@ class GitHubProxyContractTests(MSWTestCase):
             download_href = json.loads(body)["objects"][0]["actions"]["download"]["href"]
             d = urllib.parse.urlsplit(download_href)
             q_down = urllib.parse.parse_qs(d.query)
-            self.assertEqual(q_down["_msw_op"], ["download"])
-            self.assertEqual(q_down["_msw_repo"], ["acme/demo"])
+            self.assertEqual(q_down["_silo_op"], ["download"])
+            self.assertEqual(q_down["_silo_repo"], ["acme/demo"])
             status, _, body = self._http_req(
                 port, "GET", d.path + "?" + d.query, capability=PLAY_CAP)
             self.assertEqual(status, 200, body[:200])
@@ -5428,7 +5428,7 @@ class GitHubProxyContractTests(MSWTestCase):
                 import proxycore as proxycore_mod
             finally:
                 sys.path[:] = saved_path
-            stamp_exp = q_up["_msw_exp"][0]
+            stamp_exp = q_up["_silo_exp"][0]
             forged_upload = json.dumps({
                 "v": 1, "href": f"{fake.base_url}/objects/{oid}",
                 "headers": {"Authorization": "Bearer forged-cred"},
@@ -5436,8 +5436,8 @@ class GitHubProxyContractTests(MSWTestCase):
             }, sort_keys=True).encode()
             upload_blob = proxycore_mod.stamp_encode(real_key, forged_upload)
             put_q = urllib.parse.urlencode({
-                "_msw_repo": "acme/demo", "_msw_op": "upload",
-                "_msw_exp": stamp_exp, "_msw_sig": urllib.parse.quote(upload_blob, safe=""),
+                "_silo_repo": "acme/demo", "_silo_op": "upload",
+                "_silo_exp": stamp_exp, "_silo_sig": urllib.parse.quote(upload_blob, safe=""),
             })
             status, _, body = self._http_req(
                 port, "PUT", f"/objects.githubusercontent.com/objects/{oid}?{put_q}",
@@ -5519,14 +5519,14 @@ class GitHubProxyContractTests(MSWTestCase):
                             headers=[("Content-Type", "application/vnd.git-lfs+json"),
                                      ("Content-Length", str(len(batch_body)))],
                             body=batch_body),
-            env_overrides={"MSW_POLICY_FILE": missing})
+            env_overrides={"SILO_POLICY_FILE": missing})
         self.assertEqual(status, 200, resp[:200])
         download_href = json.loads(resp.split(b"\r\n\r\n", 1)[1])[
             "objects"][0]["actions"]["download"]["href"]
         d = urllib.parse.urlsplit(download_href)
         status, resp = self._proxy_request(
             self._req_bytes("GET", d.path + "?" + d.query),
-            env_overrides={"MSW_POLICY_FILE": missing})
+            env_overrides={"SILO_POLICY_FILE": missing})
         self.assertEqual(status, 200, resp[:200])
         self.assertEqual(resp.split(b"\r\n\r\n", 1)[1], payload)
 
@@ -5557,7 +5557,7 @@ class GitHubProxyContractTests(MSWTestCase):
         record = self.env.root / "mini-revoke.jsonl"
         crafted = {}
         with self._crafted_batch_upstream(lambda: crafted, record) as mini:
-            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+            with self._proxy_listener(env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini}) as port:
                 crafted = {"transfer": "basic", "objects": [{
                     "oid": oid, "size": 9, "authenticated": True,
                     "actions": {"upload": {"href": f"{mini}/objects/{oid}",
@@ -5619,7 +5619,7 @@ class GitHubProxyContractTests(MSWTestCase):
                 "oid": oid, "size": 7, "authenticated": True,
                 "actions": {"download": {"href": f"{mini}/objects/{oid}",
                                          "header": {"Authorization": credential}}}}]}
-            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+            with self._proxy_listener(env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini}) as port:
                 # UNTICKED workspace (no grant): anonymous batch forward
                 status, _, body = self._http_req(
                     port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
@@ -5672,7 +5672,7 @@ class GitHubProxyContractTests(MSWTestCase):
                                 headers=[("Content-Type", "application/vnd.git-lfs+json"),
                                          ("Content-Length", str(len(batch_body)))],
                                 body=batch_body),
-                env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+                env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini})
         self.assertEqual(status, 403, resp[:200])          # LFS 4xx, never a pass-through
         self.assertIn(b'"message"', resp)
         entries = [json.loads(line) for line in record.read_text().splitlines() if line.strip()]
@@ -5699,7 +5699,7 @@ class GitHubProxyContractTests(MSWTestCase):
                 "actions": {"upload": {"href": f"{mini}/objects/{oid}",
                                        "header": {"Authorization": credential,
                                                   "Content-Type": "application/octet-stream"}}}}]}
-            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+            with self._proxy_listener(env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini}) as port:
                 status, _, raw_body = self._http_req(
                     port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
                     body=json.dumps({"operation": "upload", "transfers": ["basic"],
@@ -5744,7 +5744,7 @@ class GitHubProxyContractTests(MSWTestCase):
             crafted = {"transfer": "basic", "objects": [{
                 "oid": oid, "size": 7, "authenticated": True,
                 "actions": {"download": {"href": f"{mini}/objects/{oid}"}}}]}
-            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+            with self._proxy_listener(env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini}) as port:
                 guest_cookie = "session=guest-secret-cookie"
                 guest_auth = "Bearer guest-token-xyz"
                 # (a) LFS batch, ungranted capability (personal has no repos),
@@ -5825,7 +5825,7 @@ class GitHubProxyContractTests(MSWTestCase):
                                     headers=[("Content-Type", "application/vnd.git-lfs+json"),
                                              ("Content-Length", str(len(batch_body)))],
                                     body=batch_body),
-                    env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+                    env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini})
                 self.assertEqual(status, 403, f"{tag}: {resp[:200]}")
                 self.assertIn(b'"message"', resp, tag)   # LFS error shape
                 self.assertNotIn(credential.encode(), resp, tag)
@@ -5858,7 +5858,7 @@ class GitHubProxyContractTests(MSWTestCase):
         ]
         with self._crafted_batch_upstream(lambda: crafted, record) as mini:
             # (a) actionless entries pass through unchanged, 200
-            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+            with self._proxy_listener(env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini}) as port:
                 for tag, good in good_cases:
                     crafted = good
                     status, _, body = self._http_req(
@@ -5911,7 +5911,7 @@ class GitHubProxyContractTests(MSWTestCase):
                                     headers=[("Content-Type", "application/vnd.git-lfs+json"),
                                              ("Content-Length", str(len(batch_body)))],
                                     body=batch_body),
-                    env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+                    env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini})
                 self.assertEqual(status, 403, f"{tag}: {resp[:200]}")
                 self.assertIn(b'"message"', resp, tag)
                 self.assertNotIn(b"leak", resp, tag)
@@ -6051,7 +6051,7 @@ class GitHubProxyContractTests(MSWTestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            with self._proxy_listener(env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini}) as port:
+            with self._proxy_listener(env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini}) as port:
                 # UNGRANTED workspace: anonymous batch -> auth:false stamp.
                 status, _, body = self._http_req(
                     port, "POST", "/github.com/acme/demo.git/info/lfs/objects/batch",
@@ -6073,10 +6073,10 @@ class GitHubProxyContractTests(MSWTestCase):
                 loc = urllib.parse.urlsplit(location)
                 self.assertEqual(loc.path, f"/objects.githubusercontent.com/objects/{oid}")
                 loc_q = urllib.parse.parse_qs(loc.query)
-                for key in ("_msw_repo", "_msw_op", "_msw_exp", "_msw_sig"):
+                for key in ("_silo_repo", "_silo_op", "_silo_exp", "_silo_sig"):
                     self.assertIn(key, loc_q)
-                self.assertEqual(loc_q["_msw_repo"], ["acme/demo"])
-                self.assertEqual(loc_q["_msw_op"], ["download"])
+                self.assertEqual(loc_q["_silo_repo"], ["acme/demo"])
+                self.assertEqual(loc_q["_silo_op"], ["download"])
                 self.assertNotIn("X-Amz", location)          # upstream signature sealed
                 self.assertNotIn("upstream-signed", location)
                 self.assertNotIn(credential, location)       # action headers sealed
@@ -6121,7 +6121,7 @@ class GitHubProxyContractTests(MSWTestCase):
         status, resp = self._proxy_request(
             self._req_bytes("POST", "/github.com/acme/demo.git/git-upload-pack",
                             headers=[("Transfer-Encoding", "chunked")], body=body),
-            env_overrides={"MSW_PROXY_MAX_BODY_BYTES": str(cap)})
+            env_overrides={"SILO_PROXY_MAX_BODY_BYTES": str(cap)})
         self.assertEqual(status, 413, resp[:200])
         self.assertEqual(fake.requests(), [])  # upstream untouched
 
@@ -6132,7 +6132,7 @@ class GitHubProxyContractTests(MSWTestCase):
                           "match": {"path": "/acme/demo.git/info/refs", "method": "GET"}})
         status, resp = self._proxy_request(
             self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack"),
-            env_overrides={"MSW_PROXY_MAX_BODY_BYTES": str(cap)})
+            env_overrides={"SILO_PROXY_MAX_BODY_BYTES": str(cap)})
         self.assertEqual(status, 0, resp[:200])  # closed, no complete response
         injected = [r for r in fake.requests() if r.get("injected") == "oversized"]
         self.assertEqual(len(injected), 1, fake.requests())
@@ -6167,7 +6167,7 @@ class GitHubProxyContractTests(MSWTestCase):
             head = (
                 f"POST /github.com/acme/demo.git/git-upload-pack HTTP/1.1\r\n"
                 f"Host: {PROXY_HOST}\r\n"
-                f"X-MSW-Capability: {DEV_CAP}\r\n"
+                f"X-Silo-Capability: {DEV_CAP}\r\n"
                 f"Transfer-Encoding: chunked\r\n\r\n"
             ).encode()
             sock.sendall(head)
@@ -6233,7 +6233,7 @@ class GitHubProxyContractTests(MSWTestCase):
             head = (
                 f"POST /github.com/acme/demo.git/git-upload-pack HTTP/1.1\r\n"
                 f"Host: 127.0.0.1:{port}\r\n"
-                f"X-MSW-Capability: {DEV_CAP}\r\n"
+                f"X-Silo-Capability: {DEV_CAP}\r\n"
                 f"Transfer-Encoding: chunked\r\n\r\n"
             ).encode()
             payload = head + f"{body_size:x}\r\n".encode() + body + b"\r\n0\r\n\r\n"
@@ -6248,7 +6248,7 @@ class GitHubProxyContractTests(MSWTestCase):
             finally:
                 s.close()
 
-        with self._proxy_listener(env_overrides={"MSW_PROXY_MAX_BODY_BYTES": str(64 * 1024 * 1024)}) as port:
+        with self._proxy_listener(env_overrides={"SILO_PROXY_MAX_BODY_BYTES": str(64 * 1024 * 1024)}) as port:
             threads = [threading.Thread(target=one_client, args=(port,)) for _ in range(n_clients)]
             for t in threads:
                 t.start()
@@ -6312,7 +6312,7 @@ class GitHubProxyContractTests(MSWTestCase):
         fake.set_control(slow)
         t0 = time.monotonic()
         status, resp = self._proxy_request(
-            raw, env_overrides={"MSW_PROXY_IDLE_TIMEOUT": "1", "MSW_PROXY_TOTAL_DEADLINE": "30"})
+            raw, env_overrides={"SILO_PROXY_IDLE_TIMEOUT": "1", "SILO_PROXY_TOTAL_DEADLINE": "30"})
         idle_elapsed = time.monotonic() - t0
         self.assertEqual(status, 0, resp[:200])  # torn down, no response
         self.assertLess(idle_elapsed, 3.0)
@@ -6321,7 +6321,7 @@ class GitHubProxyContractTests(MSWTestCase):
         fake.set_control(slow)
         t0 = time.monotonic()
         status, resp = self._proxy_request(
-            raw, env_overrides={"MSW_PROXY_IDLE_TIMEOUT": "30", "MSW_PROXY_TOTAL_DEADLINE": "2"})
+            raw, env_overrides={"SILO_PROXY_IDLE_TIMEOUT": "30", "SILO_PROXY_TOTAL_DEADLINE": "2"})
         deadline_elapsed = time.monotonic() - t0
         self.assertEqual(status, 0, resp[:200])
         self.assertGreaterEqual(deadline_elapsed, 1.0)
@@ -6512,7 +6512,7 @@ class GitHubProxyContractTests(MSWTestCase):
         # missing policy file: anonymous, forwarded
         status, resp = self._proxy_request(
             self._req_bytes("GET", read_adv),
-            env_overrides={"MSW_POLICY_FILE": str(self.env.root / "missing-policy.json")})
+            env_overrides={"SILO_POLICY_FILE": str(self.env.root / "missing-policy.json")})
         self.assertEqual(status, 200, resp[:200])
         self.assertNotIn(b"ERR ", resp)
         # malformed policy file: anonymous, forwarded
@@ -6520,7 +6520,7 @@ class GitHubProxyContractTests(MSWTestCase):
         bad.write_text("{not json!!")
         status, resp = self._proxy_request(
             self._req_bytes("GET", read_adv),
-            env_overrides={"MSW_POLICY_FILE": str(bad)})
+            env_overrides={"SILO_POLICY_FILE": str(bad)})
         self.assertEqual(status, 200, resp[:200])
         self.assertNotIn(b"ERR ", resp)
 
@@ -6544,7 +6544,7 @@ class GitHubProxyContractTests(MSWTestCase):
     def test_proxy_policy_uses_persisted_non_default_workspace_list(self) -> None:
         fake = self._start_fake_github()
         self.env.init_remote()
-        workspace_file = self.env.home / ".config/msw/workspaces.json"
+        workspace_file = self.env.home / ".config/silo/workspaces.json"
         workspace_file.write_text(json.dumps({
             "schemaVersion": 1,
             "workspaces": [
@@ -6698,7 +6698,7 @@ class GitHubProxyContractTests(MSWTestCase):
         self.assertTrue(records[-2]["authorization_present"], records)
 
     def _bridge_procs(self) -> list[str]:
-        proc = subprocess.run(["/usr/bin/pgrep", "-f", "msw-keychain-bridge"],
+        proc = subprocess.run(["/usr/bin/pgrep", "-f", "silo-keychain-bridge"],
                               capture_output=True, text=True)
         if proc.returncode != 0:
             return []
@@ -6718,11 +6718,11 @@ class GitHubProxyContractTests(MSWTestCase):
         fake = self._start_fake_github()
         self.env.init_remote()
         hang_env = {
-            "MSW_TEST_KEYCHAIN_DIR": "",  # force the real bridge path
-            "MSW_FAKE_BRIDGE_HANG": "1",
-            "MSW_KEYCHAIN_TIMEOUT_SECS": "30",   # worker would outlive caller
-            "MSW_HOST_TOKEN_TIMEOUT_SECS": "3", # helper kills bridge group
-            "MSW_HOST_TOKEN_TIMEOUT": "1",      # proxy must clamp to >= 11
+            "SILO_TEST_KEYCHAIN_DIR": "",  # force the real bridge path
+            "SILO_FAKE_BRIDGE_HANG": "1",
+            "SILO_KEYCHAIN_TIMEOUT_SECS": "30",   # worker would outlive caller
+            "SILO_HOST_TOKEN_TIMEOUT_SECS": "3", # helper kills bridge group
+            "SILO_HOST_TOKEN_TIMEOUT": "1",      # proxy must clamp to >= 11
         }
         t0 = time.monotonic()
         status, resp = self._proxy_request(
@@ -6773,7 +6773,7 @@ class GitHubProxyContractTests(MSWTestCase):
             run_cmd([SYSTEM_GIT, "-C", str(work), "commit", "-qm", "anon push"], env=env)
             url = f"http://127.0.0.1:{port}/github.com/acme/demo.git"
             push = run_cmd(
-                [SYSTEM_GIT, "-C", str(work), "-c", f"http.extraHeader=X-MSW-Capability: {PLAY_CAP}",
+                [SYSTEM_GIT, "-C", str(work), "-c", f"http.extraHeader=X-Silo-Capability: {PLAY_CAP}",
                  "push", url, "main"],
                 env=env, timeout=120)
             self.assertEqual(push.returncode, 0, push.stdout + push.stderr)
@@ -6821,7 +6821,7 @@ class GitHubProxyContractTests(MSWTestCase):
             status, resp = self._proxy_request(
                 self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack",
                                 capability=PERSONAL_CAP),
-                env_overrides={"MSW_PROXY_UPSTREAM_ROOT": mini})
+                env_overrides={"SILO_PROXY_UPSTREAM_ROOT": mini})
             self.assertEqual(status, 403, resp[:200])
             self.assertIn(b'"message"', resp)
             self.assertNotIn(b"ERR ", resp)
@@ -6866,7 +6866,7 @@ class GitHubProxyContractTests(MSWTestCase):
         # shape denial (git ERR on a git endpoint)
         status, resp = self._proxy_request(
             self._req_bytes("GET", write_adv, capability=None, headers=[
-                ("X-MSW-Capability", DEV_CAP), ("X-MSW-Capability", PLAY_CAP)]))
+                ("X-Silo-Capability", DEV_CAP), ("X-Silo-Capability", PLAY_CAP)]))
         self.assertEqual(status, 200, resp[:200])
         self.assertIn(b"ERR ", resp)
         records = fake.requests()
@@ -6951,14 +6951,14 @@ class GitHubProxyContractTests(MSWTestCase):
             # covered-host redirect -> rewritten to the proxy form
             status, resp = self._proxy_request(
                 self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack"),
-                env_overrides={"MSW_PROXY_UPSTREAM_ROOT": f"http://127.0.0.1:{mini_port}"})
+                env_overrides={"SILO_PROXY_UPSTREAM_ROOT": f"http://127.0.0.1:{mini_port}"})
             self.assertEqual(status, 302)
             self.assertIn(f"Location: http://{PROXY_HOST}/github.com/elsewhere", resp.decode("latin-1", "replace"))
             # other-host redirect -> 403 (surfaced as a git ERR pkt-line)
             SetTargetHandler.target = "https://evil.example/x"
             status, resp = self._proxy_request(
                 self._req_bytes("GET", "/github.com/acme/demo.git/info/refs?service=git-upload-pack"),
-                env_overrides={"MSW_PROXY_UPSTREAM_ROOT": f"http://127.0.0.1:{mini_port}"})
+                env_overrides={"SILO_PROXY_UPSTREAM_ROOT": f"http://127.0.0.1:{mini_port}"})
             self.assertEqual(status, 200, resp[:200])
             self.assertIn(b"ERR redirect to a non-covered host", resp)
         finally:
@@ -7047,17 +7047,17 @@ class GitHubProxyContractTests(MSWTestCase):
         self.assertEqual(fake.proc.poll(), 0)
 
 
-class _LocalModeGitHubBase(MSWTestCase):
+class _LocalModeGitHubBase(SiloTestCase):
     """Shared fixtures for Path C §5/§8/§11 local-mode CLI tests."""
 
     POLICY_DIR_NAME = "Library/Application Support/Silo"
 
     def setUp(self) -> None:
         super().setUp()
-        self.env.env["MSW_GITHUB_MODE"] = "local"
-        self.env.env["MSW_JQ_BIN"] = "/usr/bin/jq"
-        self.env.env["MSW_HOST_KEYCHAIN_SERVICE"] = HOST_KEYCHAIN_SERVICE
-        self.env.env["MSW_HOST_KEYCHAIN_ACCOUNT"] = HOST_KEYCHAIN_ACCOUNT
+        self.env.env["SILO_GITHUB_MODE"] = "local"
+        self.env.env["SILO_JQ_BIN"] = "/usr/bin/jq"
+        self.env.env["SILO_HOST_KEYCHAIN_SERVICE"] = HOST_KEYCHAIN_SERVICE
+        self.env.env["SILO_HOST_KEYCHAIN_ACCOUNT"] = HOST_KEYCHAIN_ACCOUNT
 
     @property
     def policy_path(self) -> Path:
@@ -7073,7 +7073,7 @@ class _LocalModeGitHubBase(MSWTestCase):
 
     @property
     def github_meta_dir(self) -> Path:
-        return self.env.home / ".config/msw/github"
+        return self.env.home / ".config/silo/github"
 
     def set_policy(self, payload: object) -> None:
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7087,18 +7087,18 @@ class _LocalModeGitHubBase(MSWTestCase):
         }})
 
     def guest_relay_path(self, box: str) -> Path:
-        """Host path of the fake guest's /var/lib/msw-runtime relay artifact
+        """Host path of the fake guest's /var/lib/silo-runtime relay artifact
         (mirrors map_guest_path/guest_runtime in fake_msb)."""
         state = self.env.state()
         sb = state["sandboxes"][box]
         name = sb.get("runtime_volume")
         if name:
             base = Path(state["volumes"][name]["path"])
-            if base.is_file() and os.environ.get("MSW_TEST_VALIDATE_RAW_DISKS") == "1":
+            if base.is_file() and os.environ.get("SILO_TEST_VALIDATE_RAW_DISKS") == "1":
                 base = base.parent / "guest-data"
         else:
             base = Path(sb["root"]) / "runtime"
-        return base / "msw-github-relay.py"
+        return base / "silo-github-relay.py"
 
     def host_record(self, *, token: str = HOST_TOKEN, generation: int = 1,
                     provider: str = "gh-cli", kind: str = "oauth",
@@ -7159,19 +7159,19 @@ class _LocalModeGitHubBase(MSWTestCase):
     def host_tool_env(self) -> dict[str, str]:
         env = self.env.env.copy()
         env.update({
-            "MSW_GITHUB_MODE": "local",
-            "MSW_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
-            "MSW_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
-            "MSW_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
-            "MSW_HOST_META_FILE": str(self.host_meta_path),
-            "MSW_JQ_BIN": "/usr/bin/jq",
-            "MSW_HOST_TOKEN_BIN": str(PACKAGE / "bin" / "msw-github-host-token"),
+            "SILO_GITHUB_MODE": "local",
+            "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
+            "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
+            "SILO_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
+            "SILO_HOST_META_FILE": str(self.host_meta_path),
+            "SILO_JQ_BIN": "/usr/bin/jq",
+            "SILO_HOST_TOKEN_BIN": str(PACKAGE / "bin" / "silo-github-host-token"),
         })
         return env
 
     def prepare_guest_repo(self, *, box: str = "dev", path: str = "repo") -> Path:
         self.env.init_remote()
-        self.env.msw("clone", box, "acme/demo", path)
+        self.env.silo("clone", box, "acme/demo", path)
         repo = self.env.guest_repo(box, path)
         self.env.git(repo, "config", "user.name", "Test")
         self.env.git(repo, "config", "user.email", "test@example.invalid")
@@ -7185,10 +7185,10 @@ class GitHubProxyTests(_LocalModeGitHubBase):
     """Path C CLI-driven local-mode tests: host credential lifecycle, verify,
     remove, policy get/set, push gates (§8), askpass and host-token helpers."""
 
-    # ---- host credential helpers (bin/msw-github-host-token) ------------
+    # ---- host credential helpers (bin/silo-github-host-token) ------------
 
     def test_host_token_helper_fail_closed_matrix(self) -> None:
-        helper = PACKAGE / "bin" / "msw-github-host-token"
+        helper = PACKAGE / "bin" / "silo-github-host-token"
         env = self.host_tool_env()
         # missing record -> empty stdout, exit 1
         proc = run_cmd([helper], env=env, check=False)
@@ -7253,7 +7253,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         marker = self.env.root / "credential-disabled"
         marker.write_text("revoked\n")
         marker_env = dict(env)
-        marker_env["MSW_CREDENTIAL_DENY_MARKER"] = str(marker)
+        marker_env["SILO_CREDENTIAL_DENY_MARKER"] = str(marker)
         proc = run_cmd([helper], env=marker_env, check=False)
         self.assertEqual(proc.returncode, 1, "global deny marker must deny first")
         self.assertEqual(proc.stdout, "")
@@ -7266,7 +7266,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(proc.stdout, HOST_TOKEN + "\n")
         # the helper needs NO jq (stdlib parse; jq absent from PATH)
-        no_jq_env = {k: v for k, v in env.items() if k != "MSW_JQ_BIN"}
+        no_jq_env = {k: v for k, v in env.items() if k != "SILO_JQ_BIN"}
         no_jq_env["PATH"] = "/usr/bin:/bin"
         proc = run_cmd([helper], env=no_jq_env, check=False)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -7281,13 +7281,13 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         record_before = self.host_key_path.read_text()
         meta_before = self.host_meta_path.read_text()
         env = self.host_tool_env()
-        env["MSW_TEST_KEYCHAIN_DIR"] = ""
-        env["MSW_HOST_META_FILE"] = str(self.host_meta_path)
-        env["MSW_FAKE_BRIDGE_HANG"] = "1"
-        env["MSW_KEYCHAIN_TIMEOUT_SECS"] = "30"   # bridge watchdog longer
-        env["MSW_HOST_TOKEN_TIMEOUT_SECS"] = "5"  # the helper OUTER bounds it
+        env["SILO_TEST_KEYCHAIN_DIR"] = ""
+        env["SILO_HOST_META_FILE"] = str(self.host_meta_path)
+        env["SILO_FAKE_BRIDGE_HANG"] = "1"
+        env["SILO_KEYCHAIN_TIMEOUT_SECS"] = "30"   # bridge watchdog longer
+        env["SILO_HOST_TOKEN_TIMEOUT_SECS"] = "5"  # the helper OUTER bounds it
         start = time.monotonic()
-        proc = run_cmd([PACKAGE / "bin" / "msw-github-host-token"], env=env, check=False, timeout=30)
+        proc = run_cmd([PACKAGE / "bin" / "silo-github-host-token"], env=env, check=False, timeout=30)
         elapsed = time.monotonic() - start
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual(proc.stdout, "")  # fail-closed: no token
@@ -7297,7 +7297,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(self.host_meta_path.read_text(), meta_before)
         # no descendant bridge/worker processes remain
         time.sleep(0.3)
-        leftover = subprocess.run(["pgrep", "-f", "msw-keychain-bridge"],
+        leftover = subprocess.run(["pgrep", "-f", "silo-keychain-bridge"],
                                   stdout=subprocess.PIPE, text=True)
         self.assertNotEqual(leftover.returncode, 0, "bridge descendants must be killed")
 
@@ -7308,24 +7308,24 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.seed_host_credential()
         self.seed_host_meta()
         env = self.host_tool_env()
-        env["MSW_TEST_KEYCHAIN_DIR"] = ""
-        env["MSW_FAKE_BRIDGE_HANG"] = "1"
-        env["MSW_KEYCHAIN_TIMEOUT_SECS"] = "2"
-        env["MSW_HOST_TOKEN_TIMEOUT_SECS"] = "5"
+        env["SILO_TEST_KEYCHAIN_DIR"] = ""
+        env["SILO_FAKE_BRIDGE_HANG"] = "1"
+        env["SILO_KEYCHAIN_TIMEOUT_SECS"] = "2"
+        env["SILO_HOST_TOKEN_TIMEOUT_SECS"] = "5"
         start = time.monotonic()
-        proc = run_cmd([PACKAGE / "bin" / "msw-git-askpass", "Password for 'https://user@github.com': "],
+        proc = run_cmd([PACKAGE / "bin" / "silo-git-askpass", "Password for 'https://user@github.com': "],
                        env=env, check=False, timeout=30)
         elapsed = time.monotonic() - start
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual(proc.stdout, "")
         self.assertLess(elapsed, 15, "askpass must be bounded via the helper")
         time.sleep(0.3)
-        leftover = subprocess.run(["pgrep", "-f", "msw-keychain-bridge"],
+        leftover = subprocess.run(["pgrep", "-f", "silo-keychain-bridge"],
                                   stdout=subprocess.PIPE, text=True)
         self.assertNotEqual(leftover.returncode, 0, "bridge descendants must be killed")
 
     def test_askpass_local_emits_token_only_for_github(self) -> None:
-        askpass = PACKAGE / "bin" / "msw-git-askpass"
+        askpass = PACKAGE / "bin" / "silo-git-askpass"
         env = self.host_tool_env()
         self.seed_host_credential()
         self.seed_host_meta()
@@ -7361,12 +7361,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         with self.env.start_fake_github() as fake:
             env = self.env.env.copy()
             env.update({
-                "MSW_GH_BIN": str(FAKE_GH),
-                "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_GH_BIN": str(FAKE_GH),
+                "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "auth", "--json", extra_env=env)
+            proc = self.env.silo("github", "auth", "--json", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)
             self.assertEqual(result["provider"], "gh-cli")
@@ -7402,12 +7402,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         with self.env.start_fake_github() as fake:
             env = self.env.env.copy()
             env.update({
-                "MSW_GH_BIN": str(FAKE_GH),
-                "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_GH_BIN": str(FAKE_GH),
+                "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "auth", "--force", "--json", extra_env=env)
+            proc = self.env.silo("github", "auth", "--force", "--json", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)
             self.assertEqual(result["generation"], 2)
@@ -7419,7 +7419,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.seed_host_credential(self.host_record(generation=7))
         self.seed_host_meta(generation=7)
         before = self.host_key_path.read_text()
-        proc = self.env.msw("github", "auth", "--json")
+        proc = self.env.silo("github", "auth", "--json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
         self.assertEqual(result["generation"], 7)
@@ -7427,9 +7427,9 @@ class GitHubProxyTests(_LocalModeGitHubBase):
 
     def test_auth_not_configured_fails_closed_without_persisting(self) -> None:
         env = self.env.env.copy()
-        env["MSW_GH_BIN"] = "/nonexistent/gh"
-        proc = self.env.msw("github", "auth", check=False, extra_env=env)
-        self.assertFailed(proc, "MSW_HOST_OAUTH_CLIENT_ID")
+        env["SILO_GH_BIN"] = "/nonexistent/gh"
+        proc = self.env.silo("github", "auth", check=False, extra_env=env)
+        self.assertFailed(proc, "SILO_HOST_OAUTH_CLIENT_ID")
         self.assertFalse(self.host_key_path.exists())
         self.assertFalse(self.host_meta_path.exists())
 
@@ -7446,12 +7446,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                 {"acme/demo": {"permissions": {"push": False}}}))
             env = self.env.env.copy()
             env.update({
-                "MSW_GH_BIN": str(FAKE_GH),
-                "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_GH_BIN": str(FAKE_GH),
+                "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "auth", check=False, extra_env=env)
+            proc = self.env.silo("github", "auth", check=False, extra_env=env)
             self.assertFailed(proc, "verification failed")
             self.assertFalse(self.host_key_path.exists())
             self.assertFalse(self.host_meta_path.exists())
@@ -7459,15 +7459,15 @@ class GitHubProxyTests(_LocalModeGitHubBase):
     def test_remove_local_revokes_metadata_first_and_keeps_legacy_items(self) -> None:
         self.seed_host_credential()
         self.seed_host_meta()
-        legacy = self.env.key_file("msw.github.read", "dev")
+        legacy = self.env.key_file("silo.github.read", "dev")
         legacy.write_text("github_pat_LEGACY_abcdefghijklmnopqrstuvwxyz0123456789")
-        proc = self.env.msw("github", "remove", "dev")
+        proc = self.env.silo("github", "remove", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(self.host_meta_path.exists())
         self.assertFalse(self.host_key_path.exists())
         self.assertTrue(legacy.exists())  # §1: legacy items never deleted
         # idempotent
-        proc = self.env.msw("github", "remove", "dev")
+        proc = self.env.silo("github", "remove", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_remove_local_unproven_metadata_deletion_quarantines(self) -> None:
@@ -7479,8 +7479,8 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # tombstone is surfaced as a failure with a quarantine, and every
         # helper keeps denying.
         env = self.env.env.copy()
-        env["MSW_FAKE_HOST_META_WRITE_FAIL"] = "1"
-        proc = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+        env["SILO_FAKE_HOST_META_WRITE_FAIL"] = "1"
+        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
         self.assertFailed(proc, "removal failed")
         quarantine = self.github_meta_dir / "dev.quarantine"
         self.assertTrue(quarantine.exists())
@@ -7488,7 +7488,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # the KEYCHAIN RECORD is proven deleted (the token cannot be emitted)
         self.assertFalse(self.host_key_path.exists())
         # the global deny marker remains (helpers deny even with stale state)
-        self.assertTrue((self.env.home / ".config/msw/credential-disabled").exists())
+        self.assertTrue((self.env.home / ".config/silo/credential-disabled").exists())
 
     # ---- verify (local probe) -------------------------------------------
 
@@ -7505,10 +7505,10 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         with self.env.start_fake_github() as fake:
             env = self.env.env.copy()
             env.update({
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "verify", "dev", "acme/demo", extra_env=env)
+            proc = self.env.silo("github", "verify", "dev", "acme/demo", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("Account:          fake-user", proc.stdout)
             self.assertIn("push=true", proc.stdout)
@@ -7524,9 +7524,9 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "playgrounds": {"capability": PLAY_CAP, "repos": []},
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
-        proc = self.env.msw("github", "verify", "dev", check=False)
+        proc = self.env.silo("github", "verify", "dev", check=False)
         self.assertFailed(proc, "host GitHub credential is missing")
-        self.assertIn("msw github auth", proc.stdout + proc.stderr)
+        self.assertIn("silo github auth", proc.stdout + proc.stderr)
 
     def test_verify_local_fails_on_push_probe_rejection(self) -> None:
         self.empty_policy()
@@ -7542,10 +7542,10 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                 {"acme/demo": {"permissions": {"push": False}}}))
             env = self.env.env.copy()
             env.update({
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "verify", "dev", "acme/demo", check=False, extra_env=env)
+            proc = self.env.silo("github", "verify", "dev", "acme/demo", check=False, extra_env=env)
             self.assertFailed(proc, "verification failed")
             self.assertIn("auth --force", proc.stdout + proc.stderr)
 
@@ -7558,7 +7558,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "playgrounds": {"capability": PLAY_CAP, "repos": []},
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
-        proc = self.env.msw("github", "status", "--format", "json")
+        proc = self.env.silo("github", "status", "--format", "json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
         self.assertEqual(result["mode"], "local")
@@ -7568,7 +7568,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(dev["hostCredential"], "missing")
         # missing policy still yields a repos array
         (self.policy_path).unlink()
-        proc = self.env.msw("github", "status", "--format", "json")
+        proc = self.env.silo("github", "status", "--format", "json")
         result = json.loads(proc.stdout)
         dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["capability"], "missing")
@@ -7578,7 +7578,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
     # ---- app github-policy-get/set (journaled) --------------------------
 
     def test_app_policy_set_get_roundtrip_capability_preserved_and_journal(self) -> None:
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                             "--repository", "Acme/Demo.git", "--mode", "read-write",
                             "--format", "json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -7594,7 +7594,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         capability = data["capability"]
 
         # get round-trip
-        proc = self.env.msw("app", "github-policy-get", "--workspace", "dev", "--format", "json")
+        proc = self.env.silo("app", "github-policy-get", "--workspace", "dev", "--format", "json")
         result = json.loads(proc.stdout)
         self.assertTrue(result["ok"])
         dev = next(w for w in result["result"]["workspaces"] if w["workspace"] == "dev")
@@ -7602,23 +7602,23 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(dev["repos"], [{"canonical": "acme/demo", "mode": "read-write"}])
 
         # mode update preserves capability
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                             "--repository", "acme/demo", "--mode", "read-only", "--format", "json")
         data = json.loads(proc.stdout)["result"]
         self.assertEqual(data["mode"], "read-only")
         self.assertEqual(data["capability"], capability)
 
         # remove
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                             "--repository", "acme/demo", "--remove", "--format", "json")
         data = json.loads(proc.stdout)["result"]
         self.assertEqual(data["repos"], [])
         self.assertEqual(data["capability"], capability)
 
         # set again, then clear
-        self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        self.env.silo("app", "github-policy-set", "--workspace", "dev",
                      "--repository", "acme/demo", "--mode", "read-write", "--format", "json")
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev", "--clear", "--format", "json")
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev", "--clear", "--format", "json")
         data = json.loads(proc.stdout)["result"]
         self.assertEqual(data["action"], "clear")
         self.assertEqual(data["repos"], [])
@@ -7631,29 +7631,29 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertIn('"action":"clear"', journal)
 
     def test_app_policy_errors_are_typed(self) -> None:
-        # missing policy -> MSW_POLICY_MISSING
-        proc = self.env.msw("app", "github-policy-get", "--format", "json", check=False)
+        # missing policy -> SILO_POLICY_MISSING
+        proc = self.env.silo("app", "github-policy-get", "--format", "json", check=False)
         self.assertEqual(proc.returncode, 78)
         err = json.loads(proc.stdout)["error"]
-        self.assertEqual(err["code"], "MSW_POLICY_MISSING")
-        # invalid mode -> MSW_INVALID_REQUEST
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        self.assertEqual(err["code"], "SILO_POLICY_MISSING")
+        # invalid mode -> SILO_INVALID_REQUEST
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                             "--repository", "acme/demo", "--mode", "bogus", "--format", "json",
                             check=False)
         self.assertEqual(proc.returncode, 64)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_INVALID_REQUEST")
-        # invalid repository -> MSW_INVALID_REQUEST
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_INVALID_REQUEST")
+        # invalid repository -> SILO_INVALID_REQUEST
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                             "--repository", "not-a-repo", "--mode", "read-only", "--format", "json",
                             check=False)
         self.assertEqual(proc.returncode, 64)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_INVALID_REQUEST")
-        # connect mode -> MSW_GITHUB_MODE_MISMATCH
-        proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_INVALID_REQUEST")
+        # connect mode -> SILO_GITHUB_MODE_MISMATCH
+        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                             "--repository", "acme/demo", "--mode", "read-only", "--format", "json",
-                            check=False, extra_env={"MSW_GITHUB_MODE": "connect"})
+                            check=False, extra_env={"SILO_GITHUB_MODE": "connect"})
         self.assertEqual(proc.returncode, 69)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_GITHUB_MODE_MISMATCH")
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_GITHUB_MODE_MISMATCH")
 
     def test_app_policy_set_refuses_when_lock_held(self) -> None:
         lock = self.github_meta_dir / "dev.lock"
@@ -7663,12 +7663,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(holder.stdout.readline().strip(), "READY")
-            proc = self.env.msw("app", "github-policy-set", "--workspace", "dev",
+            proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
                                 "--repository", "acme/demo", "--mode", "read-write",
                                 "--format", "json", check=False)
             self.assertEqual(proc.returncode, 73)
             err = json.loads(proc.stdout)["error"]
-            self.assertEqual(err["code"], "MSW_OPERATION_CONFLICT")
+            self.assertEqual(err["code"], "SILO_OPERATION_CONFLICT")
             self.assertTrue(err["retryable"])
         finally:
             holder.kill()
@@ -7688,7 +7688,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.seed_host_credential()
         self.seed_host_meta()
         self.prepare_guest_repo()
-        proc = self.env.msw("push", "dev", "repo", "--yes")
+        proc = self.env.silo("push", "dev", "repo", "--yes")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("pushed main from dev:repo", proc.stdout)
 
@@ -7696,7 +7696,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.empty_policy()
         self.seed_host_credential()
         self.prepare_guest_repo()
-        proc = self.env.msw("push", "dev", "repo", "--yes", check=False)
+        proc = self.env.silo("push", "dev", "repo", "--yes", check=False)
         self.assertFailed(proc, "has no credential grant on workspace 'dev'")
         self.assertIn("github-policy-set", proc.stdout + proc.stderr)
 
@@ -7708,9 +7708,9 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
         self.prepare_guest_repo()
-        proc = self.env.msw("push", "dev", "repo", "--yes", check=False)
+        proc = self.env.silo("push", "dev", "repo", "--yes", check=False)
         self.assertFailed(proc, "host GitHub credential is not provisioned")
-        self.assertIn("msw github auth", proc.stdout + proc.stderr)
+        self.assertIn("silo github auth", proc.stdout + proc.stderr)
 
     def test_auth_gh_reuse_is_fully_noninteractive_non_tty(self) -> None:
         self.env.init_remote()
@@ -7718,13 +7718,13 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         with self.env.start_fake_github() as fake:
             env = self.env.env.copy()
             env.update({
-                "MSW_GH_BIN": str(FAKE_GH),
-                "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_GH_BIN": str(FAKE_GH),
+                "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
             # stdin is a pipe (not a TTY); the gh-reuse path must still work
-            proc = self.env.msw("github", "auth", "--json", input_text="", extra_env=env)
+            proc = self.env.silo("github", "auth", "--json", input_text="", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertEqual(json.loads(proc.stdout)["provider"], "gh-cli")
 
@@ -7742,12 +7742,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             state_path.write_text(json.dumps(state))
             env = self.env.env.copy()
             env.update({
-                "MSW_GH_BIN": str(FAKE_GH),
-                "MSW_FAKE_GH_STATE": str(state_path),
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_GH_BIN": str(FAKE_GH),
+                "SILO_FAKE_GH_STATE": str(state_path),
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "auth", "--json", extra_env=env)
+            proc = self.env.silo("github", "auth", "--json", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)
             self.assertEqual(result["provider"], "gh-cli")
@@ -7765,16 +7765,16 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         network claim, and persists nothing."""
         env = self.env.env.copy()
         env.update({
-            "MSW_GH_BIN": str(FAKE_GH),
-            "MSW_FAKE_GH_STATE": str(self.fake_gh_state(authed=False, token="")),
+            "SILO_GH_BIN": str(FAKE_GH),
+            "SILO_FAKE_GH_STATE": str(self.fake_gh_state(authed=False, token="")),
         })
-        proc = self.env.msw("github", "auth", "--json", check=False, extra_env=env)
+        proc = self.env.silo("github", "auth", "--json", check=False, extra_env=env)
         self.assertEqual(proc.returncode, 66)
         error = json.loads(proc.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_HOST_OAUTH_NOT_CONFIGURED")
+        self.assertEqual(error["code"], "SILO_HOST_OAUTH_NOT_CONFIGURED")
         joined = " ".join(error["remedies"])
         self.assertIn("gh auth login", joined)
-        self.assertIn("MSW_HOST_OAUTH_CLIENT_ID", joined)
+        self.assertIn("SILO_HOST_OAUTH_CLIENT_ID", joined)
         self.assertFalse(self.host_key_path.exists())
         self.assertFalse(self.host_meta_path.exists())
 
@@ -7795,14 +7795,14 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         curl_bin.chmod(0o755)
         env = self.env.env.copy()
         env.update({
-            "MSW_GH_BIN": str(FAKE_GH),
-            "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-            "MSW_CURL_BIN": str(curl_bin),
+            "SILO_GH_BIN": str(FAKE_GH),
+            "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+            "SILO_CURL_BIN": str(curl_bin),
         })
-        proc = self.env.msw("github", "auth", "--json", check=False, extra_env=env)
+        proc = self.env.silo("github", "auth", "--json", check=False, extra_env=env)
         self.assertEqual(proc.returncode, 68, proc.stdout + proc.stderr)
         error = json.loads(proc.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_HOST_CREDENTIAL_VERIFICATION_FAILED")
+        self.assertEqual(error["code"], "SILO_HOST_CREDENTIAL_VERIFICATION_FAILED")
         joined = " ".join(error["remedies"])
         self.assertIn("verification failed", error["message"])
         self.assertNotIn("not authenticated", error["message"])
@@ -7813,14 +7813,14 @@ class GitHubProxyTests(_LocalModeGitHubBase):
 
     def test_auth_not_configured_json_error_names_both_remedies(self) -> None:
         env = self.env.env.copy()
-        env["MSW_GH_BIN"] = "/nonexistent/gh"
-        proc = self.env.msw("github", "auth", "--json", check=False, extra_env=env)
+        env["SILO_GH_BIN"] = "/nonexistent/gh"
+        proc = self.env.silo("github", "auth", "--json", check=False, extra_env=env)
         self.assertEqual(proc.returncode, 66)
         error = json.loads(proc.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_HOST_OAUTH_NOT_CONFIGURED")
+        self.assertEqual(error["code"], "SILO_HOST_OAUTH_NOT_CONFIGURED")
         joined = " ".join(error["remedies"])
         self.assertIn("gh auth login", joined)
-        self.assertIn("MSW_HOST_OAUTH_CLIENT_ID", joined)
+        self.assertIn("SILO_HOST_OAUTH_CLIENT_ID", joined)
         self.assertFalse(self.host_key_path.exists())
 
     def test_auth_device_start_and_complete(self) -> None:
@@ -7828,12 +7828,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         with self.env.start_fake_github() as fake:
             env = self.env.env.copy()
             env.update({
-                "MSW_HOST_OAUTH_CLIENT_ID": "test-client-id",
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_HOST_OAUTH_CLIENT_ID": "test-client-id",
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
             # start: one POST /login/device/code, no polling, no token exchange
-            proc = self.env.msw("github", "auth", "--device", "--format", "json", extra_env=env)
+            proc = self.env.silo("github", "auth", "--device", "--format", "json", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             start = json.loads(proc.stdout)
             self.assertTrue(start["ok"])
@@ -7848,7 +7848,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertFalse([r for r in records if r["path"] == "/login/oauth/access_token"], records)
 
             # pending poll: one exchange attempt, exit 0, status pending
-            proc = self.env.msw("github", "auth", "--device-complete", "dev-1", "--format", "json",
+            proc = self.env.silo("github", "auth", "--device-complete", "dev-1", "--format", "json",
                                 extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertEqual(json.loads(proc.stdout), {"ok": True, "status": "pending"})
@@ -7860,7 +7860,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                 "expires_in": 900, "interval": 5,
                 "status": "ready", "access_token": HOST_TOKEN,
             }))
-            proc = self.env.msw("github", "auth", "--device-complete", "dev-1", "--format", "json",
+            proc = self.env.silo("github", "auth", "--device-complete", "dev-1", "--format", "json",
                                 extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)
@@ -7880,17 +7880,17 @@ class GitHubProxyTests(_LocalModeGitHubBase):
 
     def test_auth_device_start_requires_client_id(self) -> None:
         env = self.env.env.copy()
-        env["MSW_GH_BIN"] = "/nonexistent/gh"
-        proc = self.env.msw("github", "auth", "--device", "--format", "json", check=False,
+        env["SILO_GH_BIN"] = "/nonexistent/gh"
+        proc = self.env.silo("github", "auth", "--device", "--format", "json", check=False,
                             extra_env=env)
         self.assertEqual(proc.returncode, 66)
         error = json.loads(proc.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_HOST_OAUTH_NOT_CONFIGURED")
+        self.assertEqual(error["code"], "SILO_HOST_OAUTH_NOT_CONFIGURED")
         # device-complete without a client id is equally typed
-        proc = self.env.msw("github", "auth", "--device-complete", "dev-1", "--format", "json",
+        proc = self.env.silo("github", "auth", "--device-complete", "dev-1", "--format", "json",
                             check=False, extra_env=env)
         self.assertEqual(proc.returncode, 66)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_HOST_OAUTH_NOT_CONFIGURED")
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_HOST_OAUTH_NOT_CONFIGURED")
 
     def test_repos_discovery_paginated_orgs_and_inpolicy(self) -> None:
         self.empty_policy()
@@ -7922,10 +7922,10 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             }))
             env = self.env.env.copy()
             env.update({
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
             })
-            proc = self.env.msw("github", "repos", "--format", "json", extra_env=env)
+            proc = self.env.silo("github", "repos", "--format", "json", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)
             self.assertTrue(result["ok"])
@@ -7950,19 +7950,19 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertEqual(user_pages[1]["query"].split("&")[-1], "page=2")
             self.assertTrue([r for r in records if r["path"] == "/orgs/myorg/repos"], records)
             # owner filter
-            proc = self.env.msw("github", "repos", "--owner", "myorg", "--format", "json",
+            proc = self.env.silo("github", "repos", "--owner", "myorg", "--format", "json",
                                 extra_env=env)
             filtered = json.loads(proc.stdout)["repos"]
             self.assertEqual([r["canonical"] for r in filtered], ["myorg/toolkit"])
-            proc = self.env.msw("github", "repos", "--owner", "ACME", "--format", "json",
+            proc = self.env.silo("github", "repos", "--owner", "ACME", "--format", "json",
                                 extra_env=env)
             self.assertEqual(len(json.loads(proc.stdout)["repos"]), 150)
 
     def test_repos_discovery_missing_credential_json_error(self) -> None:
-        proc = self.env.msw("github", "repos", "--format", "json", check=False)
+        proc = self.env.silo("github", "repos", "--format", "json", check=False)
         self.assertEqual(proc.returncode, 1)
         error = json.loads(proc.stdout)["error"]
-        self.assertEqual(error["code"], "MSW_HOST_CREDENTIAL_MISSING")
+        self.assertEqual(error["code"], "SILO_HOST_CREDENTIAL_MISSING")
 
     # ---- blocker 1: secret hygiene (argv/stdin/tempfiles) ---------------
 
@@ -7982,16 +7982,16 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         tmpdir = self.env.root / "isolated-tmp"
         tmpdir.mkdir()
         with self.env.start_fake_github() as fake:
-            env = self.env.env.copy()  # MSW_TEST_KEYCHAIN_DIR stays the file seam
+            env = self.env.env.copy()  # SILO_TEST_KEYCHAIN_DIR stays the file seam
             env.update({
-                "MSW_GH_BIN": str(FAKE_GH),
-                "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-                "MSW_CURL_BIN": str(FAKE_API_CURL),
-                "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
-                "MSW_FAKE_API_CURL_ARGV_LOG": str(curl_argv_log),
+                "SILO_GH_BIN": str(FAKE_GH),
+                "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
+                "SILO_FAKE_API_CURL_ARGV_LOG": str(curl_argv_log),
                 "TMPDIR": str(tmpdir),
             })
-            proc = self.env.msw("github", "auth", "--json", extra_env=env)
+            proc = self.env.silo("github", "auth", "--json", extra_env=env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)
             self.assertEqual(result["provider"], "gh-cli")
@@ -8020,7 +8020,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # through stdin — `put SERVICE ACCOUNT` argv is nonsecret — proven on
         # a REAL keychain with an ephemeral service and a >128-byte record.
         if sys.platform == "darwin":
-            bridge = PACKAGE / "bin/msw-keychain-bridge"
+            bridge = PACKAGE / "bin/silo-keychain-bridge"
             argv_log = self.env.root / "bridge-argv.log"
             wrapper = self.env.root / "bridge-wrapper"
             wrapper.write_text(
@@ -8029,7 +8029,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                 f"exec /usr/bin/python3 {bridge} \"$@\"\n"
             )
             wrapper.chmod(0o755)
-            svc = f"org.msw.hygiene.arg.{os.getpid()}.{int(time.time() * 1000)}"
+            svc = f"org.silo.hygiene.arg.{os.getpid()}.{int(time.time() * 1000)}"
             record = json.dumps(self.host_record(token="gho_hyg_" + "b" * 40))
             home = {"HOME": os.environ["HOME"]}
             run_cmd([wrapper, "put", svc, "user"], env=home, input_text=record)
@@ -8047,7 +8047,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         >128-byte JSON record (realistic token) on a REAL Keychain via stdin
         (put), a NEW helper process reads it back byte-for-byte (get), delete
         removes it, and get then fails — with a unique ephemeral service."""
-        svc = f"org.msw.hygiene.test.{os.getpid()}.{int(time.time() * 1000)}"
+        svc = f"org.silo.hygiene.test.{os.getpid()}.{int(time.time() * 1000)}"
         record = json.dumps({
             "schemaVersion": 1,
             "provider": "gh-cli",
@@ -8059,7 +8059,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "storedAt": "2026-01-01T00:00:00Z",
         })
         self.assertGreater(len(record), 128, "record must exceed security's prompted-stdin limit")
-        bridge = PACKAGE / "bin/msw-keychain-bridge"
+        bridge = PACKAGE / "bin/silo-keychain-bridge"
         env = self.env.env.copy()
         env["HOME"] = os.environ["HOME"]  # real login keychain
         # The real login keychain may be locked or absent on headless/CI
@@ -8094,22 +8094,23 @@ class GitHubProxyTests(_LocalModeGitHubBase):
 
     @unittest.skipUnless(sys.platform == "darwin", "real macOS Keychain only")
     def test_host_credential_write_real_keychain_roundtrip(self) -> None:
-        """macOS-only: the exact host_credential_write/read path (bin/msw ->
+        """macOS-only: the exact host_credential_write/read path (bin/silo ->
         the keychain bridge) stores the versioned JSON record on a REAL
         Keychain and reads it back byte-for-byte; the ephemeral item is
         deleted in finally."""
-        svc = f"org.msw.hygiene.path.{os.getpid()}.{int(time.time() * 1000)}"
+        svc = f"org.silo.hygiene.path.{os.getpid()}.{int(time.time() * 1000)}"
         record = json.dumps(self.host_record(token="gho_rt_abcdefghijklmnopqrstuvwxyz0123456789"))
         meta_file = self.env.root / "rt-meta.json"
         meta_file.write_text(json.dumps({"schemaVersion": 1, "state": "active"}))
         env = self.env.env.copy()
         env["HOME"] = os.environ["HOME"]  # real login keychain
-        env["MSW_CONFIG_FILE"] = str(self.env.home / ".config/msw/config.sh")
+        env["SILO_CONFIG_FILE"] = str(self.env.home / ".config/silo/config.sh")
+        env["SILO_WORKSPACES_FILE"] = str(self.env.home / ".config/silo/workspaces.json")
         # The real login keychain may be locked or absent on headless/CI
         # machines; probe the exact bridge write path and skip when it is
         # unavailable so the suite does not depend on a manual unlock.
         probe_svc = f"{svc}.probe"
-        bridge = PACKAGE / "bin/msw-keychain-bridge"
+        bridge = PACKAGE / "bin/silo-keychain-bridge"
         probe = run_cmd(["/usr/bin/python3", bridge, "put", probe_svc, "user"],
                         env=env, input_text="x", check=False)
         run_cmd(["/usr/bin/python3", bridge, "delete", probe_svc, "user"], env=env, check=False)
@@ -8117,12 +8118,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.skipTest(f"real login keychain unavailable (bridge rc={probe.returncode}); skipping real-keychain roundtrip")
         script = (
             "set -euo pipefail\n"
-            f'export MSW_SOURCE_ONLY=1\n'
-            f'source "{PACKAGE / "bin/msw"}"\n'
-            f'export MSW_HOST_KEYCHAIN_SERVICE="{svc}"\n'
-            f'export MSW_HOST_KEYCHAIN_ACCOUNT="user"\n'
-            f'export MSW_HOST_META_FILE="{meta_file}"\n'
-            "unset MSW_TEST_KEYCHAIN_DIR\n"
+            f'export SILO_SOURCE_ONLY=1\n'
+            f'source "{PACKAGE / "bin/silo"}"\n'
+            f'export SILO_HOST_KEYCHAIN_SERVICE="{svc}"\n'
+            f'export SILO_HOST_KEYCHAIN_ACCOUNT="user"\n'
+            f'export SILO_HOST_META_FILE="{meta_file}"\n'
+            "unset SILO_TEST_KEYCHAIN_DIR\n"
             f"if ! host_credential_write '{record}'; then echo WRITE_FAILED >&2; exit 1; fi\n"
             "host_credential_read\n"
         )
@@ -8137,12 +8138,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         """Re-review: a hidden keychain ACL prompt must never hang the CLI —
         the parent watchdog bounds the worker, kills it, and reports a typed
         timeout (no SIGALRM reliance)."""
-        bridge = PACKAGE / "bin/msw-keychain-bridge"
-        svc = f"org.msw.hang.{os.getpid()}.{int(time.time() * 1000)}"
+        bridge = PACKAGE / "bin/silo-keychain-bridge"
+        svc = f"org.silo.hang.{os.getpid()}.{int(time.time() * 1000)}"
         env = self.env.env.copy()
         env["HOME"] = os.environ["HOME"]
-        env["MSW_FAKE_BRIDGE_HANG"] = "1"
-        env["MSW_KEYCHAIN_TIMEOUT_SECS"] = "2"
+        env["SILO_FAKE_BRIDGE_HANG"] = "1"
+        env["SILO_KEYCHAIN_TIMEOUT_SECS"] = "2"
         start = time.monotonic()
         proc = run_cmd(["/usr/bin/python3", bridge, "put", svc, "user"],
                        env=env, input_text="x", check=False, timeout=30)
@@ -8156,8 +8157,8 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         """Re-review: a put that times out (wedged worker) must NEVER
         overwrite the existing v2 credential — the old record stays
         byte-identical and a subsequent get still works."""
-        bridge = PACKAGE / "bin/msw-keychain-bridge"
-        svc = f"org.msw.preserve.{os.getpid()}.{int(time.time() * 1000)}"
+        bridge = PACKAGE / "bin/silo-keychain-bridge"
+        svc = f"org.silo.preserve.{os.getpid()}.{int(time.time() * 1000)}"
         env = self.env.env.copy()
         env["HOME"] = os.environ["HOME"]
         record = json.dumps(self.host_record(token="gho_preserve_" + "c" * 30))
@@ -8169,8 +8170,8 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertEqual(got1.stdout, record)
             # wedged worker on the UPDATE path: bounded failure, record intact
             hang_env = dict(env)
-            hang_env["MSW_FAKE_BRIDGE_HANG"] = "1"
-            hang_env["MSW_KEYCHAIN_TIMEOUT_SECS"] = "2"
+            hang_env["SILO_FAKE_BRIDGE_HANG"] = "1"
+            hang_env["SILO_KEYCHAIN_TIMEOUT_SECS"] = "2"
             start = time.monotonic()
             proc = run_cmd(["/usr/bin/python3", bridge, "put", svc, "user"],
                            env=hang_env, input_text="overwrite-me", check=False, timeout=30)
@@ -8190,14 +8191,15 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         security(1) (old security-CLI ACL) must NEVER be SecItemUpdate'd /
         CopyMatching'd by the bridge. The .v2 store path completes bounded,
         the v2 record round-trips, and the legacy item stays byte-identical."""
-        old_svc = f"org.msw.legacy.{os.getpid()}.{int(time.time() * 1000)}"
+        old_svc = f"org.silo.legacy.{os.getpid()}.{int(time.time() * 1000)}"
         new_svc = f"{old_svc}.v2"
         env = self.env.env.copy()
         env["HOME"] = os.environ["HOME"]
-        env["MSW_CONFIG_FILE"] = str(self.env.home / ".config/msw/config.sh")
+        env["SILO_CONFIG_FILE"] = str(self.env.home / ".config/silo/config.sh")
+        env["SILO_WORKSPACES_FILE"] = str(self.env.home / ".config/silo/workspaces.json")
         # legacy item created by security(1) with the security-CLI ACL
-        run_cmd(["bash", "-c",
-                 f'printf "x\\nx\\n" | /usr/bin/security add-generic-password -U -s "{old_svc}" -a user -w'],
+        run_cmd(["/usr/bin/security", "add-generic-password", "-U",
+                 "-s", old_svc, "-a", "user", "-w", "x"],
                 env=env, check=False)
         legacy = run_cmd(["/usr/bin/security", "find-generic-password", "-w", "-s", old_svc, "-a", "user"],
                          env=env, check=False)
@@ -8208,20 +8210,20 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         meta_file = self.env.root / "legacy-meta.json"
         script = (
             "set -euo pipefail\n"
-            f'export MSW_SOURCE_ONLY=1\n'
-            f'source "{PACKAGE / "bin/msw"}"\n'
-            f'export MSW_HOST_KEYCHAIN_SERVICE="{new_svc}"\n'
-            f'export MSW_HOST_KEYCHAIN_ACCOUNT="user"\n'
-            f'export MSW_HOST_META_FILE="{meta_file}"\n'
-            f'export MSW_CREDENTIAL_DENY_MARKER="{self.env.root / "legacy-marker"}"\n'
-            "unset MSW_TEST_KEYCHAIN_DIR\n"
+            f'export SILO_SOURCE_ONLY=1\n'
+            f'source "{PACKAGE / "bin/silo"}"\n'
+            f'export SILO_HOST_KEYCHAIN_SERVICE="{new_svc}"\n'
+            f'export SILO_HOST_KEYCHAIN_ACCOUNT="user"\n'
+            f'export SILO_HOST_META_FILE="{meta_file}"\n'
+            f'export SILO_CREDENTIAL_DENY_MARKER="{self.env.root / "legacy-marker"}"\n'
+            "unset SILO_TEST_KEYCHAIN_DIR\n"
             f"host_credential_store 'gh-cli' 'oauth' '{HOST_TOKEN}' 'fake-user' 1 '[]'\n"
         )
         try:
             proc = run_cmd(["bash", "-c", script], env=env, check=False, timeout=45)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             # the v2 record round-trips through the bridge
-            bridge = PACKAGE / "bin/msw-keychain-bridge"
+            bridge = PACKAGE / "bin/silo-keychain-bridge"
             got = run_cmd(["/usr/bin/python3", bridge, "get", new_svc, "user"], env=env, check=False)
             self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
             self.assertEqual(json.loads(got.stdout)["accessToken"], HOST_TOKEN)
@@ -8237,7 +8239,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         finally:
             run_cmd(["/usr/bin/security", "delete-generic-password", "-s", old_svc, "-a", "user"],
                     env=env, check=False)
-            run_cmd(["/usr/bin/python3", PACKAGE / "bin/msw-keychain-bridge", "delete", new_svc, "user"],
+            run_cmd(["/usr/bin/python3", PACKAGE / "bin/silo-keychain-bridge", "delete", new_svc, "user"],
                     env=env, check=False)
 
     # ---- blocker 4: revocation deletion failure denies globally ---------
@@ -8252,13 +8254,13 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         env = self.env.env.copy()
         # exercise the production bridge path (not the file seam) with the
         # delete-failure injection; keep the bridge watchdog short
-        env["MSW_TEST_KEYCHAIN_DIR"] = ""
-        env["MSW_FAKE_KC_DELETE_FAIL"] = "1"
-        env["MSW_KEYCHAIN_TIMEOUT_SECS"] = "2"
-        proc = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+        env["SILO_TEST_KEYCHAIN_DIR"] = ""
+        env["SILO_FAKE_KC_DELETE_FAIL"] = "1"
+        env["SILO_KEYCHAIN_TIMEOUT_SECS"] = "2"
+        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
         self.assertFailed(proc, "removal failed")
         # at least one durable deny gate was recorded: the file marker
-        marker = self.env.home / ".config/msw/credential-disabled"
+        marker = self.env.home / ".config/silo/credential-disabled"
         self.assertTrue(marker.exists())
         # the tombstone records the uncertain revocation (still a GLOBAL deny)
         meta = json.loads(self.host_meta_path.read_text())
@@ -8269,18 +8271,18 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertTrue(quarantine.exists())
         # every helper denies: the marker is checked before the Keychain, so
         # no token is emitted even though the record may still exist
-        helper = PACKAGE / "bin" / "msw-github-host-token"
+        helper = PACKAGE / "bin" / "silo-github-host-token"
         helper_env = {
-            "MSW_HOST_META_FILE": str(self.host_meta_path),
-            "MSW_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
-            "MSW_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
+            "SILO_HOST_META_FILE": str(self.host_meta_path),
+            "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
+            "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
         }
         proc = run_cmd([helper], env=helper_env, check=False)
         self.assertEqual(proc.returncode, 1)
         self.assertEqual(proc.stdout, "")
         # host_credential_available also denies: auth without --force re-acquires
         # (would need gh) instead of reporting the stale record as present
-        proc = self.env.msw("github", "status", "--format", "json", extra_env=env, check=False)
+        proc = self.env.silo("github", "status", "--format", "json", extra_env=env, check=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         dev = next(w for w in json.loads(proc.stdout)["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["hostCredential"], "missing")
@@ -8294,14 +8296,14 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         blocker = self.env.root / "blocker-file"
         blocker.write_text("x")
         env = self.env.env.copy()
-        env["MSW_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
-        proc = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+        env["SILO_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
+        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("removed the host GitHub credential", proc.stdout + proc.stderr)
         self.assertFalse(self.host_key_path.exists())
         self.assertFalse(self.host_meta_path.exists())
         self.assertFalse((self.github_meta_dir / "dev.quarantine").exists())
-        self.assertFalse((self.env.home / ".config/msw/credential-disabled").exists())
+        self.assertFalse((self.env.home / ".config/silo/credential-disabled").exists())
 
     def test_remove_local_deny_item_blocks_helper_when_primary_marker_fails(self) -> None:
         """Closure re-review: if the primary FILE marker cannot be recorded,
@@ -8313,22 +8315,22 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         blocker = self.env.root / "blocker-file"
         blocker.write_text("x")
         env = self.env.env.copy()
-        env["MSW_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
-        env["MSW_FAKE_KC_DELETE_FAIL"] = "1"  # token deletion fails: gates stay
-        proc = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+        env["SILO_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
+        env["SILO_FAKE_KC_DELETE_FAIL"] = "1"  # token deletion fails: gates stay
+        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
         self.assertFailed(proc, "removal failed")
         # the primary file marker was NOT recorded (impossible path)...
-        self.assertFalse((self.env.home / ".config/msw/credential-disabled").exists())
+        self.assertFalse((self.env.home / ".config/silo/credential-disabled").exists())
         # ...but the Keychain deny item was (file seam) and denies the helper
-        deny_file = self.env.key_file("org.microsandbox.Silo.github-host.v2.deny", "user")
+        deny_file = self.env.key_file("org.silo.Silo.github-host.v2.deny", "user")
         self.assertTrue(deny_file.exists())
-        helper = PACKAGE / "bin/msw-github-host-token"
+        helper = PACKAGE / "bin/silo-github-host-token"
         helper_env = self.host_tool_env()
         proc = run_cmd([helper], env=helper_env, check=False)
         self.assertEqual(proc.returncode, 1, "deny item must block the helper globally")
         self.assertEqual(proc.stdout, "")
         # availability also denies (status reports missing)
-        proc = self.env.msw("github", "status", "--format", "json", extra_env=env, check=False)
+        proc = self.env.silo("github", "status", "--format", "json", extra_env=env, check=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         dev = next(w for w in json.loads(proc.stdout)["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["hostCredential"], "missing")
@@ -8343,11 +8345,11 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         keychain_dir = self.env.root / "keychain"
         keychain_dir.chmod(0o500)
         env = self.env.env.copy()
-        env["MSW_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
-        env["MSW_HOST_KEYCHAIN_DENY_SERVICE"] = "org.msw.unwritable.deny"
-        env["MSW_FAKE_HOST_META_WRITE_FAIL"] = "1"
+        env["SILO_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
+        env["SILO_HOST_KEYCHAIN_DENY_SERVICE"] = "org.silo.unwritable.deny"
+        env["SILO_FAKE_HOST_META_WRITE_FAIL"] = "1"
         try:
-            proc = self.env.msw("github", "remove", "dev", check=False, extra_env=env)
+            proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
             self.assertFailed(proc, "quarantined")
             self.assertTrue(self.host_key_path.exists())
             self.assertTrue(self.host_meta_path.exists())
@@ -8355,9 +8357,9 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertTrue(global_quarantine.exists())
             self.assertTrue((self.github_meta_dir / "dev.quarantine").exists())
             helper_env = self.host_tool_env()
-            helper_env["MSW_GLOBAL_CREDENTIAL_QUARANTINE"] = str(global_quarantine)
+            helper_env["SILO_GLOBAL_CREDENTIAL_QUARANTINE"] = str(global_quarantine)
             denied = run_cmd(
-                [PACKAGE / "bin" / "msw-github-host-token"],
+                [PACKAGE / "bin" / "silo-github-host-token"],
                 env=helper_env, check=False,
             )
             self.assertNotEqual(denied.returncode, 0)
@@ -8380,12 +8382,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             with self.env.start_fake_github() as fake:
                 env = self.env.env.copy()
                 env.update({
-                    "MSW_GH_BIN": str(FAKE_GH),
-                    "MSW_FAKE_GH_STATE": str(self.fake_gh_state()),
-                    "MSW_CURL_BIN": str(FAKE_API_CURL),
-                    "MSW_PROXY_UPSTREAM_ROOT": fake.base_url,
+                    "SILO_GH_BIN": str(FAKE_GH),
+                    "SILO_FAKE_GH_STATE": str(self.fake_gh_state()),
+                    "SILO_CURL_BIN": str(FAKE_API_CURL),
+                    "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
                 })
-                proc = self.env.msw("github", "auth", "--json", check=False, extra_env=env)
+                proc = self.env.silo("github", "auth", "--json", check=False, extra_env=env)
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertIn("global host credential lock", proc.stderr)
                 self.assertFalse(self.host_key_path.exists())
@@ -8459,7 +8461,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         ]
         for payload in malformed:
             self.set_policy(payload)
-            proc = self.env.msw("push", "dev", "repo", "--yes", check=False)
+            proc = self.env.silo("push", "dev", "repo", "--yes", check=False)
             self.assertNotEqual(proc.returncode, 0, payload)
             self.assertIn("malformed", proc.stdout + proc.stderr, payload)
         # sanity: a valid policy (read-write repo) pushes fine
@@ -8468,7 +8470,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "playgrounds": {"capability": PLAY_CAP, "repos": []},
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
-        proc = self.env.msw("push", "dev", "repo", "--yes")
+        proc = self.env.silo("push", "dev", "repo", "--yes")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("pushed main from dev:repo", proc.stdout)
 
@@ -8480,7 +8482,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "playgrounds": {"capability": PLAY_CAP, "repos": []},
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
-        proc = self.env.msw("github", "verify", "dev", check=False)
+        proc = self.env.silo("github", "verify", "dev", check=False)
         self.assertFailed(proc, "missing or malformed")
 
     # ---- app github-state local branch ----------------------------------
@@ -8492,7 +8494,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             "playgrounds": {"capability": PLAY_CAP, "repos": []},
             "personal": {"capability": PERSONAL_CAP, "repos": []},
         }})
-        proc = self.env.msw("app", "github-state", "--format", "json")
+        proc = self.env.silo("app", "github-state", "--format", "json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
         dev = next(w for w in result["result"]["workspaces"] if w["workspace"] == "dev")
@@ -8523,15 +8525,15 @@ class MigrationTests(_LocalModeGitHubBase):
             state["sandboxes"][box].setdefault("secrets", {})["GH_TOKEN"] = "GH_TOKEN@github.com,api.github.com"
             self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
         if keychain:
-            self.env.key_file("msw.github.read", box).write_text(
+            self.env.key_file("silo.github.read", box).write_text(
                 "github_pat_LEGACY_READ_abcdefghijklmnopqrstuvwxyz0123456789")
-            self.env.key_file("msw.github.write", box).write_text(
+            self.env.key_file("silo.github.write", box).write_text(
                 "github_pat_LEGACY_WRITE_abcdefghijklmnopqrstuvwxyz0123456789")
 
     def test_migration_full_transaction_and_lock_reacquisition(self) -> None:
         self.seed_legacy_state()
         meta_dir = self.github_meta_dir
-        proc = self.env.msw("github", "migrate", "dev")
+        proc = self.env.silo("github", "migrate", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("legacy GitHub state migrated for dev", proc.stdout)
         # conf archived (never blind-deleted), original gone
@@ -8561,14 +8563,14 @@ class MigrationTests(_LocalModeGitHubBase):
         self.assertEqual(stat.S_IMODE(journal_dir.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((journal_dir / "journal.jsonl").stat().st_mode), 0o600)
         # legacy keychain items preserved (§1)
-        self.assertTrue(self.env.key_file("msw.github.read", "dev").exists())
-        self.assertTrue(self.env.key_file("msw.github.write", "dev").exists())
+        self.assertTrue(self.env.key_file("silo.github.read", "dev").exists())
+        self.assertTrue(self.env.key_file("silo.github.write", "dev").exists())
         # lock re-acquisition: a second migration is a no-op success, and a
         # normal GitHub operation can re-acquire the same lock
-        proc = self.env.msw("github", "migrate", "dev")
+        proc = self.env.silo("github", "migrate", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("nothing to migrate", proc.stdout)
-        self.env.msw("github", "status", "dev")
+        self.env.silo("github", "status", "dev")
 
     def test_migration_refuses_when_lock_held(self) -> None:
         self.seed_legacy_state(secret=False, keychain=False)
@@ -8579,7 +8581,7 @@ class MigrationTests(_LocalModeGitHubBase):
             stdout=subprocess.PIPE, text=True)
         try:
             self.assertEqual(holder.stdout.readline().strip(), "READY")
-            proc = self.env.msw("github", "migrate", "dev", check=False)
+            proc = self.env.silo("github", "migrate", "dev", check=False)
             self.assertFailed(proc, "already in progress")
             # nothing changed: conf untouched, no policy skeleton, no journal
             self.assertTrue((self.github_meta_dir / "dev.conf").exists())
@@ -8593,14 +8595,14 @@ class MigrationTests(_LocalModeGitHubBase):
         lock = self.github_meta_dir / "dev.lock"
         lock.mkdir()
         (lock / "pid").write_text("99999999\n")
-        proc = self.env.msw("github", "migrate", "dev", check=False)
+        proc = self.env.silo("github", "migrate", "dev", check=False)
         self.assertFailed(proc, "manual review")
         self.assertTrue(lock.is_dir())  # never unlinked directly
         self.assertTrue((self.github_meta_dir / "dev.conf").exists())
 
     def test_migration_preserves_preexisting_quarantine(self) -> None:
         self.seed_legacy_state(quarantine=True, secret=False, keychain=False)
-        proc = self.env.msw("github", "migrate", "dev")
+        proc = self.env.silo("github", "migrate", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("remains quarantined", proc.stdout + proc.stderr)
         quarantine = self.github_meta_dir / "dev.quarantine"
@@ -8616,8 +8618,8 @@ class MigrationTests(_LocalModeGitHubBase):
 
     def test_migration_quarantines_when_secret_removal_fails(self) -> None:
         self.seed_legacy_state(keychain=False)
-        proc = self.env.msw("github", "migrate", "dev", check=False,
-                            extra_env={"MSW_FAKE_SECRET_REMOVE_FAIL": "1"})
+        proc = self.env.silo("github", "migrate", "dev", check=False,
+                            extra_env={"SILO_FAKE_SECRET_REMOVE_FAIL": "1"})
         self.assertFailed(proc, "quarantined")
         quarantine = self.github_meta_dir / "dev.quarantine"
         self.assertTrue(quarantine.exists())
@@ -8634,7 +8636,7 @@ class MigrationTests(_LocalModeGitHubBase):
         journal_dir.mkdir(parents=True, exist_ok=True)
         journal_dir.chmod(0o500)
         try:
-            proc = self.env.msw("github", "migrate", "dev", check=False)
+            proc = self.env.silo("github", "migrate", "dev", check=False)
             self.assertFailed(proc, "journal")
             self.assertIn("no state was changed", proc.stdout + proc.stderr)
             # untouched: conf present, secret still bound, no marker, no policy
@@ -8650,8 +8652,8 @@ class MigrationTests(_LocalModeGitHubBase):
         self.seed_legacy_state(secret=True, keychain=False)
         # write #1 = mandatory intent (succeeds); write #2 = quarantine-set
         # event, which lands AFTER the migration-owned marker (a mutation).
-        proc = self.env.msw("github", "migrate", "dev", check=False,
-                            extra_env={"MSW_FAKE_JOURNAL_FAIL_ON": "2"})
+        proc = self.env.silo("github", "migrate", "dev", check=False,
+                            extra_env={"SILO_FAKE_JOURNAL_FAIL_ON": "2"})
         self.assertFailed(proc, "journal")
         quarantine = self.github_meta_dir / "dev.quarantine"
         self.assertTrue(quarantine.exists())
@@ -8663,7 +8665,7 @@ class MigrationTests(_LocalModeGitHubBase):
 
     def test_migration_trigger_on_first_local_operation(self) -> None:
         self.seed_legacy_state(secret=False, keychain=False)
-        proc = self.env.msw("github", "status", "dev")
+        proc = self.env.silo("github", "status", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("legacy GitHub state migrated for dev", proc.stdout + proc.stderr)
         self.assertFalse((self.github_meta_dir / "dev.conf").exists())
@@ -8674,7 +8676,7 @@ class MigrationTests(_LocalModeGitHubBase):
 
     def test_migration_trigger_keeps_status_json_clean(self) -> None:
         self.seed_legacy_state(secret=False, keychain=False)
-        proc = self.env.msw("github", "status", "--format", "json", "dev")
+        proc = self.env.silo("github", "status", "--format", "json", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)  # stdout stays pure JSON despite the trigger
         dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
@@ -8697,7 +8699,7 @@ class MigrationTests(_LocalModeGitHubBase):
         self.assertFalse((self.github_meta_dir / "dev.conf").exists())
         self.assertRegex(json.loads(self.policy_path.read_text())["workspaces"]["dev"]["capability"],
                          r"^[0-9a-f]{48}$")
-        proc = self.env.msw("push", "dev", "repo", "--yes")
+        proc = self.env.silo("push", "dev", "repo", "--yes")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("pushed main from dev:repo", proc.stdout)
 
@@ -8712,9 +8714,9 @@ class MigrationTests(_LocalModeGitHubBase):
         self.seed_legacy_state(box="playgrounds", secret=False, keychain=False)
         env = self.env.env.copy()
         procs = [
-            subprocess.Popen([str(self.env.msw_bin), "github", "migrate", "dev"],
+            subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True),
-            subprocess.Popen([str(self.env.msw_bin), "github", "migrate", "playgrounds"],
+            subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "playgrounds"],
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True),
         ]
         for p in procs:
@@ -8745,7 +8747,7 @@ class MigrationTests(_LocalModeGitHubBase):
         self.seed_legacy_state(secret=True, keychain=False)
         journal_file = self.github_meta_dir / "migrated-local" / "journal.jsonl"
         env = self.env.env.copy()
-        proc = subprocess.Popen([str(self.env.msw_bin), "github", "migrate", "dev"],
+        proc = subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 60
@@ -8768,7 +8770,7 @@ class MigrationTests(_LocalModeGitHubBase):
             self.assertEqual(marker.read_text(), "Legacy GitHub state migration in progress\n")
             # re-run: completes, keeps the marker, archives the conf, journal
             # records a second intent + committed
-            proc2 = self.env.msw("github", "migrate", "dev")
+            proc2 = self.env.silo("github", "migrate", "dev")
             self.assertEqual(proc2.returncode, 0, proc2.stdout + proc2.stderr)
             self.assertIn("remains quarantined", proc2.stdout + proc2.stderr)
             self.assertEqual(marker.read_text(), "Legacy GitHub state migration in progress\n")
@@ -8789,8 +8791,8 @@ class MigrationTests(_LocalModeGitHubBase):
         marker = self.github_meta_dir / "dev.quarantine"
         marker.write_text("original reason line one\nline two\n")
         before = marker.read_bytes()
-        proc = self.env.msw("github", "migrate", "dev", check=False,
-                            extra_env={"MSW_FAKE_SECRET_REMOVE_FAIL": "1"})
+        proc = self.env.silo("github", "migrate", "dev", check=False,
+                            extra_env={"SILO_FAKE_SECRET_REMOVE_FAIL": "1"})
         self.assertFailed(proc, "quarantined")
         self.assertEqual(marker.read_bytes(), before, "pre-existing marker must be byte-identical")
         journal = (self.github_meta_dir / "migrated-local" / "journal.jsonl").read_text()
@@ -8811,9 +8813,9 @@ class MigrationTests(_LocalModeGitHubBase):
         reached = self.env.root / "migrate-pause-reached"
         pause.touch()
         env = self.env.env.copy()
-        env["MSW_FAKE_MIGRATION_PAUSE_FILE"] = str(pause)
-        env["MSW_FAKE_MIGRATION_PAUSE_REACHED"] = str(reached)
-        proc = subprocess.Popen([str(self.env.msw_bin), "github", "migrate", "dev"],
+        env["SILO_FAKE_MIGRATION_PAUSE_FILE"] = str(pause)
+        env["SILO_FAKE_MIGRATION_PAUSE_REACHED"] = str(reached)
+        proc = subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             journal = self.github_meta_dir / "migrated-local" / "journal.jsonl"
@@ -8852,9 +8854,9 @@ class MigrationTests(_LocalModeGitHubBase):
         reached = self.env.root / "migrate-arm-reached"
         pause.touch()
         env = self.env.env.copy()
-        env["MSW_FAKE_MIGRATION_ARM_PAUSE_FILE"] = str(pause)
-        env["MSW_FAKE_MIGRATION_ARM_PAUSE_REACHED"] = str(reached)
-        proc = subprocess.Popen([str(self.env.msw_bin), "github", "migrate", "dev"],
+        env["SILO_FAKE_MIGRATION_ARM_PAUSE_FILE"] = str(pause)
+        env["SILO_FAKE_MIGRATION_ARM_PAUSE_REACHED"] = str(reached)
+        proc = subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 60
@@ -8879,8 +8881,8 @@ class MigrationTests(_LocalModeGitHubBase):
         failure — the mandatory intent never lands, so the migration aborts
         before any mutation."""
         self.seed_legacy_state()
-        proc = self.env.msw("github", "migrate", "dev", check=False,
-                            extra_env={"MSW_FAKE_JOURNAL_ZERO_WRITE": "1"})
+        proc = self.env.silo("github", "migrate", "dev", check=False,
+                            extra_env={"SILO_FAKE_JOURNAL_ZERO_WRITE": "1"})
         self.assertFailed(proc, "journal")
         self.assertIn("no state was changed", proc.stdout + proc.stderr)
         self.assertTrue((self.github_meta_dir / "dev.conf").exists())
@@ -8894,8 +8896,8 @@ class MigrationTests(_LocalModeGitHubBase):
         byte lands — a simulated short write must not lose or corrupt the
         line."""
         self.seed_legacy_state()
-        proc = self.env.msw("github", "migrate", "dev",
-                            extra_env={"MSW_FAKE_JOURNAL_SHORT_WRITE": "1"})
+        proc = self.env.silo("github", "migrate", "dev",
+                            extra_env={"SILO_FAKE_JOURNAL_SHORT_WRITE": "1"})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         journal = (self.github_meta_dir / "migrated-local" / "journal.jsonl").read_text()
         lines = [json.loads(l) for l in journal.splitlines() if l.strip()]
@@ -8904,7 +8906,7 @@ class MigrationTests(_LocalModeGitHubBase):
 
 
 class LocalModeSSHTests(_LocalModeGitHubBase):
-    """Blocker 7: local-mode SSH resolves MSW_GITHUB_MODE FIRST, never reads
+    """Blocker 7: local-mode SSH resolves SILO_GITHUB_MODE FIRST, never reads
     Connect credentials.json, and never exports GH_TOKEN; legacy/Connect state
     yields a migration remedy / token-free SSH."""
 
@@ -8928,7 +8930,7 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
                 },
             },
         }))
-        self.env.key_file("msw.github.app.dev.guest.tokens", "profile").write_text(json.dumps({
+        self.env.key_file("silo.github.app.dev.guest.tokens", "profile").write_text(json.dumps({
             "schemaVersion": 3,
             "grantID": "grant-1",
             "accessToken": "ghs_connect_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -8936,8 +8938,8 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
             "generation": 1,
         }))
         env = self.env.env.copy()
-        env["MSW_FAKE_RECORD_CREDENTIAL_ENV"] = "1"
-        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        env["SILO_FAKE_RECORD_CREDENTIAL_ENV"] = "1"
+        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
         proc = self.env.run(proxy, "dev.msb", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         events = self.env.state()["events"]
@@ -8952,7 +8954,7 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
         meta_dir = self.github_meta_dir
         meta_dir.mkdir(parents=True, exist_ok=True)
         (meta_dir / "dev.conf").write_text("verification_repo=acme/demo\naccess=host-write\n")
-        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
         proc = self.env.run(proxy, "dev.msb", check=False)
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         joined = proc.stdout + proc.stderr
@@ -8965,17 +8967,17 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
         meta_dir = self.github_meta_dir
         meta_dir.mkdir(parents=True, exist_ok=True)
         (meta_dir / "dev.quarantine").write_text("pre-existing credential failure\n")
-        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
         proc = self.env.run(proxy, "dev.msb", check=False)
         self.assertFailed(proc, "quarantined")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_ssh_proxy_local_starts_stopped_workspace_token_free(self) -> None:
-        self.env.msw("stop", "dev")
+        self.env.silo("stop", "dev")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
         env = self.env.env.copy()
-        env["MSW_FAKE_RECORD_CREDENTIAL_ENV"] = "1"
-        proxy = self.env.home / ".local/bin/msw-ssh-proxy"
+        env["SILO_FAKE_RECORD_CREDENTIAL_ENV"] = "1"
+        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
         proc = self.env.run(proxy, "dev.msb", extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         events = self.env.state()["events"]
@@ -8985,7 +8987,7 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
 
 
 class GitHubPolicyApplyTests(_LocalModeGitHubBase):
-    """Blocker 3: `msw app github-policy-apply` — full policy on stdin, strict
+    """Blocker 3: `silo app github-policy-apply` — full policy on stdin, strict
     validation, transport provisioned BEFORE one atomic policy commit, typed
     rollback on partial failure, idempotent."""
 
@@ -8993,7 +8995,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         # Transport provisioning spawns real shuttle processes per workspace;
         # tear them down so the suite leaves no stray background processes.
         for box in ("dev", "playgrounds", "personal"):
-            pidfile = self.env.home / ".local/state/msw" / f"shuttle-{box}.pid"
+            pidfile = self.env.home / ".local/state/silo" / f"shuttle-{box}.pid"
             if pidfile.exists():
                 pid = pidfile.read_text().strip()
                 if pid.isdigit():
@@ -9022,8 +9024,8 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         relay->shuttle->proxy path is only exercised by the real-fixture test)."""
         env = dict(extra_env or {})
         if probe:
-            env.setdefault("MSW_FAKE_TRANSPORT_PROBE", "403")
-        return self.env.msw("app", "github-policy-apply", "--format", "json",
+            env.setdefault("SILO_FAKE_TRANSPORT_PROBE", "403")
+        return self.env.silo("app", "github-policy-apply", "--format", "json",
                             input_text=input_text if input_text is not None else json.dumps(payload),
                             check=check, extra_env=env, timeout=180)
 
@@ -9042,11 +9044,11 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         provisioning would, to model stale OWNED shuttle state (pidfile plus
         live child) that a later apply must clean up."""
         env = self.env.env.copy()
-        env["MSW_GITHUB_CIRCUIT_POLL_SECS"] = "1"
+        env["SILO_GITHUB_CIRCUIT_POLL_SECS"] = "1"
         log = (self.env.root / f"stale-shuttle-{box}.log").open("w")
         self.addCleanup(log.close)
         proc = subprocess.Popen(
-            [sys.executable, str(PACKAGE / "lib" / "msw-github-shuttle.py"), box],
+            [sys.executable, str(PACKAGE / "lib" / "silo-github-shuttle.py"), box],
             env=env, stdout=log, stderr=log, text=True,
         )
         self.addCleanup(self._stop_stale_shuttle, proc)
@@ -9088,7 +9090,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertEqual(policy["workspaces"]["dev"]["capability"], workspaces["dev"]["capability"])
         # transport was provisioned: the shuttle is running per workspace
         for box in ("dev", "playgrounds"):
-            pidfile = self.env.home / ".local/state/msw" / f"shuttle-{box}.pid"
+            pidfile = self.env.home / ".local/state/silo" / f"shuttle-{box}.pid"
             self.assertTrue(pidfile.exists(), f"{box} shuttle pidfile missing")
             pid = pidfile.read_text().strip()
             self.assertRegex(pid, r"^[0-9]+$")
@@ -9158,7 +9160,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         clearing a workspace also clears its deferred reconcile."""
         self.empty_policy()
         for box in ("dev", "playgrounds", "personal"):
-            self.env.msw("stop", box)
+            self.env.silo("stop", box)
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
             "playgrounds": {"repos": []},
@@ -9166,7 +9168,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         }}
         proc = self._apply(
             desired,
-            extra_env={"MSW_FAKE_APPLY_PROVISION_FAIL": "playgrounds"},
+            extra_env={"SILO_FAKE_APPLY_PROVISION_FAIL": "playgrounds"},
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         state = self.env.state()
@@ -9188,7 +9190,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             "playgrounds": {"repos": []},
             "personal": {"repos": []},
         }}
-        proc = self._apply(cleared, extra_env={"MSW_FAKE_APPLY_PROVISION_FAIL": "dev"})
+        proc = self._apply(cleared, extra_env={"SILO_FAKE_APPLY_PROVISION_FAIL": "dev"})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertFalse(marker.exists(), "an empty desired policy must clear the deferred reconcile")
 
@@ -9219,7 +9221,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertTrue(relay.exists(),
                         "a changed apply must repair an unchanged sibling's drifted relay")
         for box in ("dev", "playgrounds"):
-            pidfile = self.env.home / ".local/state/msw" / f"shuttle-{box}.pid"
+            pidfile = self.env.home / ".local/state/silo" / f"shuttle-{box}.pid"
             self.assertTrue(pidfile.exists(), f"{box} shuttle pidfile missing")
             pid = pidfile.read_text().strip()
             self.assertRegex(pid, r"^[0-9]+$")
@@ -9240,8 +9242,8 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         # stale OWNED shuttle state for the empty sibling: a live shuttle
         # process with its pid file, as if left behind by an older apply
         stale_proc = self._spawn_stale_shuttle("playgrounds")
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-playgrounds.pid"
-        sigfile = self.env.home / ".local/state/msw" / "shuttle-playgrounds.signature"
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-playgrounds.pid"
+        sigfile = self.env.home / ".local/state/silo" / "shuttle-playgrounds.signature"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not pidfile.exists():
             time.sleep(0.05)
@@ -9264,7 +9266,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
 
     def test_policy_apply_stopped_workspace_defers_and_start_consumes(self) -> None:
         """Regression: the apply never starts a stopped box; it records an
-        explicit deferred reconcile that `msw start` consumes, so a stopped
+        explicit deferred reconcile that `silo start` consumes, so a stopped
         workspace with transport drift becomes transport-healthy when
         started."""
         self.empty_policy()
@@ -9278,12 +9280,12 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         relay = self.guest_relay_path("dev")
         self.assertTrue(relay.exists())
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-dev.pid"
         self.assertTrue(pidfile.exists())
         marker = self.github_meta_dir / "reconcile-dev.deferred"
         self.assertFalse(marker.exists())
         # stop dev and introduce transport drift while it is stopped
-        self.env.msw("stop", "dev")
+        self.env.silo("stop", "dev")
         relay.unlink()
         # semantic no-op apply while dev is stopped: deferred, NOT started
         proc = self._apply(desired)
@@ -9293,8 +9295,8 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertTrue(marker.exists(), "the apply must defer the stopped workspace's reconcile")
         self.assertFalse(relay.exists(),
                          "deferred: drift is NOT repaired during the apply")
-        # `msw start` consumes the marker: relay reinstalled, shuttle running
-        start = self.env.msw("start", "dev", extra_env={"MSW_FAKE_TRANSPORT_PROBE": "403"})
+        # `silo start` consumes the marker: relay reinstalled, shuttle running
+        start = self.env.silo("start", "dev", extra_env={"SILO_FAKE_TRANSPORT_PROBE": "403"})
         self.assertEqual(start.returncode, 0, start.stdout + start.stderr)
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
         self.assertTrue(relay.exists(), "start must repair the deferred relay drift")
@@ -9304,7 +9306,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
     def test_policy_apply_rejects_unknown_and_transitional_lifecycle(self) -> None:
         """Regression: a workspace with no stable lifecycle (Unknown,
         Starting, Stopping, Restarting) cannot be claimed provisioned: the
-        full apply fails with MSW_STATE_UNAVAILABLE and changes nothing —
+        full apply fails with SILO_STATE_UNAVAILABLE and changes nothing —
         for semantic no-ops as well as changed policies."""
         self.empty_policy()
         self._mark_running("dev")
@@ -9320,11 +9322,11 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             proc = self._apply(
                 desired,  # semantic no-op: the rejection must come from lifecycle
                 check=False,
-                extra_env={"MSW_FAKE_STATUS_JSON": json.dumps([{"name": "dev", "status": status}])},
+                extra_env={"SILO_FAKE_STATUS_JSON": json.dumps([{"name": "dev", "status": status}])},
             )
             self.assertEqual(proc.returncode, 69, (status, proc.stdout, proc.stderr))
             err = json.loads(proc.stdout)["error"]
-            self.assertEqual(err["code"], "MSW_STATE_UNAVAILABLE", status)
+            self.assertEqual(err["code"], "SILO_STATE_UNAVAILABLE", status)
             self.assertTrue(err["retryable"])
             self.assertEqual(self.policy_path.read_bytes(), before, status)
             journal = (self.github_meta_dir / "policy-journal.jsonl").read_text()
@@ -9346,7 +9348,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         relay = self.guest_relay_path("dev")
         self.assertTrue(relay.exists(), "the first apply must install the relay")
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-dev.pid"
         self.assertTrue(pidfile.exists())
         policy_before = self.policy_path.read_bytes()
         # drift: the guest relay artifact disappears while the policy is unchanged
@@ -9360,7 +9362,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         pid = pidfile.read_text().strip()
         self.assertRegex(pid, r"^[0-9]+$")
         os.kill(int(pid), 0)  # exactly one owned shuttle is running
-        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        sigfile = self.env.home / ".local/state/silo" / "shuttle-dev.signature"
         self.assertTrue(sigfile.exists(), "the reconciled shuttle must record its signature")
 
     def test_policy_apply_empty_policy_removes_owned_stale_shuttle_state(self) -> None:
@@ -9373,8 +9375,8 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         }}
         proc = self._apply(desired)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
-        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-dev.pid"
+        sigfile = self.env.home / ".local/state/silo" / "shuttle-dev.signature"
         self.assertTrue(pidfile.exists())
         self.assertTrue(sigfile.exists())
         pid = pidfile.read_text().strip()
@@ -9402,7 +9404,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         }})
         foreign = subprocess.Popen(["sleep", "300"])
         self.addCleanup(self._stop_stale_shuttle, foreign)
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-dev.pid"
         pidfile.parent.mkdir(parents=True, exist_ok=True)
         pidfile.write_text(f"{foreign.pid}\n")
         cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
@@ -9418,9 +9420,9 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
         }})
         stubborn = subprocess.Popen(
-            ["bash", "-c", 'trap "" TERM; sleep 300', "msw-github-shuttle-stubborn"])
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
-        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+            ["bash", "-c", 'trap "" TERM; sleep 300', "silo-github-shuttle-stubborn"])
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-dev.pid"
+        sigfile = self.env.home / ".local/state/silo" / "shuttle-dev.signature"
         pidfile.parent.mkdir(parents=True, exist_ok=True)
         pidfile.write_text(f"{stubborn.pid}\n")
         sigfile.write_text("stale-signature\n")
@@ -9439,22 +9441,22 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         self.set_policy({"schemaVersion": 1, "workspaces": {
             "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
         }})
-        plist = self.env.home / "Library/LaunchAgents/org.microsandbox.Silo.github-shuttle.dev.plist"
+        plist = self.env.home / "Library/LaunchAgents/org.silo.Silo.github-shuttle.dev.plist"
         plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_text("stale-plist\n")
-        pidfile = self.env.home / ".local/state/msw" / "shuttle-dev.pid"
-        sigfile = self.env.home / ".local/state/msw" / "shuttle-dev.signature"
+        pidfile = self.env.home / ".local/state/silo" / "shuttle-dev.pid"
+        sigfile = self.env.home / ".local/state/silo" / "shuttle-dev.signature"
         pidfile.parent.mkdir(parents=True, exist_ok=True)
         pidfile.write_text("999999\n")
         sigfile.write_text("stale-signature\n")
         before = self.policy_path.read_bytes()
         cleared = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
         proc = self._apply(cleared, check=False, extra_env={
-            "MSW_FAKE_LAUNCHCTL_LABEL": "org.microsandbox.Silo.github-shuttle.dev",
+            "SILO_FAKE_LAUNCHCTL_LABEL": "org.silo.Silo.github-shuttle.dev",
         })
         self.assertEqual(proc.returncode, 77, proc.stdout + proc.stderr)
         err = json.loads(proc.stdout)["error"]
-        self.assertEqual(err["code"], "MSW_SHUTTLE_CLEANUP_FAILED")
+        self.assertEqual(err["code"], "SILO_SHUTTLE_CLEANUP_FAILED")
         self.assertTrue(plist.exists(), "evidence must be kept while the label is still loaded")
         self.assertTrue(pidfile.exists(), "evidence must be kept while the label is still loaded")
         self.assertTrue(sigfile.exists(), "evidence must be kept while the label is still loaded")
@@ -9478,11 +9480,11 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         reached = self.env.root / "apply-provision-pause-reached"
         pause.touch()
         env = self.env.env.copy()
-        env["MSW_FAKE_APPLY_PROVISION_PAUSE_FILE"] = str(pause)
-        env["MSW_FAKE_APPLY_PROVISION_PAUSE_REACHED"] = str(reached)
-        env["MSW_FAKE_TRANSPORT_PROBE"] = "403"
+        env["SILO_FAKE_APPLY_PROVISION_PAUSE_FILE"] = str(pause)
+        env["SILO_FAKE_APPLY_PROVISION_PAUSE_REACHED"] = str(reached)
+        env["SILO_FAKE_TRANSPORT_PROBE"] = "403"
         proc = subprocess.Popen(
-            [str(self.env.msw_bin), "app", "github-policy-apply", "--format", "json"],
+            [str(self.env.silo_bin), "app", "github-policy-apply", "--format", "json"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env, start_new_session=True)
         assert proc.stdin is not None
@@ -9527,10 +9529,10 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
             "playgrounds": {"repos": [{"canonical": "acme/toolkit", "mode": "read-only"}]},
         }}
-        proc = self._apply(desired, check=False, extra_env={"MSW_FAKE_APPLY_PROVISION_FAIL": "dev"})
+        proc = self._apply(desired, check=False, extra_env={"SILO_FAKE_APPLY_PROVISION_FAIL": "dev"})
         self.assertEqual(proc.returncode, 77, proc.stdout + proc.stderr)
         err = json.loads(proc.stdout)["error"]
-        self.assertEqual(err["code"], "MSW_TRANSPORT_PROVISION_FAILED")
+        self.assertEqual(err["code"], "SILO_TRANSPORT_PROVISION_FAILED")
         self.assertTrue(err["retryable"])
         # rollback: the policy file is byte-identical to the pre-apply state
         self.assertEqual(self.policy_path.read_text(), before)
@@ -9548,7 +9550,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         """Re-review item 3: transport readiness is validated with the expected
         `<repo>.git/info/refs` request shape where `service=` is intentionally
         omitted; a malformed/broken proxy request fails readiness as
-        `MSW_TRANSPORT_VERIFY_FAILED` and leaves policy untouched."""
+        `SILO_TRANSPORT_VERIFY_FAILED` and leaves policy untouched."""
         before = "BEFORE_POLICY"
         self.policy_path.parent.mkdir(parents=True, exist_ok=True)
         self.policy_path.write_text(before)
@@ -9557,10 +9559,10 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
         }}
         proc = self._apply(desired, check=False, probe=False,
-                           extra_env={"MSW_FAKE_TRANSPORT_PROBE": "fail"})
+                           extra_env={"SILO_FAKE_TRANSPORT_PROBE": "fail"})
         self.assertEqual(proc.returncode, 77, proc.stdout + proc.stderr)
         err = json.loads(proc.stdout)["error"]
-        self.assertEqual(err["code"], "MSW_TRANSPORT_VERIFY_FAILED")
+        self.assertEqual(err["code"], "SILO_TRANSPORT_VERIFY_FAILED")
         self.assertTrue(err["retryable"])
         self.assertEqual(self.policy_path.read_text(), before)
 
@@ -9568,7 +9570,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         """Re-review item 3: transport readiness depends on a fixed bare
         `info/refs` probe request (no `service=`). A `403` response for that
         request shape is expected; 200/404/500/503 or any other non-403 response
-        fails as `MSW_TRANSPORT_VERIFY_FAILED`, leaving policy untouched."""
+        fails as `SILO_TRANSPORT_VERIFY_FAILED`, leaving policy untouched."""
         self._mark_running("dev")
         desired = {"schemaVersion": 1, "workspaces": {
             "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
@@ -9578,22 +9580,22 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             self.policy_path.parent.mkdir(parents=True, exist_ok=True)
             self.policy_path.write_text(before)
             proc = self._apply(desired, check=False, probe=False,
-                               extra_env={"MSW_FAKE_TRANSPORT_PROBE": code})
+                               extra_env={"SILO_FAKE_TRANSPORT_PROBE": code})
             self.assertEqual(proc.returncode, 77, (code, proc.stdout, proc.stderr))
             err = json.loads(proc.stdout)["error"]
-            self.assertEqual(err["code"], "MSW_TRANSPORT_VERIFY_FAILED", code)
+            self.assertEqual(err["code"], "SILO_TRANSPORT_VERIFY_FAILED", code)
             self.assertEqual(self.policy_path.read_text(), before, code)
         # 403 for the malformed bare `info/refs` request is the expected readiness
         # signal for the missing `service=` request shape.
         self.policy_path.write_text("BEFORE_POLICY_403_OK")
         proc = self._apply(desired, probe=False,
-                           extra_env={"MSW_FAKE_TRANSPORT_PROBE": "403"})
+                           extra_env={"SILO_FAKE_TRANSPORT_PROBE": "403"})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertTrue(json.loads(proc.stdout)["result"]["committed"])
 
     def test_policy_apply_transport_probe_real_fixture(self) -> None:
         """Re-review item 3: the bounded readiness probe runs against a REAL
-        proxy (bin/msw-github-proxy --listen) via a real guest HTTP request
+        proxy (bin/silo-github-proxy --listen) via a real guest HTTP request
         carrying the desired capability; the proxy answers with the expected
         403 (uncommitted capability) and the apply then commits."""
         self.empty_policy()  # valid policy; the apply's capabilities are not
@@ -9602,12 +9604,12 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         err = err_path.open("ab")
         proxy_env = self.env.env.copy()
         proxy_env.update({
-            "MSW_GITHUB_MODE": "local",
-            "MSW_POLICY_FILE": str(self.policy_path),
-            "MSW_PROXY_LOG_FILE": str(self.env.root / "apply-proxy.log"),
-            "MSW_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
-            "MSW_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
-            "MSW_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
+            "SILO_GITHUB_MODE": "local",
+            "SILO_POLICY_FILE": str(self.policy_path),
+            "SILO_PROXY_LOG_FILE": str(self.env.root / "apply-proxy.log"),
+            "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
+            "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
+            "SILO_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
         })
         proxy_proc = subprocess.Popen([str(PROXY_BIN), "--listen", "0"],
                                       env=proxy_env, cwd=str(PACKAGE),
@@ -9633,7 +9635,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
                 "dev": {"repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
             }}
             proc = self._apply(desired, probe=False,
-                               extra_env={"MSW_TRANSPORT_PROBE_PORT": str(port)})
+                               extra_env={"SILO_TRANSPORT_PROBE_PORT": str(port)})
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             result = json.loads(proc.stdout)["result"]
             self.assertTrue(result["provisioned"])
@@ -9670,11 +9672,11 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         reached = self.env.root / "apply-pause-reached"
         pause.touch()
         env = self.env.env.copy()
-        env["MSW_FAKE_APPLY_PAUSE_FILE"] = str(pause)
-        env["MSW_FAKE_APPLY_PAUSE_REACHED"] = str(reached)
-        env.setdefault("MSW_FAKE_TRANSPORT_PROBE", "403")
+        env["SILO_FAKE_APPLY_PAUSE_FILE"] = str(pause)
+        env["SILO_FAKE_APPLY_PAUSE_REACHED"] = str(reached)
+        env.setdefault("SILO_FAKE_TRANSPORT_PROBE", "403")
         proc = subprocess.Popen(
-            [str(self.env.msw_bin), "app", "github-policy-apply", "--format", "json"],
+            [str(self.env.silo_bin), "app", "github-policy-apply", "--format", "json"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env)
         assert proc.stdin is not None
@@ -9688,12 +9690,12 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             self.assertTrue(reached.exists(), "apply never reached the pause point")
             # personal is OMITTED from the apply; a concurrent per-repo edit
             # of personal must be refused while the apply holds the locks
-            set_proc = self.env.msw("app", "github-policy-set", "--workspace", "personal",
+            set_proc = self.env.silo("app", "github-policy-set", "--workspace", "personal",
                                     "--repository", "acme/other", "--mode", "read-write",
                                     "--format", "json", check=False)
             self.assertEqual(set_proc.returncode, 73, set_proc.stdout + set_proc.stderr)
             err = json.loads(set_proc.stdout)["error"]
-            self.assertEqual(err["code"], "MSW_OPERATION_CONFLICT")
+            self.assertEqual(err["code"], "SILO_OPERATION_CONFLICT")
             pause.unlink()
             proc.wait(timeout=120)
             assert proc.stdout is not None and proc.stderr is not None
@@ -9720,9 +9722,9 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
 
     def test_policy_apply_connect_mode_mismatch(self) -> None:
         desired = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
-        proc = self._apply(desired, check=False, extra_env={"MSW_GITHUB_MODE": "connect"})
+        proc = self._apply(desired, check=False, extra_env={"SILO_GITHUB_MODE": "connect"})
         self.assertEqual(proc.returncode, 69)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_GITHUB_MODE_MISMATCH")
+        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_GITHUB_MODE_MISMATCH")
         self.assertFalse(self.policy_path.exists())
 
     def test_policy_apply_invalid_request_typed_error(self) -> None:
@@ -9741,7 +9743,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         ):
             proc = self._apply(bad, check=False, input_text=bad)
             self.assertEqual(proc.returncode, 64, (bad, proc.stdout, proc.stderr))
-            self.assertEqual(json.loads(proc.stdout)["error"]["code"], "MSW_INVALID_REQUEST", bad)
+            self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_INVALID_REQUEST", bad)
         self.assertFalse(self.policy_path.exists())
 
 class GitHubShuttleRetryTests(_LocalModeGitHubBase):
@@ -9750,15 +9752,15 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
     storm, recovery without a restart) and keep bounded backoff for transient
     transport failures. fake_msb stubs the relay exec with faithful failure
     modes: rc 2 + ENOENT when the artifact is absent, plain rc 1 while
-    MSW_FAKE_RELAY_FAIL_FILE exists."""
+    SILO_FAKE_RELAY_FAIL_FILE exists."""
 
-    SHUTTLE = PACKAGE / "lib" / "msw-github-shuttle.py"
+    SHUTTLE = PACKAGE / "lib" / "silo-github-shuttle.py"
 
     def tearDown(self) -> None:
         # Direct-shuttle tests and the proxy-configure lock test spawn real
         # shuttle processes; stop them so the suite leaves no strays.
         for box in ("dev", "playgrounds", "personal"):
-            pidfile = self.env.home / ".local/state/msw" / f"shuttle-{box}.pid"
+            pidfile = self.env.home / ".local/state/silo" / f"shuttle-{box}.pid"
             if pidfile.exists():
                 pid = pidfile.read_text().strip()
                 if pid.isdigit():
@@ -9789,7 +9791,7 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
     def _start_shuttle(self, box: str, *, extra_env: dict[str, str] | None = None,
                        log_path: Path | None = None) -> subprocess.Popen[str]:
         env = self.env.env.copy()
-        env["MSW_GITHUB_CIRCUIT_POLL_SECS"] = "1"
+        env["SILO_GITHUB_CIRCUIT_POLL_SECS"] = "1"
         if extra_env:
             env.update(extra_env)
         log = (log_path or (self.env.root / f"shuttle-{box}.log")).open("w")
@@ -9820,7 +9822,7 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
 
     def test_shuttle_missing_relay_opens_circuit_once_and_recovers(self) -> None:
         """A missing guest relay is PERMANENT: exactly one actionable
-        MSW_RELAY_NOT_INSTALLED failure, no respawn backoff storm, the
+        SILO_RELAY_NOT_INSTALLED failure, no respawn backoff storm, the
         shuttle stays alive (launchd-friendly), and the circuit closes
         without a shuttle restart once the artifact reappears."""
         self._mark_dev_running()
@@ -9829,23 +9831,23 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         relay.unlink(missing_ok=True)
         log = self.env.root / "shuttle-permanent.log"
         proc = self._start_shuttle("dev", log_path=log)
-        self.assertTrue(self._wait_for(log, "MSW_RELAY_NOT_INSTALLED", 15),
+        self.assertTrue(self._wait_for(log, "SILO_RELAY_NOT_INSTALLED", 15),
                         log.read_text(errors="replace") if log.exists() else "no shuttle log")
         text = log.read_text(errors="replace")
-        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertEqual(text.count("SILO_RELAY_NOT_INSTALLED"), 1, text)
         self.assertNotIn("respawn in", text, "permanent failure must not respawn")
         self.assertIsNone(proc.poll(), "the shuttle must stay alive with the circuit open")
         # the circuit stays open: no new spawn attempts while the artifact is absent
         time.sleep(2.5)
         text = log.read_text(errors="replace")
-        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertEqual(text.count("SILO_RELAY_NOT_INSTALLED"), 1, text)
         self.assertNotIn("respawn in", text)
-        tail = text.split("MSW_RELAY_NOT_INSTALLED", 1)[1]
+        tail = text.split("SILO_RELAY_NOT_INSTALLED", 1)[1]
         self.assertNotIn("relay spawned (pid", tail, "no spawn may happen after the circuit opens")
         # repair WITHOUT a shuttle restart: the artifact reappears. The
         # probe blocks every spawn while the relay is absent, so the FIRST
         # spawn line can only appear after the circuit closes.
-        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        shutil.copy2(PACKAGE / "lib" / "silo-github-relay.py", relay)
         self.assertTrue(self._wait_for(log, "retry circuit closed", 10),
                         log.read_text(errors="replace"))
         self.assertTrue(self._wait_for(log, "relay spawned (pid", 10),
@@ -9853,7 +9855,7 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         text = log.read_text(errors="replace")
         self.assertGreaterEqual(text.count("relay spawned (pid"), 1,
                                 "the circuit recovery must spawn a fresh relay")
-        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertEqual(text.count("SILO_RELAY_NOT_INSTALLED"), 1, text)
         self.assertIsNone(proc.poll(), "the shuttle must survive the circuit recovery")
 
     def test_shuttle_transient_failures_retry_bounded_then_recover(self) -> None:
@@ -9863,19 +9865,19 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         self._mark_dev_running()
         relay = self.guest_relay_path("dev")
         relay.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        shutil.copy2(PACKAGE / "lib" / "silo-github-relay.py", relay)
         fail_file = self.env.root / "relay-fail"
         fail_file.write_text("fail")
         log = self.env.root / "shuttle-transient.log"
         proc = self._start_shuttle("dev", log_path=log,
-                                   extra_env={"MSW_FAKE_RELAY_FAIL_FILE": str(fail_file)})
+                                   extra_env={"SILO_FAKE_RELAY_FAIL_FILE": str(fail_file)})
         # two transient failures already imply the 0.5s then 1.0s backoff steps
         self.assertTrue(self._wait_for(log, "respawn in 1.0s", 20),
                         log.read_text(errors="replace") if log.exists() else "no shuttle log")
         text = log.read_text(errors="replace")
         self.assertIn("relay exited rc=1", text)
         self.assertIn("respawn in 0.5s", text)
-        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text,
+        self.assertNotIn("SILO_RELAY_NOT_INSTALLED", text,
                          "transient failures must never open the permanent circuit")
         # end the transient window: the next bounded retry must bring the relay up
         fail_file.unlink()
@@ -9888,7 +9890,7 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
             time.sleep(0.1)
         text = log.read_text(errors="replace")
         self.assertGreater(text.count("relay spawned (pid"), before, text)
-        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text)
+        self.assertNotIn("SILO_RELAY_NOT_INSTALLED", text)
         self.assertIsNone(proc.poll(), "the shuttle must keep running after recovery")
 
     def test_shuttle_missing_interpreter_opens_circuit_once(self) -> None:
@@ -9899,14 +9901,14 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         self._mark_dev_running()
         relay = self.guest_relay_path("dev")
         relay.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        shutil.copy2(PACKAGE / "lib" / "silo-github-relay.py", relay)
         log = self.env.root / "shuttle-no-python.log"
         proc = self._start_shuttle("dev", log_path=log,
-                                   extra_env={"MSW_FAKE_GUEST_PYTHON_MISSING": "1"})
-        self.assertTrue(self._wait_for(log, "MSW_RELAY_NOT_INSTALLED", 15),
+                                   extra_env={"SILO_FAKE_GUEST_PYTHON_MISSING": "1"})
+        self.assertTrue(self._wait_for(log, "SILO_RELAY_NOT_INSTALLED", 15),
                         log.read_text(errors="replace") if log.exists() else "no shuttle log")
         text = log.read_text(errors="replace")
-        self.assertEqual(text.count("MSW_RELAY_NOT_INSTALLED"), 1, text)
+        self.assertEqual(text.count("SILO_RELAY_NOT_INSTALLED"), 1, text)
         self.assertNotIn("relay spawned (pid", text,
                          "no spawn may happen while the interpreter is missing")
         self.assertIsNone(proc.poll(), "the shuttle must stay alive with the circuit open")
@@ -9919,18 +9921,18 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         self._mark_dev_running()
         relay = self.guest_relay_path("dev")
         relay.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PACKAGE / "lib" / "msw-github-relay.py", relay)
+        shutil.copy2(PACKAGE / "lib" / "silo-github-relay.py", relay)
         fail_file = self.env.root / "relay-fail"
         fail_file.write_text("enoent")
         log = self.env.root / "shuttle-late-enoent.log"
         proc = self._start_shuttle("dev", log_path=log,
-                                   extra_env={"MSW_FAKE_RELAY_FAIL_FILE": str(fail_file)})
+                                   extra_env={"SILO_FAKE_RELAY_FAIL_FILE": str(fail_file)})
         self.assertTrue(self._wait_for(log, "respawn in 1.0s", 20),
                         log.read_text(errors="replace") if log.exists() else "no shuttle log")
         text = log.read_text(errors="replace")
         self.assertIn("relay exited rc=2", text)
         self.assertIn("respawn in 0.5s", text)
-        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text,
+        self.assertNotIn("SILO_RELAY_NOT_INSTALLED", text,
                          "an unrelated ENOENT must not open the permanent circuit")
         # end the failure window: the next bounded retry brings the relay up
         fail_file.unlink()
@@ -9943,7 +9945,7 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
             time.sleep(0.1)
         text = log.read_text(errors="replace")
         self.assertGreater(text.count("relay spawned (pid"), before, text)
-        self.assertNotIn("MSW_RELAY_NOT_INSTALLED", text)
+        self.assertNotIn("SILO_RELAY_NOT_INSTALLED", text)
 
     def test_proxy_configure_spawn_does_not_pin_workspace_lock(self) -> None:
         """The long-lived shuttle spawned by proxy-configure must not inherit
@@ -9954,35 +9956,35 @@ class GitHubShuttleRetryTests(_LocalModeGitHubBase):
         state["sandboxes"]["dev"]["running"] = True
         (self.env.home / ".microsandbox" / "state.json").write_text(
             json.dumps(state, indent=2, sort_keys=True))
-        proc = self.env.msw("github", "proxy-configure", "dev",
-                            extra_env={"MSW_FAKE_TRANSPORT_PROBE": "403"})
+        proc = self.env.silo("github", "proxy-configure", "dev",
+                            extra_env={"SILO_FAKE_TRANSPORT_PROBE": "403"})
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         started = time.monotonic()
-        rotate = self.env.msw("github", "capability", "rotate", "dev", timeout=60)
+        rotate = self.env.silo("github", "capability", "rotate", "dev", timeout=60)
         elapsed = time.monotonic() - started
         self.assertEqual(rotate.returncode, 0, rotate.stdout + rotate.stderr)
 
 
-class GenericSecretsTests(MSWTestCase):
+class GenericSecretsTests(SiloTestCase):
     """Host-held generic secrets: protocol redaction, domain grammar, values
     restricted to Keychain, add/edit/remove pending states, immediate
     fail-closed unbind, lifecycle reconciliation on start/restart, restart
     summaries, and Keychain deletion only after verified removal."""
 
-    SECRET_SERVICE = "org.microsandbox.Silo.secret.v1"
+    SECRET_SERVICE = "org.silo.Silo.secret.v1"
 
     def _key_file(self, name: str) -> Path:
         return self.env.key_file(self.SECRET_SERVICE, name)
 
     def _secrets_meta(self) -> Path:
-        return self.env.home / ".config" / "msw" / "secrets.json"
+        return self.env.home / ".config" / "silo" / "secrets.json"
 
     def _plan(self, operation: str, name: str, workspaces: list[str], domains: list[str]) -> dict:
         request = json.dumps({
             "operation": operation, "name": name,
             "workspaces": workspaces, "allowedDomains": domains,
         })
-        return json.loads(self.env.msw(
+        return json.loads(self.env.silo(
             "app", "secret-plan", "--input-fd", "0", "--format", "json",
             input_text=request,
         ).stdout)["result"]
@@ -9992,7 +9994,7 @@ class GenericSecretsTests(MSWTestCase):
         request: dict = {"confirmation": confirmation if confirmation is not None else plan["confirmationPhrase"]}
         if value is not None:
             request["value"] = value
-        return self.env.msw(
+        return self.env.silo(
             "app", "secret-apply", plan["planId"], "--input-fd", "0", "--format", "json",
             input_text=json.dumps(request), check=check,
         )
@@ -10008,7 +10010,7 @@ class GenericSecretsTests(MSWTestCase):
         return self._apply_ok(plan, value=value)
 
     def _listing(self) -> dict:
-        return json.loads(self.env.msw("app", "secrets-list", "--format", "json").stdout)["result"]
+        return json.loads(self.env.silo("app", "secrets-list", "--format", "json").stdout)["result"]
 
     def _entry(self, name: str) -> dict:
         for entry in self._listing()["entries"]:
@@ -10020,7 +10022,7 @@ class GenericSecretsTests(MSWTestCase):
         return self.env.state()["sandboxes"][box].get("secrets", {})
 
     def test_secret_protocol_redacts_values_and_exports_only_to_lifecycle_children(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         value = "sk_live_redaction_9f8e7d6c5b4a3210fedcba"
         plan = self._plan("add", "API_KEY", ["dev"], ["api.example.com"])
         apply_result = self._apply_ok(plan, value=value)
@@ -10039,10 +10041,10 @@ class GenericSecretsTests(MSWTestCase):
         # children (modify/start/restart), never in observation commands
         secrets_fd_marker = self.env.root / "secrets-fd.log"
         probe_env = {
-            "MSW_FAKE_RECORD_CREDENTIAL_ENV": "1",
-            "MSW_FAKE_SECRETS_LOCK_FD_MARKER": str(secrets_fd_marker),
+            "SILO_FAKE_RECORD_CREDENTIAL_ENV": "1",
+            "SILO_FAKE_SECRETS_LOCK_FD_MARKER": str(secrets_fd_marker),
         }
-        self.env.msw("restart", "dev", extra_env=probe_env)
+        self.env.silo("restart", "dev", extra_env=probe_env)
         events = self.env.state()["events"]
         credential_events = [e for e in events if e.get("event") == "credential-env"]
         self.assertTrue(credential_events, events)
@@ -10065,7 +10067,7 @@ class GenericSecretsTests(MSWTestCase):
         )
         # a later app observation command must not carry the value either
         before = len(events)
-        self.env.msw("app", "secrets-list", "--format", "json", extra_env=probe_env)
+        self.env.silo("app", "secrets-list", "--format", "json", extra_env=probe_env)
         for event in self.env.state()["events"][before:]:
             if event.get("event") == "credential-env":
                 self.assertEqual(event["secret_exported"], [], event)
@@ -10080,7 +10082,7 @@ class GenericSecretsTests(MSWTestCase):
         self.assertNotEqual(proc.returncode, 0)
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "MSW_SECRET_VALUE_MISSING")
+        self.assertEqual(envelope["error"]["code"], "SILO_SECRET_VALUE_MISSING")
         self.assertEqual(envelope["error"]["workspace"], "dev")
         self.assertEqual(
             envelope["error"]["message"],
@@ -10095,8 +10097,8 @@ class GenericSecretsTests(MSWTestCase):
     def test_app_json_string_preserves_utf8_characters(self) -> None:
         script = (
             "set -e\n"
-            "export MSW_SOURCE_ONLY=1\n"
-            f'source "{PACKAGE / "bin" / "msw"}"\n'
+            "export SILO_SOURCE_ONLY=1\n"
+            f'source "{PACKAGE / "bin" / "silo"}"\n'
             "app_json_string '✓ café'\n"
         )
         proc = self.env.run("/bin/bash", "-c", script)
@@ -10107,7 +10109,7 @@ class GenericSecretsTests(MSWTestCase):
     def test_secret_domain_and_name_grammar_validation(self) -> None:
         for domain in ["api.example.com", "*.example.com", "*"]:
             with self.subTest(domain=domain):
-                proc = self.env.msw(
+                proc = self.env.silo(
                     "app", "secret-plan", "--input-fd", "0", "--format", "json",
                     input_text=json.dumps({
                         "operation": "add", "name": "API_KEY",
@@ -10115,29 +10117,29 @@ class GenericSecretsTests(MSWTestCase):
                     }),
                 )
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        for name in ["GH_TOKEN", "GITHUB_TOKEN", "MSW_TOOLCHAIN"]:
+        for name in ["GH_TOKEN", "GITHUB_TOKEN", "SILO_TOOLCHAIN"]:
             with self.subTest(name=name):
-                proc = self.env.msw(
+                proc = self.env.silo(
                     "app", "secret-plan", "--input-fd", "0", "--format", "json", check=False,
                     input_text=json.dumps({
                         "operation": "add", "name": name,
                         "workspaces": ["dev"], "allowedDomains": ["api.example.com"],
                     }),
                 )
-                self.assertFailed(proc, "MSW_SECRET_NAME_INVALID")
+                self.assertFailed(proc, "SILO_SECRET_NAME_INVALID")
         for name in ["bad-name", "1secret", "-secret", ""]:
             with self.subTest(name=name):
-                proc = self.env.msw(
+                proc = self.env.silo(
                     "app", "secret-plan", "--input-fd", "0", "--format", "json", check=False,
                     input_text=json.dumps({
                         "operation": "add", "name": name,
                         "workspaces": ["dev"], "allowedDomains": ["api.example.com"],
                     }),
                 )
-                self.assertFailed(proc, "MSW_INVALID_REQUEST")
+                self.assertFailed(proc, "SILO_INVALID_REQUEST")
         for name in ["API_KEY", "ApiKey2", "_secret"]:
             with self.subTest(name=name):
-                proc = self.env.msw(
+                proc = self.env.silo(
                     "app", "secret-plan", "--input-fd", "0", "--format", "json",
                     input_text=json.dumps({
                         "operation": "add", "name": name,
@@ -10157,17 +10159,17 @@ class GenericSecretsTests(MSWTestCase):
                        "allowedDomains": ["api.example.com"]}
             request.update(override)
             with self.subTest(override=override):
-                proc = self.env.msw(
+                proc = self.env.silo(
                     "app", "secret-plan", "--input-fd", "0", "--format", "json", check=False,
                     input_text=json.dumps(request),
                 )
-                self.assertFailed(proc, "MSW_INVALID_REQUEST")
+                self.assertFailed(proc, "SILO_INVALID_REQUEST")
 
     def test_secret_values_never_persist_plaintext_or_backup(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         value = "sk_live_persistence_0123456789abcdef"
         self._add_secret(value=value)
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self.assertEqual(self._entry("API_KEY")["status"], "active")
         self.assertNotIn(value, self._secrets_meta().read_text())
         self.assertNotIn(value, json.dumps(self.env.state()))
@@ -10180,13 +10182,13 @@ class GenericSecretsTests(MSWTestCase):
         # a full managed backup archive must not contain the value
         destination = self.env.root / "secret-backups"
         destination.mkdir()
-        started = json.loads(self.env.msw(
+        started = json.loads(self.env.silo(
             "app", "backup-start", "--directory", str(destination),
             "--request-key", "secret-backup-contract", "--format", "json",
         ).stdout)["result"]
         last = None
         for _ in range(300):
-            last = json.loads(self.env.msw(
+            last = json.loads(self.env.silo(
                 "app", "backup-status", "--operation-id", started["operationId"],
                 "--format", "json",
             ).stdout)["result"]
@@ -10201,7 +10203,7 @@ class GenericSecretsTests(MSWTestCase):
         self.assertNotIn(value.encode(), decompressed.stdout)
 
     def test_secret_add_pending_states_and_restart_summaries(self) -> None:
-        self.env.msw("start", "dev")  # dev running; playgrounds/personal stopped
+        self.env.silo("start", "dev")  # dev running; playgrounds/personal stopped
         self._add_secret(workspaces=["dev", "playgrounds"],
                          domains=["api.example.com", "*.example.com"])
         entry = self._listing()["entries"][0]
@@ -10218,7 +10220,7 @@ class GenericSecretsTests(MSWTestCase):
         self.assertEqual(by_box["playgrounds"]["pendingCount"], 1)
         self.assertEqual(by_box["personal"]["pendingCount"], 0)
         # the app state snapshot carries the separate secrets object
-        state_doc = json.loads(self.env.msw("app", "state", "--format", "json").stdout)["result"]
+        state_doc = json.loads(self.env.silo("app", "state", "--format", "json").stdout)["result"]
         dev_state = next(w for w in state_doc["workspaces"] if w["id"] == "dev")
         self.assertEqual(dev_state["secrets"]["state"], "restart-required")
         self.assertEqual(dev_state["secrets"]["pendingCount"], 1)
@@ -10234,7 +10236,7 @@ class GenericSecretsTests(MSWTestCase):
         retryable = self._entry("API_KEY")
         self.assertEqual(retryable["status"], "restart-required")
         self.assertIsNone(retryable["error"])
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         entry = self._entry("API_KEY")
         self.assertEqual(entry["status"], "applies-on-next-start")
         self.assertIsNone(entry["error"])
@@ -10247,7 +10249,7 @@ class GenericSecretsTests(MSWTestCase):
         self.assertFalse(by_box["dev"]["restartRequired"])
         self.assertEqual(by_box["playgrounds"]["pendingCount"], 1)
         # starting playgrounds applies the remaining pending add
-        self.env.msw("start", "playgrounds")
+        self.env.silo("start", "playgrounds")
         entry = self._entry("API_KEY")
         self.assertEqual(entry["status"], "active")
         self.assertIsNone(entry["pendingOperation"])
@@ -10260,11 +10262,11 @@ class GenericSecretsTests(MSWTestCase):
         self.assertEqual(by_box["playgrounds"]["pendingCount"], 0)
 
     def test_secret_edit_disables_old_binding_immediately_and_rebinds_on_restart(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         old_value = "sk_live_edit_old_aaaaaaaaaaaaaaaa"
         new_value = "sk_live_edit_new_bbbbbbbbbbbbbbbb"
         self._add_secret(value=old_value)
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self.assertEqual(self._sandbox_secrets("dev").get("API_KEY"), "API_KEY@api.example.com")
         self.assertEqual(self._entry("API_KEY")["status"], "active")
         plan = self._plan("edit", "API_KEY", ["dev"], ["*.example.com"])
@@ -10282,17 +10284,17 @@ class GenericSecretsTests(MSWTestCase):
         self.assertEqual(entry["generation"], 2)
         self.assertEqual(entry["allowedDomains"], ["*.example.com"])
         # the restart binds the replacement value with the new domains
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self.assertEqual(self._sandbox_secrets("dev").get("API_KEY"), "API_KEY@*.example.com")
         entry = self._entry("API_KEY")
         self.assertEqual(entry["status"], "active")
         self.assertIsNone(entry["pendingOperation"])
 
     def test_secret_remove_unbinds_immediately_and_deletes_keychain_after_verified_absence(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         value = "sk_live_remove_cccccccccccccccc"
         self._add_secret(value=value)
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self.assertTrue(self._key_file("API_KEY").exists())
         plan = self._plan("remove", "API_KEY", ["dev"], ["api.example.com"])
         apply_result = self._apply_ok(plan)  # no value for a removal
@@ -10307,22 +10309,22 @@ class GenericSecretsTests(MSWTestCase):
         self.assertEqual(entry["pendingOperation"]["type"], "remove")
         self.assertEqual(entry["generation"], 2)
         # the restart verifies absence and only then deletes the Keychain item
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self.assertFalse(self._key_file("API_KEY").exists())
         self.assertEqual(self._listing()["entries"], [])
         self.assertNotIn("API_KEY", self._secrets_meta().read_text())
         # Keychain deletion failure after verified absence remains a compact
         # removal-pending state; the next restart retries and completes.
         self._add_secret(value=value)
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self._apply_ok(self._plan("remove", "API_KEY", ["dev"], ["api.example.com"]))
-        self.env.msw("restart", "dev", extra_env={"MSW_FAKE_KC_DELETE_FAIL": "1"})
+        self.env.silo("restart", "dev", extra_env={"SILO_FAKE_KC_DELETE_FAIL": "1"})
         self.assertTrue(self._key_file("API_KEY").exists())
         entry = self._entry("API_KEY")
         self.assertEqual(entry["status"], "removal-pending-restart")
         self.assertEqual(entry["pendingOperation"]["type"], "remove")
         self.assertIsNone(entry["error"])
-        self.env.msw("restart", "dev")
+        self.env.silo("restart", "dev")
         self.assertFalse(self._key_file("API_KEY").exists())
         self.assertEqual(self._listing()["entries"], [])
 
@@ -10350,41 +10352,41 @@ class GenericSecretsTests(MSWTestCase):
         self.assertEqual(by_box["playgrounds"]["pendingCount"], 1)
         # nothing is bound yet for the stopped workspace
         self.assertNotIn("API_KEY", self._sandbox_secrets("playgrounds"))
-        state_doc = json.loads(self.env.msw("app", "state", "--format", "json").stdout)["result"]
+        state_doc = json.loads(self.env.silo("app", "state", "--format", "json").stdout)["result"]
         playground_state = next(w for w in state_doc["workspaces"] if w["id"] == "playgrounds")
         self.assertEqual(playground_state["secrets"]["state"], "applies-on-next-start")
         # the next start applies the pending add and finalizes it
-        self.env.msw("start", "playgrounds")
+        self.env.silo("start", "playgrounds")
         self.assertEqual(self._sandbox_secrets("playgrounds").get("API_KEY"), "API_KEY@api.example.com")
         self.assertEqual(self._entry("API_KEY")["status"], "active")
 
     def test_secret_apply_confirmation_value_and_expiry_rules(self) -> None:
-        self.env.msw("start", "dev")
+        self.env.silo("start", "dev")
         plan = self._plan("add", "API_KEY", ["dev"], ["api.example.com"])
         wrong = self._apply(plan, value="sk_live_x", confirmation="ADD SECRET OTHER", check=False)
-        self.assertFailed(wrong, "MSW_CONFIRMATION_MISMATCH")
+        self.assertFailed(wrong, "SILO_CONFIRMATION_MISMATCH")
         # validation failures do not consume the plan
         missing_value = self._apply(plan, confirmation=plan["confirmationPhrase"], check=False)
-        self.assertFailed(missing_value, "MSW_SECRET_VALUE_REQUIRED")
+        self.assertFailed(missing_value, "SILO_SECRET_VALUE_REQUIRED")
         bad_value = self._apply(plan, value="sk bad\nvalue", check=False)
-        self.assertFailed(bad_value, "MSW_SECRET_VALUE_REQUIRED")
+        self.assertFailed(bad_value, "SILO_SECRET_VALUE_REQUIRED")
         ok = self._apply_ok(plan, value="sk_live_good_eeeeeeeeeeeeeeee")
         self.assertTrue(ok["applied"])
         # a consumed plan cannot be replayed
         replay = self._apply(plan, value="sk_live_replay_ffffffffffffffff", check=False)
-        self.assertFailed(replay, "MSW_PLAN_NOT_FOUND")
+        self.assertFailed(replay, "SILO_PLAN_NOT_FOUND")
         # a removal may not carry a value
         remove_plan = self._plan("remove", "API_KEY", ["dev"], ["api.example.com"])
         with_value = self._apply(remove_plan, value="sk_live_removevalue", check=False)
-        self.assertFailed(with_value, "MSW_INVALID_REQUEST")
+        self.assertFailed(with_value, "SILO_INVALID_REQUEST")
         # an expired plan is rejected and removed
         plan2 = self._plan("add", "SECOND_KEY", ["dev"], ["api.example.com"])
-        plan_file = self.env.home / ".config" / "msw" / "github" / "secret-plans" / f"{plan2['planId']}.plan"
+        plan_file = self.env.home / ".config" / "silo" / "github" / "secret-plans" / f"{plan2['planId']}.plan"
         content = json.loads(plan_file.read_text())
         content["expires"] = 0
         plan_file.write_text(json.dumps(content))
         expired = self._apply(plan2, value="sk_live_expired", check=False)
-        self.assertFailed(expired, "MSW_PLAN_EXPIRED")
+        self.assertFailed(expired, "SILO_PLAN_EXPIRED")
         self.assertFalse(plan_file.exists())
 
 

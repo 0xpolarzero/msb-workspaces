@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MSW Monitor — Product and Technical Plan</title>
+  <title>Silo — Product and Technical Plan</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -111,9 +111,9 @@
 <main>
   <header class="hero">
     <div class="eyebrow">Product and technical plan · 2026-08-07</div>
-    <h1>MSW Monitor</h1>
+    <h1>Silo</h1>
     <p class="lede">A small native macOS menu-bar monitor and launcher for the three persistent MicroSandbox workspaces: <code>dev</code>, <code>playgrounds</code>, and <code>personal</code>.</p>
-    <div class="decision"><strong>Core decision:</strong> build a monitor and launcher, not a graphical replacement for <code>msw</code>. Keep the status bar calm, expose frequent reversible actions directly, and hand credential-heavy, destructive, or parameter-heavy work back to the trusted CLI in Ghostty.</div>
+    <div class="decision"><strong>Core decision:</strong> build a monitor and launcher, not a graphical replacement for <code>silo</code>. Keep the status bar calm, expose frequent reversible actions directly, and hand credential-heavy, destructive, or parameter-heavy work back to the trusted CLI in Ghostty.</div>
   </header>
 
   <h2>1. What the repository tells us</h2>
@@ -121,13 +121,13 @@
     <section class="card"><h3>Three isolated trust domains</h3><p><code>dev</code> is the main workspace, <code>playgrounds</code> is for experiments, and <code>personal</code> is for personal projects. Each has its own VM, persistent ext4 workspace volume, Docker runtime volume, processes, credentials, network, loopback IP, and browser hostname.</p></section>
     <section class="card"><h3>Current resource limits</h3><p>Packaged defaults allocate 8 CPU / 32&nbsp;GB to <code>dev</code>, 4 CPU / 32&nbsp;GB to <code>playgrounds</code>, and 6 CPU / 16&nbsp;GB to <code>personal</code>. Resize ceilings are 12 CPU and 48/48/32&nbsp;GB respectively.</p></section>
     <section class="card"><h3>Safety boundary</h3><p>Guest GitHub access is read-only. Host-only pushes use a separate Keychain credential. Failed credential cleanup can quarantine a workspace; normal start, restart, exec, SSH, and push paths then fail closed.</p></section>
-    <section class="card"><h3>Useful runtime facts</h3><p>MicroSandbox exposes stable JSON for status, inspect, and metrics. The current <code>msw status</code> table and <code>msw metrics</code> watch output are human-oriented and should not be parsed by the app.</p></section>
+    <section class="card"><h3>Useful runtime facts</h3><p>MicroSandbox exposes stable JSON for status, inspect, and metrics. The current <code>silo status</code> table and <code>silo metrics</code> watch output are human-oriented and should not be parsed by the app.</p></section>
   </div>
 
   <h2>2. Recommended product shape</h2>
   <div class="grid">
-    <section class="card"><h3>Menu-bar icon</h3><p>One monochrome SF Symbol, such as <code>square.stack.3d.up</code>. Never put workspace names, CPU, memory, or action icons in the menu bar.</p><ul><li>Normal: neutral template icon.</li><li>Attention: small amber indicator.</li><li>Critical/offline: red indicator.</li><li>Busy: restrained progress treatment, never an attention-grabbing animation.</li></ul><p class="small">Tooltip: “msw — all systems normal”, or the highest-priority issue.</p></section>
-    <section class="card"><h3>Popover</h3><p>Use a compact, keyboard-navigable window around 380–400&nbsp;pt wide. Header contains <strong>msw</strong>, aggregate state, Refresh, Settings, Activity, and Quit. Scroll only the workspace list; keep the header and footer stable.</p></section>
+    <section class="card"><h3>Menu-bar icon</h3><p>One monochrome SF Symbol, such as <code>square.stack.3d.up</code>. Never put workspace names, CPU, memory, or action icons in the menu bar.</p><ul><li>Normal: neutral template icon.</li><li>Attention: small amber indicator.</li><li>Critical/offline: red indicator.</li><li>Busy: restrained progress treatment, never an attention-grabbing animation.</li></ul><p class="small">Tooltip: “silo — all systems normal”, or the highest-priority issue.</p></section>
+    <section class="card"><h3>Popover</h3><p>Use a compact, keyboard-navigable window around 380–400&nbsp;pt wide. Header contains <strong>silo</strong>, aggregate state, Refresh, Settings, Activity, and Quit. Scroll only the workspace list; keep the header and footer stable.</p></section>
     <section class="card"><h3>Workspace cards</h3><p>One card per workspace, in fixed order. Show purpose, lifecycle state, last-updated time, CPU, memory, and the single best next action. Keep secondary actions in a labeled menu.</p></section>
     <section class="card"><h3>Detail window</h3><p>Open a normal window for data-rich work: Overview, Metrics, Logs, Repositories, Ports, and Maintenance. Recommended initial size: roughly 760×520&nbsp;pt. Do not turn the popover into a terminal emulator.</p></section>
   </div>
@@ -143,23 +143,23 @@
   </ul>
 
   <h2>3. Complete command inventory and UI exposure</h2>
-  <p>The matrix below covers every user-facing command in <code>msw help</code>. “Terminal handoff” is an intentional product decision, not a missing feature: the CLI already owns hidden prompts, Keychain access, SSH TTY behavior, transactional rollback, and exact confirmation phrases.</p>
+  <p>The matrix below covers every user-facing command in <code>silo help</code>. “Terminal handoff” is an intentional product decision, not a missing feature: the CLI already owns hidden prompts, Keychain access, SSH TTY behavior, transactional rollback, and exact confirmation phrases.</p>
 
   <h3>Core monitor and launcher</h3>
   <div class="table-wrap"><table>
     <thead><tr><th>Command</th><th>Exposure</th><th>Tier</th><th>Recommended behavior</th></tr></thead>
     <tbody>
-      <tr><td><code>msw status</code> / <code>msw ps</code></td><td>Aggregate state + cards</td><td><span class="tag p0">P0</span></td><td>Poll without starting VMs. Use a future JSON mode or direct read-only MicroSandbox JSON; never parse the ANSI/text wrapper.</td></tr>
-      <tr><td><code>msw start [TARGET]</code></td><td>Start button per card; Start all in overflow</td><td><span class="tag p0">P0</span></td><td>Invoke the wrapper so quarantine checks, Keychain secret binding, readiness, and configured validation remain intact.</td></tr>
-      <tr><td><code>msw stop [TARGET]</code></td><td>Stop in workspace menu; Stop all in overflow</td><td><span class="tag p0">P0</span></td><td>Graceful stop only. Confirm a single stop when work may be interrupted; require an explicit “Stop all” confirmation for the global action.</td></tr>
-      <tr><td><code>msw restart [TARGET]</code></td><td>Workspace menu</td><td><span class="tag p0">P0</span></td><td>Confirmation plus progress. Never use direct <code>msb restart</code>; the wrapper rebinds the read credential correctly.</td></tr>
-      <tr><td><code>msw metrics [TARGET]</code></td><td>Inline CPU/memory; charts in detail</td><td><span class="tag p0">P0</span></td><td>Use one-shot JSON for cards and a throttled stream only while Metrics is visible. Do not invoke the wrapper’s blocking <code>--watch</code> table.</td></tr>
-      <tr><td><code>msw logs WORKSPACE [OPTIONS]</code></td><td>Logs tab / activity window</td><td><span class="tag p1">P1</span></td><td>Use <code>--json --follow --timestamps --no-color</code> and render a bounded ring buffer with search, copy, pause, and “Open in terminal”.</td></tr>
-      <tr><td><code>msw open WORKSPACE [PORT] [SCHEME]</code></td><td>Open site button + port picker</td><td><span class="tag p0">P0</span></td><td>Show the exact URL and that opening may start the VM. Favorites: 3000, 5173, 8080; allow any configured published port.</td></tr>
-      <tr><td><code>msw url WORKSPACE [PORT] [SCHEME]</code></td><td>Copy link / Open link</td><td><span class="tag p0">P0</span></td><td>Read-only URL construction. Do not imply that a service is listening; the configured port list is not a process probe.</td></tr>
-      <tr><td><code>msw ports [TARGET]</code></td><td>Searchable port picker</td><td><span class="tag p1">P1</span></td><td>Show pre-published ports and fixed hostnames. Label this as “published”, not “active”.</td></tr>
-      <tr><td><code>msw zed WORKSPACE [PATH]</code></td><td>Open in Zed from repo picker</td><td><span class="tag p0">P0</span></td><td>Use the wrapper and validate a workspace-relative path. If no path is chosen, open the workspace root.</td></tr>
-      <tr><td><code>msw dev [PATH]</code>, <code>msw playgrounds [PATH]</code>, <code>msw personal [PATH]</code>, <code>msw shell WORKSPACE [PATH]</code></td><td>Open terminal / Ghostty handoff</td><td><span class="tag p0">P0</span></td><td>Launch a new Ghostty window with an argv-based command. Fallback: copy the exact command and offer a terminal handoff. Do not run an interactive SSH shell inside the app process.</td></tr>
+      <tr><td><code>silo status</code> / <code>silo ps</code></td><td>Aggregate state + cards</td><td><span class="tag p0">P0</span></td><td>Poll without starting VMs. Use a future JSON mode or direct read-only MicroSandbox JSON; never parse the ANSI/text wrapper.</td></tr>
+      <tr><td><code>silo start [TARGET]</code></td><td>Start button per card; Start all in overflow</td><td><span class="tag p0">P0</span></td><td>Invoke the wrapper so quarantine checks, Keychain secret binding, readiness, and configured validation remain intact.</td></tr>
+      <tr><td><code>silo stop [TARGET]</code></td><td>Stop in workspace menu; Stop all in overflow</td><td><span class="tag p0">P0</span></td><td>Graceful stop only. Confirm a single stop when work may be interrupted; require an explicit “Stop all” confirmation for the global action.</td></tr>
+      <tr><td><code>silo restart [TARGET]</code></td><td>Workspace menu</td><td><span class="tag p0">P0</span></td><td>Confirmation plus progress. Never use direct <code>msb restart</code>; the wrapper rebinds the read credential correctly.</td></tr>
+      <tr><td><code>silo metrics [TARGET]</code></td><td>Inline CPU/memory; charts in detail</td><td><span class="tag p0">P0</span></td><td>Use one-shot JSON for cards and a throttled stream only while Metrics is visible. Do not invoke the wrapper’s blocking <code>--watch</code> table.</td></tr>
+      <tr><td><code>silo logs WORKSPACE [OPTIONS]</code></td><td>Logs tab / activity window</td><td><span class="tag p1">P1</span></td><td>Use <code>--json --follow --timestamps --no-color</code> and render a bounded ring buffer with search, copy, pause, and “Open in terminal”.</td></tr>
+      <tr><td><code>silo open WORKSPACE [PORT] [SCHEME]</code></td><td>Open site button + port picker</td><td><span class="tag p0">P0</span></td><td>Show the exact URL and that opening may start the VM. Favorites: 3000, 5173, 8080; allow any configured published port.</td></tr>
+      <tr><td><code>silo url WORKSPACE [PORT] [SCHEME]</code></td><td>Copy link / Open link</td><td><span class="tag p0">P0</span></td><td>Read-only URL construction. Do not imply that a service is listening; the configured port list is not a process probe.</td></tr>
+      <tr><td><code>silo ports [TARGET]</code></td><td>Searchable port picker</td><td><span class="tag p1">P1</span></td><td>Show pre-published ports and fixed hostnames. Label this as “published”, not “active”.</td></tr>
+      <tr><td><code>silo zed WORKSPACE [PATH]</code></td><td>Open in Zed from repo picker</td><td><span class="tag p0">P0</span></td><td>Use the wrapper and validate a workspace-relative path. If no path is chosen, open the workspace root.</td></tr>
+      <tr><td><code>silo dev [PATH]</code>, <code>silo playgrounds [PATH]</code>, <code>silo personal [PATH]</code>, <code>silo shell WORKSPACE [PATH]</code></td><td>Open terminal / Ghostty handoff</td><td><span class="tag p0">P0</span></td><td>Launch a new Ghostty window with an argv-based command. Fallback: copy the exact command and offer a terminal handoff. Do not run an interactive SSH shell inside the app process.</td></tr>
     </tbody>
   </table></div>
 
@@ -167,15 +167,15 @@
   <div class="table-wrap"><table>
     <thead><tr><th>Command</th><th>Exposure</th><th>Tier</th><th>Recommended behavior</th></tr></thead>
     <tbody>
-      <tr><td><code>msw repos WORKSPACE</code></td><td>Repositories tab / searchable picker</td><td><span class="tag p1">P1</span></td><td>Load on demand because the wrapper starts a stopped VM. Cache paths with an observed-at timestamp.</td></tr>
-      <tr><td><code>msw clone WORKSPACE OWNER/REPO [PATH]</code></td><td>Clone sheet</td><td><span class="tag p1">P1</span></td><td>Collect owner/repository and optional relative destination. Validate paths before execution; offer Open in Zed after success.</td></tr>
-      <tr><td><code>msw pull WORKSPACE [PATH|all]</code></td><td>Repo action / Pull all in detail window</td><td><span class="tag p1">P1</span></td><td>Show per-repository results. Explain fast-forward-only behavior and retain stderr for failures.</td></tr>
-      <tr><td><code>msw push WORKSPACE PATH [--yes] [--force-with-lease]</code></td><td>Git action with review sheet</td><td><span class="tag p1">P1</span></td><td>High-risk. Display repository, path, branch, exact commit, mode, and commits before approval. Preserve the native <code>PUSH</code> confirmation; never silently add <code>--yes</code>. Force-with-lease is a separate, stronger warning.</td></tr>
-      <tr><td><code>msw identity "NAME" EMAIL [TARGET]</code></td><td>Settings / Git identity form</td><td><span class="tag p2">P2</span></td><td>Explicit workspace/all scope. Show current values only after a deliberate read; do not make identity configuration part of the compact card.</td></tr>
-      <tr><td><code>msw github status [WORKSPACE|all]</code></td><td>Credential-health badges</td><td><span class="tag p0">P0</span></td><td>Show read access, host-write access, verification repository, and verification age. Never show token values.</td></tr>
-      <tr><td><code>msw github verify WORKSPACE [REPO]</code></td><td>Verify access button in detail</td><td><span class="tag p1">P1</span></td><td>Explain that it creates and deletes a temporary verification branch and uses the workspace lock. Stream progress; disable conflicting GitHub actions.</td></tr>
-      <tr><td><code>msw github setup WORKSPACE OWNER/REPO [--read-only]</code></td><td>Terminal handoff from Settings</td><td><span class="tag p2">P2</span></td><td>Do not reimplement token entry initially. The CLI hides input, stores Keychain values, binds only the read secret, verifies the boundary, and rolls back on failure.</td></tr>
-      <tr><td><code>msw github remove WORKSPACE</code></td><td>Terminal handoff from Settings</td><td><span class="tag p2">P2</span></td><td>Credential removal can quarantine a workspace if cleanup cannot be proven. Keep it out of the popover and require a terminal-visible operation.</td></tr>
+      <tr><td><code>silo repos WORKSPACE</code></td><td>Repositories tab / searchable picker</td><td><span class="tag p1">P1</span></td><td>Load on demand because the wrapper starts a stopped VM. Cache paths with an observed-at timestamp.</td></tr>
+      <tr><td><code>silo clone WORKSPACE OWNER/REPO [PATH]</code></td><td>Clone sheet</td><td><span class="tag p1">P1</span></td><td>Collect owner/repository and optional relative destination. Validate paths before execution; offer Open in Zed after success.</td></tr>
+      <tr><td><code>silo pull WORKSPACE [PATH|all]</code></td><td>Repo action / Pull all in detail window</td><td><span class="tag p1">P1</span></td><td>Show per-repository results. Explain fast-forward-only behavior and retain stderr for failures.</td></tr>
+      <tr><td><code>silo push WORKSPACE PATH [--yes] [--force-with-lease]</code></td><td>Git action with review sheet</td><td><span class="tag p1">P1</span></td><td>High-risk. Display repository, path, branch, exact commit, mode, and commits before approval. Preserve the native <code>PUSH</code> confirmation; never silently add <code>--yes</code>. Force-with-lease is a separate, stronger warning.</td></tr>
+      <tr><td><code>silo identity "NAME" EMAIL [TARGET]</code></td><td>Settings / Git identity form</td><td><span class="tag p2">P2</span></td><td>Explicit workspace/all scope. Show current values only after a deliberate read; do not make identity configuration part of the compact card.</td></tr>
+      <tr><td><code>silo github status [WORKSPACE|all]</code></td><td>Credential-health badges</td><td><span class="tag p0">P0</span></td><td>Show read access, host-write access, verification repository, and verification age. Never show token values.</td></tr>
+      <tr><td><code>silo github verify WORKSPACE [REPO]</code></td><td>Verify access button in detail</td><td><span class="tag p1">P1</span></td><td>Explain that it creates and deletes a temporary verification branch and uses the workspace lock. Stream progress; disable conflicting GitHub actions.</td></tr>
+      <tr><td><code>silo github setup WORKSPACE OWNER/REPO [--read-only]</code></td><td>Terminal handoff from Settings</td><td><span class="tag p2">P2</span></td><td>Do not reimplement token entry initially. The CLI hides input, stores Keychain values, binds only the read secret, verifies the boundary, and rolls back on failure.</td></tr>
+      <tr><td><code>silo github remove WORKSPACE</code></td><td>Terminal handoff from Settings</td><td><span class="tag p2">P2</span></td><td>Credential removal can quarantine a workspace if cleanup cannot be proven. Keep it out of the popover and require a terminal-visible operation.</td></tr>
     </tbody>
   </table></div>
 
@@ -183,17 +183,17 @@
   <div class="table-wrap"><table>
     <thead><tr><th>Command</th><th>Exposure</th><th>Tier</th><th>Recommended behavior</th></tr></thead>
     <tbody>
-      <tr><td><code>msw disk [TARGET]</code></td><td>On-demand Diagnostics section</td><td><span class="tag p1">P1</span></td><td>Label clearly: it starts a stopped VM and runs guest <code>df</code> plus Docker usage. Show filesystem and Docker usage separately.</td></tr>
-      <tr><td><code>msw resize WORKSPACE MEMORY [CPUS]</code></td><td>Resource sheet</td><td><span class="tag p2">P2</span></td><td>Use steppers/sliders bounded by configured ceilings. Show aggregate host allocation and confirm changes that may pressure the Mac.</td></tr>
-      <tr><td><code>msw clean [TARGET] [--volumes]</code></td><td>Advanced Maintenance only</td><td><span class="tag p2">P2</span></td><td>Two-stage confirmation. Default cleanup preserves volumes; the volume checkbox is visually destructive and explains unused database volumes can be deleted.</td></tr>
-      <tr><td><code>msw check [--deep]</code></td><td>Diagnostics: Quick check; Deep check behind disclosure</td><td><span class="tag p1">P1</span></td><td>Quick check is a useful read-only health signal. Deep check starts stopped VMs, probes SSH/internet/published ports, and creates temporary health services/containers; require explicit confirmation.</td></tr>
-      <tr><td><code>msw backup [DIRECTORY]</code></td><td>Backup wizard / progress window</td><td><span class="tag p1">P1</span></td><td>Destination picker, sensitive-archive warning, list of currently running VMs, progress, checksum/info paths, and a clear note that running VMs are stopped then restored to their previous state.</td></tr>
-      <tr><td><code>msw restore ARCHIVE [--yes]</code></td><td>Recovery wizard only</td><td><span class="tag p2">P2</span></td><td>Never put in the normal popover. Verify checksum and archive contents, show that managed state is replaced, require typed <code>RESTORE</code>, and state that VMs remain stopped and Keychain tokens are not changed.</td></tr>
-      <tr><td><code>msw upgrade [TARGET]</code></td><td>Terminal handoff / Advanced Maintenance</td><td><span class="tag p2">P2</span></td><td>Long-running guest package upgrade. Show affected workspaces and require explicit approval; terminal output is the safest first implementation.</td></tr>
-      <tr><td><code>msw update</code></td><td>Terminal handoff / Advanced Maintenance</td><td><span class="tag p2">P2</span></td><td>Host MicroSandbox update plus <code>doctor</code>. Keep terminal-visible until a structured progress contract exists.</td></tr>
-      <tr><td><code>msw tunnel WORKSPACE REMOTE [LOCAL]</code></td><td>Tunnel sheet + tracked Activity process</td><td><span class="tag p1">P1</span></td><td>Ask for remote and local ports, display <code>http://localhost:LOCAL</code>, keep the SSH process alive, and provide Stop tunnel. Validate both ports.</td></tr>
-      <tr><td><code>msw exec WORKSPACE COMMAND...</code></td><td>Terminal-first Advanced action</td><td><span class="tag p2">P2</span></td><td>Do not embed an arbitrary shell in the popover. Offer canned commands and “Open terminal”; if a form is added later, pass argv without shell interpolation.</td></tr>
-      <tr><td><code>msw host repair</code></td><td>Terminal handoff from Diagnostics</td><td><span class="tag p2">P2</span></td><td>It changes loopback aliases, launch-daemon state, <code>/etc/hosts</code>, SSH authorization, and asks for <code>sudo</code>. Keep the privilege interaction in a terminal.</td></tr>
+      <tr><td><code>silo disk [TARGET]</code></td><td>On-demand Diagnostics section</td><td><span class="tag p1">P1</span></td><td>Label clearly: it starts a stopped VM and runs guest <code>df</code> plus Docker usage. Show filesystem and Docker usage separately.</td></tr>
+      <tr><td><code>silo resize WORKSPACE MEMORY [CPUS]</code></td><td>Resource sheet</td><td><span class="tag p2">P2</span></td><td>Use steppers/sliders bounded by configured ceilings. Show aggregate host allocation and confirm changes that may pressure the Mac.</td></tr>
+      <tr><td><code>silo clean [TARGET] [--volumes]</code></td><td>Advanced Maintenance only</td><td><span class="tag p2">P2</span></td><td>Two-stage confirmation. Default cleanup preserves volumes; the volume checkbox is visually destructive and explains unused database volumes can be deleted.</td></tr>
+      <tr><td><code>silo check [--deep]</code></td><td>Diagnostics: Quick check; Deep check behind disclosure</td><td><span class="tag p1">P1</span></td><td>Quick check is a useful read-only health signal. Deep check starts stopped VMs, probes SSH/internet/published ports, and creates temporary health services/containers; require explicit confirmation.</td></tr>
+      <tr><td><code>silo backup [DIRECTORY]</code></td><td>Backup wizard / progress window</td><td><span class="tag p1">P1</span></td><td>Destination picker, sensitive-archive warning, list of currently running VMs, progress, checksum/info paths, and a clear note that running VMs are stopped then restored to their previous state.</td></tr>
+      <tr><td><code>silo restore ARCHIVE [--yes]</code></td><td>Recovery wizard only</td><td><span class="tag p2">P2</span></td><td>Never put in the normal popover. Verify checksum and archive contents, show that managed state is replaced, require typed <code>RESTORE</code>, and state that VMs remain stopped and Keychain tokens are not changed.</td></tr>
+      <tr><td><code>silo upgrade [TARGET]</code></td><td>Terminal handoff / Advanced Maintenance</td><td><span class="tag p2">P2</span></td><td>Long-running guest package upgrade. Show affected workspaces and require explicit approval; terminal output is the safest first implementation.</td></tr>
+      <tr><td><code>silo update</code></td><td>Terminal handoff / Advanced Maintenance</td><td><span class="tag p2">P2</span></td><td>Host MicroSandbox update plus <code>doctor</code>. Keep terminal-visible until a structured progress contract exists.</td></tr>
+      <tr><td><code>silo tunnel WORKSPACE REMOTE [LOCAL]</code></td><td>Tunnel sheet + tracked Activity process</td><td><span class="tag p1">P1</span></td><td>Ask for remote and local ports, display <code>http://localhost:LOCAL</code>, keep the SSH process alive, and provide Stop tunnel. Validate both ports.</td></tr>
+      <tr><td><code>silo exec WORKSPACE COMMAND...</code></td><td>Terminal-first Advanced action</td><td><span class="tag p2">P2</span></td><td>Do not embed an arbitrary shell in the popover. Offer canned commands and “Open terminal”; if a form is added later, pass argv without shell interpolation.</td></tr>
+      <tr><td><code>silo host repair</code></td><td>Terminal handoff from Diagnostics</td><td><span class="tag p2">P2</span></td><td>It changes loopback aliases, launch-daemon state, <code>/etc/hosts</code>, SSH authorization, and asks for <code>sudo</code>. Keep the privilege interaction in a terminal.</td></tr>
     </tbody>
   </table></div>
 
@@ -201,12 +201,12 @@
   <div class="table-wrap"><table>
     <thead><tr><th>Command</th><th>Exposure</th><th>Recommendation</th></tr></thead>
     <tbody>
-      <tr><td><code>msw version</code></td><td>Settings → Diagnostics</td><td>Show MSW and MicroSandbox versions; include in Copy Diagnostics.</td></tr>
-      <tr><td><code>msw docs [TOPIC]</code></td><td>Settings → Documentation</td><td>Open the relevant installed guide in the default Markdown application or terminal. Topics are cheatsheet, setup, github, and tests.</td></tr>
-      <tr><td><code>msw help</code></td><td>Settings → Documentation</td><td>Offer “Copy CLI help” rather than a second command catalog in the app.</td></tr>
+      <tr><td><code>silo version</code></td><td>Settings → Diagnostics</td><td>Show Silo and MicroSandbox versions; include in Copy Diagnostics.</td></tr>
+      <tr><td><code>silo docs [TOPIC]</code></td><td>Settings → Documentation</td><td>Open the relevant installed guide in the default Markdown application or terminal. Topics are cheatsheet, setup, github, and tests.</td></tr>
+      <tr><td><code>silo help</code></td><td>Settings → Documentation</td><td>Offer “Copy CLI help” rather than a second command catalog in the app.</td></tr>
       <tr><td><code>./setup.sh</code> and its repair flags</td><td>Never a normal app action</td><td>Show installer guidance and a terminal fallback only. Rebuild/recreate/reset operations can affect persistent state.</td></tr>
       <tr><td><code>__github-verify-transaction</code></td><td>Never expose</td><td>Internal transaction entry point; only the wrapper should invoke it.</td></tr>
-      <tr><td>Raw <code>msb</code> image/volume/snapshot/remove/update commands</td><td>Never expose by default</td><td>They bypass MSW policy and trust-boundary orchestration. Keep them for expert terminal use only.</td></tr>
+      <tr><td>Raw <code>msb</code> image/volume/snapshot/remove/update commands</td><td>Never expose by default</td><td>They bypass Silo policy and trust-boundary orchestration. Keep them for expert terminal use only.</td></tr>
     </tbody>
   </table></div>
 
@@ -217,24 +217,24 @@
     <div class="flow-arrow">→</div>
     <div class="flow-box"><strong>AppModel</strong><span class="small">@MainActor state</span></div>
     <div class="flow-arrow">→</div>
-    <div class="flow-box"><strong>MSWClient</strong><span class="small">actor + typed intents</span></div>
+    <div class="flow-box"><strong>SiloClient</strong><span class="small">actor + typed intents</span></div>
     <div class="flow-arrow">→</div>
     <div class="flow-box"><strong>ProcessRunner</strong><span class="small">argv, timeout, stderr</span></div>
   </div>
   <div class="grid">
     <section class="card"><h3>App shell</h3><p><code>@main</code> app with <code>MenuBarExtra</code>, <code>.menuBarExtraStyle(.window)</code>, an agent-style <code>LSUIElement</code> bundle setting, a Settings scene, and a separate detail window opened only when needed.</p></section>
-    <section class="card"><h3>State and concurrency</h3><p>Use an <code>@MainActor</code> AppModel backed by an <code>MSWClient</code> actor. Give each workspace an operation lock and a cancellable operation state. Status and metrics reads can run in parallel; conflicting writes cannot.</p></section>
-    <section class="card"><h3>Process boundary</h3><p>Launch absolute executable paths with <code>Foundation.Process</code> and an argument array. Set a deterministic PATH containing <code>$HOME/.local/bin</code>, Homebrew, and system paths. Preserve <code>HOME</code> so <code>msw</code> finds <code>~/.config/msw/config.sh</code>.</p></section>
+    <section class="card"><h3>State and concurrency</h3><p>Use an <code>@MainActor</code> AppModel backed by an <code>SiloClient</code> actor. Give each workspace an operation lock and a cancellable operation state. Status and metrics reads can run in parallel; conflicting writes cannot.</p></section>
+    <section class="card"><h3>Process boundary</h3><p>Launch absolute executable paths with <code>Foundation.Process</code> and an argument array. Set a deterministic PATH containing <code>$HOME/.local/bin</code>, Homebrew, and system paths. Preserve <code>HOME</code> so <code>silo</code> finds <code>~/.config/silo/config.sh</code>.</p></section>
     <section class="card"><h3>Distribution</h3><p>For a personal utility, prefer a Developer ID/notarized distribution outside the Mac App Store and do not enable App Sandbox initially. The app must execute the user’s installed CLI, launch Ghostty/Zed, read selected files, and participate in normal Keychain prompts.</p></section>
   </div>
 
   <h3>Command adapter contract</h3>
-  <div class="callout success"><strong>Current safe path:</strong> invoke <code>msw</code> for all policy-bearing mutations and terminal handoffs. For read-only telemetry, use <code>msb status --all --label msw.managed=true --format json</code>, <code>msb inspect NAME --format json</code>, <code>msb metrics --all --format json</code> or <code>--follow</code>, and <code>msw logs NAME --json --follow</code>. Do not parse <code>msw status</code> tables or <code>msw metrics --watch</code> terminal output.</div>
-  <p>Add a small versioned machine-readable surface to <code>msw</code> before production UI work:</p>
+  <div class="callout success"><strong>Current safe path:</strong> invoke <code>silo</code> for all policy-bearing mutations and terminal handoffs. For read-only telemetry, use <code>msb status --all --label silo.managed=true --format json</code>, <code>msb inspect NAME --format json</code>, <code>msb metrics --all --format json</code> or <code>--follow</code>, and <code>silo logs NAME --json --follow</code>. Do not parse <code>silo status</code> tables or <code>silo metrics --watch</code> terminal output.</div>
+  <p>Add a small versioned machine-readable surface to <code>silo</code> before production UI work:</p>
   <ul>
-    <li><code>msw status --format json</code>: schema version, MSW/MSB versions, workspace IDs, lifecycle state, resource configuration, hostnames/IPs, published ports, GitHub credential presence/access mode, verification metadata, quarantine state, capabilities, and timestamp. Never include token values.</li>
-    <li><code>msw metrics [TARGET] --format json --once</code> and <code>--follow</code>: preserve the existing human default while exposing a stable JSON contract.</li>
-    <li><code>msw github status --format json</code>, <code>msw repos WORKSPACE --format json</code>, and <code>msw ports [TARGET] --format json</code>.</li>
+    <li><code>silo status --format json</code>: schema version, Silo/MSB versions, workspace IDs, lifecycle state, resource configuration, hostnames/IPs, published ports, GitHub credential presence/access mode, verification metadata, quarantine state, capabilities, and timestamp. Never include token values.</li>
+    <li><code>silo metrics [TARGET] --format json --once</code> and <code>--follow</code>: preserve the existing human default while exposing a stable JSON contract.</li>
+    <li><code>silo github status --format json</code>, <code>silo repos WORKSPACE --format json</code>, and <code>silo ports [TARGET] --format json</code>.</li>
     <li>Later: structured preview/result modes for <code>push</code>, <code>backup</code>, <code>restore</code>, and <code>disk</code>. Until then, keep those workflows terminal-visible.</li>
   </ul>
   <p class="small">This avoids sourcing or parsing <code>config.sh</code> in Swift and avoids coupling the app to MicroSandbox’s incidental JSON fields. Human CLI output remains unchanged.</p>
@@ -264,7 +264,7 @@ MetricsSnapshot = { cpuPercent, memoryUsed, memoryLimit, network, diskIO, uptime
       <tr><td>Accidental lifecycle interruption</td><td>Use distinct Start, Stop, and Restart buttons. Disable conflicting actions while busy. Confirm Stop/Restart and require stronger confirmation for global operations.</td></tr>
       <tr><td>Host-only push</td><td>Show exact repository, path, branch, SHA, fast-forward mode, and commits. Preserve the CLI’s <code>PUSH</code> phrase; never auto-approve or hide force-with-lease.</td></tr>
       <tr><td>Credential leakage</td><td>Never log environment values, Keychain contents, token prompts, or raw command environments. Keep GitHub setup in a terminal until a secure native wizard is explicitly designed.</td></tr>
-      <tr><td>Quarantine bypass</td><td>Use <code>msw</code>, not direct <code>msb</code>, for mutations. Model quarantine separately from lifecycle state and do not offer a “clear quarantine” button.</td></tr>
+      <tr><td>Quarantine bypass</td><td>Use <code>silo</code>, not direct <code>msb</code>, for mutations. Model quarantine separately from lifecycle state and do not offer a “clear quarantine” button.</td></tr>
       <tr><td>Destructive Docker cleanup</td><td>Default to volume-preserving cleanup. Make <code>--volumes</code> a separate, red, explicitly confirmed option.</td></tr>
       <tr><td>Cold backup surprises</td><td>Before execution, show destination, sensitive contents, affected workspaces, and that running VMs will be stopped and then restored to their prior running set.</td></tr>
       <tr><td>Restore damage</td><td>Keep restore out of the popover. Require checksum validation, archive inspection, typed <code>RESTORE</code>, and a final explanation that VMs remain stopped and Keychain tokens are not changed.</td></tr>
@@ -275,7 +275,7 @@ MetricsSnapshot = { cpuPercent, memoryUsed, memoryLimit, network, diskIO, uptime
 
   <h2>7. Delivery phases</h2>
   <div class="step"><div class="step-num">0</div><div><h3>Stabilize the machine interface</h3><p>Add and test versioned JSON modes for status, metrics, GitHub status, repositories, and ports. Add fixture-based parser tests and preserve current human output. This is the prerequisite that prevents a brittle Swift text parser.</p></div></div>
-  <div class="step"><div class="step-num">1</div><div><h3>Ship the monitor core</h3><p>Create <code>macos/MSWMonitor</code> as a macOS 14+ Xcode app. Implement the status item, three cards, status/metrics polling, Start/Stop/Restart, Refresh, settings, login item toggle, errors, stale data, Activity, and terminal fallback.</p></div></div>
+  <div class="step"><div class="step-num">1</div><div><h3>Ship the monitor core</h3><p>Create <code>macos/SiloMonitor</code> as a macOS 14+ Xcode app. Implement the status item, three cards, status/metrics polling, Start/Stop/Restart, Refresh, settings, login item toggle, errors, stale data, Activity, and terminal fallback.</p></div></div>
   <div class="step"><div class="step-num">2</div><div><h3>Ship daily workflow launchers</h3><p>Add Open site, Copy URL, Open in Zed, Ghostty shell handoff, ports picker, streaming logs, repository picker, clone, pull, and GitHub status/verify. Add the detail window and bounded operation history.</p></div></div>
   <div class="step"><div class="step-num">3</div><div><h3>Ship guarded maintenance</h3><p>Add disk inspection, resize, backup, tunnel tracking, deep check, push review, and identity settings. Keep operations visible with progress and failure recovery.</p></div></div>
   <div class="step"><div class="step-num">4</div><div><h3>Ship recovery and expert controls</h3><p>Add secure native flows only where they improve safety: clean, upgrade, update, host repair, GitHub setup/remove, restore, and optional canned exec actions. Terminal handoff remains a supported escape hatch.</p></div></div>
@@ -283,7 +283,7 @@ MetricsSnapshot = { cpuPercent, memoryUsed, memoryLimit, network, diskIO, uptime
   <h2>8. Verification plan</h2>
   <div class="grid">
     <section class="card"><h3>Pure Swift tests</h3><ul><li>JSON decoding and schema-version rejection.</li><li>Lifecycle transition/state-machine invariants.</li><li>Stale/partial data aggregation and status-item severity.</li><li>Argument construction and path validation.</li><li>Redaction and bounded output buffers.</li><li>Confirmation policy for every dangerous command.</li></ul></section>
-    <section class="card"><h3>Process integration tests</h3><ul><li>Fake <code>msw</code>/<code>msb</code> executables with controlled stdout, stderr, exit codes, delays, and streamed JSON Lines.</li><li>Cancellation terminates child processes without launching duplicate operations.</li><li>Missing CLI/config, missing Keychain access, quarantine, and stale data all render recoverable states.</li></ul></section>
+    <section class="card"><h3>Process integration tests</h3><ul><li>Fake <code>silo</code>/<code>msb</code> executables with controlled stdout, stderr, exit codes, delays, and streamed JSON Lines.</li><li>Cancellation terminates child processes without launching duplicate operations.</li><li>Missing CLI/config, missing Keychain access, quarantine, and stale data all render recoverable states.</li></ul></section>
     <section class="card"><h3>Real Mac smoke test</h3><ul><li>Launch with all VMs stopped; verify no automatic starts.</li><li>Start <code>dev</code>, observe readiness and metrics, open a published site, open Zed and Ghostty, then stop.</li><li>Stream logs, run quick check, verify GitHub status, and exercise a failed command.</li><li>Test light/dark mode, VoiceOver, keyboard focus, notification opt-in, login item, signed build, and relaunch.</li></ul></section>
   </div>
   <div class="callout danger"><strong>Do not use production backup/restore, credential rotation, force push, or destructive Docker cleanup as casual smoke tests.</strong> Cover their command planning and confirmation behavior with fakes; use a disposable workspace for real end-to-end validation.</div>
@@ -293,18 +293,18 @@ MetricsSnapshot = { cpuPercent, memoryUsed, memoryLimit, network, diskIO, uptime
     <li>macOS 14+ deployment target; SwiftUI <code>MenuBarExtra</code> with window style.</li>
     <li>One calm icon; no status text or workspace names in the menu bar.</li>
     <li>No automatic VM starts from monitoring.</li>
-    <li><code>msw</code> remains the policy boundary for mutations.</li>
+    <li><code>silo</code> remains the policy boundary for mutations.</li>
     <li>No App Sandbox for the first personal Developer ID build.</li>
     <li>No global hotkey, arbitrary command form, or token wizard in the first release.</li>
     <li>Settings persist only non-sensitive preferences: paths, favorites, polling, notifications, launch-at-login, and display choices.</li>
   </ul>
 
   <h2>Sources and evidence</h2>
-  <details open><summary>Repository and runtime sources read</summary><ul><li><code>README.md</code> — workspace purposes, defaults, daily use, trust boundary.</li><li><code>docs/MSW-CHEATSHEET.md</code> — complete command catalog and examples.</li><li><code>docs/SETUP-GUIDE.md</code> — lifecycle, ports, Git, backup, recovery, maintenance.</li><li><code>docs/GITHUB-SETUP.md</code> — Keychain split, read-only guest token, host-only push, verification, quarantine implications.</li><li><code>docs/TEST-REPORT.md</code> — 46 release scenarios and security invariants.</li><li><code>bin/msw</code>, <code>config.sh</code>, <code>setup.sh</code> — actual dispatch, side effects, environment, resources, and safety guards.</li><li>Installed <code>msb --help</code> and <code>msb --tree</code>; live read-only <code>msb status --all --format json</code> and <code>msb metrics --all --format json</code> output.</li></ul></details>
+  <details open><summary>Repository and runtime sources read</summary><ul><li><code>README.md</code> — workspace purposes, defaults, daily use, trust boundary.</li><li><code>docs/Silo-CHEATSHEET.md</code> — complete command catalog and examples.</li><li><code>docs/SETUP-GUIDE.md</code> — lifecycle, ports, Git, backup, recovery, maintenance.</li><li><code>docs/GITHUB-SETUP.md</code> — Keychain split, read-only guest token, host-only push, verification, quarantine implications.</li><li><code>docs/TEST-REPORT.md</code> — 46 release scenarios and security invariants.</li><li><code>bin/silo</code>, <code>config.sh</code>, <code>setup.sh</code> — actual dispatch, side effects, environment, resources, and safety guards.</li><li>Installed <code>msb --help</code> and <code>msb --tree</code>; live read-only <code>msb status --all --format json</code> and <code>msb metrics --all --format json</code> output.</li></ul></details>
   <details><summary>Apple platform references</summary><ul><li><a href="https://developer.apple.com/documentation/swiftui/menubarextra">SwiftUI MenuBarExtra</a> and <a href="https://developer.apple.com/documentation/swiftui/scene/menubarextrastyle(_:)">MenuBarExtra window style</a>.</li><li><a href="https://developer.apple.com/documentation/servicemanagement/smappservice">ServiceManagement SMAppService</a> for launch-at-login.</li><li><a href="https://developer.apple.com/documentation/appkit/nsworkspace/openconfiguration">NSWorkspace.OpenConfiguration</a> for argv-based app handoff.</li><li><a href="https://developer.apple.com/documentation/appkit/nsstatusitem">NSStatusItem</a> and <a href="https://developer.apple.com/documentation/appkit/nspopover">NSPopover</a> as the deliberate AppKit fallback if native MenuBarExtra control proves insufficient.</li></ul></details>
-  <details><summary>Research panel</summary><p>Seven independent <code>gpt-5.6-sol</code> research runs reviewed command inventory, SwiftUI/AppKit architecture, menu-bar UX, accessibility, safety, integration feasibility, and product prioritization. They made no repository code changes. Their convergent recommendations are reflected above: use <code>msw</code> for policy-bearing mutations, machine JSON for telemetry, progressive disclosure, explicit confirmations, stale-data semantics, and terminal fallback for sensitive workflows.</p></details>
+  <details><summary>Research panel</summary><p>Seven independent <code>gpt-5.6-sol</code> research runs reviewed command inventory, SwiftUI/AppKit architecture, menu-bar UX, accessibility, safety, integration feasibility, and product prioritization. They made no repository code changes. Their convergent recommendations are reflected above: use <code>silo</code> for policy-bearing mutations, machine JSON for telemetry, progressive disclosure, explicit confirmations, stale-data semantics, and terminal fallback for sensitive workflows.</p></details>
 
-  <footer class="footer">Working title: <strong>MSW Monitor</strong>. This is the agreed planning baseline for implementation; it intentionally leaves no command unclassified and no destructive path implicit.</footer>
+  <footer class="footer">Working title: <strong>Silo</strong>. This is the agreed planning baseline for implementation; it intentionally leaves no command unclassified and no destructive path implicit.</footer>
 </main>
 </body>
 </html>

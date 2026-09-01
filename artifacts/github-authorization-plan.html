@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MSW Monitor GitHub Authorization Plan</title>
+  <title>Silo GitHub Authorization Plan</title>
   <style>
     :root {
       color-scheme: light;
@@ -77,9 +77,9 @@
 <body>
   <main>
     <header>
-      <div class="eyebrow">MSW Monitor · Proposed architecture</div>
+      <div class="eyebrow">Silo · Proposed architecture</div>
       <h1>GitHub authorization that feels like Vercel</h1>
-      <p class="lede">Authenticate once in GitHub, return to MSW Monitor, choose which workspaces receive which repositories, and review the exact access before applying it.</p>
+      <p class="lede">Authenticate once in GitHub, return to Silo, choose which workspaces receive which repositories, and review the exact access before applying it.</p>
       <div class="meta">
         <span class="pill"><strong>Status</strong> Proposed</span>
         <span class="pill"><strong>Current commit</strong> 58738d4</span>
@@ -97,7 +97,7 @@
       <div class="grid">
         <div class="card">
           <h3>One visible login</h3>
-          <p>Use a hosted MSW Connect OAuth broker so the desktop app can provide a real browser callback and a single GitHub authorization session. No GitHub client secret is shipped in the Mac bundle.</p>
+          <p>Use a hosted Silo Connect OAuth broker so the desktop app can provide a real browser callback and a single GitHub authorization session. No GitHub client secret is shipped in the Mac bundle.</p>
         </div>
         <div class="card">
           <h3>Per-workspace grants</h3>
@@ -116,11 +116,11 @@
     <section>
       <h2>Target user flow</h2>
       <div class="diagram" aria-label="Authorization flow diagram">
-        <div class="node">Connect GitHub<small>one button in MSW</small></div>
+        <div class="node">Connect GitHub<small>one button in Silo</small></div>
         <div class="arrow">→</div>
         <div class="node">GitHub<small>sign in and authorize</small></div>
         <div class="arrow">→</div>
-        <div class="node">MSW Connect<small>secure callback and discovery</small></div>
+        <div class="node">Silo Connect<small>secure callback and discovery</small></div>
       </div>
       <div class="diagram" aria-label="Workspace assignment flow diagram" style="grid-template-columns: repeat(7, minmax(100px, 1fr));">
         <div class="node">Account<small>Connected as @user</small></div>
@@ -132,9 +132,9 @@
         <div class="node">VM access<small>review and apply</small></div>
       </div>
       <ol>
-        <li>Click <strong>Connect GitHub</strong>. MSW opens the hosted authorization page in the system browser or <code>ASWebAuthenticationSession</code>.</li>
-        <li>Authorize the MSW GitHub App once. The callback returns a one-time authorization result to the desktop app through a registered callback or loopback listener.</li>
-        <li>Show the signed-in account and available GitHub App installations. If the App is not installed for an owner, offer <strong>Install MSW App</strong> as the next step.</li>
+        <li>Click <strong>Connect GitHub</strong>. Silo opens the hosted authorization page in the system browser or <code>ASWebAuthenticationSession</code>.</li>
+        <li>Authorize the Silo GitHub App once. The callback returns a one-time authorization result to the desktop app through a registered callback or loopback listener.</li>
+        <li>Show the signed-in account and available GitHub App installations. If the App is not installed for an owner, offer <strong>Install Silo App</strong> as the next step.</li>
         <li>Present a workspace assignment view. Each workspace card has owner, repositories, and an explicit <strong>Read-only</strong> / <strong>Read + write</strong> choice. Read-only is the default.</li>
         <li>Show a final review and apply all assignments together. The app reports exactly what each VM will receive and what remains unconfigured.</li>
       </ol>
@@ -145,9 +145,9 @@
       <table>
         <thead><tr><th>Artifact</th><th>Owner</th><th>Lifetime</th><th>Rule</th></tr></thead>
         <tbody>
-          <tr><td>OAuth authorization code / user token</td><td>MSW Connect service</td><td>Transient or encrypted service session</td><td>Never embedded in the app and never sent to a VM.</td></tr>
-          <tr><td>GitHub App private key</td><td>MSW Connect service</td><td>Rotatable server secret</td><td>Never present in the Mac bundle, logs, or local Keychain.</td></tr>
-          <tr><td>Workspace grant</td><td>MSW Monitor + service</td><td>Revocable; one per workspace/access boundary</td><td>Contains installation ID, owner, repository set, access mode, and grant identity; no full user token.</td></tr>
+          <tr><td>OAuth authorization code / user token</td><td>Silo Connect service</td><td>Transient or encrypted service session</td><td>Never embedded in the app and never sent to a VM.</td></tr>
+          <tr><td>GitHub App private key</td><td>Silo Connect service</td><td>Rotatable server secret</td><td>Never present in the Mac bundle, logs, or local Keychain.</td></tr>
+          <tr><td>Workspace grant</td><td>Silo + service</td><td>Revocable; one per workspace/access boundary</td><td>Contains installation ID, owner, repository set, access mode, and grant identity; no full user token.</td></tr>
           <tr><td>Installation access token</td><td>Target VM through the broker</td><td>Short-lived; renewed by service</td><td>Mint with the selected repository subset and required GitHub App permissions only.</td></tr>
         </tbody>
       </table>
@@ -201,9 +201,9 @@
           </ul>
         </div>
         <div class="card">
-          <h3>5 · MSW/VM delivery</h3>
+          <h3>5 · Silo/VM delivery</h3>
           <ul>
-            <li>Make <code>MSWClient</code> request credentials by workspace grant, not by arbitrary local token metadata.</li>
+            <li>Make <code>SiloClient</code> request credentials by workspace grant, not by arbitrary local token metadata.</li>
             <li>Pass only the selected short-lived token to the target VM or use a brokered credential proxy.</li>
             <li>Preserve host write approval and guest read-only sequencing.</li>
           </ul>
@@ -230,7 +230,7 @@
           <tr><td><code>GitHubAuthorizationCoordinator.swift</code></td><td>Stores user token after discovery and commits per-role credentials</td><td>Consume broker sessions and commit grant metadata plus scoped token handles.</td></tr>
           <tr><td><code>CredentialBroker.swift</code></td><td>Stores full token per workspace/role; repository IDs are metadata</td><td>Grant-based schema; enforce scoped-token invariant and migrate broad records safely.</td></tr>
           <tr><td><code>TokenRefreshCoordinator.swift</code></td><td>Refreshes GitHub user tokens locally</td><td>Renews service grants or installation tokens without exposing the user token locally.</td></tr>
-          <tr><td><code>MSWClient.swift</code> and host agent</td><td>Binds credentials into workspace operations</td><td>Request and deliver only the target workspace's scoped credential.</td></tr>
+          <tr><td><code>SiloClient.swift</code> and host agent</td><td>Binds credentials into workspace operations</td><td>Request and deliver only the target workspace's scoped credential.</td></tr>
         </tbody>
       </table>
     </section>
@@ -255,7 +255,7 @@
       <h2>Acceptance criteria</h2>
       <ul>
         <li>A new user sees one clear <strong>Connect GitHub</strong> action, not client-ID configuration.</li>
-        <li>One GitHub authorization can assign access to multiple MSW workspaces.</li>
+        <li>One GitHub authorization can assign access to multiple Silo workspaces.</li>
         <li>The user can see and review every owner, repository, workspace, and access mode before applying.</li>
         <li>Repository checkboxes correspond to enforced server-side token scope, not metadata-only promises.</li>
         <li>No GitHub client secret, private key, or broad user token ships to or is logged by the desktop app or VM.</li>

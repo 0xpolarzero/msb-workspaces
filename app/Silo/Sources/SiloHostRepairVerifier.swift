@@ -1,17 +1,17 @@
 import Foundation
 
-protocol MSWHostRepairVerifying: Sendable {
-    func isReady(records: [MSWWorkspaceNetworkRecord]) async -> Bool
+protocol SiloHostRepairVerifying: Sendable {
+    func isReady(records: [SiloWorkspaceNetworkRecord]) async -> Bool
 }
 
-struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
-    private let runner: MSWCommandRunner
+struct SiloHostRepairVerifier: SiloHostRepairVerifying, Sendable {
+    private let runner: SiloCommandRunner
 
-    init(runner: MSWCommandRunner = MSWCommandRunner()) {
+    init(runner: SiloCommandRunner = SiloCommandRunner()) {
         self.runner = runner
     }
 
-    func isReady(records: [MSWWorkspaceNetworkRecord]) async -> Bool {
+    func isReady(records: [SiloWorkspaceNetworkRecord]) async -> Bool {
         guard hostsFileIsReady(records: records),
               await loopbackAliasesAreReady(records: records),
               await launchDaemonIsReady() else {
@@ -20,7 +20,7 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
         return true
     }
 
-    private func hostsFileIsReady(records: [MSWWorkspaceNetworkRecord]) -> Bool {
+    private func hostsFileIsReady(records: [SiloWorkspaceNetworkRecord]) -> Bool {
         Self.hostsFileMatches(records: records)
     }
 
@@ -28,7 +28,7 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
     /// the desired records. Cheap enough for keystroke-frequency UI checks;
     /// the authoritative pre-apply verification still covers aliases and the
     /// daemon as well.
-    static func hostsFileMatches(records: [MSWWorkspaceNetworkRecord]) -> Bool {
+    static func hostsFileMatches(records: [SiloWorkspaceNetworkRecord]) -> Bool {
         let url = URL(fileURLWithPath: "/etc/hosts")
         guard let data = try? Data(contentsOf: url), data.count <= 1_024 * 1_024 else {
             return false
@@ -36,21 +36,14 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
         return Self.managedHostsMatch(String(decoding: data, as: UTF8.self), expected: records)
     }
 
-    /// Managed `/etc/hosts` block dialects. The administrator repair script
-    /// strips both spellings and rewrites the managed form; verification
-    /// accepts either single complete block so machines configured by earlier
-    /// releases or the msw CLI are not flagged for repair when the records
-    /// already match.
+    /// The administrator repair script and verifier share one canonical
+    /// `/etc/hosts` block format.
     private static let managedMarkers = (
         begin: "# BEGIN SILO MANAGED HOSTS",
         end: "# END SILO MANAGED HOSTS"
     )
-    private static let legacyMarkers = (
-        begin: "# BEGIN MSW WORKSPACES",
-        end: "# END MSW WORKSPACES"
-    )
 
-    static func managedHostsMatch(_ text: String, expected records: [MSWWorkspaceNetworkRecord]) -> Bool {
+    static func managedHostsMatch(_ text: String, expected records: [SiloWorkspaceNetworkRecord]) -> Bool {
         let lines = text
             .split(whereSeparator: \.isNewline)
             .map(String.init)
@@ -60,28 +53,20 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
             return found.count == 1 ? found[0] : nil
         }
 
-        for (markers, other) in [(Self.managedMarkers, Self.legacyMarkers), (Self.legacyMarkers, Self.managedMarkers)] {
-            guard let start = soleIndex(of: markers.begin),
-                  let end = soleIndex(of: markers.end),
-                  start < end else {
-                continue
-            }
-            // Exactly one unambiguous managed block may exist: any trace of
-            // the other dialect means the file needs a real repair pass.
-            guard !lines.contains(other.begin), !lines.contains(other.end) else {
-                return false
-            }
-            let actual = lines[(start + 1)..<end].map { line in
-                line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-            }
-            return actual == records.map { [$0.address, $0.hostname] }
+        guard let start = soleIndex(of: Self.managedMarkers.begin),
+              let end = soleIndex(of: Self.managedMarkers.end),
+              start < end else {
+            return false
         }
-        return false
+        let actual = lines[(start + 1)..<end].map { line in
+            line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+        }
+        return actual == records.map { [$0.address, $0.hostname] }
     }
 
-    private func loopbackAliasesAreReady(records: [MSWWorkspaceNetworkRecord]) async -> Bool {
+    private func loopbackAliasesAreReady(records: [SiloWorkspaceNetworkRecord]) async -> Bool {
         guard let result = try? await runner.run(
-            MSWCommand(
+            SiloCommand(
                 executable: URL(fileURLWithPath: "/sbin/ifconfig"),
                 arguments: ["lo0"],
                 timeout: .seconds(5),
@@ -107,9 +92,9 @@ struct MSWHostRepairVerifier: MSWHostRepairVerifying, Sendable {
 
     private func launchDaemonIsReady() async -> Bool {
         guard let result = try? await runner.run(
-            MSWCommand(
+            SiloCommand(
                 executable: URL(fileURLWithPath: "/bin/launchctl"),
-                arguments: ["print", "system/dev.msw.loopback-aliases"],
+                arguments: ["print", "system/dev.silo.loopback-aliases"],
                 timeout: .seconds(5),
                 captureLimit: 64 * 1024
             )

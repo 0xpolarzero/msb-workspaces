@@ -94,14 +94,14 @@ struct Workspace: Identifiable, Equatable, Sendable {
     var state: State
     var credential: CredentialState
     var secrets: SecretsState
-    var freshness: MSWFreshness
+    var freshness: SiloFreshness
     var observedAt: Date?
     var networkHost: String?
     var quarantineReason: String?
     var statusReason: String?
     var recoveryAction: String?
     var nextAction: String
-    var serverCapabilities: MSWActionCapabilities
+    var serverCapabilities: SiloActionCapabilities
     var canStart: Bool
     var canStop: Bool
     var canRestart: Bool
@@ -118,7 +118,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         state: State = .stopped,
         credential: CredentialState = .unconfigured,
         secrets: SecretsState = .active,
-        freshness: MSWFreshness = .neverObserved,
+        freshness: SiloFreshness = .neverObserved,
         observedAt: Date? = nil,
         networkHost: String? = nil,
         quarantineReason: String? = nil,
@@ -132,7 +132,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         canPush: Bool = false,
         skippedPorts: [Int]? = nil,
         portWarning: String? = nil,
-        serverCapabilities: MSWActionCapabilities? = nil
+        serverCapabilities: SiloActionCapabilities? = nil
     ) {
         self.id = id
         self.purpose = purpose ?? Self.defaultPurpose(for: id)
@@ -146,7 +146,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         self.statusReason = statusReason
         self.recoveryAction = recoveryAction
         self.nextAction = nextAction ?? (state == .running ? "Open Terminal" : "Start")
-        self.serverCapabilities = serverCapabilities ?? MSWActionCapabilities(
+        self.serverCapabilities = serverCapabilities ?? SiloActionCapabilities(
             canStart: canStart,
             canStop: canStop,
             canRestart: canRestart,
@@ -169,7 +169,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         case .dev: return "Primary software development workspace"
         case .playgrounds: return "Experiments and disposable prototypes"
         case .personal: return "Personal projects and services"
-        default: return "Configured MSW workspace"
+        default: return "Configured Silo workspace"
         }
     }
 }
@@ -304,7 +304,7 @@ extension Workspace {
         }
         return WorkspaceActionAvailability(
             isAllowed: capability,
-            reason: capability ? nil : (serverCapabilities.reason ?? "MSW did not authorize \(actionTitle.lowercased()) for \(id.rawValue)."),
+            reason: capability ? nil : (serverCapabilities.reason ?? "Silo did not authorize \(actionTitle.lowercased()) for \(id.rawValue)."),
             recovery: capability ? nil : (serverCapabilities.recovery ?? recoveryAction)
         )
     }
@@ -324,7 +324,7 @@ struct MonitorHealth: Equatable, Sendable {
     let severity: Severity
 }
 
-struct MSWOperationFailureNotice: Equatable, Sendable {
+struct SiloOperationFailureNotice: Equatable, Sendable {
     static let diagnosticLimit = 64 * 1024
 
     let action: String
@@ -514,14 +514,14 @@ enum RuntimeRepairAccessibilityIdentifier {
 }
 
 enum RuntimeRepairPresentation {
-    static let message = "MSW installation needs repair"
+    static let message = "Silo installation needs repair"
     static let actionTitle = "Repair…"
-    static let statusValue = "Silo. Repair needed. MSW installation needs repair."
+    static let statusValue = "Silo. Repair needed. Silo installation needs repair."
 }
 
 enum RuntimeRepairIssueClassifier {
     static func isRepairRelated(_ error: Error) -> Bool {
-        guard let clientError = error as? MSWClientError else { return false }
+        guard let clientError = error as? SiloClientError else { return false }
         switch clientError {
         case .invalidExecutable:
             return true
@@ -540,14 +540,14 @@ enum RuntimeRepairIssueClassifier {
         return repairRequired && isRepairRelated(message) ? nil : message
     }
 
-    static func isRepairRelated(_ operation: MSWBackupOperation) -> Bool {
+    static func isRepairRelated(_ operation: SiloBackupOperation) -> Bool {
         isRepairRelated(operation.message)
     }
 
     private static let repairMessageMarkers = [
-        "msw executable is unavailable",
-        "bundled msw payload is unavailable",
-        "bundled msw command failed its version handshake"
+        "silo executable is unavailable",
+        "bundled silo payload is unavailable",
+        "bundled silo command failed its version handshake"
     ]
 }
 
@@ -856,7 +856,7 @@ struct SourceEditorLauncher {
             case .unsupportedEditor(let name):
                 return "\(name) is the default source-code editor, but Silo has no verified remote-workspace adapter for it. Choose a supported editor as the macOS default; no fallback was opened."
             case .invalidTarget:
-                return "MSW returned an invalid remote folder target."
+                return "Silo returned an invalid remote folder target."
             case .openFailed(let message):
                 return "The selected source-code editor could not open the selected folder: \(message)"
             }
@@ -874,7 +874,7 @@ struct SourceEditorLauncher {
             }
         }
 
-        func remoteURL(for target: MSWEditorTarget) -> URL? {
+        func remoteURL(for target: SiloEditorTarget) -> URL? {
             switch self {
             case .zed: return target.zedRemoteURL
             }
@@ -889,7 +889,7 @@ struct SourceEditorLauncher {
         return application
     }
 
-    func open(application: SystemApplication?, target: MSWEditorTarget?) async throws {
+    func open(application: SystemApplication?, target: SiloEditorTarget?) async throws {
         let application = try validate(application: application)
         guard let target,
               let adapter = Adapter(bundleIdentifier: application.bundleIdentifier),
@@ -925,15 +925,15 @@ final class AppModel {
     }
 
     private struct PendingLifecycleRequest {
-        let plan: MSWLifecyclePlan
-        let action: MSWLifecycleAction
+        let plan: SiloLifecyclePlan
+        let action: SiloLifecycleAction
         let workspace: Workspace.ID
     }
 
     private struct LifecycleVerification {
         let operationID: UUID
         let operationGeneration: Int
-        let action: MSWLifecycleAction
+        let action: SiloLifecycleAction
         let minimumObservedAt: Date
         let commandBoundaryObservationGeneration: Int
     }
@@ -952,27 +952,27 @@ final class AppModel {
     private(set) var workspaces: [Workspace]
     private(set) var lastObservedAt: Date?
     private(set) var lastError: String?
-    private(set) var lastRecovery: MSWRecoveryContext?
-    private(set) var latestOperationFailure: MSWOperationFailureNotice?
-    private(set) var activities: [MSWActivity] = []
-    private(set) var operationStates: [String: MSWOperationState] = [:]
-    private(set) var notificationEvents: [MSWNotificationEvent] = []
-    private(set) var setupState: MSWBootstrapState = .initial
+    private(set) var lastRecovery: SiloRecoveryContext?
+    private(set) var latestOperationFailure: SiloOperationFailureNotice?
+    private(set) var activities: [SiloActivity] = []
+    private(set) var operationStates: [String: SiloOperationState] = [:]
+    private(set) var notificationEvents: [SiloNotificationEvent] = []
+    private(set) var setupState: SiloBootstrapState = .initial
     private(set) var startupRecoveryBlockedReason: String?
-    private(set) var repositoriesByWorkspace: [String: MSWRepositoriesResponse] = [:]
+    private(set) var repositoriesByWorkspace: [String: SiloRepositoriesResponse] = [:]
     private(set) var repositoryLoadingWorkspaces: Set<String> = []
     private(set) var repositoryUnavailableWorkspaces: Set<String> = []
-    private(set) var portsSnapshot: MSWPortsResponse?
-    private(set) var githubSnapshot: MSWGitHubStateResponse?
+    private(set) var portsSnapshot: SiloPortsResponse?
+    private(set) var githubSnapshot: SiloGitHubStateResponse?
     private(set) var detailError: String?
     private(set) var backupError: String?
     private(set) var isDetailLoading = false
-    private(set) var logsByWorkspace: [String: MSWLogsResponse] = [:]
+    private(set) var logsByWorkspace: [String: SiloLogsResponse] = [:]
     private(set) var logsUnavailableWorkspaces: Set<String> = []
-    private(set) var systemHealthChecks: [MSWPreflightCheck] = []
+    private(set) var systemHealthChecks: [SiloPreflightCheck] = []
     private(set) var isSystemHealthLoading = false
-    private(set) var backupOperations: [MSWBackupOperation] = []
-    private(set) var pendingBackupPreview: MSWBackupPreview?
+    private(set) var backupOperations: [SiloBackupOperation] = []
+    private(set) var pendingBackupPreview: SiloBackupPreview?
     private(set) var isBackupPreviewLoading = false
     /// Single application-wide runtime repair state. The authoritative
     /// value comes from executable resolution plus the protocol handshake.
@@ -980,7 +980,7 @@ final class AppModel {
     private(set) var maintenanceMessage: String?
     var selectedWorkspace: Workspace.ID?
     private var pendingLifecycleRequests: [LifecycleConfirmationSurface: PendingLifecycleRequest] = [:]
-    private(set) var pendingPushPlan: MSWPushPlan?
+    private(set) var pendingPushPlan: SiloPushPlan?
     /// Nonsecret host-secret metadata for the Secrets tab. Values never exist
     /// in app memory beyond the transient apply request body on stdin.
     private(set) var secretEntries: [SecretEntry] = []
@@ -991,7 +991,7 @@ final class AppModel {
     /// refresh succeeds or a new operation stages cleanly.
     private(set) var secretsOperationError: String?
     private(set) var isSecretOperationInFlight = false
-    private(set) var pendingSecretPlan: MSWSecretPlanResult?
+    private(set) var pendingSecretPlan: SiloSecretPlanResult?
     private var secretRefreshGeneration = 0
     private var secretsFixtureEnabled = false
     private var secretsFixtureRunning: Set<String> = []
@@ -1004,7 +1004,7 @@ final class AppModel {
 
     private var secretsRestartBatch: SecretsRestartBatch?
     private enum SafetyAction {
-        case lifecycle(MSWLifecycleAction)
+        case lifecycle(SiloLifecycleAction)
         case terminal
         case editor
         case site
@@ -1018,20 +1018,20 @@ final class AppModel {
     }
 
     private struct CachedDirectoryResponse {
-        let response: MSWDirectoryResponse
+        let response: SiloDirectoryResponse
         let cachedAt: Date
     }
 
     private var startupRecoveryRetry: (() -> Void)?
-    private let client: MSWClient?
+    private let client: SiloClient?
     let applicationPreferences: ApplicationPreferenceStore
-    private let operationCoordinator: MSWOperationCoordinator?
-    private let operationService: MSWOperationService?
-    private let diagnostics: MSWDiagnostics?
-    private var systemHealthCoordinator: (any MSWBootstrapCoordinating)?
+    private let operationCoordinator: SiloOperationCoordinator?
+    private let operationService: SiloOperationService?
+    private let diagnostics: SiloDiagnostics?
+    private var systemHealthCoordinator: (any SiloBootstrapCoordinating)?
     private let provider: (any GitHubProviding)?
     let accessMode: GitHubAccessMode
-    private let activityStore: MSWActivityStore
+    private let activityStore: SiloActivityStore
     private var pollingTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var runtimeRepairFailureRefreshTask: Task<Void, Never>?
@@ -1049,19 +1049,19 @@ final class AppModel {
     private var notificationGeneration = 0
     private var detailRequestGeneration = 0
     private var systemHealthGeneration = 0
-    private var directoryFixture: [MSWDirectoryResponse] = []
+    private var directoryFixture: [SiloDirectoryResponse] = []
     private var backupPreviewFixtureSourceAllocatedBytes: Int64?
-    private var backupPreviewFixtureArchiveEstimate: MSWBackupEstimate?
+    private var backupPreviewFixtureArchiveEstimate: SiloBackupEstimate?
     private var backupPreviewFixtureDestination: URL?
     private var backupUITestResultScenario: BackupUITestResultScenario?
     private var lifecycleUITestFixtureEnabled = false
-    private var lifecycleUITestAction: MSWLifecycleAction?
+    private var lifecycleUITestAction: SiloLifecycleAction?
     private var lifecycleUITestObservationIndex = 0
     private var lifecycleUITestWorkspace: Workspace.ID?
     private var directoryCache: [DirectoryCacheKey: CachedDirectoryResponse] = [:]
     private var configuredWorkspaceIDs: [Workspace.ID]
     private enum RefreshResult {
-        case applied(MSWStateResponse)
+        case applied(SiloStateResponse)
         case failed
         case superseded
     }
@@ -1069,17 +1069,17 @@ final class AppModel {
 
 
     init(
-        client: MSWClient? = nil,
-        operationCoordinator: MSWOperationCoordinator? = nil,
-        operationService: MSWOperationService? = nil,
-        diagnostics: MSWDiagnostics? = nil,
+        client: SiloClient? = nil,
+        operationCoordinator: SiloOperationCoordinator? = nil,
+        operationService: SiloOperationService? = nil,
+        diagnostics: SiloDiagnostics? = nil,
         provider: (any GitHubProviding)? = nil,
         accessMode: GitHubAccessMode = .local,
-        activityStore: MSWActivityStore = MSWActivityStore(),
+        activityStore: SiloActivityStore = SiloActivityStore(),
         workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil,
         startupRecoveryBlockedReason: String? = nil,
         startupRecoveryRetry: (() -> Void)? = nil,
-        initialOperationFailure: MSWOperationFailureNotice? = nil,
+        initialOperationFailure: SiloOperationFailureNotice? = nil,
         applicationPreferences: ApplicationPreferenceStore? = nil,
         applicationDefaults: SystemApplicationDefaults? = nil,
         initialRuntimeRepairRequired: Bool = false,
@@ -1132,7 +1132,7 @@ final class AppModel {
                 ? Workspace(
                     id: $0,
                     statusReason: "No authoritative state has been observed.",
-                    recoveryAction: "Connect MSW and retry the observation.",
+                    recoveryAction: "Connect Silo and retry the observation.",
                     nextAction: "Observe",
                     canStart: false
                 )
@@ -1215,7 +1215,7 @@ final class AppModel {
         )
     }
 
-    var presentedBackupOperations: [MSWBackupOperation] {
+    var presentedBackupOperations: [SiloBackupOperation] {
         guard runtimeRepairRequired else { return backupOperations }
         return backupOperations.filter { !RuntimeRepairIssueClassifier.isRepairRelated($0) }
     }
@@ -1406,7 +1406,7 @@ final class AppModel {
             return
         }
         guard let client else {
-            lastError = "MSW is unavailable in fixture mode."
+            lastError = "Silo is unavailable in fixture mode."
             return
         }
         applicationPreferences.refreshInstalledApplications()
@@ -1417,7 +1417,7 @@ final class AppModel {
         Task { [weak self] in
             guard let executable = await client.executableURL() else {
                 self?.runtimeRepairRequired = true
-                self?.lastError = "The MSW executable is unavailable. Repair the toolchain and retry."
+                self?.lastError = "The Silo executable is unavailable. Repair the toolchain and retry."
                 return
             }
             do {
@@ -1452,14 +1452,14 @@ final class AppModel {
             return lastError
         }
         guard let client else {
-            let message = "MSW is unavailable in fixture mode."
+            let message = "Silo is unavailable in fixture mode."
             lastError = message
             return message
         }
         do {
             let envelope = try await client.editorTarget(workspace: id.rawValue, path: path)
             guard let target = envelope.result else {
-                throw MSWClientError.missingResult(command: "editor-target")
+                throw SiloClientError.missingResult(command: "editor-target")
             }
             try await SourceEditorLauncher().open(application: editor, target: target)
             return nil
@@ -1474,15 +1474,15 @@ final class AppModel {
         for id: Workspace.ID,
         path: String = ".",
         query: String? = nil
-    ) async throws -> MSWDirectoryResponse {
+    ) async throws -> SiloDirectoryResponse {
         guard let workspace = workspaces.first(where: { $0.id == id }) else {
-            throw MSWClientError.unavailable(
+            throw SiloClientError.unavailable(
                 "The selected workspace is unavailable. Refresh workspace state and select a valid workspace."
             )
         }
         let availability = actionAvailability(for: workspace, action: .editor)
         guard availability.isAllowed else {
-            throw MSWClientError.unavailable(
+            throw SiloClientError.unavailable(
                 [availability.reason, availability.recovery]
                     .compactMap { $0 }
                     .joined(separator: " ")
@@ -1505,7 +1505,7 @@ final class AppModel {
                 value.workspace == id.rawValue && value.path == path && value.query == nil
             }.map { value in
                 guard let query, !query.isEmpty else { return value }
-                return MSWDirectoryResponse(
+                return SiloDirectoryResponse(
                     workspace: value.workspace,
                     path: value.path,
                     query: query,
@@ -1517,7 +1517,7 @@ final class AppModel {
                 )
             }
             guard let fixture else {
-                throw MSWClientError.unavailable("The requested fixture folder is unavailable.")
+                throw SiloClientError.unavailable("The requested fixture folder is unavailable.")
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-folder-loading-skeleton") {
                 try await Task.sleep(for: .seconds(3))
@@ -1529,9 +1529,9 @@ final class AppModel {
             return fixture
         }
         guard let client else {
-            throw MSWClientError.unavailable("Folder browsing is unavailable in fixture mode.")
+            throw SiloClientError.unavailable("Folder browsing is unavailable in fixture mode.")
         }
-        let response: MSWEnvelope<MSWDirectoryResponse>
+        let response: SiloEnvelope<SiloDirectoryResponse>
         do {
             response = try await client.directories(
                 workspace: id.rawValue,
@@ -1543,7 +1543,7 @@ final class AppModel {
             throw error
         }
         guard let result = response.result else {
-            throw MSWClientError.missingResult(
+            throw SiloClientError.missingResult(
                 command: normalizedQuery == nil ? "directory-list" : "directory-search"
             )
         }
@@ -1559,8 +1559,8 @@ final class AppModel {
         workspaces[index].state = .running
         workspaces[index].freshness = .fresh
         workspaces[index].canOpenTerminal = true
-        workspaces[index].networkHost = "dev.msw.test"
-        workspaces[index].serverCapabilities = MSWActionCapabilities(
+        workspaces[index].networkHost = "dev.silo.test"
+        workspaces[index].serverCapabilities = SiloActionCapabilities(
             canStart: false,
             canStop: true,
             canRestart: true,
@@ -1568,13 +1568,13 @@ final class AppModel {
             canPush: false
         )
         workspaces[index].nextAction = "Open Terminal"
-        portsSnapshot = MSWPortsResponse(
+        portsSnapshot = SiloPortsResponse(
             workspace: "all",
             workspaces: [
                 .init(
                     workspace: "dev",
                     lifecycle: .running,
-                    host: "dev.msw.test",
+                    host: "dev.silo.test",
                     listeningState: .known,
                     ports: [
                         .init(port: "3000", configured: true, listening: true),
@@ -1585,7 +1585,7 @@ final class AppModel {
                 .init(
                     workspace: "playgrounds",
                     lifecycle: .stopped,
-                    host: "playgrounds.msw.test",
+                    host: "playgrounds.silo.test",
                     listeningState: .known,
                     ports: [
                         .init(port: "3000", configured: true, listening: false),
@@ -1596,7 +1596,7 @@ final class AppModel {
                 .init(
                     workspace: "personal",
                     lifecycle: .stopped,
-                    host: "personal.msw.test",
+                    host: "personal.silo.test",
                     listeningState: .known,
                     ports: [
                         .init(port: "3000", configured: true, listening: false),
@@ -1607,10 +1607,10 @@ final class AppModel {
             ],
             freshness: .fresh
         )
-        repositoriesByWorkspace["dev"] = MSWRepositoriesResponse(
+        repositoriesByWorkspace["dev"] = SiloRepositoriesResponse(
             workspace: "dev",
             repositories: [
-                MSWRepositorySnapshot(
+                SiloRepositorySnapshot(
                     path: "ui-playground-repo",
                     canonicalRemote: nil,
                     branch: "main",
@@ -1637,14 +1637,14 @@ final class AppModel {
             notice: nil
         )
         logsByWorkspace = [
-            "dev": MSWLogsResponse(
+            "dev": SiloLogsResponse(
                 workspace: "dev",
                 available: true,
                 lifecycle: .running,
                 freshness: .fresh,
                 reason: nil,
                 lines: [
-                    MSWLogEntry(
+                    SiloLogEntry(
                         workspace: "dev",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_400),
                         source: "stdout",
@@ -1653,7 +1653,7 @@ final class AppModel {
                         message: "HHHHHHHHHHHHHHHHDevelopment service ready",
                         safeForDisplay: true
                     ),
-                    MSWLogEntry(
+                    SiloLogEntry(
                         workspace: "dev",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_403),
                         source: "stdout",
@@ -1664,14 +1664,14 @@ final class AppModel {
                     )
                 ]
             ),
-            "playgrounds": MSWLogsResponse(
+            "playgrounds": SiloLogsResponse(
                 workspace: "playgrounds",
                 available: true,
                 lifecycle: .stopped,
                 freshness: .fresh,
                 reason: nil,
                 lines: [
-                    MSWLogEntry(
+                    SiloLogEntry(
                         workspace: "playgrounds",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_401),
                         source: "stdout",
@@ -1682,14 +1682,14 @@ final class AppModel {
                     )
                 ]
             ),
-            "personal": MSWLogsResponse(
+            "personal": SiloLogsResponse(
                 workspace: "personal",
                 available: true,
                 lifecycle: .stopped,
                 freshness: .fresh,
                 reason: nil,
                 lines: [
-                    MSWLogEntry(
+                    SiloLogEntry(
                         workspace: "personal",
                         observedAt: Date(timeIntervalSince1970: 1_786_118_402),
                         source: "stdout",
@@ -1702,7 +1702,7 @@ final class AppModel {
             )
         ]
         directoryFixture = [
-            MSWDirectoryResponse(
+            SiloDirectoryResponse(
                 workspace: "dev",
                 path: ".",
                 query: nil,
@@ -1720,14 +1720,14 @@ final class AppModel {
                 ],
                 truncated: true
             ),
-            MSWDirectoryResponse(
+            SiloDirectoryResponse(
                 workspace: "dev",
                 path: "Projects",
                 query: nil,
                 entries: [.init(name: "Demo", path: "Projects/Demo", kind: "directory")],
                 truncated: false
             ),
-            MSWDirectoryResponse(
+            SiloDirectoryResponse(
                 workspace: "dev",
                 path: "Scratch",
                 query: nil,
@@ -1759,7 +1759,7 @@ final class AppModel {
             return
         }
         guard let client else {
-            lastError = "MSW is unavailable in fixture mode."
+            lastError = "Silo is unavailable in fixture mode."
             return
         }
         Task { [weak self] in
@@ -1774,10 +1774,10 @@ final class AppModel {
                         expectedPort: port,
                         expectedScheme: "http"
                       ) else {
-                    throw MSWClientError.malformedJSON(command: "url")
+                    throw SiloClientError.malformedJSON(command: "url")
                 }
                 guard NSWorkspace.shared.open(url) else {
-                    throw MSWClientError.unavailable("macOS could not open the validated workspace URL.")
+                    throw SiloClientError.unavailable("macOS could not open the validated workspace URL.")
                 }
             } catch {
                 self?.noteRuntimeRepairFailure(error)
@@ -1822,7 +1822,7 @@ final class AppModel {
             let response = try await client.state()
             guard !Task.isCancelled,
                   generation == refreshGeneration else { return .superseded }
-            guard let state = response.result else { throw MSWClientError.missingResult(command: "state") }
+            guard let state = response.result else { throw SiloClientError.missingResult(command: "state") }
             guard requestSequence > lastAppliedStateRefreshSequence else { return .superseded }
             guard !shouldRejectLifecycleObservation(
                 observationGeneration: requestSequence
@@ -1847,16 +1847,16 @@ final class AppModel {
             sustainedUnavailableNotified = false
             lastRecovery = nil
             if stateChanged {
-                let activity = MSWActivity(
+                let activity = SiloActivity(
                     id: UUID(), createdAt: Date(), kind: .observation, title: "State changed",
-                    detail: "MSW returned updated state for \(state.workspaces.count) workspaces.",
+                    detail: "Silo returned updated state for \(state.workspaces.count) workspaces.",
                     workspace: nil, isFailure: false
                 )
                 await append(activity)
             }
             for operation in reconciledOperations {
                 let succeeded = operation.outcome == .succeeded
-                let activity = MSWActivity(
+                let activity = SiloActivity(
                     id: UUID(), createdAt: Date(), kind: succeeded ? .operation : .failure,
                     title: succeeded ? "\(operation.action.capitalized) verified" : "\(operation.action.capitalized) outcome unknown",
                     detail: operation.message, workspace: operation.workspace, isFailure: !succeeded
@@ -1890,13 +1890,13 @@ final class AppModel {
                 emitNotification(
                     kind: .sustainedUnavailability,
                     workspace: nil,
-                    title: "MSW remains unavailable",
+                    title: "Silo remains unavailable",
                     message: "Workspace state could not be observed after repeated attempts.",
                     recovery: lastRecovery?.recovery ?? "Retry or run diagnostics.",
                     deepLink: "silo://diagnostics"
                 )
             }
-            let activity = MSWActivity(
+            let activity = SiloActivity(
                 id: UUID(), createdAt: Date(), kind: .failure, title: "Refresh failed",
                 detail: error.localizedDescription, workspace: nil, isFailure: true
             )
@@ -1905,11 +1905,11 @@ final class AppModel {
         }
     }
 
-    var pendingLifecyclePlan: MSWLifecyclePlan? {
+    var pendingLifecyclePlan: SiloLifecyclePlan? {
         pendingLifecyclePlan(for: .statusPopover)
     }
 
-    func pendingLifecyclePlan(for surface: LifecycleConfirmationSurface) -> MSWLifecyclePlan? {
+    func pendingLifecyclePlan(for surface: LifecycleConfirmationSurface) -> SiloLifecyclePlan? {
         pendingLifecycleRequests[surface]?.plan
     }
 
@@ -1973,7 +1973,7 @@ final class AppModel {
     }
 
     private static func protocolFailure(_ error: any Error, hasCode code: String) -> Bool {
-        guard let clientError = error as? MSWClientError,
+        guard let clientError = error as? SiloClientError,
               case .protocolFailure(let protocolError) = clientError else {
             return false
         }
@@ -1992,7 +1992,7 @@ final class AppModel {
         repositoryUnavailableWorkspaces.subtract(workspaceNames)
         let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
-            var loaded: [String: MSWRepositoriesResponse] = [:]
+            var loaded: [String: SiloRepositoriesResponse] = [:]
             var failed: Set<String> = []
             var failureMessage: String?
             for id in ids {
@@ -2019,7 +2019,7 @@ final class AppModel {
     }
 
 
-    func reviewPush(for repository: MSWRepositorySnapshot, workspace id: Workspace.ID) {
+    func reviewPush(for repository: SiloRepositorySnapshot, workspace id: Workspace.ID) {
         guard let operationService else {
             detailError = "Repository pushes are unavailable in fixture mode."
             return
@@ -2160,7 +2160,7 @@ final class AppModel {
         policy: GitHubPolicyFile?,
         catalog: GitHubCatalog,
         workspaceIDs: [Workspace.ID] = Workspace.ID.fixtureDefaults
-    ) -> MSWGitHubStateResponse {
+    ) -> SiloGitHubStateResponse {
         let workspaces = workspaceIDs.map { id in
             let workspace = policy?.workspaces[id.rawValue]
             let repos = workspace?.repos ?? []
@@ -2173,7 +2173,7 @@ final class AppModel {
             } else {
                 accessMode = "read-only"
             }
-            return MSWGitHubWorkspaceState(
+            return SiloGitHubWorkspaceState(
                 workspace: id.rawValue,
                 provider: "local-policy",
                 configured: workspace != nil,
@@ -2185,12 +2185,12 @@ final class AppModel {
                 refreshExpiresAt: nil,
                 needsRestart: false,
                 quarantined: false,
-                repos: repos.map { MSWGitHubPolicyRepo(canonical: $0.canonical, mode: $0.mode) },
+                repos: repos.map { SiloGitHubPolicyRepo(canonical: $0.canonical, mode: $0.mode) },
                 policyUpdatedAt: policy?.updatedAt,
                 hostCredential: catalog.hostCredentialPresent ? "present" : "missing"
             )
         }
-        return MSWGitHubStateResponse(workspaces: workspaces)
+        return SiloGitHubStateResponse(workspaces: workspaces)
     }
 
     func loadLogs(for id: Workspace.ID, clearsError: Bool = true) {
@@ -2209,7 +2209,7 @@ final class AppModel {
 
         let request = beginDetailRequest(clearsError: clearsError)
         Task { [weak self] in
-            var snapshots: [String: MSWLogsResponse] = [:]
+            var snapshots: [String: SiloLogsResponse] = [:]
             var unavailable: Set<String> = []
             var firstError: String?
             for id in pending {
@@ -2217,7 +2217,7 @@ final class AppModel {
                     snapshots[id.rawValue] = try await operationService.logs(workspace: id.rawValue)
                 } catch {
                     self?.noteRuntimeRepairFailure(error)
-                    if Self.protocolFailure(error, hasCode: "MSW_LOGS_UNAVAILABLE") {
+                    if Self.protocolFailure(error, hasCode: "SILO_LOGS_UNAVAILABLE") {
                         unavailable.insert(id.rawValue)
                     } else if firstError == nil {
                         firstError = error.localizedDescription
@@ -2239,7 +2239,7 @@ final class AppModel {
         }
     }
 
-    func configureSystemHealthChecks(using coordinator: (any MSWBootstrapCoordinating)?) {
+    func configureSystemHealthChecks(using coordinator: (any SiloBootstrapCoordinating)?) {
         systemHealthGeneration &+= 1
         systemHealthCoordinator = coordinator
         systemHealthChecks = []
@@ -2261,7 +2261,7 @@ final class AppModel {
 
     func installBackupUITestFixture(
         sourceAllocatedBytes: Int64 = 16_000_000_000,
-        archiveEstimate: MSWBackupEstimate? = nil,
+        archiveEstimate: SiloBackupEstimate? = nil,
         destination: URL? = nil,
         resultScenario: BackupUITestResultScenario? = nil
     ) {
@@ -2272,16 +2272,16 @@ final class AppModel {
     }
 
     func installRuntimeRepairUITestFixture() {
-        detailError = MSWClientError.invalidExecutable.localizedDescription
-        backupError = MSWClientError.invalidExecutable.localizedDescription
+        detailError = SiloClientError.invalidExecutable.localizedDescription
+        backupError = SiloClientError.invalidExecutable.localizedDescription
         let now = Date()
-        let error = MSWBackupOperationErrorResponse(
-            code: "MSW_RUNTIME_UNAVAILABLE",
-            message: MSWClientError.invalidExecutable.localizedDescription,
+        let error = SiloBackupOperationErrorResponse(
+            code: "SILO_RUNTIME_UNAVAILABLE",
+            message: SiloClientError.invalidExecutable.localizedDescription,
             recovery: "Use Repair… to reinstall the bundled runtime.",
             retryable: false
         )
-        backupOperations = [MSWBackupOperation(
+        backupOperations = [SiloBackupOperation(
             id: "runtime-repair-fixture", requestKey: "runtime-repair-fixture",
             state: .failed, phase: .failed, message: error.message,
             destination: URL(fileURLWithPath: "/tmp", isDirectory: true),
@@ -2299,13 +2299,13 @@ final class AppModel {
     ) {
         installBackupUITestFixture(destination: destination)
         let now = Date()
-        let completedResult = MSWBackupResult(
+        let completedResult = SiloBackupResult(
             archive: destination.appendingPathComponent("fixture-completed.tar.zst"),
             archiveBytes: 3_145_728, completedAt: now.addingTimeInterval(-2),
             checksum: destination.appendingPathComponent("fixture-completed.tar.zst.sha256"),
             stoppedWorkspaces: [], restartedWorkspaces: []
         )
-        let completed = MSWBackupOperation(
+        let completed = SiloBackupOperation(
             id: "fixture-completed-0001", requestKey: "fixture-completed-key",
             state: .completed, phase: .completed, message: "Fixture archive and checksum completed.",
             destination: destination, startedAt: now.addingTimeInterval(-12),
@@ -2316,7 +2316,7 @@ final class AppModel {
             throughputBytesPerSecond: 1_200_000, totalBytes: nil, etaSeconds: nil,
             result: completedResult, error: nil, warnings: []
         )
-        let active = MSWBackupOperation(
+        let active = SiloBackupOperation(
             id: "fixture-active-0002", requestKey: "fixture-active-key",
             state: .running, phase: .archiveWriting,
             message: advanced
@@ -2325,7 +2325,7 @@ final class AppModel {
             destination: destination, startedAt: now.addingTimeInterval(-6), updatedAt: now,
             completedAt: nil, elapsedSeconds: 6, ownerPID: 4242,
             ownerProcessState: "fixture-running", sourceAllocatedBytes: 24_000_000,
-            archiveEstimate: MSWBackupEstimate(lowerBytes: 4_000_000, upperBytes: 8_000_000,
+            archiveEstimate: SiloBackupEstimate(lowerBytes: 4_000_000, upperBytes: 8_000_000,
                 basisRatio: 0.25, changedSourceRatio: 1.1, provenance: "fixture same-scope history"),
             processedBytes: advanced ? 10_485_760 : 6_291_456,
             writtenBytes: advanced ? 3_145_728 : 2_097_152,
@@ -2341,15 +2341,15 @@ final class AppModel {
     }
 
     func installMalformedBackupUITestFixture() {
-        backupError = "MSW returned malformed backup data for backup-list."
+        backupError = "Silo returned malformed backup data for backup-list."
     }
 
-    func prepareBackup(to directory: URL) async -> MSWBackupPreview? {
+    func prepareBackup(to directory: URL) async -> SiloBackupPreview? {
         guard !isMaintenanceOperationInFlight, !isBackupPreviewLoading else { return nil }
         backupError = nil
         pendingBackupPreview = nil
         if let sourceAllocatedBytes = backupPreviewFixtureSourceAllocatedBytes {
-            let preview = MSWBackupPreview(
+            let preview = SiloBackupPreview(
                 destination: directory,
                 sourceAllocatedBytes: sourceAllocatedBytes,
                 archiveEstimate: backupPreviewFixtureArchiveEstimate,
@@ -2476,7 +2476,7 @@ final class AppModel {
         workspaces[index].canStop = true
         workspaces[index].canRestart = true
         workspaces[index].canOpenTerminal = true
-        workspaces[index].serverCapabilities = MSWActionCapabilities(
+        workspaces[index].serverCapabilities = SiloActionCapabilities(
             canStart: false,
             canStop: true,
             canRestart: true,
@@ -2520,7 +2520,7 @@ final class AppModel {
         workspaces[index].canRestart = false
         workspaces[index].canOpenTerminal = true
         workspaces[index].canPush = true
-        workspaces[index].serverCapabilities = MSWActionCapabilities(
+        workspaces[index].serverCapabilities = SiloActionCapabilities(
             canStart: false,
             canStop: true,
             canRestart: false,
@@ -2542,7 +2542,7 @@ final class AppModel {
         workspaces[index].freshness = .fresh
         workspaces[index].canStop = true
         workspaces[index].canRestart = true
-        workspaces[index].serverCapabilities = MSWActionCapabilities(
+        workspaces[index].serverCapabilities = SiloActionCapabilities(
             canStart: false,
             canStop: true,
             canRestart: true,
@@ -2630,7 +2630,7 @@ final class AppModel {
             return false
         }
         do {
-            let request = MSWSecretPlanRequest(
+            let request = SiloSecretPlanRequest(
                 operation: operation.rawValue,
                 name: name,
                 workspaces: workspaces,
@@ -2740,9 +2740,9 @@ final class AppModel {
     }
 
     private func applySecretsWorkspaceSummaries(
-        _ summaries: [MSWSecretsListResponse.WorkspaceSummary]
+        _ summaries: [SiloSecretsListResponse.WorkspaceSummary]
     ) {
-        var byName: [String: MSWSecretsListResponse.WorkspaceSummary] = [:]
+        var byName: [String: SiloSecretsListResponse.WorkspaceSummary] = [:]
         for summary in summaries where byName[summary.workspace] == nil {
             byName[summary.workspace] = summary
         }
@@ -2775,7 +2775,7 @@ final class AppModel {
         name: String,
         workspaces: [String],
         allowedDomains: [String]
-    ) -> MSWSecretPlanResult? {
+    ) -> SiloSecretPlanResult? {
         guard SecretNameRule.isValid(name),
               !workspaces.isEmpty,
               workspaces.allSatisfy(WorkspaceID.isValid),
@@ -2786,7 +2786,7 @@ final class AppModel {
         let exists = secretsFixtureEntries.contains { $0.name == name }
         if operation == .add, exists { return nil }
         if operation != .add, !exists { return nil }
-        let plan = MSWSecretPlanResult(
+        let plan = SiloSecretPlanResult(
             planId: "ui-test-\(operation.rawValue)-\(name)",
             operation: operation.rawValue,
             name: name,
@@ -2801,7 +2801,7 @@ final class AppModel {
     }
 
     private func applySecretsFixturePlan(
-        _ plan: MSWSecretPlanResult,
+        _ plan: SiloSecretPlanResult,
         confirmation: String,
         value: String?
     ) throws {
@@ -2947,10 +2947,10 @@ final class AppModel {
     }
 
     private func secretsErrorMessage(_ error: Error) -> String {
-        if let clientError = error as? MSWClientError,
+        if let clientError = error as? SiloClientError,
            case .malformedJSON(let command) = clientError,
            ["secrets-list", "secret-plan", "secret-apply"].contains(command) {
-            return "MSW returned malformed secret metadata for \(command)."
+            return "Silo returned malformed secret metadata for \(command)."
         }
         return error.localizedDescription
     }
@@ -2962,7 +2962,7 @@ final class AppModel {
         if let scenario = backupUITestResultScenario {
             let now = Date()
             let id = UUID().uuidString.lowercased()
-            let base = MSWBackupOperation(
+            let base = SiloBackupOperation(
                 id: id, requestKey: "ui-fixture-\(id)", state: .running, phase: .archiveWriting,
                 message: "Fixture archive pipeline is advancing.", destination: directory,
                 startedAt: now.addingTimeInterval(-4), updatedAt: now, completedAt: nil,
@@ -2976,15 +2976,15 @@ final class AppModel {
             case .running:
                 backupOperations.insert(base, at: 0)
             case .success, .partial:
-                let result = MSWBackupResult(
-                    archive: directory.appendingPathComponent("microsandbox-all-20260826-120000.tar.zst"),
+                let result = SiloBackupResult(
+                    archive: directory.appendingPathComponent("silo-all-20260826-120000.tar.zst"),
                     archiveBytes: 7_340_032,
                     completedAt: Date(timeIntervalSince1970: 1_787_745_600),
                     checksum: nil,
                     stoppedWorkspaces: scenario == .partial ? ["dev", "personal"] : ["dev"],
                     restartedWorkspaces: ["dev"]
                 )
-                backupOperations.insert(MSWBackupOperation(
+                backupOperations.insert(SiloBackupOperation(
                     id: id, requestKey: base.requestKey, state: .completed, phase: .completed,
                     message: "Fixture archive, checksum, and result completed.", destination: directory,
                     startedAt: base.startedAt, updatedAt: result.completedAt, completedAt: result.completedAt,
@@ -2998,11 +2998,11 @@ final class AppModel {
                     ? "Archive created."
                     : "Archive created. Restart required for: \(result.workspacesNeedingRestart.joined(separator: ", "))."
             case .failure:
-                let operationError = MSWBackupOperationErrorResponse(
-                    code: "MSW_BACKUP_FAILED", message: "The fixture backup could not be created.",
+                let operationError = SiloBackupOperationErrorResponse(
+                    code: "SILO_BACKUP_FAILED", message: "The fixture backup could not be created.",
                     recovery: "Retry the fixture with a distinct request key.", retryable: true
                 )
-                backupOperations.insert(MSWBackupOperation(
+                backupOperations.insert(SiloBackupOperation(
                     id: id, requestKey: base.requestKey, state: .failed, phase: .failed,
                     message: operationError.message, destination: directory, startedAt: base.startedAt,
                     updatedAt: now, completedAt: now, elapsedSeconds: 4, ownerPID: nil,
@@ -3069,7 +3069,7 @@ final class AppModel {
 
     private static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
-        return (error as? MSWClientError) == .cancelled
+        return (error as? SiloClientError) == .cancelled
     }
 
     private func isRuntimeRepairFailure(_ error: Error) -> Bool {
@@ -3077,15 +3077,15 @@ final class AppModel {
     }
 
     private func backupErrorMessage(_ error: Error) -> String {
-        if let clientError = error as? MSWClientError,
+        if let clientError = error as? SiloClientError,
            case .malformedJSON(let command) = clientError,
            ["backup-preview", "backup-start", "backup-list", "backup-status"].contains(command) {
-            return "MSW returned malformed backup data for \(command)."
+            return "Silo returned malformed backup data for \(command)."
         }
         return error.localizedDescription
     }
 
-    private func upsertBackupOperation(_ operation: MSWBackupOperation) {
+    private func upsertBackupOperation(_ operation: SiloBackupOperation) {
         backupOperations.removeAll { $0.id == operation.id }
         backupOperations.append(operation)
         backupOperations.sort { $0.startedAt > $1.startedAt }
@@ -3300,16 +3300,16 @@ final class AppModel {
         invalidatePendingPlansIfUnsafe()
     }
 
-    func activitiesSnapshot() async -> [MSWActivity] {
+    func activitiesSnapshot() async -> [SiloActivity] {
         await activityStore.recent(limit: 100)
     }
 
     private func runLifecycle(
-        _ action: MSWLifecycleAction,
+        _ action: SiloLifecycleAction,
         id: Workspace.ID,
         surface: LifecycleConfirmationSurface,
         confirmation: String? = nil,
-        reviewedPlan: MSWLifecyclePlan? = nil
+        reviewedPlan: SiloLifecyclePlan? = nil
     ) {
         guard requireActionSafety(
             for: id,
@@ -3330,7 +3330,7 @@ final class AppModel {
             return
         }
         guard let operationCoordinator else {
-            lastError = "MSW operations are unavailable in fixture mode."
+            lastError = "Silo operations are unavailable in fixture mode."
             return
         }
 
@@ -3379,7 +3379,7 @@ final class AppModel {
                 }
                 guard let ownership else { return }
                 await self?.verifyLifecycle(ownership, action: action, workspace: id)
-            } catch let error as MSWOperationCoordinator.CoordinatorError {
+            } catch let error as SiloOperationCoordinator.CoordinatorError {
                 if case let .confirmationRequired(plan) = error {
                     await MainActor.run {
                         guard let self else { return }
@@ -3450,7 +3450,7 @@ final class AppModel {
                     return true
                 }
                 guard failureWasRecorded else { return }
-                let activity = MSWActivity(
+                let activity = SiloActivity(
                     id: UUID(),
                     createdAt: Date(),
                     kind: .failure,
@@ -3462,7 +3462,7 @@ final class AppModel {
                 await self?.append(activity)
                 await self?.refreshRemote()
             } catch {
-                if Self.protocolFailure(error, hasCode: "MSW_RECONCILE_PENDING"),
+                if Self.protocolFailure(error, hasCode: "SILO_RECONCILE_PENDING"),
                    let ownership,
                    await self?.beginLifecycleVerification(
                     ownership,
@@ -3512,7 +3512,7 @@ final class AppModel {
                     return true
                 }
                 guard failureWasRecorded else { return }
-                let activity = MSWActivity(
+                let activity = SiloActivity(
                     id: UUID(),
                     createdAt: Date(),
                     kind: .failure,
@@ -3530,7 +3530,7 @@ final class AppModel {
     @discardableResult
     private func beginLifecycleVerification(
         _ ownership: LifecycleOperationOwnership,
-        action: MSWLifecycleAction,
+        action: SiloLifecycleAction,
         workspace id: Workspace.ID,
         minimumObservedAt: Date,
         message: String
@@ -3552,15 +3552,15 @@ final class AppModel {
     }
 
     private func runLifecycleFixture(
-        _ action: MSWLifecycleAction,
+        _ action: SiloLifecycleAction,
         id: Workspace.ID,
         surface: LifecycleConfirmationSurface,
         confirmation: String?,
-        reviewedPlan: MSWLifecyclePlan?
+        reviewedPlan: SiloLifecyclePlan?
     ) {
         if action != .start && confirmation == nil {
             pendingLifecycleRequests[surface] = PendingLifecycleRequest(
-                plan: MSWLifecyclePlan(
+                plan: SiloLifecyclePlan(
                     planId: "ui-test-\(action.rawValue)-\(id.rawValue)",
                     action: action.rawValue,
                     workspace: id.rawValue,
@@ -3624,7 +3624,7 @@ final class AppModel {
         if action == .restart, index == 0 {
             return .failed
         }
-        let lifecycle: MSWLifecycle
+        let lifecycle: SiloLifecycle
         switch action {
         case .start:
             lifecycle = .running
@@ -3654,28 +3654,28 @@ final class AppModel {
 
     private func lifecycleUITestState(
         workspace targetWorkspace: Workspace.ID,
-        lifecycle targetLifecycle: MSWLifecycle,
+        lifecycle targetLifecycle: SiloLifecycle,
         observedAt: Date
-    ) -> MSWStateResponse {
+    ) -> SiloStateResponse {
         let snapshots = configuredWorkspaceIDs.map { id in
             let existing = workspaces.first(where: { $0.id == id })
             let lifecycle = id == targetWorkspace
                 ? targetLifecycle
-                : MSWLifecycle(rawValue: existing?.state.rawValue ?? "") ?? .stopped
+                : SiloLifecycle(rawValue: existing?.state.rawValue ?? "") ?? .stopped
             let running = lifecycle == .running
             let secrets = existing?.secrets ?? .active
-            let secretsSnapshot = MSWSecretsSnapshot(
-                state: MSWSecretsSnapshot.State(rawValue: secrets.status.rawValue) ?? .active,
+            let secretsSnapshot = SiloSecretsSnapshot(
+                state: SiloSecretsSnapshot.State(rawValue: secrets.status.rawValue) ?? .active,
                 pendingCount: secrets.pendingCount,
                 reason: secrets.reason
             )
-            return MSWWorkspaceSnapshot(
+            return SiloWorkspaceSnapshot(
                 id: id.rawValue,
                 purpose: "Deterministic lifecycle verification fixture.",
                 lifecycle: lifecycle,
                 freshness: .fresh,
-                quarantine: MSWQuarantineSnapshot(state: .clear, reason: nil),
-                credential: MSWCredentialSnapshot(
+                quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
+                credential: SiloCredentialSnapshot(
                     state: .ready,
                     accessMode: "fixture",
                     verificationRepository: nil,
@@ -3686,15 +3686,15 @@ final class AppModel {
                     needsRestart: false
                 ),
                 secrets: secretsSnapshot,
-                resources: MSWResourceSnapshot(
+                resources: SiloResourceSnapshot(
                     cpus: "1",
                     maxCpus: "1",
                     memory: "1 GiB",
                     maxMemory: "1 GiB",
                     rootDisk: "1 GiB"
                 ),
-                network: MSWNetworkSnapshot(host: "\(id.rawValue).msw.test", ip: "127.0.0.1"),
-                actionCapabilities: MSWActionCapabilities(
+                network: SiloNetworkSnapshot(host: "\(id.rawValue).silo.test", ip: "127.0.0.1"),
+                actionCapabilities: SiloActionCapabilities(
                     canStart: !running,
                     canStop: running,
                     canRestart: running,
@@ -3704,12 +3704,12 @@ final class AppModel {
                 statusObservedAt: observedAt
             )
         }
-        return MSWStateResponse(schemaVersion: 1, mswVersion: "ui-test", workspaces: snapshots)
+        return SiloStateResponse(schemaVersion: 1, siloVersion: "ui-test", workspaces: snapshots)
     }
 
     private func verifyLifecycle(
         _ ownership: LifecycleOperationOwnership,
-        action: MSWLifecycleAction,
+        action: SiloLifecycleAction,
         workspace id: Workspace.ID
     ) async {
         let attempts = action == .start ? 1 : lifecycleVerificationDelays.count + 1
@@ -3746,16 +3746,16 @@ final class AppModel {
         }
     }
 
-    private func expectedLifecycleDescription(_ action: MSWLifecycleAction) -> String {
+    private func expectedLifecycleDescription(_ action: SiloLifecycleAction) -> String {
         action == .stop ? "stopped" : "running"
     }
 
     @discardableResult
     private func apply(
-        state: MSWStateResponse,
+        state: SiloStateResponse,
         observedAt: Date?,
         observationGeneration: Int
-    ) -> [MSWOperationState] {
+    ) -> [SiloOperationState] {
         let previousByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         let hadAuthoritativeObservation = lastObservedAt != nil
         lastObservedAt = observedAt ?? Date()
@@ -3766,7 +3766,7 @@ final class AppModel {
                     id: id,
                     state: .unknown,
                     freshness: .unavailable,
-                    statusReason: "MSW omitted this workspace from the latest observation.",
+                    statusReason: "Silo omitted this workspace from the latest observation.",
                     recoveryAction: "Retry the observation or run diagnostics.",
                     nextAction: "Retry",
                     canStart: false
@@ -3780,17 +3780,17 @@ final class AppModel {
                 ? Workspace.State.quarantined
                 : Workspace.State(rawValue: snapshot.lifecycle.rawValue) ?? .unknown
             let safeCapabilities = isQuarantined
-                ? MSWActionCapabilities(canStart: false, canStop: snapshot.actionCapabilities.canStop, canRestart: false, canOpenTerminal: false, canPush: false)
+                ? SiloActionCapabilities(canStart: false, canStop: snapshot.actionCapabilities.canStop, canRestart: false, canOpenTerminal: false, canPush: false)
                 : snapshot.actionCapabilities
             let authoritativeCapabilities = snapshot.freshness == .fresh
                 ? safeCapabilities
-                : MSWActionCapabilities(canStart: false, canStop: false, canRestart: false, canOpenTerminal: false, canPush: false)
+                : SiloActionCapabilities(canStart: false, canStop: false, canRestart: false, canOpenTerminal: false, canPush: false)
             let lifecycleOperation = operationStates[
                 operationKey(kind: .lifecycle, workspace: id.rawValue)
             ]
             let lifecycleIsPending = lifecycleOperation?.outcome == .pending
             let capabilities = lifecycleIsPending
-                ? MSWActionCapabilities(
+                ? SiloActionCapabilities(
                     canStart: false,
                     canStop: false,
                     canRestart: false,
@@ -3945,7 +3945,7 @@ final class AppModel {
         }
     }
 
-    private func credentialState(_ state: MSWCredentialSnapshot.State) -> Workspace.CredentialState {
+    private func credentialState(_ state: SiloCredentialSnapshot.State) -> Workspace.CredentialState {
         switch state {
         case .ready: return .ready
         case .expiring: return .expiring
@@ -3960,7 +3960,7 @@ final class AppModel {
         }
     }
 
-    private func secretsState(_ snapshot: MSWSecretsSnapshot?) -> Workspace.SecretsState {
+    private func secretsState(_ snapshot: SiloSecretsSnapshot?) -> Workspace.SecretsState {
         guard let snapshot else { return .active }
         return Workspace.SecretsState(
             status: Workspace.SecretsState.Status(rawValue: snapshot.state.rawValue) ?? .error,
@@ -3969,7 +3969,7 @@ final class AppModel {
         )
     }
 
-    private func nextAction(_ snapshot: MSWWorkspaceSnapshot, isQuarantined: Bool = false) -> String {
+    private func nextAction(_ snapshot: SiloWorkspaceSnapshot, isQuarantined: Bool = false) -> String {
         guard snapshot.freshness == .fresh else { return "Retry" }
         guard !isQuarantined else {
             return snapshot.actionCapabilities.canStop ? "Stop or Repair" : "Repair"
@@ -3982,7 +3982,7 @@ final class AppModel {
         }
     }
 
-    func recordProgress(_ event: MSWProgressEvent) {
+    func recordProgress(_ event: SiloProgressEvent) {
         guard event.safeForDisplay else { return }
         let candidates = operationStates.keys.filter { key in
             guard let operation = operationStates[key] else { return false }
@@ -3997,18 +3997,18 @@ final class AppModel {
         operationStates[key] = operation
     }
 
-    func drainNotificationEvents() -> [MSWNotificationEvent] {
+    func drainNotificationEvents() -> [SiloNotificationEvent] {
         defer { notificationEvents.removeAll(keepingCapacity: true) }
         return notificationEvents
     }
 
-    private func operationKey(kind: MSWOperationState.Kind, workspace: String?) -> String {
+    private func operationKey(kind: SiloOperationState.Kind, workspace: String?) -> String {
         "\(kind.rawValue):\(workspace ?? "all")"
     }
 
     @discardableResult
     private func beginOperation(
-        kind: MSWOperationState.Kind,
+        kind: SiloOperationState.Kind,
         workspace: String?,
         action: String,
         message: String
@@ -4027,7 +4027,7 @@ final class AppModel {
             return existing.id
         }
         let operationID = UUID()
-        operationStates[key] = MSWOperationState(
+        operationStates[key] = SiloOperationState(
             id: operationID, kind: kind, workspace: workspace, action: action,
             startedAt: now, updatedAt: now, phase: .running, fraction: nil,
             message: message, outcome: .pending, recovery: nil
@@ -4036,10 +4036,10 @@ final class AppModel {
     }
 
     private func updateOperation(
-        kind: MSWOperationState.Kind,
+        kind: SiloOperationState.Kind,
         workspace: String?,
-        phase: MSWOperationState.Phase,
-        outcome: MSWOperationState.Outcome,
+        phase: SiloOperationState.Phase,
+        outcome: SiloOperationState.Outcome,
         message: String
     ) {
         let key = operationKey(kind: kind, workspace: workspace)
@@ -4052,7 +4052,7 @@ final class AppModel {
     }
 
     private func markOperationVerifying(
-        kind: MSWOperationState.Kind,
+        kind: SiloOperationState.Kind,
         workspace: String?,
         message: String
     ) {
@@ -4061,7 +4061,7 @@ final class AppModel {
 
     private func finishOperation(
         key: String,
-        outcome: MSWOperationState.Outcome,
+        outcome: SiloOperationState.Outcome,
         message: String
     ) {
         guard var operation = operationStates[key] else { return }
@@ -4091,7 +4091,7 @@ final class AppModel {
         recovery: String,
         diagnosticDetails: String? = nil
     ) {
-        latestOperationFailure = MSWOperationFailureNotice(
+        latestOperationFailure = SiloOperationFailureNotice(
             action: action,
             title: "\(action.capitalized) failed",
             reason: reason,
@@ -4102,11 +4102,11 @@ final class AppModel {
     }
 
     private func failOperation(
-        kind: MSWOperationState.Kind,
+        kind: SiloOperationState.Kind,
         workspace: String?,
         action: String,
         error: Error,
-        notificationKind: MSWNotificationEvent.Kind = .operationFailure,
+        notificationKind: SiloNotificationEvent.Kind = .operationFailure,
         expectedOperationID: UUID? = nil
     ) {
         let key = operationKey(kind: kind, workspace: workspace)
@@ -4150,8 +4150,8 @@ final class AppModel {
     }
 
     private func operationDiagnostics(for error: Error, summary: String) -> String? {
-        if case let MSWClientError.protocolFailure(protocolError) = error {
-            return "\(protocolError.message)\nMSW error code: \(protocolError.code)"
+        if case let SiloClientError.protocolFailure(protocolError) = error {
+            return "\(protocolError.message)\nSilo error code: \(protocolError.code)"
         }
         let detail = error.localizedDescription
         let summaryLine = summary.components(separatedBy: .newlines)
@@ -4246,8 +4246,8 @@ final class AppModel {
     private func reconcileLifecycleOperations(
         observedAt: Date?,
         observationGeneration: Int
-    ) -> [MSWOperationState] {
-        var reconciled: [MSWOperationState] = []
+    ) -> [SiloOperationState] {
+        var reconciled: [SiloOperationState] = []
         for (workspaceID, verification) in lifecycleVerifications {
             let key = operationKey(kind: .lifecycle, workspace: workspaceID)
             guard let current = operationStates[key],
@@ -4344,7 +4344,7 @@ final class AppModel {
             markOperationUnknown(key: key, reason: reason)
         }
     }
-    private func restoreStateIsVerified(_ state: MSWStateResponse) -> Bool {
+    private func restoreStateIsVerified(_ state: SiloStateResponse) -> Bool {
         let expectedIDs = Set(configuredWorkspaceIDs.map(\.rawValue))
         guard state.workspaces.count == expectedIDs.count,
               Set(state.workspaces.map(\.id)) == expectedIDs else {
@@ -4361,9 +4361,9 @@ final class AppModel {
         for error: Error,
         workspace: String? = nil,
         fallbackRecovery: String
-    ) -> MSWRecoveryContext {
-        if case let MSWClientError.protocolFailure(protocolError) = error {
-            return MSWRecoveryContext(
+    ) -> SiloRecoveryContext {
+        if case let SiloClientError.protocolFailure(protocolError) = error {
+            return SiloRecoveryContext(
                 code: protocolError.code,
                 reason: protocolError.message,
                 recovery: protocolError.recovery ?? fallbackRecovery,
@@ -4371,19 +4371,19 @@ final class AppModel {
                 retryable: protocolError.retryable
             )
         }
-        if case let MSWClientError.processFailed(command, status, message) = error {
+        if case let SiloClientError.processFailed(command, status, message) = error {
             let reason = message?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return MSWRecoveryContext(
-                code: "MSW_PROCESS_FAILED",
+            return SiloRecoveryContext(
+                code: "SILO_PROCESS_FAILED",
                 reason: reason.flatMap { $0.isEmpty ? nil : $0 }
-                    ?? "MSW \(command) exited with status \(status) without returning error details.",
+                    ?? "Silo \(command) exited with status \(status) without returning error details.",
                 recovery: fallbackRecovery,
                 workspace: workspace,
                 retryable: true
             )
         }
-        return MSWRecoveryContext(
-            code: "MSW_UNAVAILABLE",
+        return SiloRecoveryContext(
+            code: "SILO_UNAVAILABLE",
             reason: error.localizedDescription,
             recovery: fallbackRecovery,
             workspace: workspace,
@@ -4393,7 +4393,7 @@ final class AppModel {
 
 
     private func emitNotification(
-        kind: MSWNotificationEvent.Kind,
+        kind: SiloNotificationEvent.Kind,
         workspace: String?,
         title: String,
         message: String,
@@ -4401,7 +4401,7 @@ final class AppModel {
         deepLink: String
     ) {
         notificationGeneration += 1
-        notificationEvents.append(MSWNotificationEvent(
+        notificationEvents.append(SiloNotificationEvent(
             id: UUID(), kind: kind, createdAt: Date(), workspace: workspace,
             title: title, message: message, recovery: recovery,
             deepLink: deepLink, generation: notificationGeneration
@@ -4412,7 +4412,7 @@ final class AppModel {
         "silo://workspace/\(workspace)?section=\(section)"
     }
 
-    private func append(_ activity: MSWActivity) async {
+    private func append(_ activity: SiloActivity) async {
         await activityStore.append(activity)
         activities = await activityStore.recent(limit: 100)
     }

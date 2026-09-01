@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""MSW GitHub proxy core -- the per-connection "checker" (Path C contract section 4).
+"""Silo GitHub proxy core -- the per-connection "checker" (Path C contract section 4).
 
 Per-connection process: launchd spawns one instance per accepted socket on
 127.0.0.1:18446 (inetdCompatibility Wait:true); the socket is stdin/stdout.
@@ -33,7 +33,7 @@ client disconnect mid-stream the upstream request is aborted so a partial
 body never appears complete. The ONLY buffered body is the LFS batch JSON,
 bounded in memory (8 MiB) for the operation parse and href rewriting.
 
-Identity is the X-MSW-Capability header, matched constant-time against
+Identity is the X-Silo-Capability header, matched constant-time against
 the policy file (re-read per request/process). The policy is a CREDENTIAL
 GRANT table, never a reachability gate: a missing or malformed policy, an
 absent or unknown capability, an ungranted repository, or a read-only
@@ -46,21 +46,21 @@ canonicalization rules are in this module; the outbound TLS/socket leg is
 lib/proxy-upstream.py.
 
 HMAC stamp key: random 32 bytes per deployment, hex, persisted mode 0600 in
-<policy dir>/github-proxy-hmac.key (MSW_PROXY_HMAC_KEY_FILE seam), created
+<policy dir>/github-proxy-hmac.key (SILO_PROXY_HMAC_KEY_FILE seam), created
 atomically with O_EXCL. NOTE FOR PHASE 2 REVIEW: key-rotation/expiry policy
 for this file is owned by the phase-2 credential/migration work; the key is
 only ever used to stamp/verify LFS object URLs, never to sign anything else.
 
 One structured, single-line, REDACTED JSON record per request goes to
-MSW_PROXY_LOG_FILE. Capability and token values are never logged; the LFS
+SILO_PROXY_LOG_FILE. Capability and token values are never logged; the LFS
 stamp signature query value is redacted.
 
-Env seams (all optional; defaults noted): MSW_POLICY_FILE,
-MSW_PROXY_HMAC_KEY_FILE, MSW_PROXY_LOG_FILE, MSW_PROXY_UPSTREAM_ROOT,
-MSW_PROXY_OBJECTS_UPSTREAM_ROOT, MSW_PROXY_BASE_URL, MSW_GITHUB_PROXY_PORT,
-MSW_PROXY_MAX_BODY_BYTES, MSW_PROXY_IDLE_TIMEOUT, MSW_PROXY_TOTAL_DEADLINE,
-MSW_PROXY_STAMP_TTL, MSW_HOST_KEYCHAIN_SERVICE, MSW_HOST_KEYCHAIN_ACCOUNT,
-MSW_TEST_KEYCHAIN_DIR.
+Env seams (all optional; defaults noted): SILO_POLICY_FILE,
+SILO_PROXY_HMAC_KEY_FILE, SILO_PROXY_LOG_FILE, SILO_PROXY_UPSTREAM_ROOT,
+SILO_PROXY_OBJECTS_UPSTREAM_ROOT, SILO_PROXY_BASE_URL, SILO_GITHUB_PROXY_PORT,
+SILO_PROXY_MAX_BODY_BYTES, SILO_PROXY_IDLE_TIMEOUT, SILO_PROXY_TOTAL_DEADLINE,
+SILO_PROXY_STAMP_TTL, SILO_HOST_KEYCHAIN_SERVICE, SILO_HOST_KEYCHAIN_ACCOUNT,
+SILO_TEST_KEYCHAIN_DIR.
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def _verify_vendored_h11() -> None:
         version = (0, 0, 0)
     if version < VENDOR_H11_FLOOR:
         sys.stderr.write(
-            f"msw-github-proxy: vendored h11 {h11.__version__} is below the hard "
+            f"silo-github-proxy: vendored h11 {h11.__version__} is below the hard "
             f"floor {VENDOR_H11_FLOOR_TEXT} (CVE-2025-43859 / GHSA-vqfr-h8mv-ghfj); "
             "refusing to start (fail-closed)\n"
         )
@@ -122,7 +122,7 @@ def _load_proxy_upstream(lib_dir: str) -> Any:
     path = os.path.join(lib_dir, "proxy-upstream.py")
     spec = importlib.util.spec_from_file_location("proxy_upstream", path)
     if spec is None or spec.loader is None:
-        raise SystemExit(f"msw-github-proxy: cannot load {path}")
+        raise SystemExit(f"silo-github-proxy: cannot load {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules["proxy_upstream"] = module
     spec.loader.exec_module(module)
@@ -251,7 +251,7 @@ _STRIP_OUTBOUND = frozenset({
     b"host",
     b"authorization",
     b"cookie",
-    b"x-msw-capability",
+    b"x-silo-capability",
 })
 
 
@@ -298,45 +298,45 @@ def _default_policy_path() -> str:
 
 
 def _default_workspace_path() -> str:
-    return os.path.join(os.path.expanduser("~"), ".config", "msw", "workspaces.json")
+    return os.path.join(os.path.expanduser("~"), ".config", "silo", "workspaces.json")
 
 
 class Config:
     def __init__(self) -> None:
-        self.policy_file = Path(os.environ.get("MSW_POLICY_FILE", _default_policy_path()))
-        self.workspace_file = Path(os.environ.get("MSW_WORKSPACES_FILE", _default_workspace_path()))
+        self.policy_file = Path(os.environ.get("SILO_POLICY_FILE", _default_policy_path()))
+        self.workspace_file = Path(os.environ.get("SILO_WORKSPACES_FILE", _default_workspace_path()))
         policy_dir = self.policy_file.parent
         self.hmac_key_file = Path(
-            os.environ.get("MSW_PROXY_HMAC_KEY_FILE", str(policy_dir / "github-proxy-hmac.key"))
+            os.environ.get("SILO_PROXY_HMAC_KEY_FILE", str(policy_dir / "github-proxy-hmac.key"))
         )
-        log = os.environ.get("MSW_PROXY_LOG_FILE")
+        log = os.environ.get("SILO_PROXY_LOG_FILE")
         self.log_file = str(log) if log else str(policy_dir / "github-proxy.log")
 
-        self.github_upstream_root = os.environ.get("MSW_PROXY_UPSTREAM_ROOT", "https://github.com")
-        if os.environ.get("MSW_PROXY_OBJECTS_UPSTREAM_ROOT"):
-            self.objects_upstream_root = os.environ["MSW_PROXY_OBJECTS_UPSTREAM_ROOT"]
-        elif os.environ.get("MSW_PROXY_UPSTREAM_ROOT"):
+        self.github_upstream_root = os.environ.get("SILO_PROXY_UPSTREAM_ROOT", "https://github.com")
+        if os.environ.get("SILO_PROXY_OBJECTS_UPSTREAM_ROOT"):
+            self.objects_upstream_root = os.environ["SILO_PROXY_OBJECTS_UPSTREAM_ROOT"]
+        elif os.environ.get("SILO_PROXY_UPSTREAM_ROOT"):
             # Test seam: the fake fixture serves both hosts from one root.
             self.objects_upstream_root = self.github_upstream_root
         else:
             self.objects_upstream_root = "https://objects.githubusercontent.com"
 
-        port = os.environ.get("MSW_GITHUB_PROXY_PORT", str(DEFAULT_PORT))
-        base = os.environ.get("MSW_PROXY_BASE_URL", f"http://127.0.0.1:{port}")
+        port = os.environ.get("SILO_GITHUB_PROXY_PORT", str(DEFAULT_PORT))
+        base = os.environ.get("SILO_PROXY_BASE_URL", f"http://127.0.0.1:{port}")
         self.base_url = base.rstrip("/")
         split = urllib.parse.urlsplit(self.base_url)
         self.expected_host = split.netloc or f"127.0.0.1:{port}"
 
-        self.max_body_bytes = int(os.environ.get("MSW_PROXY_MAX_BODY_BYTES", str(DEFAULT_BODY_CAP)))
-        self.idle_timeout = float(os.environ.get("MSW_PROXY_IDLE_TIMEOUT", "60"))
-        self.total_deadline = float(os.environ.get("MSW_PROXY_TOTAL_DEADLINE", "3600"))
-        self.stamp_ttl = int(os.environ.get("MSW_PROXY_STAMP_TTL", "3600"))
+        self.max_body_bytes = int(os.environ.get("SILO_PROXY_MAX_BODY_BYTES", str(DEFAULT_BODY_CAP)))
+        self.idle_timeout = float(os.environ.get("SILO_PROXY_IDLE_TIMEOUT", "60"))
+        self.total_deadline = float(os.environ.get("SILO_PROXY_TOTAL_DEADLINE", "3600"))
+        self.stamp_ttl = int(os.environ.get("SILO_PROXY_STAMP_TTL", "3600"))
 
         self.keychain_service = os.environ.get(
-            "MSW_HOST_KEYCHAIN_SERVICE", "org.microsandbox.Silo.github-host.v2"
+            "SILO_HOST_KEYCHAIN_SERVICE", "org.silo.Silo.github-host.v2"
         )
-        self.keychain_account = os.environ.get("MSW_HOST_KEYCHAIN_ACCOUNT", "user")
-        td = os.environ.get("MSW_TEST_KEYCHAIN_DIR")
+        self.keychain_account = os.environ.get("SILO_HOST_KEYCHAIN_ACCOUNT", "user")
+        td = os.environ.get("SILO_TEST_KEYCHAIN_DIR")
         self.test_keychain_dir = Path(td) if td else None
 
         self.hmac_key = _load_or_create_hmac_key(self.hmac_key_file)
@@ -364,12 +364,12 @@ def _load_or_create_hmac_key(path: Path) -> bytes:
         key = _parse_key_file(path)
         if key is None:
             sys.stderr.write(
-                f"msw-github-proxy: HMAC key file {path} is invalid; refusing to start (fail-closed)\n"
+                f"silo-github-proxy: HMAC key file {path} is invalid; refusing to start (fail-closed)\n"
             )
             raise SystemExit(1)
         return key
     except OSError as exc:
-        sys.stderr.write(f"msw-github-proxy: cannot create HMAC key file {path}: {exc}\n")
+        sys.stderr.write(f"silo-github-proxy: cannot create HMAC key file {path}: {exc}\n")
         raise SystemExit(1)
     key = os.urandom(32)
     try:
@@ -377,7 +377,7 @@ def _load_or_create_hmac_key(path: Path) -> bytes:
             fh.write(key.hex() + "\n")
         os.chmod(str(path), 0o600)
     except OSError as exc:
-        sys.stderr.write(f"msw-github-proxy: cannot write HMAC key file {path}: {exc}\n")
+        sys.stderr.write(f"silo-github-proxy: cannot write HMAC key file {path}: {exc}\n")
         raise SystemExit(1)
     return key
 
@@ -553,12 +553,12 @@ def _load_policy(cfg: Config) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Host credential (section 5; delivered by bin/msw-github-host-token over a pipe)
+# Host credential (section 5; delivered by bin/silo-github-host-token over a pipe)
 # ---------------------------------------------------------------------------
 
 
 def _load_host_token(cfg: Config) -> Optional[str]:
-    """Read the host credential by spawning bin/msw-github-host-token (§4/§5).
+    """Read the host credential by spawning bin/silo-github-host-token (§4/§5).
 
     The helper is fail-closed: it prints the raw accessToken to stdout and
     exits 0; on a missing/invalid record or a rejected token kind (ghs_/ghr_)
@@ -566,45 +566,45 @@ def _load_host_token(cfg: Config) -> Optional[str]:
     (stdout=PIPE) and never appears in argv, env, or logs. Empty stdout or a
     nonzero exit is treated as unavailable, so the caller degrades to
     anonymous forwarding (never a local denial) -- objects requests never
-    need a token (the signed URL is the auth). MSW_HOST_TOKEN_BIN is the
+    need a token (the signed URL is the auth). SILO_HOST_TOKEN_BIN is the
     test/install seam; fallbacks are the repo copy and the setup.sh install
     location.
     """
     candidates = [
-        os.environ.get("MSW_HOST_TOKEN_BIN"),
-        os.path.join(_LIB_DIR, "..", "bin", "msw-github-host-token"),
-        os.path.expanduser("~/.local/libexec/msw-github-host-token"),
+        os.environ.get("SILO_HOST_TOKEN_BIN"),
+        os.path.join(_LIB_DIR, "..", "bin", "silo-github-host-token"),
+        os.path.expanduser("~/.local/libexec/silo-github-host-token"),
     ]
     helper = next((c for c in candidates if c and os.path.isfile(c)), None)
     if helper is None:
         return None
     env = {
-        "MSW_HOST_KEYCHAIN_SERVICE": cfg.keychain_service,
-        "MSW_HOST_KEYCHAIN_ACCOUNT": cfg.keychain_account,
-        "MSW_TEST_KEYCHAIN_DIR": str(cfg.test_keychain_dir) if cfg.test_keychain_dir else "",
-        "MSW_SECURITY_BIN": os.environ.get("MSW_SECURITY_BIN", "/usr/bin/security"),
-        "MSW_JQ_BIN": os.environ.get("MSW_JQ_BIN") or shutil.which("jq") or "",
-        "MSW_HOST_KEYCHAIN_HOME": os.environ.get("MSW_HOST_KEYCHAIN_HOME", ""),
-        "MSW_HOST_META_FILE": os.environ.get("MSW_HOST_META_FILE", ""),
-        "MSW_KEYCHAIN_BRIDGE": os.environ.get("MSW_KEYCHAIN_BRIDGE", ""),
-        "MSW_FAKE_BRIDGE_HANG": os.environ.get("MSW_FAKE_BRIDGE_HANG", ""),
+        "SILO_HOST_KEYCHAIN_SERVICE": cfg.keychain_service,
+        "SILO_HOST_KEYCHAIN_ACCOUNT": cfg.keychain_account,
+        "SILO_TEST_KEYCHAIN_DIR": str(cfg.test_keychain_dir) if cfg.test_keychain_dir else "",
+        "SILO_SECURITY_BIN": os.environ.get("SILO_SECURITY_BIN", "/usr/bin/security"),
+        "SILO_JQ_BIN": os.environ.get("SILO_JQ_BIN") or shutil.which("jq") or "",
+        "SILO_HOST_KEYCHAIN_HOME": os.environ.get("SILO_HOST_KEYCHAIN_HOME", ""),
+        "SILO_HOST_META_FILE": os.environ.get("SILO_HOST_META_FILE", ""),
+        "SILO_KEYCHAIN_BRIDGE": os.environ.get("SILO_KEYCHAIN_BRIDGE", ""),
+        "SILO_FAKE_BRIDGE_HANG": os.environ.get("SILO_FAKE_BRIDGE_HANG", ""),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", ""),
     }
     # Never export an empty timeout: the bridge parses it eagerly and an empty
     # value would turn the production default into an immediate config error.
-    keychain_timeout = os.environ.get("MSW_KEYCHAIN_TIMEOUT_SECS", "")
+    keychain_timeout = os.environ.get("SILO_KEYCHAIN_TIMEOUT_SECS", "")
     if keychain_timeout:
-        env["MSW_KEYCHAIN_TIMEOUT_SECS"] = keychain_timeout
+        env["SILO_KEYCHAIN_TIMEOUT_SECS"] = keychain_timeout
     # Staggered watchdog stack. The helper may perform TWO bridge reads
     # (deny item, then activation record), each bounded by its own outer
     # deadline. The proxy deadline is clamped above both complete helper
     # deadlines so it can never pre-empt the helper while it is killing the
     # second bridge/worker process group.
-    helper_timeout_raw = os.environ.get("MSW_HOST_TOKEN_TIMEOUT_SECS") or "15"
+    helper_timeout_raw = os.environ.get("SILO_HOST_TOKEN_TIMEOUT_SECS") or "15"
     helper_timeout = max(1.0, float(helper_timeout_raw))
-    env["MSW_HOST_TOKEN_TIMEOUT_SECS"] = str(helper_timeout)
-    requested_timeout = float(os.environ.get("MSW_HOST_TOKEN_TIMEOUT") or "40")
+    env["SILO_HOST_TOKEN_TIMEOUT_SECS"] = str(helper_timeout)
+    requested_timeout = float(os.environ.get("SILO_HOST_TOKEN_TIMEOUT") or "40")
     timeout = max(requested_timeout, (2.0 * helper_timeout) + 5.0)
     try:
         proc = subprocess.Popen(
@@ -792,7 +792,7 @@ class Classifier:
     ) -> Tuple[str, str, str, Dict[str, str], bool]:
         """Validate the self-carrying LFS stamp (section 4).
 
-        Visible params: _msw_repo, _msw_op, _msw_exp; _msw_sig is the AEAD
+        Visible params: _silo_repo, _silo_op, _silo_exp; _silo_sig is the AEAD
         blob (stamp_encode) carrying the REAL href, the action's credential
         headers, op, repo, expiry and whether the batch was authenticated --
         decrypted host-side only, TTL enforced here. GET must carry
@@ -804,13 +804,13 @@ class Classifier:
         """
         params = urllib.parse.parse_qs(query)
         try:
-            repo = params["_msw_repo"][0]
-            op = params["_msw_op"][0]
-            exp = params["_msw_exp"][0]
-            sig = params["_msw_sig"][0]
+            repo = params["_silo_repo"][0]
+            op = params["_silo_op"][0]
+            exp = params["_silo_exp"][0]
+            sig = params["_silo_sig"][0]
         except (KeyError, IndexError):
             raise ProxyError(
-                403, "missing LFS stamp parameters (_msw_repo/_msw_op/_msw_exp/_msw_sig); "
+                403, "missing LFS stamp parameters (_silo_repo/_silo_op/_silo_exp/_silo_sig); "
                 "unstamped object URLs are denied", category="denied",
             )
         if op not in ("download", "upload"):
@@ -1137,10 +1137,10 @@ class RequestContext:
         capability header is a request-shape violation and stays denied
         (ambiguous identity cannot authorize a grant).
         """
-        caps = [value for name, value in request.headers if name == b"x-msw-capability"]
+        caps = [value for name, value in request.headers if name == b"x-silo-capability"]
         if len(caps) > 1:
             raise ProxyError(
-                403, "at most one X-MSW-Capability header is allowed", category="identity",
+                403, "at most one X-Silo-Capability header is allowed", category="identity",
             )
         if caps:
             self.presented_capability = caps[0].decode("latin-1")
@@ -1262,7 +1262,7 @@ class RequestContext:
             return framing
         if framing == "cl" and (self.cl_value or 0) > self.cfg.max_body_bytes:
             raise ProxyError(
-                413, "request body exceeds MSW_PROXY_MAX_BODY_BYTES", category="cap",
+                413, "request body exceeds SILO_PROXY_MAX_BODY_BYTES", category="cap",
             )
         if self._client_expects_continue(request):
             self._flush(self.conn.send(h11.InformationalResponse(status_code=100, headers=[])))
@@ -1285,7 +1285,7 @@ class RequestContext:
                         # never appear complete) and discard the pending chunk.
                         self._abort_upstream()
                         raise ProxyError(
-                            413, "request body exceeds MSW_PROXY_MAX_BODY_BYTES (mid-stream)",
+                            413, "request body exceeds SILO_PROXY_MAX_BODY_BYTES (mid-stream)",
                             category="cap",
                         )
                     if framing == "chunked" and event.chunk_start and pending_confirmed:
@@ -1356,10 +1356,10 @@ class RequestContext:
         self.error = self._sanitize(reason)
         if self.batch_failed:
             # LFS error shape so git-lfs surfaces the refusal message.
-            body = json.dumps({"message": f"msw-proxy: {self.error}"}).encode("utf-8")
+            body = json.dumps({"message": f"silo-proxy: {self.error}"}).encode("utf-8")
             content_type = "application/vnd.git-lfs+json"
         else:
-            body = json.dumps({"error": f"msw-proxy: {self.error}"}).encode("utf-8")
+            body = json.dumps({"error": f"silo-proxy: {self.error}"}).encode("utf-8")
             content_type = "application/json"
         try:
             self._send_head(status, [("Content-Type", content_type),
@@ -1776,8 +1776,8 @@ class RequestContext:
         }, sort_keys=True).encode("utf-8")
         sig = stamp_encode(self.cfg.hmac_key, payload)
         params = (
-            f"_msw_repo={urllib.parse.quote(repo, safe='')}"
-            f"&_msw_op={stamp_op}&_msw_exp={exp}&_msw_sig={urllib.parse.quote(sig, safe='')}"
+            f"_silo_repo={urllib.parse.quote(repo, safe='')}"
+            f"&_silo_op={stamp_op}&_silo_exp={exp}&_silo_sig={urllib.parse.quote(sig, safe='')}"
         )
         return f"{self.cfg.base_url}/objects.githubusercontent.com/objects/{oid}?{params}"
 
@@ -1788,7 +1788,7 @@ class RequestContext:
         """Build the self-carrying stamped URL for one upload/download action.
 
         The REAL href and the action's credential headers are AEAD-encoded
-        into _msw_sig (host-side key); the VM only ever sees the stamped
+        into _silo_sig (host-side key); the VM only ever sees the stamped
         proxy URL. Raises ProxyError (failing the WHOLE batch closed) for any
         foreign, unparseable, or mismatched href -- the VM must never see an
         upstream href or action header. The headers are GitHub-issued,
@@ -1949,7 +1949,7 @@ class RequestContext:
         if self.log_fh is None:
             return
         target = self.target or ""
-        redacted_target = re.sub(r"(_msw_sig=)[^&]+", r"\1<redacted>", target)
+        redacted_target = re.sub(r"(_silo_sig=)[^&]+", r"\1<redacted>", target)
         entry = {
             "t": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "pid": os.getpid(),
@@ -2047,7 +2047,7 @@ def serve_listen(port: int) -> int:
     actual_port = sock.getsockname()[1]
     print(f"PROXY_READY port={actual_port}", flush=True)
     # Children must advertise and validate against the real bound port.
-    os.environ["MSW_PROXY_BASE_URL"] = f"http://127.0.0.1:{actual_port}"
+    os.environ["SILO_PROXY_BASE_URL"] = f"http://127.0.0.1:{actual_port}"
 
     def _stop(signum: int, frame: Any) -> None:
         raise SystemExit(0)

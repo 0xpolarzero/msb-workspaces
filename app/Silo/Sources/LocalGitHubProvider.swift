@@ -24,7 +24,7 @@ protocol GitHubProviding: Sendable {
     /// and no device-flow client ID is configured (the app then launches the
     /// installed gh web OAuth flow and retries), or `.deviceFlowAvailable`
     /// when the CLI reports the OAuth Device Flow is the intended path
-    /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED from `github auth --json`).
+    /// (SILO_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED from `github auth --json`).
     func connectAccount() async throws -> GitHubAccount?
     /// Launches the installed gh CLI's web OAuth flow
     /// (`gh auth login --hostname github.com --git-protocol https --web
@@ -34,15 +34,15 @@ protocol GitHubProviding: Sendable {
     func launchGhWebLogin() async throws
     /// One-shot device-flow start; the caller drives polling with
     /// `pollDeviceFlow(deviceId:)` at `interval` sleeps.
-    func startDeviceFlow() async throws -> MSWDeviceFlowStart
-    func pollDeviceFlow(deviceId: String) async throws -> MSWDeviceFlowPoll
+    func startDeviceFlow() async throws -> SiloDeviceFlowStart
+    func pollDeviceFlow(deviceId: String) async throws -> SiloDeviceFlowPoll
     /// Local onboarding's desired/effective cutover. Implementations that do
     /// not support the background contract may use the synchronous default.
     func policySyncProgress() async -> GitHubApplyProgress?
     func waitForPolicySync() async throws
     func retryPolicySync() async throws
     func cancelPolicySync() async
-    func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult
+    func setIdentity(name: String, email: String, workspace: String?) async throws -> SiloIdentityResult
     /// Rebuilds every workspace-scoped target from the validated configuration
     /// published by Setup, independently of bootstrap registration.
     func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws
@@ -181,7 +181,7 @@ enum GitHubLocalStrings {
 }
 
 /// Local-mode provider. The repo catalog is assembled from the policy file
-/// read-back through `msw github status --format json`, which lists every
+/// read-back through `silo github status --format json`, which lists every
 /// workspace's granted repos; the CLI exposes no GitHub repo enumeration,
 /// so the app never adds one. On EVERY successful load, credential grants
 /// whose repos are missing from the discovered catalog are re-synthesized
@@ -190,13 +190,13 @@ enum GitHubLocalStrings {
 /// comes from the CLI (`github status`, `github auth --json`) — the app
 /// only reads status and never holds the token.
 actor GitHubLocalProvider: GitHubProviding {
-    private let client: MSWClient
+    private let client: SiloClient
     private let policyURL: URL
     private var applyProgress: GitHubApplyProgress?
     private var currentApplyTask: Task<Void, Never>?
     private var currentApplyGeneration: Int?
     private var mutationTail: Task<Void, Never>?
-    private var desiredRequest: MSWGitHubPolicyApplyRequest?
+    private var desiredRequest: SiloGitHubPolicyApplyRequest?
     private var desiredHash: String?
     private var nextGeneration: Int
     private var configuredWorkspaces: [String]
@@ -205,7 +205,7 @@ actor GitHubLocalProvider: GitHubProviding {
     private let contentionBackoff: @Sendable (Int) -> Duration
 
     init(
-        client: MSWClient,
+        client: SiloClient,
         policyStore: GitHubPolicyStore,
         workspaceConfigurations: [SetupWorkspaceConfiguration] = SetupWorkspaceConfiguration.defaults,
         contentionBackoff: @escaping @Sendable (Int) -> Duration = { attempt in
@@ -353,7 +353,7 @@ actor GitHubLocalProvider: GitHubProviding {
         }
         // Discovery requires the host credential; without one the catalog is
         // empty and the caller surfaces the no-credential state.
-        let discovered: [MSWGitHubDiscoveredRepo]
+        let discovered: [SiloGitHubDiscoveredRepo]
         if hasCredential {
             do {
                 discovered = try await client.githubRepos()
@@ -575,7 +575,7 @@ actor GitHubLocalProvider: GitHubProviding {
         guard let progress = applyProgress else { return }
         if progress.phase == .failed {
             let failure = progress.failure ?? GitHubApplyFailure(
-                code: "MSW_GITHUB_RECONCILIATION_FAILED",
+                code: "SILO_GITHUB_RECONCILIATION_FAILED",
                 message: "GitHub reconciliation failed.",
                 recovery: "Check the workspace runtime, then retry GitHub reconciliation.",
                 workspace: progress.workspace,
@@ -624,17 +624,17 @@ actor GitHubLocalProvider: GitHubProviding {
         try? persist(request: desiredRequest, hash: desiredHash, progress: cancelled, status: .cancelled)
     }
 
-    func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
+    func setIdentity(name: String, email: String, workspace: String?) async throws -> SiloIdentityResult {
         await waitForConfigurationReload()
         let expected = workspace.map { [$0] } ?? configuredWorkspaces
         guard !expected.isEmpty,
               expected.allSatisfy({ configuredWorkspaces.contains($0) }) else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let result = try await performMutation { [client] in
             let response = try await client.setIdentity(name: name, email: email, workspace: workspace)
             guard let result = response.result else {
-                throw MSWClientError.missingResult(command: "identity")
+                throw SiloClientError.missingResult(command: "identity")
             }
             return result
         }
@@ -647,7 +647,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     /// Applies the desired per-workspace policy through ONE journaled CLI
-    /// transaction (`msw app github-policy-apply`) that carries the full
+    /// transaction (`silo app github-policy-apply`) that carries the full
     /// desired policy on stdin, provisions/verifies transport only for changed
     /// non-empty workspaces, and commits atomically (rollback on an unproven
     /// step).
@@ -655,8 +655,8 @@ actor GitHubLocalProvider: GitHubProviding {
     /// workspaces keep their current policy entries.
     private func makeRequest(
         _ policy: [GitHubWorkspacePolicy],
-        preserving pendingRequest: MSWGitHubPolicyApplyRequest?
-    ) throws -> MSWGitHubPolicyApplyRequest {
+        preserving pendingRequest: SiloGitHubPolicyApplyRequest?
+    ) throws -> SiloGitHubPolicyApplyRequest {
         let current = GitHubPolicyStore.read(policyURL: policyURL)
         var edited: [String: GitHubWorkspacePolicy] = [:]
         for workspacePolicy in policy {
@@ -710,12 +710,12 @@ actor GitHubLocalProvider: GitHubProviding {
                 workspaces[workspace] = GitHubPolicyWorkspace(capability: nil, repos: [])
             }
         }
-        return MSWGitHubPolicyApplyRequest(schemaVersion: 1, workspaces: workspaces)
+        return SiloGitHubPolicyApplyRequest(schemaVersion: 1, workspaces: workspaces)
     }
 
     private static func apply(
-        _ request: MSWGitHubPolicyApplyRequest,
-        with client: MSWClient,
+        _ request: SiloGitHubPolicyApplyRequest,
+        with client: SiloClient,
         contentionBackoff: @escaping @Sendable (Int) -> Duration,
         onContention: @escaping @Sendable (Int) async -> Void
     ) async throws {
@@ -732,8 +732,8 @@ actor GitHubLocalProvider: GitHubProviding {
                     )
                 }
                 return
-            } catch MSWClientError.protocolFailure(let error)
-                where error.code == "MSW_OPERATION_CONFLICT" && error.retryable {
+            } catch SiloClientError.protocolFailure(let error)
+                where error.code == "SILO_OPERATION_CONFLICT" && error.retryable {
                 attempt += 1
                 await onContention(attempt)
                 try await Task.sleep(for: contentionBackoff(attempt))
@@ -742,7 +742,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     private func startReconciliation(
-        request: MSWGitHubPolicyApplyRequest,
+        request: SiloGitHubPolicyApplyRequest,
         hash: String,
         generation: Int,
         workspace: String?
@@ -779,7 +779,7 @@ actor GitHubLocalProvider: GitHubProviding {
 
     private func finishReconciliation(
         operation: Task<Void, Error>,
-        request: MSWGitHubPolicyApplyRequest,
+        request: SiloGitHubPolicyApplyRequest,
         hash: String,
         generation: Int,
         workspace: String?
@@ -818,7 +818,7 @@ actor GitHubLocalProvider: GitHubProviding {
             // A newer generation owns the visible state. Setup-close
             // cancellation is finalized by `cancelPolicySync` after
             // the process group and CLI locks have been released.
-        } catch let error as MSWClientError where error == .cancelled {
+        } catch let error as SiloClientError where error == .cancelled {
             // Same cancellation contract as Swift CancellationError.
         } catch {
             guard applyProgress?.generation == generation else { return }
@@ -919,7 +919,7 @@ actor GitHubLocalProvider: GitHubProviding {
         return task
     }
 
-    private func matchesEffectivePolicy(_ request: MSWGitHubPolicyApplyRequest) -> Bool {
+    private func matchesEffectivePolicy(_ request: SiloGitHubPolicyApplyRequest) -> Bool {
         guard let current = GitHubPolicyStore.read(policyURL: policyURL) else {
             return request.workspaces.values.allSatisfy(\.repos.isEmpty)
         }
@@ -932,7 +932,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     private func firstChangedNonEmptyWorkspace(
-        in request: MSWGitHubPolicyApplyRequest
+        in request: SiloGitHubPolicyApplyRequest
     ) -> String? {
         let current = GitHubPolicyStore.read(policyURL: policyURL)
         return configuredWorkspaces.first { workspace in
@@ -943,7 +943,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     private func persist(
-        request: MSWGitHubPolicyApplyRequest,
+        request: SiloGitHubPolicyApplyRequest,
         hash: String,
         progress: GitHubApplyProgress,
         status: GitHubApplyPersistenceStatus
@@ -963,7 +963,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     private static func semanticHash(
-        _ request: MSWGitHubPolicyApplyRequest,
+        _ request: SiloGitHubPolicyApplyRequest,
         workspaces: [String]
     ) -> String {
         var hash: UInt64 = 14_695_981_039_346_656_037
@@ -981,9 +981,9 @@ actor GitHubLocalProvider: GitHubProviding {
     /// Desired intent deliberately excludes effective proxy capabilities.
     /// The CLI preserves or mints them while holding the policy locks.
     private static func intentRequest(
-        _ request: MSWGitHubPolicyApplyRequest
-    ) -> MSWGitHubPolicyApplyRequest {
-        MSWGitHubPolicyApplyRequest(
+        _ request: SiloGitHubPolicyApplyRequest
+    ) -> SiloGitHubPolicyApplyRequest {
+        SiloGitHubPolicyApplyRequest(
             schemaVersion: request.schemaVersion,
             workspaces: request.workspaces.mapValues {
                 GitHubPolicyWorkspace(capability: nil, repos: $0.repos)
@@ -992,10 +992,10 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     private static func scopedRequest(
-        _ request: MSWGitHubPolicyApplyRequest,
+        _ request: SiloGitHubPolicyApplyRequest,
         workspaces: [String]
-    ) -> MSWGitHubPolicyApplyRequest {
-        MSWGitHubPolicyApplyRequest(
+    ) -> SiloGitHubPolicyApplyRequest {
+        SiloGitHubPolicyApplyRequest(
             schemaVersion: request.schemaVersion,
             workspaces: Dictionary(uniqueKeysWithValues: workspaces.map {
                 ($0, GitHubPolicyWorkspace(
@@ -1033,7 +1033,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 
     private static func failure(for error: Error, workspace: String?) -> GitHubApplyFailure {
-        if let clientError = error as? MSWClientError,
+        if let clientError = error as? SiloClientError,
            case .protocolFailure(let protocolError) = clientError {
             let containsInternalContentionLanguage = [
                 protocolError.message,
@@ -1053,7 +1053,7 @@ actor GitHubLocalProvider: GitHubProviding {
         }
         let message = error.localizedDescription
         return GitHubApplyFailure(
-            code: "MSW_GITHUB_RECONCILIATION_FAILED",
+            code: "SILO_GITHUB_RECONCILIATION_FAILED",
             message: GitHubApplyFailure.containsInternalContentionLanguage(message)
                 ? "GitHub synchronization could not continue."
                 : message,
@@ -1093,15 +1093,15 @@ actor GitHubLocalProvider: GitHubProviding {
             let metadata = try await client.githubAuth()
             guard let login = metadata.accountLogin, !login.isEmpty else { return nil }
             return GitHubAccount(login: login, id: Self.stableID(login), name: nil, email: nil)
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             if case .rawCLIError(let code, _) = error {
                 switch code {
-                case "MSW_HOST_OAUTH_NOT_CONFIGURED":
+                case "SILO_HOST_OAUTH_NOT_CONFIGURED":
                     // gh is not authenticated and no device-flow client ID
                     // is configured: the in-app device sheet cannot run.
                     // The app must launch the installed gh web OAuth flow.
                     throw GitHubCatalogError.ghWebLoginRequired
-                case "MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED":
+                case "SILO_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED":
                     // A device-flow client ID is explicitly configured; the
                     // in-app device sheet is the intended path.
                     throw GitHubCatalogError.deviceFlowAvailable
@@ -1116,7 +1116,7 @@ actor GitHubLocalProvider: GitHubProviding {
     func launchGhWebLogin() async throws {
         do {
             try await client.githubWebLogin()
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             if case .rawCLIError(_, let message) = error {
                 throw GitHubCatalogError.notConfigured(
                     message ?? "GitHub CLI (gh) sign-in could not be started."
@@ -1126,11 +1126,11 @@ actor GitHubLocalProvider: GitHubProviding {
         }
     }
 
-    func startDeviceFlow() async throws -> MSWDeviceFlowStart {
+    func startDeviceFlow() async throws -> SiloDeviceFlowStart {
         do {
             return try await client.githubAuthDevice()
-        } catch let error as MSWClientError {
-            if case .rawCLIError(let code, let message) = error, code == "MSW_HOST_OAUTH_NOT_CONFIGURED" {
+        } catch let error as SiloClientError {
+            if case .rawCLIError(let code, let message) = error, code == "SILO_HOST_OAUTH_NOT_CONFIGURED" {
                 throw GitHubCatalogError.notConfigured(
                     message ?? "GitHub sign-in is not configured on this Mac."
                 )
@@ -1139,7 +1139,7 @@ actor GitHubLocalProvider: GitHubProviding {
         }
     }
 
-    func pollDeviceFlow(deviceId: String) async throws -> MSWDeviceFlowPoll {
+    func pollDeviceFlow(deviceId: String) async throws -> SiloDeviceFlowPoll {
         try await client.githubAuthDeviceComplete(deviceId: deviceId)
     }
 
@@ -1179,7 +1179,7 @@ actor GitHubLocalProvider: GitHubProviding {
 }
 
 /// UI-test fixture provider: simulates local-mode catalog loads and policy
-/// commits so the `--ui-test-github-*` flows never invoke a developer's MSW
+/// commits so the `--ui-test-github-*` flows never invoke a developer's Silo
 /// runtime.
 actor GitHubFixtureProvider: GitHubProviding {
     let scenario: String?
@@ -1341,8 +1341,8 @@ actor GitHubFixtureProvider: GitHubProviding {
 
     func launchGhWebLogin() async throws {}
 
-    func startDeviceFlow() async throws -> MSWDeviceFlowStart {
-        MSWDeviceFlowStart(
+    func startDeviceFlow() async throws -> SiloDeviceFlowStart {
+        SiloDeviceFlowStart(
             deviceId: "fixture-device",
             code: "FIXT-CODE",
             verificationUri: "https://github.com/login/device",
@@ -1351,12 +1351,12 @@ actor GitHubFixtureProvider: GitHubProviding {
         )
     }
 
-    func pollDeviceFlow(deviceId: String) async throws -> MSWDeviceFlowPoll {
-        MSWDeviceFlowPoll(status: .authorized, interval: nil, accountLogin: "octocat")
+    func pollDeviceFlow(deviceId: String) async throws -> SiloDeviceFlowPoll {
+        SiloDeviceFlowPoll(status: .authorized, interval: nil, accountLogin: "octocat")
     }
 
-    func setIdentity(name: String, email: String, workspace: String?) async throws -> MSWIdentityResult {
-        MSWIdentityResult(
+    func setIdentity(name: String, email: String, workspace: String?) async throws -> SiloIdentityResult {
+        SiloIdentityResult(
             target: workspace ?? "all",
             name: name,
             email: email,

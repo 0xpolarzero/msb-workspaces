@@ -293,7 +293,7 @@ struct DetailView: View {
                 .accessibilityAddTraits(.isHeader)
             Spacer()
             if needsInstallationRepair {
-                Button("Repair MSW installation…") {
+                Button("Repair Silo installation…") {
                     NSApp.sendAction(#selector(AppDelegate.openRuntimeRepair), to: nil, from: nil)
                 }
                 .accessibilityIdentifier("maintenance.repair.button")
@@ -540,7 +540,7 @@ struct DetailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func operationFailurePanel(_ failure: MSWOperationFailureNotice) -> some View {
+    private func operationFailurePanel(_ failure: SiloOperationFailureNotice) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "xmark.circle.fill")
                 .foregroundStyle(.red)
@@ -1021,13 +1021,13 @@ struct FolderBrowserView: View {
     @State private var folderPath = "."
     @State private var folderSearch = ""
     @State private var selectedFolderPath: String?
-    @State private var snapshot: MSWDirectoryResponse?
+    @State private var snapshot: SiloDirectoryResponse?
     @State private var directoryError: String?
     @State private var editorError: String?
     @State private var isDirectoryLoading = false
     @State private var isEditorOpening = false
     @State private var editorOpenRequestID: UUID?
-    @State private var childrenByPath: [String: [MSWDirectoryResponse.Entry]] = [:]
+    @State private var childrenByPath: [String: [SiloDirectoryResponse.Entry]] = [:]
     @State private var expandedPaths: Set<String> = []
     @State private var loadingChildPaths: Set<String> = []
     @State private var childErrors: [String: String] = [:]
@@ -1197,7 +1197,7 @@ struct FolderBrowserView: View {
     }
 
     @ViewBuilder
-    private func folderTree(entries: [MSWDirectoryResponse.Entry]) -> some View {
+    private func folderTree(entries: [SiloDirectoryResponse.Entry]) -> some View {
         if treeOnly {
             folderTreeRows(entries)
                 .padding(.vertical, 2)
@@ -1217,7 +1217,7 @@ struct FolderBrowserView: View {
     }
 
     private func folderTreeRows(
-        _ entries: [MSWDirectoryResponse.Entry]
+        _ entries: [SiloDirectoryResponse.Entry]
     ) -> some View {
         LazyVStack(alignment: .leading, spacing: 2) {
             ForEach(entries) { entry in
@@ -1236,7 +1236,7 @@ struct FolderBrowserView: View {
         }
     }
 
-    private func searchResults(entries: [MSWDirectoryResponse.Entry]) -> some View {
+    private func searchResults(entries: [SiloDirectoryResponse.Entry]) -> some View {
         List(entries) { entry in
             Button {
                 selectedFolderPath = entry.path
@@ -1348,9 +1348,9 @@ struct FolderBrowserView: View {
  
     private func cachedSnapshot(
         path: String,
-        entries: [MSWDirectoryResponse.Entry]
-    ) -> MSWDirectoryResponse {
-        MSWDirectoryResponse(
+        entries: [SiloDirectoryResponse.Entry]
+    ) -> SiloDirectoryResponse {
+        SiloDirectoryResponse(
             workspace: workspace.rawValue,
             path: path,
             query: nil,
@@ -1382,7 +1382,7 @@ struct FolderBrowserView: View {
         }
     }
 
-    private func hydratePrefetchedTree(_ entries: [MSWDirectoryResponse.Entry]) {
+    private func hydratePrefetchedTree(_ entries: [SiloDirectoryResponse.Entry]) {
         for entry in entries {
             if !entry.hasChildren || !entry.children.isEmpty {
                 childrenByPath[entry.path] = entry.children
@@ -1448,8 +1448,8 @@ struct FolderBrowserView: View {
 }
 
 private struct FolderTreeBranch: View {
-    let entry: MSWDirectoryResponse.Entry
-    @Binding var childrenByPath: [String: [MSWDirectoryResponse.Entry]]
+    let entry: SiloDirectoryResponse.Entry
+    @Binding var childrenByPath: [String: [SiloDirectoryResponse.Entry]]
     @Binding var expandedPaths: Set<String>
     @Binding var loadingPaths: Set<String>
     @Binding var errorsByPath: [String: String]
@@ -1575,7 +1575,7 @@ private struct FolderTreeBranch: View {
 
 private extension DetailView {
 
-    private func newestRepositoryDate(_ value: MSWRepositoriesResponse) -> Date? {
+    private func newestRepositoryDate(_ value: SiloRepositoriesResponse) -> Date? {
         value.repositories.compactMap(\.checkedAt).max()
     }
 
@@ -1588,7 +1588,7 @@ private extension DetailView {
                     description: Text("Select at least one workspace to see its network services.")
                 )
             } else {
-                Text("Each workspace has its own .msw.test address, so the same port can be active in multiple workspaces.")
+                Text("Each workspace has its own .silo.test address, so the same port can be active in multiple workspaces.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if let snapshot = model.portsSnapshot {
@@ -1624,8 +1624,8 @@ private extension DetailView {
     }
 
     private func visibleNetworkSnapshots(
-        _ response: MSWPortsResponse
-    ) -> [MSWPortsResponse.WorkspacePorts] {
+        _ response: SiloPortsResponse
+    ) -> [SiloPortsResponse.WorkspacePorts] {
         response.workspaces
             .filter { snapshot in
                 guard let id = Workspace.ID(rawValue: snapshot.workspace),
@@ -1649,7 +1649,7 @@ private extension DetailView {
 
     private func networkRow(
         workspace: Workspace,
-        snapshot: MSWPortsResponse.WorkspacePorts
+        snapshot: SiloPortsResponse.WorkspacePorts
     ) -> some View {
         let active = activePorts(snapshot)
         let inactive = inactivePorts(snapshot)
@@ -1713,9 +1713,9 @@ private extension DetailView {
     }
 
     private func portStrip(
-        _ ports: [MSWPortsResponse.Port],
+        _ ports: [SiloPortsResponse.Port],
         workspace: Workspace,
-        snapshot: MSWPortsResponse.WorkspacePorts,
+        snapshot: SiloPortsResponse.WorkspacePorts,
         active: Bool
     ) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -1759,22 +1759,22 @@ private extension DetailView {
     }
 
     private func activePorts(
-        _ snapshot: MSWPortsResponse.WorkspacePorts
-    ) -> [MSWPortsResponse.Port] {
+        _ snapshot: SiloPortsResponse.WorkspacePorts
+    ) -> [SiloPortsResponse.Port] {
         snapshot.ports
             .filter { $0.listening == true }
             .sorted(by: portOrder)
     }
 
     private func inactivePorts(
-        _ snapshot: MSWPortsResponse.WorkspacePorts
-    ) -> [MSWPortsResponse.Port] {
+        _ snapshot: SiloPortsResponse.WorkspacePorts
+    ) -> [SiloPortsResponse.Port] {
         snapshot.ports
             .filter { $0.listening != true }
             .sorted(by: portOrder)
     }
 
-    private func portOrder(_ lhs: MSWPortsResponse.Port, _ rhs: MSWPortsResponse.Port) -> Bool {
+    private func portOrder(_ lhs: SiloPortsResponse.Port, _ rhs: SiloPortsResponse.Port) -> Bool {
         (Int(lhs.port) ?? .max) < (Int(rhs.port) ?? .max)
     }
 
@@ -1791,7 +1791,7 @@ private extension DetailView {
         )
     }
 
-    private func canOpen(port: MSWPortsResponse.Port, in workspace: Workspace) -> Bool {
+    private func canOpen(port: SiloPortsResponse.Port, in workspace: Workspace) -> Bool {
         port.configured &&
             port.listening == true &&
             workspace.state == .running &&
@@ -1866,7 +1866,7 @@ private extension DetailView {
         .accessibilityIdentifier("details.activity")
     }
 
-    private var filteredActivities: [MSWActivity] {
+    private var filteredActivities: [SiloActivity] {
         model.activities.filter { entry in
             guard let workspace = entry.workspace,
                   let id = Workspace.ID(rawValue: workspace) else {
@@ -2090,7 +2090,7 @@ private extension DetailView {
 
     private func chooseRestoreArchive() {
         let panel = NSOpenPanel()
-        panel.title = "Choose MSW Backup Archive"
+        panel.title = "Choose Silo Backup Archive"
         panel.prompt = "Preview Restore"
         panel.message = "Selecting an archive does not restore it. You will review impact and type a confirmation next."
         panel.canChooseDirectories = false
@@ -2125,7 +2125,7 @@ private extension DetailView {
         maintenanceOperation = operation
     }
 
-    private var latestRestoreOperation: MSWOperationState? {
+    private var latestRestoreOperation: SiloOperationState? {
         model.operationStates.values
             .filter { $0.kind == .restore }
             .max { $0.updatedAt < $1.updatedAt }
@@ -2138,7 +2138,7 @@ private extension DetailView {
         return error == operation.message
     }
 
-    private func retryMaintenance(kind: MSWOperationState.Kind) {
+    private func retryMaintenance(kind: SiloOperationState.Kind) {
         if kind == .backup, let backupDestination {
             prepareBackupReview(to: backupDestination)
         } else if kind == .restore, restoreArchive != nil {
@@ -2152,7 +2152,7 @@ private extension DetailView {
     }
 
 
-    private func diagnosticSymbol(_ status: MSWPreflightCheck.Status) -> String {
+    private func diagnosticSymbol(_ status: SiloPreflightCheck.Status) -> String {
         switch status {
         case .pass: return "checkmark.circle.fill"
         case .needsAction: return "exclamationmark.triangle.fill"
@@ -2160,7 +2160,7 @@ private extension DetailView {
         }
     }
 
-    private func diagnosticColor(_ status: MSWPreflightCheck.Status) -> Color {
+    private func diagnosticColor(_ status: SiloPreflightCheck.Status) -> Color {
         switch status {
         case .pass: return .green
         case .needsAction: return .orange
@@ -2168,7 +2168,7 @@ private extension DetailView {
         }
     }
 
-    private func healthStatusTitle(_ status: MSWPreflightCheck.Status) -> String {
+    private func healthStatusTitle(_ status: SiloPreflightCheck.Status) -> String {
         switch status {
         case .pass: return "Passed"
         case .needsAction: return "Needs action"
@@ -2343,7 +2343,7 @@ private struct WorkspaceSummaryRow: View {
 }
 
 private struct FreshnessNotice: View {
-    let freshness: MSWFreshness
+    let freshness: SiloFreshness
     let observedAt: Date?
     let reason: String?
 
@@ -2407,7 +2407,7 @@ private struct OperationRow: View {
 }
 
 private struct RepositoryRow: View {
-    let repository: MSWRepositorySnapshot
+    let repository: SiloRepositorySnapshot
     let push: () -> Void
 
     var body: some View {
@@ -2431,7 +2431,7 @@ private struct RepositoryRow: View {
 
 
 private struct PushConfirmationView: View {
-    let plan: MSWPushPlan
+    let plan: SiloPushPlan
     @Binding var confirmation: String
     let cancel: () -> Void
     let apply: () -> Void
@@ -2467,7 +2467,7 @@ private struct PushConfirmationView: View {
 }
 
 private struct BackupReviewView: View {
-    let preview: MSWBackupPreview
+    let preview: SiloBackupPreview
     let isBusy: Bool
     let cancel: () -> Void
     let apply: () -> Void
@@ -2591,7 +2591,7 @@ private struct MaintenanceOperation: Equatable {
 }
 
 private struct BackupOperationCard: View {
-    let operation: MSWBackupOperation
+    let operation: SiloBackupOperation
     let refreshWorkspaceState: () -> Void
 
     var body: some View {
@@ -2680,7 +2680,7 @@ private struct BackupOperationCard: View {
         .accessibilityIdentifier("backup.operation.card")
     }
 
-    private func runningPhaseTitle(_ phase: MSWBackupOperation.Phase) -> String {
+    private func runningPhaseTitle(_ phase: SiloBackupOperation.Phase) -> String {
         switch phase {
         case .preparing: return "Preparing backup"
         case .archiveWriting: return "Archiving and writing"
@@ -2734,7 +2734,7 @@ private struct MaintenanceOperationView: View {
 }
 
 private struct ModelOperationView: View {
-    let operation: MSWOperationState
+    let operation: SiloOperationState
     let retry: () -> Void
 
     var body: some View {

@@ -1,8 +1,8 @@
-# MSW 3.1.0 verification report
+# Silo 3.1.0 verification report
 
-Verification is split between the native Silo app and the portable `msw` release suite. Local mode (`MSW_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
+Verification is split between the native Silo app and the portable `silo` release suite. Local mode (`SILO_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
 
-The token-prompt GitHub setup scenarios described in older release reports are historical. The legacy `msw github setup` surface is removed and must not be treated as a supported setup or rotation path.
+The token-prompt GitHub setup scenarios described in older release reports are historical. The legacy `silo github setup` surface is removed and must not be treated as a supported setup or rotation path.
 
 Run the app checks after source changes:
 
@@ -18,7 +18,7 @@ The focused smoke flows prove the app bundle, status-item/popover UI, and runtim
 ## Native macOS app evidence
 
 - Verification date: 2026-08-30.
-- Bundle exercised: `app/Silo/build/Silo.app` with bundle identifier `org.microsandbox.Silo`.
+- Bundle exercised: `app/Silo/build/Silo.app` with bundle identifier `org.silo.Silo`.
 - UI launch mode: the focused tests used `--ui-test-open-popover`; the repair test also used `--ui-test-runtime-repair`. Production popover behavior remains `.transient`.
 - Build: `app/Silo/Scripts/build.sh` completed with `** BUILD SUCCEEDED **`; complete output is `app/Silo/build/logs/build.log`.
 - Model suite: `app/Silo/Scripts/test.sh` passed 276 tests with zero failures and one environment-dependent skip. Result: `app/Silo/build/DerivedData/Tests/Logs/Test/Test-Silo-2026.08.30_22-45-10-+0200.xcresult`; complete output is `app/Silo/build/logs/test.log`.
@@ -34,7 +34,7 @@ The focused smoke flows prove the app bundle, status-item/popover UI, and runtim
   - `workspace.playgrounds.name/state`: `playgrounds` / `Stopped`.
   - `workspace.personal.name/state`: `personal` / `Stopped`.
   - `open-monitor.button`: `Open Silo…`; separate Overview, Settings, and Setup shortcuts were absent.
-  - Repair fixture: `statusItem.button` value `Silo. Repair needed. MSW installation needs repair.`, one `runtime-repair.popover.row`, message `MSW installation needs repair`, and one `Repair…` action.
+  - Repair fixture: `statusItem.button` value `Silo. Repair needed. Silo installation needs repair.`, one `runtime-repair.popover.row`, message `Silo installation needs repair`, and one `Repair…` action.
   - Repair window: one global repair banner and one `Repair…` action on Overview, Workspaces, GitHub, Secrets, Notifications, Backup, and General. The fixture's first repair attempt exposed bounded details; the retry reported `Installation repaired`, removed every repair surface, and restored status value `Not observed. No authoritative workspace state is available yet.`
   - `quit.button`: `Quit`; the app reached `notRunning`.
 - Cleanup: the app was quit through the UI, and the subsequent `pgrep -x Silo` check returned no remaining instance.
@@ -43,9 +43,9 @@ The focused smoke flows prove the app bundle, status-item/popover UI, and runtim
   - `process == "Silo" AND (messageType == error OR messageType == fault)`
   No narrower wall-clock interval was recorded. These logs are framework diagnostics; the app has no intentional application-level logger.
 
-- Live-service limit: historical — the configured MSW Connect endpoint was unavailable from this machine during probing (DNS resolution failed), and Connect is dormant in the current build. Current GitHub verification is local mode: the proxy contract and integration suites run against `tests/fake_github.py`; no real GitHub account or credential was used.
+- Live-service limit: historical — the configured Silo Connect endpoint was unavailable from this machine during probing (DNS resolution failed), and Connect is dormant in the current build. Current GitHub verification is local mode: the proxy contract and integration suites run against `tests/fake_github.py`; no real GitHub account or credential was used.
 
-The native app values above are deterministic fixture values from the current scaffold, not live sandbox telemetry. The smoke test does not prove VM health, `msw` integration, lifecycle actions, telemetry, signing, notarization, or release readiness.
+The native app values above are deterministic fixture values from the current scaffold, not live sandbox telemetry. The smoke test does not prove VM health, `silo` integration, lifecycle actions, telemetry, signing, notarization, or release readiness.
 
 ## Automated coverage
 
@@ -121,7 +121,7 @@ prompt reporting the migration path without reading a pasted token.
 ### Backup and restore — 6 scenarios
 
 - Cold backup restoring only the previously running VM set and excluding Keychain credentials.
-- Full backup/restore of workspace files, Docker runtime data, and MSW configuration.
+- Full backup/restore of workspace files, Docker runtime data, and Silo configuration.
 - Corrupt-checksum rejection before mutation.
 - Rejection of traversal, duplicate, incomplete, unexpected, and absolute-symlink archive content.
 - Failed restored-state health check rolling back to the previous installation.
@@ -130,7 +130,7 @@ prompt reporting the migration path without reading a pasted token.
 ### Packaged behavior — 1 scenario
 
 - Help, version, and installed documentation without a functioning `msb` binary.
-- Complete simulated `msw check --deep` covering each VM, Docker Engine, Compose bind mounts, SSH, public internet, direct process port publication, and Docker-published port publication.
+- Complete simulated `silo check --deep` covering each VM, Docker Engine, Compose bind mounts, SSH, public internet, direct process port publication, and Docker-published port publication.
 - Health-test process/container cleanup.
 
 ## Security properties exercised
@@ -165,7 +165,7 @@ A prior real Apple Silicon macOS canary against MicroSandbox v0.6.8 independentl
 ./setup.sh
 ```
 
-The installer ends by running `msw check --deep`. Continue only when it reports:
+The installer ends by running `silo check --deep`. Continue only when it reports:
 
 ```text
 all live VM, Docker, SSH, internet, and published-port checks passed
@@ -177,7 +177,7 @@ Open **Silo** → **Settings** → **GitHub**, connect the account on this
 Mac, tick the repositories each workspace may use (new assignments default to
 **Clone/pull (push from Mac)**), and toggle **Clone/pull + Push from VM** only
 where VM-initiated push is needed. Local editing and commits always work; host
-push (`msw push` or the app's Push button) works for every selected
+push (`silo push` or the app's Push button) works for every selected
 repository, and no GitHub credential enters any workspace.
 
 The user-side verification set is the installer deep check plus the app build,
@@ -196,7 +196,7 @@ The suite uses temporary directories, simulated MicroSandbox state, and local Gi
 ## 2026-08-27 startup disk diagnosis
 
 Read-only inspection showed that the sandbox's
-first named disk mount is `msw-dev-workspace` at `/workspace`; agentd identifies
+first named disk mount is `silo-dev-workspace` at `/workspace`; agentd identifies
 that attachment as `/dev/vdc`. `msb volume inspect` reports a raw 120 GiB ext4
 disk, `file` identifies an ext4 revision-1 filesystem, and the on-disk
 superblock contains the ext magic `53 ef` at byte 1080. That metadata alone was
@@ -213,7 +213,7 @@ for MicroSandbox's atomic one-time ext4 creation to finish before attaching it.
 Every later start validates the named-volume kind, filesystem declaration,
 canonical path, ext superblock magic, block size, and declared block count
 against the raw image length. Existing blank, truncated, unknown, non-ext4, or
-damaged volumes fail closed with `MSW_WORKSPACE_DISK_INVALID`; MSW never formats
+damaged volumes fail closed with `SILO_WORKSPACE_DISK_INVALID`; Silo never formats
 or extends an existing volume. A mount-time `/dev/vdc` EINVAL receives the same
 workspace-disk classification and is not an installation-repair signal.
 

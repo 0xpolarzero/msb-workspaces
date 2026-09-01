@@ -54,7 +54,7 @@ enum SecretNameRule {
         "BASH_ENV", "PS1", "PS2", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
         "NO_PROXY"
     ]
-    static let processControlPrefixes = ["DYLD_", "LD_", "LC_", "MSW_"]
+    static let processControlPrefixes = ["DYLD_", "LD_", "LC_", "SILO_"]
 
     static func isValid(_ name: String) -> Bool {
         guard !name.isEmpty, name.count <= 128,
@@ -123,7 +123,7 @@ struct SecretsView: View {
     @Bindable var model: AppModel
 
     @State private var editorTarget: SecretEditorTarget?
-    @State private var pendingRemovalPlan: MSWSecretPlanResult?
+    @State private var pendingRemovalPlan: SiloSecretPlanResult?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -267,7 +267,7 @@ struct SecretsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("No secrets")
                     .font(.body.weight(.semibold))
-                Text("MSW gives the VM a placeholder and replaces it with the real value only inside the proxy for allowed requests.")
+                Text("Silo gives the VM a placeholder and replaces it with the real value only inside the proxy for allowed requests.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

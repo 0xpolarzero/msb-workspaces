@@ -17,7 +17,7 @@ tunnel recovers when the sandbox comes back. Because msb exec can hang
 without exiting when the sandbox stops mid-stream, the relay sends a
 heartbeat control frame every 10s; a silent stream for >30s is treated as a
 dead relay and the child is killed and respawned. The shuttle itself is
-respawned by launchd KeepAlive (installed by `msw github proxy-configure`) or
+respawned by launchd KeepAlive (installed by `silo github proxy-configure`) or
 by the app; on SIGTERM/SIGINT it tears the relay down and exits 0.
 
 Retry circuit: before every spawn the shuttle runs ONE authoritative
@@ -25,8 +25,8 @@ precondition probe — the guest relay artifact exists AND the guest can
 execute it (`command -v python3`) — with an explicit absent/present/unknown
 result. ABSENT (missing relay or missing interpreter) is a PERMANENT
 precondition failure: the shuttle emits exactly ONE actionable failure line
-(MSW_RELAY_NOT_INSTALLED) and stops spawning, re-checking the precondition
-every CIRCUIT_POLL_SECS so a repair (`msw github proxy-configure <box>` or a
+(SILO_RELAY_NOT_INSTALLED) and stops spawning, re-checking the precondition
+every CIRCUIT_POLL_SECS so a repair (`silo github proxy-configure <box>` or a
 policy apply) resumes the tunnel without a shuttle restart. UNKNOWN (the
 probe itself failed) and every post-spawn failure — including a relay that
 dies later with an unrelated ENOENT — stay transient and keep the bounded
@@ -61,19 +61,19 @@ INTERNAL_LOG_SESSION_SIGNATURE = (
     bytes([CONTROL]) + len(OP_HEARTBEAT).to_bytes(4, "big") + OP_HEARTBEAT
 )
 
-PROXY_HOST = os.environ.get("MSW_GITHUB_PROXY_HOST", "127.0.0.1")
-PROXY_PORT = int(os.environ.get("MSW_GITHUB_PROXY_PORT", "18446"))
-GUEST_RELAY = os.environ.get("MSW_GUEST_RELAY_PATH", "/var/lib/msw-runtime/msw-github-relay.py")
-HEARTBEAT_TIMEOUT = float(os.environ.get("MSW_GITHUB_HEARTBEAT_TIMEOUT", "30"))
+PROXY_HOST = os.environ.get("SILO_GITHUB_PROXY_HOST", "127.0.0.1")
+PROXY_PORT = int(os.environ.get("SILO_GITHUB_PROXY_PORT", "18446"))
+GUEST_RELAY = os.environ.get("SILO_GUEST_RELAY_PATH", "/var/lib/silo-runtime/silo-github-relay.py")
+HEARTBEAT_TIMEOUT = float(os.environ.get("SILO_GITHUB_HEARTBEAT_TIMEOUT", "30"))
 # CIRCUIT_POLL_SECS is how often an open retry circuit re-checks the relay
 # precondition so an external repair resumes the tunnel without a shuttle
 # restart (see the module docstring).
-CIRCUIT_POLL_SECS = float(os.environ.get("MSW_GITHUB_CIRCUIT_POLL_SECS", "60"))
+CIRCUIT_POLL_SECS = float(os.environ.get("SILO_GITHUB_CIRCUIT_POLL_SECS", "60"))
 # Hostile-interface hardening: the relay is the untrusted side of this pipe.
 # Frames are produced by chunking socket reads of at most 65536 bytes, so no
 # legitimate frame is ever larger. Any declared length above this cap is a
 # protocol violation and tears the whole stream down before any payload is
-# buffered. MUST match MAX_FRAME in msw-github-relay.py.
+# buffered. MUST match MAX_FRAME in silo-github-relay.py.
 MAX_FRAME = 65536
 
 
@@ -89,7 +89,7 @@ def log(message: str) -> None:
 class Shuttle:
     def __init__(self, box: str) -> None:
         self._box = box
-        self._msb = os.environ.get("MSW_MSB_BIN") or shutil.which("msb") or ""
+        self._msb = os.environ.get("SILO_MSB_BIN") or shutil.which("msb") or ""
         self._running = True
         self._child: subprocess.Popen[bytes] | None = None
         self._reader: threading.Thread | None = None
@@ -101,8 +101,8 @@ class Shuttle:
         self._last_activity = 0.0
         self._stream_dead = False
         self._circuit_open = False
-        self._pidfile = os.environ.get("MSW_SHUTTLE_PID_FILE") or os.path.join(
-            os.path.expanduser("~"), ".local", "state", "msw", "shuttle-%s.pid" % box
+        self._pidfile = os.environ.get("SILO_SHUTTLE_PID_FILE") or os.path.join(
+            os.path.expanduser("~"), ".local", "state", "silo", "shuttle-%s.pid" % box
         )
 
     # -- pidfile ------------------------------------------------------------
@@ -124,7 +124,7 @@ class Shuttle:
     # -- relay process management -------------------------------------------
     def spawn_relay(self) -> None:
         if not self._msb:
-            log("msb binary not found (MSW_MSB_BIN unset and no msb on PATH); exiting")
+            log("msb binary not found (SILO_MSB_BIN unset and no msb on PATH); exiting")
             self._running = False
             return
         log("spawning relay: %s exec %s --stream -- (internal marker) python3 %s"
@@ -136,13 +136,13 @@ class Shuttle:
             # the relay can never start (missing file, interpreter error)
             # and therefore never emits its own heartbeat. The marker is a
             # byte-exact heartbeat control frame the shuttle already treats
-            # as benign. The real command follows $0 ("msw-shuttle"); the
+            # as benign. The real command follows $0 ("silo-shuttle"); the
             # MicroSandbox test simulator strips the wrapper and restores
             # the `python3 <relay>` form it would run.
             self._child = subprocess.Popen(
                 [self._msb, "exec", self._box, "--stream", "--",
                  "bash", "-c", "printf '\\x00\\x00\\x00\\x00\\x01H'; exec python3 \"$1\"",
-                 "msw-shuttle", GUEST_RELAY],
+                 "silo-shuttle", GUEST_RELAY],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 bufsize=0,
@@ -162,7 +162,7 @@ class Shuttle:
         """True only when the sandbox is currently running.
 
         msb exec auto-boots a stopped sandbox, which would silently undo a
-        user's `msw stop`. The shuttle must therefore never spawn the relay
+        user's `silo stop`. The shuttle must therefore never spawn the relay
         while the sandbox is stopped; it waits and retries instead.
         """
         if not self._msb:
@@ -210,8 +210,8 @@ class Shuttle:
             return
         self._circuit_open = True
         log(
-            "relay failure for %s: MSW_RELAY_NOT_INSTALLED guest relay %s is missing or cannot be executed; "
-            "retry circuit opened, relay respawns stopped. Repair: run 'msw github proxy-configure %s' "
+            "relay failure for %s: SILO_RELAY_NOT_INSTALLED guest relay %s is missing or cannot be executed; "
+            "retry circuit opened, relay respawns stopped. Repair: run 'silo github proxy-configure %s' "
             "or re-apply the GitHub policy." % (self._box, GUEST_RELAY, self._box)
         )
 
@@ -450,12 +450,12 @@ class Shuttle:
                 break
             if not self.sandbox_up():
                 # Never spawn while the sandbox is stopped: msb exec would
-                # auto-boot it and silently undo a user's `msw stop`.
+                # auto-boot it and silently undo a user's `silo stop`.
                 time.sleep(2)
                 continue
             if self._circuit_open:
                 # Permanent precondition failure: do not respawn. Re-check the
-                # precondition slowly; a repair (`msw github proxy-configure`
+                # precondition slowly; a repair (`silo github proxy-configure`
                 # or a policy apply) closes the circuit without a restart.
                 if self.relay_precondition() == "present":
                     log("guest relay %s present again; retry circuit closed" % GUEST_RELAY)
@@ -517,7 +517,7 @@ class Shuttle:
 
 def main() -> int:
     if len(sys.argv) != 2 or not sys.argv[1] or sys.argv[1].startswith("-"):
-        sys.stderr.write("usage: msw-github-shuttle.py WORKSPACE\n")
+        sys.stderr.write("usage: silo-github-shuttle.py WORKSPACE\n")
         return 2
     shuttle = Shuttle(sys.argv[1])
     faulthandler.register(signal.SIGUSR1, file=sys.stderr)

@@ -1,6 +1,6 @@
 # Vendored h11 (ingress parser)
 
-The hostile-ingress HTTP/1.1 parser for the MSW GitHub proxy is a vendored copy
+The hostile-ingress HTTP/1.1 parser for the Silo GitHub proxy is a vendored copy
 of `h11` at `lib/vendor/h11/` — a pure-Python tree, pinned and hash-verified,
 never installed from PyPI at runtime. The proxy imports it **only** from the
 vendored tree via `sys.path` insertion; site-packages is never consulted.
@@ -14,7 +14,7 @@ vendored tree via `sys.path` insertion; site-packages is never consulted.
 - **sdist SHA-256:**
   `4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1`
 
-The floor constant lives in `verify_vendored_h11` in `bin/msw`; it must never be
+The floor constant lives in `verify_vendored_h11` in `bin/silo`; it must never be
 lowered. Per-file SHA-256 entries for every vendored file are appended to
 `MANIFEST.txt` under a `# Vendored h11 0.16.0` block and are enforced by
 `verify_vendored_h11` at install time (and by the proxy before it starts).
@@ -67,7 +67,7 @@ advisory narrative appears to say. A pin of 0.15.0 or lower fails
    `# Vendored h11 <version>` block in `MANIFEST.txt`, and update this file
    (version, sdist URL + SHA-256, advisory table).
 4. **Floor assertion:** the floor constant in `verify_vendored_h11`
-   (`bin/msw`) stays `0.16.0`; the bump is refused if the new version is lower.
+   (`bin/silo`) stays `0.16.0`; the bump is refused if the new version is lower.
 5. **Verification:** run `verify_vendored_h11` (must pass), run the full
    framing/smuggling matrix (REGRESS-1, SMUGGLE), and re-run the h11 parse
    smoke (well-formed chunked request accepted; malformed post-chunk CRLF

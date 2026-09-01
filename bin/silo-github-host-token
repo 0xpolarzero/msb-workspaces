@@ -15,29 +15,29 @@
 # Activation gate (§5/blocker 4): the nonsecret metadata file must exist with
 # schemaVersion 1, state "active", and generation/accountLogin EQUAL to the
 # Keychain record. A revoked/revocation-uncertain tombstone (written by
-# `msw github remove` BEFORE the Keychain deletion) or a generation/account
+# `silo github remove` BEFORE the Keychain deletion) or a generation/account
 # mismatch denies the credential GLOBALLY, so no other workspace can keep
 # using a credential whose revocation is unproven.
 #
-# Global deny marker (§5 re-review): `~/.config/msw/credential-disabled` (or
-# MSW_CREDENTIAL_DENY_MARKER) is checked FIRST — before the Keychain. The
+# Global deny marker (§5 re-review): `~/.config/silo/credential-disabled` (or
+# SILO_CREDENTIAL_DENY_MARKER) is checked FIRST — before the Keychain. The
 # revocation writes it before any mutation, so even a crash mid-revocation
 # leaves a global deny.
 #
 # Env (all optional, for tests and launchd):
-#   MSW_HOST_KEYCHAIN_SERVICE  Keychain service (default org.microsandbox.Silo.github-host.v2)
-#   MSW_HOST_KEYCHAIN_ACCOUNT  Keychain account (default user)
-#   MSW_TEST_KEYCHAIN_DIR      File-backed keychain seam (tests)
-#   MSW_SECURITY_BIN           security(1) path
-#   MSW_HOST_KEYCHAIN_HOME     HOME passed to security(1) (login keychain)
-#   MSW_HOST_META_FILE         nonsecret activation metadata path (default:
+#   SILO_HOST_KEYCHAIN_SERVICE  Keychain service (default org.silo.Silo.github-host.v2)
+#   SILO_HOST_KEYCHAIN_ACCOUNT  Keychain account (default user)
+#   SILO_TEST_KEYCHAIN_DIR      File-backed keychain seam (tests)
+#   SILO_SECURITY_BIN           security(1) path
+#   SILO_HOST_KEYCHAIN_HOME     HOME passed to security(1) (login keychain)
+#   SILO_HOST_META_FILE         nonsecret activation metadata path (default:
 #                              $HOME/Library/Application Support/Silo/github-host.json)
-#   MSW_CREDENTIAL_DENY_MARKER global deny marker path (default:
-#                              $HOME/.config/msw/credential-disabled)
-#   MSW_PYTHON_BIN             python3 path (default /usr/bin/python3)
+#   SILO_CREDENTIAL_DENY_MARKER global deny marker path (default:
+#                              $HOME/.config/silo/credential-disabled)
+#   SILO_PYTHON_BIN             python3 path (default /usr/bin/python3)
 set -eu
 export PYTHONDONTWRITEBYTECODE=1
-exec "${MSW_PYTHON_BIN:-/usr/bin/python3}" - "$@" <<'PY'
+exec "${SILO_PYTHON_BIN:-/usr/bin/python3}" - "$@" <<'PY'
 from __future__ import annotations
 
 import json
@@ -55,7 +55,7 @@ _GRAPH_MAX = 0x7E
 
 def _fail(message: str = "") -> int:
     if message:
-        sys.stderr.write("msw-github-host-token: %s\n" % message)
+        sys.stderr.write("silo-github-host-token: %s\n" % message)
     return 1
 
 
@@ -82,7 +82,7 @@ def _read_keychain(service: str, account: str, security_bin: str,
         except OSError:
             return None
     # Production (re-review): read in-process via Security.framework (ctypes).
-    # The writer in bin/msw runs the same python binary, so the item's creator
+    # The writer in bin/silo runs the same python binary, so the item's creator
     # trust extends to this helper's SecItemCopyMatching — no security(1)
     # prompts and no 128-byte prompted-stdin limit on the write side.
     return _secitem_read(service, account)
@@ -158,13 +158,13 @@ def _meta_valid(meta, record) -> bool:
 
 
 def _bridge_path() -> str:
-    configured = os.environ.get("MSW_KEYCHAIN_BRIDGE", "")
+    configured = os.environ.get("SILO_KEYCHAIN_BRIDGE", "")
     if configured:
         return configured
     script_dir = os.path.dirname(os.path.abspath(__file__))
     for candidate in (
-        os.path.join(script_dir, "msw-keychain-bridge"),
-        os.path.expanduser("~/.local/libexec/msw-keychain-bridge"),
+        os.path.join(script_dir, "silo-keychain-bridge"),
+        os.path.expanduser("~/.local/libexec/silo-keychain-bridge"),
     ):
         if os.path.isfile(candidate):
             return candidate
@@ -174,7 +174,7 @@ def _bridge_path() -> str:
 # Closure re-review: the host-token OUTER timeout must exceed the bridge's own
 # worker watchdog (bridge default 10s) and kill the whole bridge process group
 # (bridge parent + worker) so a wedged child can never survive the helper.
-OUTER_TIMEOUT_SECS = max(1, int(float(os.environ.get("MSW_HOST_TOKEN_TIMEOUT_SECS") or "15")))
+OUTER_TIMEOUT_SECS = max(1, int(float(os.environ.get("SILO_HOST_TOKEN_TIMEOUT_SECS") or "15")))
 
 
 def _bridge_get(service: str, account: str) -> tuple[int, bytes] | None:
@@ -184,7 +184,7 @@ def _bridge_get(service: str, account: str) -> tuple[int, bytes] | None:
     bridge = _bridge_path()
     if not bridge:
         return None
-    python = os.environ.get("MSW_PYTHON_BIN", "/usr/bin/python3")
+    python = os.environ.get("SILO_PYTHON_BIN", "/usr/bin/python3")
     try:
         proc = subprocess.Popen(
             [python, bridge, "get", service, account],
@@ -230,11 +230,11 @@ def _deny_item_present() -> bool:
     queried BEFORE the activation record. The helper proceeds only on an
     explicit item-not-found (rc 44); a present deny item OR any deny-query
     error (including a timeout) denies globally (fail-closed). Honors the
-    MSW_TEST_KEYCHAIN_DIR file seam for tests."""
+    SILO_TEST_KEYCHAIN_DIR file seam for tests."""
     deny_service = os.environ.get(
-        "MSW_HOST_KEYCHAIN_DENY_SERVICE", "org.microsandbox.Silo.github-host.v2.deny")
-    deny_account = os.environ.get("MSW_HOST_KEYCHAIN_DENY_ACCOUNT", "user")
-    test_keychain_dir = os.environ.get("MSW_TEST_KEYCHAIN_DIR", "")
+        "SILO_HOST_KEYCHAIN_DENY_SERVICE", "org.silo.Silo.github-host.v2.deny")
+    deny_account = os.environ.get("SILO_HOST_KEYCHAIN_DENY_ACCOUNT", "user")
+    test_keychain_dir = os.environ.get("SILO_TEST_KEYCHAIN_DIR", "")
     if test_keychain_dir:
         path = os.path.join(test_keychain_dir, "%s__%s" % (
             _safe_component(deny_service), _safe_component(deny_account)))
@@ -250,8 +250,8 @@ def _deny_item_present() -> bool:
 
 
 def _deny_marker_present() -> bool:
-    marker = os.environ.get("MSW_CREDENTIAL_DENY_MARKER", "") or os.path.join(
-        os.path.expanduser("~"), ".config", "msw", "credential-disabled")
+    marker = os.environ.get("SILO_CREDENTIAL_DENY_MARKER", "") or os.path.join(
+        os.path.expanduser("~"), ".config", "silo", "credential-disabled")
     try:
         return os.path.lexists(marker)
     except OSError:
@@ -260,8 +260,8 @@ def _deny_marker_present() -> bool:
 
 def _global_quarantine_present() -> bool:
     """Last-resort durable global deny for an unprovable revocation."""
-    path = os.environ.get("MSW_GLOBAL_CREDENTIAL_QUARANTINE", "") or os.path.join(
-        os.path.expanduser("~"), ".config", "msw", "github", "credential.quarantine")
+    path = os.environ.get("SILO_GLOBAL_CREDENTIAL_QUARANTINE", "") or os.path.join(
+        os.path.expanduser("~"), ".config", "silo", "github", "credential.quarantine")
     try:
         return os.path.lexists(path)
     except OSError:
@@ -281,13 +281,13 @@ def main() -> int:
     if _deny_marker_present():
         return _fail("credential revoked (global deny marker present)")
 
-    service = os.environ.get("MSW_HOST_KEYCHAIN_SERVICE",
-                             "org.microsandbox.Silo.github-host.v2")
-    account = os.environ.get("MSW_HOST_KEYCHAIN_ACCOUNT", "user")
-    security_bin = os.environ.get("MSW_SECURITY_BIN", "/usr/bin/security")
-    keychain_home = os.environ.get("MSW_HOST_KEYCHAIN_HOME", "")
-    test_keychain_dir = os.environ.get("MSW_TEST_KEYCHAIN_DIR", "")
-    meta_file = os.environ.get("MSW_HOST_META_FILE", "") or os.path.join(
+    service = os.environ.get("SILO_HOST_KEYCHAIN_SERVICE",
+                             "org.silo.Silo.github-host.v2")
+    account = os.environ.get("SILO_HOST_KEYCHAIN_ACCOUNT", "user")
+    security_bin = os.environ.get("SILO_SECURITY_BIN", "/usr/bin/security")
+    keychain_home = os.environ.get("SILO_HOST_KEYCHAIN_HOME", "")
+    test_keychain_dir = os.environ.get("SILO_TEST_KEYCHAIN_DIR", "")
+    meta_file = os.environ.get("SILO_HOST_META_FILE", "") or os.path.join(
         os.path.expanduser("~"), "Library", "Application Support",
         "Silo", "github-host.json")
 

@@ -14,12 +14,12 @@ Lifecycle: this process dies with the stream. On stdin EOF (the shuttle or
 the msb exec bridge went away) it calls os._exit(0) so it never lingers as a
 zombie holding the guest port; the host shuttle respawns a fresh relay.
 
-Heartbeat: every MSW_GITHUB_HEARTBEAT_SECS (default 10) this relay sends a
+Heartbeat: every SILO_GITHUB_HEARTBEAT_SECS (default 10) this relay sends a
 control frame b"H" so the shuttle can tell a healthy idle tunnel apart from a
 wedged one (msb exec can hang without exiting when the sandbox stops
 mid-stream; the shuttle kills and respawns us when heartbeats stop). The exact
 framed heartbeat bytes also reserve this structured MicroSandbox log session
-for internal transport. The MSW log adapter excludes every record with the
+for internal transport. The Silo log adapter excludes every record with the
 same session id, never records selected by their display text.
 
 Security: binds ONLY guest loopback 127.0.0.1:18446. It never listens on any
@@ -35,9 +35,9 @@ import threading
 import time
 
 LISTEN_HOST = "127.0.0.1"
-LISTEN_PORT = int(os.environ.get("MSW_GITHUB_PROXY_PORT", "18446"))
+LISTEN_PORT = int(os.environ.get("SILO_GITHUB_PROXY_PORT", "18446"))
 MAX_CONNS = 254  # conn-id is one byte; 0 is reserved for control
-HEARTBEAT_SECS = float(os.environ.get("MSW_GITHUB_HEARTBEAT_SECS", "10"))
+HEARTBEAT_SECS = float(os.environ.get("SILO_GITHUB_HEARTBEAT_SECS", "10"))
 
 CONTROL = 0
 OP_OPEN = b"O"
@@ -51,7 +51,7 @@ INTERNAL_LOG_SESSION_SIGNATURE = (
 # produced by chunking socket reads of at most 65536 bytes, so no legitimate
 # frame is ever larger. A declared length above this cap is a protocol
 # violation and the relay dies fail-closed. MUST match MAX_FRAME in
-# msw-github-shuttle.py.
+# silo-github-shuttle.py.
 MAX_FRAME = 65536
 
 
@@ -202,7 +202,7 @@ class Relay:
         while True:
             try:
                 # Keep this byte-exact signature synchronized with the host
-                # shuttle and the structured MSW logs adapter.
+                # shuttle and the structured Silo logs adapter.
                 self.write_stream(INTERNAL_LOG_SESSION_SIGNATURE)
             except OSError:
                 os._exit(0)

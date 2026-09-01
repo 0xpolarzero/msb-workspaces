@@ -1,7 +1,7 @@
 @preconcurrency import Foundation
 import Darwin
 
-struct MSWCommand: Sendable {
+struct SiloCommand: Sendable {
     let executable: URL
     let arguments: [String]
     let environment: [String: String]
@@ -32,7 +32,7 @@ struct MSWCommand: Sendable {
     }
 }
 
-struct MSWCommandResult: Sendable {
+struct SiloCommandResult: Sendable {
     let status: Int32
     let stdout: Data
     let stderr: Data
@@ -42,7 +42,7 @@ struct MSWCommandResult: Sendable {
     var stderrString: String { String(decoding: stderr, as: UTF8.self) }
 }
 
-struct MSWExecutableResolution: Sendable, Equatable {
+struct SiloExecutableResolution: Sendable, Equatable {
     let selected: URL?
 }
 
@@ -74,23 +74,23 @@ struct GitIdentityPrefill: Sendable, Equatable {
     let didPrefill: Bool
 }
 
-actor MSWCommandRunner {
+actor SiloCommandRunner {
     struct Configuration: Sendable {
         let homeDirectory: URL
         let additionalSearchPaths: [URL]
         let managedToolchainRoot: URL
-        let testMSWExecutable: URL?
+        let testSiloExecutable: URL?
 
         init(
             homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
             additionalSearchPaths: [URL] = [],
             managedToolchainRoot: URL? = nil,
-            testMSWExecutable: URL? = nil
+            testSiloExecutable: URL? = nil
         ) {
             self.homeDirectory = homeDirectory
             self.additionalSearchPaths = additionalSearchPaths
             self.managedToolchainRoot = managedToolchainRoot ?? ToolchainLayout.managedRoot(homeDirectory: homeDirectory)
-            self.testMSWExecutable = testMSWExecutable
+            self.testSiloExecutable = testSiloExecutable
         }
     }
 
@@ -99,18 +99,18 @@ actor MSWCommandRunner {
     }
 
     private let configuration: Configuration
-    private let redactor = MSWProtocolRedactor()
+    private let redactor = SiloProtocolRedactor()
     private var runningProcesses: [UUID: RunningProcess] = [:]
     private var cancelledOperations: Set<UUID> = []
-    private var cachedMSWResolution: MSWExecutableResolution?
-    private var cachedSelectedHandshake: (url: URL, handshake: MSWHandshake)?
-    private var mswResolutionGeneration = 0
+    private var cachedSiloResolution: SiloExecutableResolution?
+    private var cachedSelectedHandshake: (url: URL, handshake: SiloHandshake)?
+    private var siloResolutionGeneration = 0
 
     init(configuration: Configuration = .init()) {
         self.configuration = configuration
     }
 
-    func run(_ command: MSWCommand, operationID: UUID = UUID()) async throws -> MSWCommandResult {
+    func run(_ command: SiloCommand, operationID: UUID = UUID()) async throws -> SiloCommandResult {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let stdinPipe = command.stdin.map { _ in Pipe() }
@@ -189,12 +189,12 @@ actor MSWCommandRunner {
         let stdout = await stdoutTask.value
         let stderr = await stderrTask.value
         if cancelledOperations.contains(operationID) || Task.isCancelled {
-            throw MSWClientError.cancelled
+            throw SiloClientError.cancelled
         }
         let duration = startedAt.duration(to: .now)
         let redactedStdout = Data(redactor.redact(String(decoding: stdout, as: UTF8.self)).utf8)
         let redactedStderr = Data(redactor.redact(String(decoding: stderr, as: UTF8.self)).utf8)
-        return MSWCommandResult(status: status, stdout: redactedStdout, stderr: redactedStderr, duration: duration)
+        return SiloCommandResult(status: status, stdout: redactedStdout, stderr: redactedStderr, duration: duration)
     }
 
     func cancel(operationID: UUID) async {
@@ -213,7 +213,7 @@ actor MSWCommandRunner {
     /// reconciliation has written the exact validated configuration.
     func installedWorkspaceConfigurations() -> [SetupWorkspaceConfiguration]? {
         let url = configuration.homeDirectory
-            .appending(path: ".config/msw/workspaces.json")
+            .appending(path: ".config/silo/workspaces.json")
         guard let values = try? url.resourceValues(forKeys: [
                   .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey
               ]),
@@ -222,31 +222,31 @@ actor MSWCommandRunner {
               let fileSize = values.fileSize,
               fileSize <= 256 * 1_024,
               let data = try? Data(contentsOf: url),
-              let boundary = MSWBootstrapConfiguration.decodeValidated(from: data) else {
+              let boundary = SiloBootstrapConfiguration.decodeValidated(from: data) else {
             return nil
         }
         return boundary.setupConfigurations
     }
 
-    func resolveMSW() -> URL? {
-        mswCandidates().first?.executable
+    func resolveSilo() -> URL? {
+        siloCandidates().first?.executable
     }
 
-    func mswResolution(forceRefresh: Bool = false) async -> MSWExecutableResolution {
-        if !forceRefresh, let cachedMSWResolution {
-            return cachedMSWResolution
+    func siloResolution(forceRefresh: Bool = false) async -> SiloExecutableResolution {
+        if !forceRefresh, let cachedSiloResolution {
+            return cachedSiloResolution
         }
-        mswResolutionGeneration &+= 1
-        let generation = mswResolutionGeneration
-        let candidates = mswCandidates()
+        siloResolutionGeneration &+= 1
+        let generation = siloResolutionGeneration
+        let candidates = siloCandidates()
         for candidate in candidates {
             if let handshake = await handshakeIfCompatible(
                 candidate.executable,
                 expectedVersion: candidate.expectedVersion
             ) {
-                let resolution = MSWExecutableResolution(selected: candidate.executable)
-                if generation == mswResolutionGeneration {
-                    cachedMSWResolution = resolution
+                let resolution = SiloExecutableResolution(selected: candidate.executable)
+                if generation == siloResolutionGeneration {
+                    cachedSiloResolution = resolution
                     cachedSelectedHandshake = (url: candidate.executable, handshake: handshake)
                 }
                 return resolution
@@ -256,12 +256,12 @@ actor MSWCommandRunner {
             // transient result; a queued mutation must be able to resolve the
             // same executable after the cancelled process group has exited.
             if Task.isCancelled {
-                return MSWExecutableResolution(selected: nil)
+                return SiloExecutableResolution(selected: nil)
             }
         }
-        let resolution = MSWExecutableResolution(selected: nil)
-        if generation == mswResolutionGeneration {
-            cachedMSWResolution = resolution
+        let resolution = SiloExecutableResolution(selected: nil)
+        if generation == siloResolutionGeneration {
+            cachedSiloResolution = resolution
             cachedSelectedHandshake = nil
         }
         return resolution
@@ -269,37 +269,37 @@ actor MSWCommandRunner {
 
     /// Returns the handshake captured during the most recent resolution of the
     /// currently selected runtime, so callers can reuse the spawn instead of
-    /// running an identical `msw app handshake` again.
-    func handshakeForSelectedRuntime() -> MSWHandshake? {
-        guard let selected = cachedMSWResolution?.selected,
+    /// running an identical `silo app handshake` again.
+    func handshakeForSelectedRuntime() -> SiloHandshake? {
+        guard let selected = cachedSiloResolution?.selected,
               let pair = cachedSelectedHandshake,
               pair.url == selected else { return nil }
         return pair.handshake
     }
 
-    func invalidateMSWResolution() {
-        mswResolutionGeneration &+= 1
-        cachedMSWResolution = nil
+    func invalidateSiloResolution() {
+        siloResolutionGeneration &+= 1
+        cachedSiloResolution = nil
         cachedSelectedHandshake = nil
     }
 
-    private struct MSWCandidate {
+    private struct SiloCandidate {
         let executable: URL
         let expectedVersion: String?
     }
 
-    private func mswCandidates() -> [MSWCandidate] {
-        if let testExecutable = configuration.testMSWExecutable,
+    private func siloCandidates() -> [SiloCandidate] {
+        if let testExecutable = configuration.testSiloExecutable,
            Self.isExecutableCandidate(testExecutable) {
-            return [MSWCandidate(executable: testExecutable, expectedVersion: nil)]
+            return [SiloCandidate(executable: testExecutable, expectedVersion: nil)]
         }
-        var candidates: [MSWCandidate] = []
+        var candidates: [SiloCandidate] = []
         let current = configuration.managedToolchainRoot.appendingPathComponent("current", isDirectory: true)
         if let bundledRoot = ToolchainLayout.bundledRoot(),
            let bundled = try? ToolchainValidator.validateBundled(root: bundledRoot),
            let validated = try? ToolchainValidator.validateActivated(root: current),
            validated.manifest == bundled.manifest {
-            candidates.append(MSWCandidate(
+            candidates.append(SiloCandidate(
                 executable: validated.executable,
                 expectedVersion: validated.manifest.version
             ))
@@ -313,15 +313,15 @@ actor MSWCommandRunner {
     private func handshakeIfCompatible(
         _ executable: URL,
         expectedVersion: String?
-    ) async -> MSWHandshake? {
+    ) async -> SiloHandshake? {
         do {
-            let output = try await run(MSWCommand(
+            let output = try await run(SiloCommand(
                 executable: executable,
                 arguments: ["app", "handshake", "--format", "json"],
                 timeout: .seconds(5),
                 captureLimit: 256 * 1024
             ))
-            let envelope = try MSWProtocolDecoder.decodeStrictHandshake(output.stdout)
+            let envelope = try SiloProtocolDecoder.decodeStrictHandshake(output.stdout)
             guard envelope.schemaVersion == 1,
                   envelope.command == "handshake",
                   !envelope.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -334,7 +334,7 @@ actor MSWCommandRunner {
                       let result = envelope.result,
                       result.protocolVersion == 1,
                       result.capabilities.isComplete,
-                      expectedVersion.map({ result.mswVersion == $0 }) ?? true else {
+                      expectedVersion.map({ result.siloVersion == $0 }) ?? true else {
                     return nil
                 }
                 return result
@@ -348,7 +348,7 @@ actor MSWCommandRunner {
 
     func resolveExecutable(named name: String) -> URL? {
         guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { return nil }
-        if name == "msw" { return resolveMSW() }
+        if name == "silo" { return resolveSilo() }
         var directories = [configuration.homeDirectory.appending(path: ".local/bin")]
         directories.append(contentsOf: configuration.additionalSearchPaths.map { $0.deletingLastPathComponent() })
         directories.append(contentsOf: [
@@ -376,7 +376,7 @@ actor MSWCommandRunner {
 
     private func gitConfigurationValue(_ key: String, executable: URL) async -> String? {
         do {
-            let result = try await run(MSWCommand(
+            let result = try await run(SiloCommand(
                 executable: executable,
                 arguments: ["config", "--get", key],
                 timeout: .seconds(5),
@@ -390,18 +390,18 @@ actor MSWCommandRunner {
         }
     }
 
-    func makeMSWCommand(
+    func makeSiloCommand(
         arguments: [String],
         environment: [String: String] = [:],
         timeout: Duration = .seconds(30),
         stdin: Data? = nil,
         terminationGrace: Duration = .milliseconds(250)
-    ) async throws -> MSWCommand {
-        let resolution = await mswResolution()
+    ) async throws -> SiloCommand {
+        let resolution = await siloResolution()
         guard let executable = resolution.selected else {
-            throw MSWClientError.invalidExecutable
+            throw SiloClientError.invalidExecutable
         }
-        return MSWCommand(
+        return SiloCommand(
             executable: executable,
             arguments: arguments,
             environment: environment,
@@ -411,7 +411,7 @@ actor MSWCommandRunner {
         )
     }
 
-    private func processEnvironment(for command: MSWCommand) -> [String: String] {
+    private func processEnvironment(for command: SiloCommand) -> [String: String] {
         var environment: [String: String] = [
             "HOME": configuration.homeDirectory.path,
             "PATH": deterministicPath(),
@@ -430,8 +430,8 @@ actor MSWCommandRunner {
     }
 
     private static func isSafeAmbientVariable(_ key: String) -> Bool {
-        // Finder/launchd environments are not part of the app-to-MSW
-        // contract. In particular, ambient MSW_* overrides could redirect
+        // Finder/launchd environments are not part of the app-to-Silo
+        // contract. In particular, ambient SILO_* overrides could redirect
         // helper binaries or credential stores. Tests and explicit advanced
         // settings pass narrowly allowed values through command.environment.
         key == "TMPDIR"
@@ -442,13 +442,13 @@ actor MSWCommandRunner {
               !key.uppercased().contains("SECRET"),
               !key.uppercased().contains("PASSWORD"),
               !key.uppercased().contains("PRIVATE_KEY"),
-              key != "MSW_EXECUTABLE" else {
+              key != "SILO_EXECUTABLE" else {
             return false
         }
-        return key == "MSW_CONFIG_FILE"
-            || key == "MSW_SKIP_HOST_REPAIR"
-            || key == "MSW_TEST_KEYCHAIN_DIR"
-            || key == "MSW_TEST_VISIBLE"
+        return key == "SILO_CONFIG_FILE"
+            || key == "SILO_SKIP_HOST_REPAIR"
+            || key == "SILO_TEST_KEYCHAIN_DIR"
+            || key == "SILO_TEST_VISIBLE"
             || key == "NONINTERACTIVE"
             || key == "HOMEBREW_NO_AUTO_UPDATE"
             || key == "HOMEBREW_NO_ENV_HINTS"
@@ -468,7 +468,7 @@ actor MSWCommandRunner {
         return paths.joined(separator: ":")
     }
 
-    private func wait(for processIdentifier: pid_t, command: MSWCommand) async throws -> Int32 {
+    private func wait(for processIdentifier: pid_t, command: SiloCommand) async throws -> Int32 {
         let statusTask = Task.detached(priority: .userInitiated) {
             Self.waitForExit(processIdentifier)
         }
@@ -480,20 +480,20 @@ actor MSWCommandRunner {
                     group.addTask {
                         try await Task.sleep(for: command.timeout)
                         await Self.terminate(processIdentifier, grace: command.terminationGrace)
-                        throw MSWClientError.timedOut(command: command.arguments.first ?? "msw")
+                        throw SiloClientError.timedOut(command: command.arguments.first ?? "silo")
                     }
                     guard let result = try await group.next() else {
-                        throw MSWClientError.cancelled
+                        throw SiloClientError.cancelled
                     }
                     group.cancelAll()
-                    if Task.isCancelled { throw MSWClientError.cancelled }
+                    if Task.isCancelled { throw SiloClientError.cancelled }
                     return result
                 }
             } onCancel: {
                 Task { await Self.terminate(processIdentifier, grace: command.terminationGrace) }
             }
         } catch is CancellationError {
-            throw MSWClientError.cancelled
+            throw SiloClientError.cancelled
         }
     }
 
@@ -520,7 +520,7 @@ actor MSWCommandRunner {
         var attributes: posix_spawnattr_t?
         guard posix_spawn_file_actions_init(&actions) == 0,
               posix_spawnattr_init(&attributes) == 0 else {
-            throw MSWClientError.processFailed(command: arguments.first ?? executable.lastPathComponent, status: -1, message: "Could not initialize MSW process controls.")
+            throw SiloClientError.processFailed(command: arguments.first ?? executable.lastPathComponent, status: -1, message: "Could not initialize Silo process controls.")
         }
         defer {
             _ = posix_spawn_file_actions_destroy(&actions)
@@ -543,7 +543,7 @@ actor MSWCommandRunner {
             }
         }
         guard actionStatus == 0 else {
-            throw MSWClientError.processFailed(command: arguments.first ?? executable.lastPathComponent, status: actionStatus, message: "Could not configure MSW process pipes.")
+            throw SiloClientError.processFailed(command: arguments.first ?? executable.lastPathComponent, status: actionStatus, message: "Could not configure Silo process pipes.")
         }
 
         // POSIX_SPAWN_SETPGROUP makes the child become the process-group leader
@@ -552,7 +552,7 @@ actor MSWCommandRunner {
         let groupFlag = Int16(POSIX_SPAWN_SETPGROUP)
         guard posix_spawnattr_setflags(&attributes, groupFlag) == 0,
               posix_spawnattr_setpgroup(&attributes, 0) == 0 else {
-            throw MSWClientError.processFailed(command: arguments.first ?? executable.lastPathComponent, status: -1, message: "Could not configure the MSW process group.")
+            throw SiloClientError.processFailed(command: arguments.first ?? executable.lastPathComponent, status: -1, message: "Could not configure the Silo process group.")
         }
 
         let argumentValues = [executable.path] + arguments
@@ -593,7 +593,7 @@ actor MSWCommandRunner {
         }
         guard result == 0 else {
             let message = String(cString: strerror(result))
-            throw MSWClientError.processFailed(
+            throw SiloClientError.processFailed(
                 command: arguments.first ?? executable.lastPathComponent,
                 status: result,
                 message: message

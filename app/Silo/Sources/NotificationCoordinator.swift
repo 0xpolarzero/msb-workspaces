@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import UserNotifications
 
-enum MSWNotificationCategory: String, CaseIterable, Identifiable {
+enum SiloNotificationCategory: String, CaseIterable, Identifiable {
     case workspaceHealth
     case actionFailures
     case backupFailures
@@ -32,7 +32,7 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
         "notifications.category.\(rawValue).enabled"
     }
 
-    static func category(for kind: MSWNotificationEvent.Kind) -> Self {
+    static func category(for kind: SiloNotificationEvent.Kind) -> Self {
         switch kind {
         case .sustainedUnavailability, .quarantine, .lifecycleLoss:
             return .workspaceHealth
@@ -45,14 +45,14 @@ enum MSWNotificationCategory: String, CaseIterable, Identifiable {
 }
 
 @MainActor
-protocol MSWNotificationCenterControlling: AnyObject {
+protocol SiloNotificationCenterControlling: AnyObject {
     func authorizationStatus() async -> UNAuthorizationStatus
     func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool
     func add(_ request: UNNotificationRequest) async throws
 }
 
 @MainActor
-private final class SystemNotificationCenter: MSWNotificationCenterControlling {
+private final class SystemNotificationCenter: SiloNotificationCenterControlling {
     private let center: UNUserNotificationCenter
 
     init(center: UNUserNotificationCenter) {
@@ -72,8 +72,8 @@ private final class SystemNotificationCenter: MSWNotificationCenterControlling {
     }
 }
 
-struct MSWNotificationDeliveryFailure: Identifiable, Equatable, Sendable {
-    let event: MSWNotificationEvent
+struct SiloNotificationDeliveryFailure: Identifiable, Equatable, Sendable {
+    let event: SiloNotificationEvent
     let attempts: Int
 
     var id: UUID { event.id }
@@ -86,22 +86,22 @@ final class NotificationCoordinator {
     private static let enabledPreferenceKey = "notifications.enabled"
 
     private struct RetryEntry {
-        let event: MSWNotificationEvent
+        let event: SiloNotificationEvent
         let attempts: Int
     }
 
-    private let notificationCenter: any MSWNotificationCenterControlling
+    private let notificationCenter: any SiloNotificationCenterControlling
     private let defaults: UserDefaults
     private let retryDelays: [Duration]
     private var deliveredKeys: Set<String> = []
     private var retryableEvents: [RetryEntry] = []
     private var retryTask: Task<Void, Never>?
-    private(set) var permanentFailures: [MSWNotificationDeliveryFailure] = []
+    private(set) var permanentFailures: [SiloNotificationDeliveryFailure] = []
 
     init(
         center: UNUserNotificationCenter = .current(),
         defaults: UserDefaults = .standard,
-        notificationCenter: (any MSWNotificationCenterControlling)? = nil,
+        notificationCenter: (any SiloNotificationCenterControlling)? = nil,
         retryDelays: [Duration] = [.seconds(5), .seconds(15)]
     ) {
         self.notificationCenter = notificationCenter ?? SystemNotificationCenter(center: center)
@@ -129,8 +129,8 @@ final class NotificationCoordinator {
         return "A notification\(scope) could not be delivered after \(failure.attempts) attempts. Check Notification Settings and retry the alert category."
     }
 
-    func enabledCategories() -> Set<MSWNotificationCategory> {
-        Set(MSWNotificationCategory.allCases.filter { defaults.bool(forKey: $0.preferenceKey) })
+    func enabledCategories() -> Set<SiloNotificationCategory> {
+        Set(SiloNotificationCategory.allCases.filter { defaults.bool(forKey: $0.preferenceKey) })
     }
 
     func notificationsEnabled() -> Bool {
@@ -162,7 +162,7 @@ final class NotificationCoordinator {
     }
 
     @discardableResult
-    func setEnabled(_ enabled: Bool, for category: MSWNotificationCategory) async -> Bool {
+    func setEnabled(_ enabled: Bool, for category: SiloNotificationCategory) async -> Bool {
         guard enabled else {
             defaults.set(false, forKey: category.preferenceKey)
             return false
@@ -183,7 +183,7 @@ final class NotificationCoordinator {
         retryDelays.count + 1
     }
 
-    func deliver(_ events: [MSWNotificationEvent]) async {
+    func deliver(_ events: [SiloNotificationEvent]) async {
         await deliverEvents(events)
     }
 
@@ -191,11 +191,11 @@ final class NotificationCoordinator {
         await deliverEvents(model.drainNotificationEvents())
     }
 
-    func deliver(_ event: MSWNotificationEvent) async {
+    func deliver(_ event: SiloNotificationEvent) async {
         await deliverEvents([event])
     }
 
-    private func deliverEvents(_ events: [MSWNotificationEvent]) async {
+    private func deliverEvents(_ events: [SiloNotificationEvent]) async {
         for event in events {
             if await deliverEvent(event) == .failed {
                 enqueueRetry(for: event, attempts: 1)
@@ -204,7 +204,7 @@ final class NotificationCoordinator {
         scheduleRetry()
     }
 
-    private func enqueueRetry(for event: MSWNotificationEvent, attempts: Int) {
+    private func enqueueRetry(for event: SiloNotificationEvent, attempts: Int) {
         guard attempts < maxAttempts else {
             recordPermanentFailure(event, attempts: maxAttempts)
             return
@@ -216,9 +216,9 @@ final class NotificationCoordinator {
         }
     }
 
-    private func recordPermanentFailure(_ event: MSWNotificationEvent, attempts: Int) {
+    private func recordPermanentFailure(_ event: SiloNotificationEvent, attempts: Int) {
         guard !permanentFailures.contains(where: { $0.event.id == event.id }) else { return }
-        permanentFailures.append(MSWNotificationDeliveryFailure(event: event, attempts: attempts))
+        permanentFailures.append(SiloNotificationDeliveryFailure(event: event, attempts: attempts))
         if permanentFailures.count > 32 {
             permanentFailures.removeFirst(permanentFailures.count - 32)
         }
@@ -251,8 +251,8 @@ final class NotificationCoordinator {
         scheduleRetry()
     }
 
-    private func deliverEvent(_ event: MSWNotificationEvent) async -> DeliveryResult {
-        let category = MSWNotificationCategory.category(for: event.kind)
+    private func deliverEvent(_ event: SiloNotificationEvent) async -> DeliveryResult {
+        let category = SiloNotificationCategory.category(for: event.kind)
         guard notificationsEnabled(),
               defaults.bool(forKey: category.preferenceKey),
               (await self.authorizationStatus()).allowsDelivery,
@@ -301,7 +301,7 @@ final class NotificationCoordinator {
     }
 
     private static func deepLinkPayload(
-        for event: MSWNotificationEvent
+        for event: SiloNotificationEvent
     ) -> (url: URL, workspace: String, destination: String)? {
         guard let url = validatedDeepLink(event.deepLink) else { return nil }
         let pathComponents = url.pathComponents.filter { $0 != "/" }
@@ -328,9 +328,9 @@ final class NotificationCoordinator {
         return components.url
     }
 
-    private static func title(for kind: MSWNotificationEvent.Kind) -> String {
+    private static func title(for kind: SiloNotificationEvent.Kind) -> String {
         switch kind {
-        case .sustainedUnavailability: return "MSW remains unavailable"
+        case .sustainedUnavailability: return "Silo remains unavailable"
         case .quarantine: return "Workspace quarantined"
         case .lifecycleLoss: return "Workspace stopped unexpectedly"
         case .operationFailure: return "Workspace operation failed"
@@ -338,7 +338,7 @@ final class NotificationCoordinator {
         }
     }
 
-    private static func body(for kind: MSWNotificationEvent.Kind, workspace: String?) -> String {
+    private static func body(for kind: SiloNotificationEvent.Kind, workspace: String?) -> String {
         let scope = workspace.map { "Workspace \($0)" } ?? "Silo"
         switch kind {
         case .sustainedUnavailability:

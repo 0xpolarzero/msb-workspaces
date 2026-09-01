@@ -1,8 +1,8 @@
 #!/usr/bin/python3
-"""MSW GitHub proxy -- outbound (upstream) leg (Path C contract section 4).
+"""Silo GitHub proxy -- outbound (upstream) leg (Path C contract section 4).
 
 The upstream side is the TRUSTED leg (real github.com / objects.githubusercontent.com,
-or the tests/fake_github.py fixture via MSW_PROXY_UPSTREAM_ROOT). It therefore uses
+or the tests/fake_github.py fixture via SILO_PROXY_UPSTREAM_ROOT). It therefore uses
 stdlib `http.client` (TLS with system roots, fail-closed; plain HTTP only when a
 test seam points at the fake). The HOSTILE ingress leg is parsed exclusively by the
 vendored h11 tree in lib/proxycore.py -- nothing in this module touches ingress bytes.
@@ -67,14 +67,14 @@ class UpstreamError(Exception):
 
 
 class UpstreamIdleTimeout(UpstreamError):
-    """No upstream data within MSW_PROXY_IDLE_TIMEOUT."""
+    """No upstream data within SILO_PROXY_IDLE_TIMEOUT."""
 
     def __init__(self) -> None:
         super().__init__("idle timeout waiting on upstream", category="idle", status=504)
 
 
 class UpstreamDeadline(UpstreamError):
-    """MSW_PROXY_TOTAL_DEADLINE elapsed while talking to upstream."""
+    """SILO_PROXY_TOTAL_DEADLINE elapsed while talking to upstream."""
 
     def __init__(self) -> None:
         super().__init__("total deadline exceeded while talking to upstream", category="deadline", status=504)

@@ -8,7 +8,7 @@ supports `@file`), performs the request with stdlib urllib against the local
 fake GitHub server, and prints the response body. HTTP responses (with a
 body) exit 0 exactly like curl -sS without -f; connection failures exit 7.
 This makes the CLI-side acquisition/verification tests exercise the same wire
-path the proxy uses (MSW_PROXY_UPSTREAM_ROOT -> fake GitHub).
+path the proxy uses (SILO_PROXY_UPSTREAM_ROOT -> fake GitHub).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from pathlib import Path
 
 def main() -> int:
     args = sys.argv[1:]
-    argv_log = os.environ.get("MSW_FAKE_API_CURL_ARGV_LOG")
+    argv_log = os.environ.get("SILO_FAKE_API_CURL_ARGV_LOG")
     if argv_log:
         with open(argv_log, "a") as fh:
             fh.write("|".join(args) + "\n")

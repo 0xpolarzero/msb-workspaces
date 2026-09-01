@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>org.microsandbox.Silo.host-agent</string>
+    <string>org.silo.Silo.host-agent</string>
     <key>BundleProgram</key>
     <string>Contents/Resources/SiloHostAgent</string>
     <key>MachServices</key>
     <dict>
-        <key>org.microsandbox.Silo.host-agent</key>
+        <key>org.silo.Silo.host-agent</key>
         <true/>
     </dict>
     <key>RunAtLoad</key>

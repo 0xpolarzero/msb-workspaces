@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Stateful MicroSandbox CLI simulator used by the MSW release tests."""
+"""Stateful MicroSandbox CLI simulator used by the Silo release tests."""
 from __future__ import annotations
 
 import json
@@ -11,12 +11,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-STATE_ROOT = Path(os.environ.get("MSW_FAKE_STATE", "/tmp/msw-fake-state")).resolve()
+STATE_ROOT = Path(os.environ.get("SILO_FAKE_STATE", "/tmp/silo-fake-state")).resolve()
 STATE_FILE = STATE_ROOT / "state.json"
-REMOTE_ROOT = os.environ.get("MSW_TEST_GITHUB_REMOTE_ROOT", "")
+REMOTE_ROOT = os.environ.get("SILO_TEST_GITHUB_REMOTE_ROOT", "")
 
 
-# Raw-disk tail-discard seam: MSW_FAKE_TAIL_DISCARD=safe|unsafe selects how
+# Raw-disk tail-discard seam: SILO_FAKE_TAIL_DISCARD=safe|unsafe selects how
 # the simulated runtime answers a guest FITRIM that reaches the end of a
 # mounted raw disk. safe preserves the raw image length; unsafe reproduces
 # msb-imago 0.1.1's File::try_discard_by_truncate defect, which shortens the
@@ -24,7 +24,7 @@ REMOTE_ROOT = os.environ.get("MSW_TEST_GITHUB_REMOTE_ROOT", "")
 # 132,112,384-byte deficit observed on 2 GiB images). While the seam is
 # active, `volume create` materializes real raw images (instead of
 # directories) so setup.sh's geometry checks can observe the truncation.
-TAIL_DISCARD = os.environ.get("MSW_FAKE_TAIL_DISCARD", "")
+TAIL_DISCARD = os.environ.get("SILO_FAKE_TAIL_DISCARD", "")
 TAIL_DISCARD_DEFICIT = 132_112_384
 
 
@@ -54,7 +54,7 @@ def require_secret_source(sb: dict[str, Any], *, binding_operation: bool = False
     if (
         binding_operation
         and
-        os.environ.get("MSW_FAKE_REQUIRE_SECRET_SOURCE") == "1"
+        os.environ.get("SILO_FAKE_REQUIRE_SECRET_SOURCE") == "1"
         and sb.get("secrets", {}).get("GH_TOKEN")
         and not os.environ.get("GH_TOKEN")
     ):
@@ -62,7 +62,7 @@ def require_secret_source(sb: dict[str, Any], *, binding_operation: bool = False
         return False
     return True
 def record_lock_fd() -> None:
-    marker = os.environ.get("MSW_FAKE_LOCK_FD_MARKER", "")
+    marker = os.environ.get("SILO_FAKE_LOCK_FD_MARKER", "")
     if not marker:
         return
     try:
@@ -74,7 +74,7 @@ def record_lock_fd() -> None:
     Path(marker).write_text(value + "\n")
 
 def record_secrets_lock_fd(command: str) -> None:
-    marker = os.environ.get("MSW_FAKE_SECRETS_LOCK_FD_MARKER", "")
+    marker = os.environ.get("SILO_FAKE_SECRETS_LOCK_FD_MARKER", "")
     if not marker:
         return
     try:
@@ -137,7 +137,7 @@ def write_raw_ext4_image(path: Path, declared_bytes: int, length_bytes: int) -> 
 def volume_path(state: dict[str, Any], name: str) -> Path:
     entry = state["volumes"][name]
     p = Path(entry["path"])
-    if p.is_file() and os.environ.get("MSW_TEST_VALIDATE_RAW_DISKS") == "1":
+    if p.is_file() and os.environ.get("SILO_TEST_VALIDATE_RAW_DISKS") == "1":
         p = p.parent / "guest-data"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -179,10 +179,10 @@ def map_guest_path(state: dict[str, Any], box: str, raw: str) -> str:
         return str(guest_workspace(state, box))
     if raw.startswith("/workspace/"):
         return str(guest_workspace(state, box) / raw[len("/workspace/"):])
-    if raw == "/var/lib/msw-runtime":
+    if raw == "/var/lib/silo-runtime":
         return str(guest_runtime(state, box))
-    if raw.startswith("/var/lib/msw-runtime/"):
-        return str(guest_runtime(state, box) / raw[len("/var/lib/msw-runtime/"):])
+    if raw.startswith("/var/lib/silo-runtime/"):
+        return str(guest_runtime(state, box) / raw[len("/var/lib/silo-runtime/"):])
     if raw == "/tmp":
         return str(root / "tmp")
     if raw.startswith("/tmp/"):
@@ -195,7 +195,7 @@ def git_env(state: dict[str, Any], box: str) -> dict[str, str]:
     env = os.environ.copy()
     env.update({
         "HOME": str(Path(sb["root"]) / "home"),
-        "MSW_GUEST_WORKSPACE_ROOT": str(guest_workspace(state, box)),
+        "SILO_GUEST_WORKSPACE_ROOT": str(guest_workspace(state, box)),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "GIT_TERMINAL_PROMPT": "0",
         # Isolate the guest "system" git config so guest-side
@@ -211,8 +211,8 @@ def git_env(state: dict[str, Any], box: str) -> dict[str, str]:
             env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
         else:
             env[secret_name] = "$MSB_" + secret_name
-    if os.environ.get("MSW_FAKE_GUEST_PUSH_ALLOWED") != "1":
-        env["MSW_GUEST_READ_ONLY"] = "1"
+    if os.environ.get("SILO_FAKE_GUEST_PUSH_ALLOWED") != "1":
+        env["SILO_GUEST_READ_ONLY"] = "1"
     if REMOTE_ROOT:
         env["GIT_CONFIG_COUNT"] = "2"
         env["GIT_CONFIG_KEY_0"] = f"url.file://{Path(REMOTE_ROOT).resolve()}/.insteadOf"
@@ -331,7 +331,7 @@ def parse_create(args: list[str], state: dict[str, Any]) -> int:
             }
         sb["mounts"][dest] = vol
         if dest == "/workspace": sb["workspace_volume"] = vol
-        if dest == "/var/lib/msw-runtime": sb["runtime_volume"] = vol
+        if dest == "/var/lib/silo-runtime": sb["runtime_volume"] = vol
     state["sandboxes"][name] = sb
     ensure_sandbox_dirs(state, name)
     guest_workspace(state, name).mkdir(parents=True, exist_ok=True)
@@ -372,24 +372,24 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     if not require_secret_source(sb):
         return 1
     sb["running"] = True
-    # MSW control-plane execs run through a bash -c wrapper that prints the
+    # Silo control-plane execs run through a bash -c wrapper that prints the
     # reserved internal-session marker (control conn-id 0, length 1, payload
     # "H") to stderr before exec'ing the real command. Strip that wrapper so
     # every stub below — including the relay stub and systemctl branches —
     # matches the unchanged real command shape. The CLI wrappers use $0="_"
     # and exec "$@" (the payload follows the marker); the shuttle's relay
-    # wrapper uses $0="msw-shuttle" and execs `python3 "$1"` explicitly, so
+    # wrapper uses $0="silo-shuttle" and execs `python3 "$1"` explicitly, so
     # the stripped command must restore the python3 it would run. Only the
     # marker wrapper is stripped: plain `bash -c ... _ ARG` commands that
     # legitimately use "_" as $0 (git verification probes) are left intact.
     if (len(command) >= 4 and command[:2] == ["bash", "-c"]
-            and command[3] in ("_", "msw-shuttle")
+            and command[3] in ("_", "silo-shuttle")
             and command[2].startswith("printf ")
             and "exec " in command[2]):
         # Journal that this exec arrived as the marker-wrapped control-plane
         # argv so regressions can prove control-session provenance.
         sb["wrapped_control_execs"] = sb.get("wrapped_control_execs", 0) + 1
-        if command[3] == "msw-shuttle":
+        if command[3] == "silo-shuttle":
             command = ["python3"] + command[4:]
         else:
             command = command[4:]
@@ -405,15 +405,15 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     # Setup/bootstrap and deep-check scripts are exercised semantically by the simulator.
     if command[:2] == ["bash", "-s"] or command[:3] == ["bash", "-s", "--"]:
         text = stdin_data.decode("utf-8", errors="replace")
-        if "MSW app listening-port probe" in text:
+        if "Silo app listening-port probe" in text:
             configured = set(command[3:]) if command[:3] == ["bash", "-s", "--"] else set(command[2:])
             listening = set(sb.get("port_content", {}).keys())
-            fixture = os.environ.get("MSW_FAKE_LISTENING_PORTS", "")
+            fixture = os.environ.get("SILO_FAKE_LISTENING_PORTS", "")
             if fixture:
                 try:
                     listening.update(str(port) for port in json.loads(fixture).get(box, []))
                 except (json.JSONDecodeError, AttributeError, TypeError):
-                    return fail("invalid MSW_FAKE_LISTENING_PORTS", 64)
+                    return fail("invalid SILO_FAKE_LISTENING_PORTS", 64)
             for port in sorted(configured & listening, key=int):
                 print(port)
             return 0
@@ -421,16 +421,16 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             sb["bootstrapped"] = True
             save(state)
             return 0
-        if "hostnamectl set-hostname" in text and "msw-docker-smoke" in text:
+        if "hostnamectl set-hostname" in text and "silo-docker-smoke" in text:
             sb["configured"] = True
             save(state)
             return 0
         if "findmnt -n -o FSTYPE /workspace" in text and "docker buildx version" in text:
-            if os.environ.get("MSW_FAKE_DEEP_CHECK_FAIL") == "1":
+            if os.environ.get("SILO_FAKE_DEEP_CHECK_FAIL") == "1":
                 print("Docker/containerd did not become ready within 30 seconds", file=sys.stderr)
                 return 1
             return 0
-        if "MSW named-volume migration" in text:
+        if "Silo named-volume migration" in text:
             source_name = sb.get("mounts", {}).get("/source")
             destination_name = sb.get("mounts", {}).get("/destination")
             if not source_name or not destination_name:
@@ -456,13 +456,13 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
         return 0
 
     if command[0] == "systemctl":
-        # Delayed systemd-bus readiness: with MSW_FAKE_GUEST_READY_ATTEMPTS
+        # Delayed systemd-bus readiness: with SILO_FAKE_GUEST_READY_ATTEMPTS
         # set, the first N daemon-reload probes fail (the bootstrap readiness
         # wait discards this raw stderr), then the bus comes up. The probe
         # count is journaled on the sandbox so tests can prove guest
         # configuration ran only after readiness.
         if command[1:2] == ["daemon-reload"]:
-            delay = os.environ.get("MSW_FAKE_GUEST_READY_ATTEMPTS", "")
+            delay = os.environ.get("SILO_FAKE_GUEST_READY_ATTEMPTS", "")
             if delay:
                 attempts = sb.setdefault("systemd_reload_attempts", 0) + 1
                 sb["systemd_reload_attempts"] = attempts
@@ -470,7 +470,7 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
                 if attempts <= int(delay):
                     print("Failed to connect to bus: no such file or directory", file=sys.stderr)
                     return 1
-        if "stop" in command and any("msw-health-direct" in x for x in command):
+        if "stop" in command and any("silo-health-direct" in x for x in command):
             sb.setdefault("port_content", {}).pop("24678", None)
             save(state)
         return 0
@@ -496,7 +496,7 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             save(state)
             return 0
 
-    # The guest relay (lib/msw-github-relay.py) is a REAL python script that
+    # The guest relay (lib/silo-github-relay.py) is a REAL python script that
     # would bind host 127.0.0.1:18446 and collide with the proxy's listener.
     # Stub it as a bounded sleep so shuttle-spawned relay processes keep the
     # exec stream alive without ever touching the proxy port; the frame
@@ -504,11 +504,11 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     # Faithful failure modes: an absent relay artifact fails exactly like
     # python3 (rc 2 + "can't open file ... No such file or directory") so the
     # shuttle's permanent-failure circuit can be exercised; while
-    # MSW_FAKE_RELAY_FAIL_FILE exists the relay fails with a plain transient
+    # SILO_FAKE_RELAY_FAIL_FILE exists the relay fails with a plain transient
     # error (rc 1, no ENOENT signature) so bounded retry can be exercised.
-    if command[0] == "python3" and len(command) >= 2 and command[1].endswith("msw-github-relay.py"):
+    if command[0] == "python3" and len(command) >= 2 and command[1].endswith("silo-github-relay.py"):
         relay_path = Path(map_guest_path(state, box, command[1]))
-        fail_file = os.environ.get("MSW_FAKE_RELAY_FAIL_FILE", "")
+        fail_file = os.environ.get("SILO_FAKE_RELAY_FAIL_FILE", "")
         if fail_file and Path(fail_file).exists():
             if Path(fail_file).read_text().strip() == "enoent":
                 # An ENOENT-flavored failure AFTER a passing precondition
@@ -567,22 +567,22 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
 
     # Map guest absolute paths passed as normal arguments.
     mapped = [command[0]] + [map_guest_path(state, box, x) if x.startswith("/") else x for x in command[1:]]
-    # For shell command strings, replace only the guest roots used by MSW.
+    # For shell command strings, replace only the guest roots used by Silo.
     if mapped[0] in {"bash", "sh"} and len(mapped) >= 3 and mapped[1] in {"-c", "-lc"}:
         script = mapped[2]
         # Map /tmp first so an absolute simulator workspace path below /tmp is
         # not remapped a second time after /workspace substitution.
         script = script.replace("/tmp/", str(Path(sb["root"]) / "tmp") + "/")
         script = script.replace("/workspace/", str(guest_workspace(state, box)) + "/")
-        script = script.replace("/var/lib/msw-runtime/", str(guest_runtime(state, box)) + "/")
+        script = script.replace("/var/lib/silo-runtime/", str(guest_runtime(state, box)) + "/")
         # Test seam: model a guest without python3 (the shuttle's relay
         # precondition probes `command -v python3`).
-        if os.environ.get("MSW_FAKE_GUEST_PYTHON_MISSING") == "1" and "command -v python3" in script:
+        if os.environ.get("SILO_FAKE_GUEST_PYTHON_MISSING") == "1" and "command -v python3" in script:
             return fail("python3: command not found", 1)
         mapped[2] = script
 
-    pause_file = os.environ.get("MSW_FAKE_VERIFY_PAUSE_FILE", "")
-    pause_once = os.environ.get("MSW_FAKE_VERIFY_PAUSE_ONCE", "") == "1"
+    pause_file = os.environ.get("SILO_FAKE_VERIFY_PAUSE_FILE", "")
+    pause_once = os.environ.get("SILO_FAKE_VERIFY_PAUSE_ONCE", "") == "1"
     pause_after_clone = bool(
         pause_file
         and command[:2] == ["bash", "-s"]
@@ -607,9 +607,9 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
 
 
 def advance_remote_for_race() -> None:
-    remote = os.environ.get("MSW_FAKE_ADVANCE_REMOTE_ON_BUNDLE", "")
-    ref = os.environ.get("MSW_FAKE_RACE_REF", "refs/heads/main")
-    marker = os.environ.get("MSW_FAKE_RACE_ONCE_FILE", "")
+    remote = os.environ.get("SILO_FAKE_ADVANCE_REMOTE_ON_BUNDLE", "")
+    ref = os.environ.get("SILO_FAKE_RACE_REF", "refs/heads/main")
+    marker = os.environ.get("SILO_FAKE_RACE_ONCE_FILE", "")
     if not remote:
         return
     if marker and Path(marker).exists():
@@ -619,9 +619,9 @@ def advance_remote_for_race() -> None:
     tree = subprocess.check_output(["git", "--git-dir", str(git_dir), "rev-parse", f"{old}^{{tree}}"], text=True).strip()
     env = os.environ.copy()
     env.update({
-        "GIT_AUTHOR_NAME": "MSW Race Test",
+        "GIT_AUTHOR_NAME": "Silo Race Test",
         "GIT_AUTHOR_EMAIL": "race@example.invalid",
-        "GIT_COMMITTER_NAME": "MSW Race Test",
+        "GIT_COMMITTER_NAME": "Silo Race Test",
         "GIT_COMMITTER_EMAIL": "race@example.invalid",
     })
     commit = subprocess.check_output(
@@ -647,10 +647,10 @@ def do_copy(args: list[str], state: dict[str, Any]) -> int:
         src = Path(map_guest_path(state, box, raw))
         dst = Path(dst_raw)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if os.environ.get("MSW_FAKE_COPY_SYMLINK_LFS") == "1" and "/lfs/objects/" in str(src):
+        if os.environ.get("SILO_FAKE_COPY_SYMLINK_LFS") == "1" and "/lfs/objects/" in str(src):
             dst.symlink_to("/etc/passwd")
             return 0
-        if os.environ.get("MSW_FAKE_COPY_CORRUPT_LFS") == "1" and "/lfs/objects/" in str(src):
+        if os.environ.get("SILO_FAKE_COPY_CORRUPT_LFS") == "1" and "/lfs/objects/" in str(src):
             dst.write_bytes(b"corrupt")
             return 0
         if src.is_dir():
@@ -681,8 +681,8 @@ def main() -> int:
         return 0
     cmd, rest = args[0], args[1:]
     record_secrets_lock_fd(cmd)
-    if os.environ.get("MSW_FAKE_RECORD_CREDENTIAL_ENV") == "1":
-        exported = [n for n in os.environ.get("MSW_SECRET_EXPORTED", "").split(",") if n]
+    if os.environ.get("SILO_FAKE_RECORD_CREDENTIAL_ENV") == "1":
+        exported = [n for n in os.environ.get("SILO_SECRET_EXPORTED", "").split(",") if n]
         box = first_box_arg(rest) if cmd in {
             "start", "restart", "stop", "rm", "exec", "inspect", "ping",
             "logs", "modify", "copy", "cp", "ssh",
@@ -703,7 +703,7 @@ def main() -> int:
         )
         save(state)
     if cmd == "doctor":
-        if os.environ.get("MSW_FAKE_DOCTOR_FAIL") == "1" and "--fix" not in rest:
+        if os.environ.get("SILO_FAKE_DOCTOR_FAIL") == "1" and "--fix" not in rest:
             return fail("fake doctor failure")
         return 0
     if cmd == "update":
@@ -717,7 +717,7 @@ def main() -> int:
     if cmd in {"create", "run"}: return parse_create(rest, state)
     if cmd == "inspect":
         box = rest[0] if rest else ""
-        if os.environ.get("MSW_FAKE_INSPECT_FAIL") == "1":
+        if os.environ.get("SILO_FAKE_INSPECT_FAIL") == "1":
             return fail("fake inspect failure", 2)
         if box in state["sandboxes"]:
             if not require_secret_source(state["sandboxes"][box]):
@@ -744,7 +744,7 @@ def main() -> int:
         return fail(f"error: sandbox not found: {box}")
     if cmd == "ping":
         box = parse_named_arg(rest) or ""
-        if os.environ.get("MSW_FAKE_PING_FAIL") == "1":
+        if os.environ.get("SILO_FAKE_PING_FAIL") == "1":
             return 1
         if box not in state["sandboxes"] or not require_secret_source(state["sandboxes"][box]):
             return 1
@@ -753,7 +753,7 @@ def main() -> int:
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
         record_lock_fd()
-        if os.environ.get("MSW_FAKE_START_FAIL") == "1":
+        if os.environ.get("SILO_FAKE_START_FAIL") == "1":
             return fail("fake start failure")
         missing = [n for n in state["sandboxes"][box].get("secrets", {}) if not os.environ.get(n)]
         if missing:
@@ -767,7 +767,7 @@ def main() -> int:
         if box not in state["sandboxes"]: return 1
         if not require_secret_source(state["sandboxes"][box]):
             return 1
-        if os.environ.get("MSW_FAKE_STOP_FAIL") == "1":
+        if os.environ.get("SILO_FAKE_STOP_FAIL") == "1":
             return fail("fake stop failure")
         state["sandboxes"][box]["running"] = False
         log_event(state, "stop", box=box)
@@ -787,7 +787,7 @@ def main() -> int:
         sub = rest[0]
         name = rest[1] if len(rest) > 1 else ""
         if sub == "inspect":
-            if os.environ.get("MSW_FAKE_VOLUME_INSPECT_ERROR") == "1":
+            if os.environ.get("SILO_FAKE_VOLUME_INSPECT_ERROR") == "1":
                 print("error: volume registry unavailable", file=sys.stderr)
                 return 2
             entry = state["volumes"].get(name)
@@ -810,7 +810,7 @@ def main() -> int:
             path = STATE_ROOT / "volumes" / name
             path.mkdir(parents=True, exist_ok=True)
             volume_path = path
-            if os.environ.get("MSW_FAKE_TRUNCATED_EXT4_CREATE") == "1":
+            if os.environ.get("SILO_FAKE_TRUNCATED_EXT4_CREATE") == "1":
                 size_match = re.fullmatch(r"([0-9]+)G", size)
                 if not size_match:
                     return fail("truncated ext4 fixture requires a GiB size")
@@ -851,7 +851,7 @@ def main() -> int:
         sub = rest[0]
         if sub == "inspect":
             name = rest[1] if len(rest) > 1 else ""
-            if os.environ.get("MSW_FAKE_RESTORE_HEALTH_FAIL") == "1": return 1
+            if os.environ.get("SILO_FAKE_RESTORE_HEALTH_FAIL") == "1": return 1
             return 0 if name in state["snapshots"] else 1
         if sub == "create":
             name = rest[1]
@@ -881,7 +881,7 @@ def main() -> int:
             state["sandboxes"][box].setdefault("secrets", {})[name] = spec
         if "--secret-rm" in rest:
             name = rest[rest.index("--secret-rm") + 1]
-            if os.environ.get("MSW_FAKE_SECRET_REMOVE_FAIL") == "1":
+            if os.environ.get("SILO_FAKE_SECRET_REMOVE_FAIL") == "1":
                 return fail("fake secret removal failure")
             state["sandboxes"][box].setdefault("secrets", {}).pop(name, None)
         for option, key in (("--memory", "memory"), ("--cpus", "cpus"), ("--root-disk", "root_disk")):
@@ -901,10 +901,10 @@ def main() -> int:
             return 0
     if cmd in {"ps", "ls", "status"}:
         if cmd == "status" and "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
-            if os.environ.get("MSW_FAKE_STATUS_FAIL") == "1":
+            if os.environ.get("SILO_FAKE_STATUS_FAIL") == "1":
                 return fail("fake status failure", 69)
-            if "MSW_FAKE_STATUS_JSON" in os.environ:
-                print(os.environ["MSW_FAKE_STATUS_JSON"])
+            if "SILO_FAKE_STATUS_JSON" in os.environ:
+                print(os.environ["SILO_FAKE_STATUS_JSON"])
                 return 0
             names = [name for name in sorted(state["sandboxes"]) if name in rest]
             if not names:
@@ -918,7 +918,7 @@ def main() -> int:
                 print(f"{name}\t{'running' if sb.get('running') else 'stopped'}")
         return 0
     if cmd == "metrics":
-        payload = os.environ.get("MSW_FAKE_METRICS", "")
+        payload = os.environ.get("SILO_FAKE_METRICS", "")
         if payload:
             print(payload)
         return 0
@@ -926,9 +926,9 @@ def main() -> int:
         box = rest[0] if rest else ""
         log_event(state, "logs", box=box, args=rest[1:])
         save(state)
-        if os.environ.get("MSW_FAKE_LOGS_JSON_FAIL") == "1" and "--json" in rest:
+        if os.environ.get("SILO_FAKE_LOGS_JSON_FAIL") == "1" and "--json" in rest:
             return 64
-        payload = os.environ.get("MSW_FAKE_LOGS", "")
+        payload = os.environ.get("SILO_FAKE_LOGS", "")
         if payload:
             print(payload)
         return 0

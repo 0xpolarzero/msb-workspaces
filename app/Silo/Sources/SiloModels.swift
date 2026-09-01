@@ -1,6 +1,6 @@
 import Foundation
 
-private struct MSWAnyCodingKey: CodingKey {
+private struct SiloAnyCodingKey: CodingKey {
     let stringValue: String
     let intValue: Int?
 
@@ -23,7 +23,7 @@ private func requireExactKeys<Key: CodingKey & CaseIterable>(
     // that the enum does not know about. Inspect through a dynamic key first
     // so future fields are rejected instead of being mistaken for the current
     // canonical protocol contract.
-    let container = try decoder.container(keyedBy: MSWAnyCodingKey.self)
+    let container = try decoder.container(keyedBy: SiloAnyCodingKey.self)
     let actual = Set(container.allKeys.map(\.stringValue))
     let expected = Set(Key.allCases.map(\.stringValue))
     guard actual == expected else {
@@ -123,7 +123,7 @@ struct SetupWorkspaceConfiguration: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-struct MSWBootstrapConfiguration: Codable, Equatable, Sendable {
+struct SiloBootstrapConfiguration: Codable, Equatable, Sendable {
     private static let rootKeys: Set<String> = ["schemaVersion", "workspaces"]
     private static let workspaceKeys: Set<String> = [
         "name", "cpu", "cpuCeiling", "memoryGiB", "memoryCeilingGiB",
@@ -191,9 +191,9 @@ struct MSWBootstrapConfiguration: Codable, Equatable, Sendable {
     }
 }
 
-// MARK: - Machine-readable MSW contract
+// MARK: - Machine-readable Silo contract
 
-struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
+struct SiloEnvelope<Value: Codable & Sendable>: Codable, Sendable {
     let schemaVersion: Int
     let requestId: String
     let ok: Bool
@@ -201,7 +201,7 @@ struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
     let observedAt: Date?
     let result: Value?
     let warnings: [String]
-    let error: MSWProtocolError?
+    let error: SiloProtocolError?
 
     init(
         schemaVersion: Int,
@@ -211,7 +211,7 @@ struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
         observedAt: Date? = nil,
         result: Value? = nil,
         warnings: [String] = [],
-        error: MSWProtocolError? = nil
+        error: SiloProtocolError? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.requestId = requestId
@@ -233,7 +233,7 @@ struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
         observedAt = try container.decodeIfPresent(Date.self, forKey: .observedAt)
         result = try container.decodeIfPresent(Value.self, forKey: .result)
         warnings = try container.decode([String].self, forKey: .warnings)
-        error = try container.decodeIfPresent(MSWProtocolError.self, forKey: .error)
+        error = try container.decodeIfPresent(SiloProtocolError.self, forKey: .error)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -265,7 +265,7 @@ struct MSWEnvelope<Value: Codable & Sendable>: Codable, Sendable {
     }
 }
 
-struct MSWProtocolError: Codable, Error, LocalizedError, Sendable, Equatable {
+struct SiloProtocolError: Codable, Error, LocalizedError, Sendable, Equatable {
     let code: String
     let message: String
     let recovery: String?
@@ -322,14 +322,14 @@ struct MSWProtocolError: Codable, Error, LocalizedError, Sendable, Equatable {
         if let recovery, !recovery.isEmpty {
             description += " \(recovery)"
         }
-        description += " (MSW error code: \(code).)"
+        description += " (Silo error code: \(code).)"
         return description
     }
 }
 
-struct MSWHandshake: Codable, Sendable {
+struct SiloHandshake: Codable, Sendable {
     let protocolVersion: Int
-    let mswVersion: String
+    let siloVersion: String
     let platform: Platform
     let configurationAvailable: Bool
     let runtimeAvailable: Bool
@@ -337,7 +337,7 @@ struct MSWHandshake: Codable, Sendable {
     let exitCodes: [String: Int]
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case protocolVersion, mswVersion, platform, configurationAvailable, runtimeAvailable
+        case protocolVersion, siloVersion, platform, configurationAvailable, runtimeAvailable
         case capabilities, exitCodes
     }
 
@@ -345,7 +345,7 @@ struct MSWHandshake: Codable, Sendable {
         try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
-        mswVersion = try container.decode(String.self, forKey: .mswVersion)
+        siloVersion = try container.decode(String.self, forKey: .siloVersion)
         platform = try container.decode(Platform.self, forKey: .platform)
         configurationAvailable = try container.decode(Bool.self, forKey: .configurationAvailable)
         runtimeAvailable = try container.decode(Bool.self, forKey: .runtimeAvailable)
@@ -399,29 +399,29 @@ struct MSWHandshake: Codable, Sendable {
     }
 }
 
-struct MSWStateResponse: Codable, Sendable {
+struct SiloStateResponse: Codable, Sendable {
     let schemaVersion: Int
-    let mswVersion: String
-    let workspaces: [MSWWorkspaceSnapshot]
+    let siloVersion: String
+    let workspaces: [SiloWorkspaceSnapshot]
 }
 
-struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
+struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
     let id: String
     let purpose: String
-    let lifecycle: MSWLifecycle
-    let freshness: MSWFreshness
+    let lifecycle: SiloLifecycle
+    let freshness: SiloFreshness
     let statusObservedAt: Date?
     let metricsObservedAt: Date?
     let githubObservedAt: Date?
     let activityObservedAt: Date?
-    let quarantine: MSWQuarantineSnapshot
-    let credential: MSWCredentialSnapshot
+    let quarantine: SiloQuarantineSnapshot
+    let credential: SiloCredentialSnapshot
     /// Per-workspace host-secret configuration state. Absent in older CLI
     /// output, which the app reads as "no pending secret configuration".
-    let secrets: MSWSecretsSnapshot?
-    let resources: MSWResourceSnapshot
-    let network: MSWNetworkSnapshot
-    let actionCapabilities: MSWActionCapabilities
+    let secrets: SiloSecretsSnapshot?
+    let resources: SiloResourceSnapshot
+    let network: SiloNetworkSnapshot
+    let actionCapabilities: SiloActionCapabilities
     /// Published ports skipped by the workspace proxy because they were
     /// already in use ([] when none). Absent in older CLI output.
     let skippedPorts: [Int]?
@@ -431,14 +431,14 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
     init(
         id: String,
         purpose: String,
-        lifecycle: MSWLifecycle,
-        freshness: MSWFreshness,
-        quarantine: MSWQuarantineSnapshot,
-        credential: MSWCredentialSnapshot,
-        secrets: MSWSecretsSnapshot? = nil,
-        resources: MSWResourceSnapshot,
-        network: MSWNetworkSnapshot,
-        actionCapabilities: MSWActionCapabilities,
+        lifecycle: SiloLifecycle,
+        freshness: SiloFreshness,
+        quarantine: SiloQuarantineSnapshot,
+        credential: SiloCredentialSnapshot,
+        secrets: SiloSecretsSnapshot? = nil,
+        resources: SiloResourceSnapshot,
+        network: SiloNetworkSnapshot,
+        actionCapabilities: SiloActionCapabilities,
         statusObservedAt: Date? = nil,
         metricsObservedAt: Date? = nil,
         githubObservedAt: Date? = nil,
@@ -468,18 +468,18 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         purpose = try container.decode(String.self, forKey: .purpose)
-        lifecycle = try container.decode(MSWLifecycle.self, forKey: .lifecycle)
-        freshness = try container.decode(MSWFreshness.self, forKey: .freshness)
+        lifecycle = try container.decode(SiloLifecycle.self, forKey: .lifecycle)
+        freshness = try container.decode(SiloFreshness.self, forKey: .freshness)
         statusObservedAt = try container.decodeIfPresent(Date.self, forKey: .statusObservedAt)
         metricsObservedAt = try container.decodeIfPresent(Date.self, forKey: .metricsObservedAt)
         githubObservedAt = try container.decodeIfPresent(Date.self, forKey: .githubObservedAt)
         activityObservedAt = try container.decodeIfPresent(Date.self, forKey: .activityObservedAt)
-        quarantine = try container.decode(MSWQuarantineSnapshot.self, forKey: .quarantine)
-        credential = try container.decode(MSWCredentialSnapshot.self, forKey: .credential)
-        secrets = try container.decodeIfPresent(MSWSecretsSnapshot.self, forKey: .secrets)
-        resources = try container.decode(MSWResourceSnapshot.self, forKey: .resources)
-        network = try container.decode(MSWNetworkSnapshot.self, forKey: .network)
-        actionCapabilities = try container.decode(MSWActionCapabilities.self, forKey: .actionCapabilities)
+        quarantine = try container.decode(SiloQuarantineSnapshot.self, forKey: .quarantine)
+        credential = try container.decode(SiloCredentialSnapshot.self, forKey: .credential)
+        secrets = try container.decodeIfPresent(SiloSecretsSnapshot.self, forKey: .secrets)
+        resources = try container.decode(SiloResourceSnapshot.self, forKey: .resources)
+        network = try container.decode(SiloNetworkSnapshot.self, forKey: .network)
+        actionCapabilities = try container.decode(SiloActionCapabilities.self, forKey: .actionCapabilities)
         skippedPorts = try container.decodeIfPresent([Int].self, forKey: .skippedPorts)
         portWarning = try container.decodeIfPresent(String.self, forKey: .portWarning)
     }
@@ -493,7 +493,7 @@ struct MSWWorkspaceSnapshot: Codable, Identifiable, Sendable {
     var identity: String { id }
 }
 
-enum MSWLifecycle: String, Codable, Sendable {
+enum SiloLifecycle: String, Codable, Sendable {
     case running = "Running"
     case stopped = "Stopped"
     case starting = "Starting"
@@ -509,14 +509,14 @@ enum MSWLifecycle: String, Codable, Sendable {
     }
 }
 
-enum MSWFreshness: String, Codable, Sendable {
+enum SiloFreshness: String, Codable, Sendable {
     case fresh
     case stale
     case unavailable
     case neverObserved = "never-observed"
 }
 
-struct MSWQuarantineSnapshot: Codable, Sendable {
+struct SiloQuarantineSnapshot: Codable, Sendable {
     let state: State
     let reason: String?
 
@@ -527,7 +527,7 @@ struct MSWQuarantineSnapshot: Codable, Sendable {
     }
 }
 
-struct MSWCredentialSnapshot: Codable, Sendable {
+struct SiloCredentialSnapshot: Codable, Sendable {
     let state: State
     let accessMode: String
     let verificationRepository: String?
@@ -551,7 +551,7 @@ struct MSWCredentialSnapshot: Codable, Sendable {
     }
 }
 
-struct MSWResourceSnapshot: Codable, Sendable {
+struct SiloResourceSnapshot: Codable, Sendable {
     let cpus: String
     let maxCpus: String
     let memory: String
@@ -559,12 +559,12 @@ struct MSWResourceSnapshot: Codable, Sendable {
     let rootDisk: String
 }
 
-struct MSWNetworkSnapshot: Codable, Sendable {
+struct SiloNetworkSnapshot: Codable, Sendable {
     let host: String
     let ip: String
 }
 
-struct MSWActionCapabilities: Codable, Sendable, Equatable {
+struct SiloActionCapabilities: Codable, Sendable, Equatable {
     let canStart: Bool
     let canStop: Bool
     let canRestart: Bool
@@ -592,14 +592,14 @@ struct MSWActionCapabilities: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWPortsResponse: Codable, Sendable {
+struct SiloPortsResponse: Codable, Sendable {
     let workspace: String
     let workspaces: [WorkspacePorts]
-    let freshness: MSWFreshness
+    let freshness: SiloFreshness
 
     struct WorkspacePorts: Codable, Identifiable, Sendable {
         let workspace: String
-        let lifecycle: MSWLifecycle
+        let lifecycle: SiloLifecycle
         let host: String
         let listeningState: ListeningState
         let ports: [Port]
@@ -621,25 +621,25 @@ struct MSWPortsResponse: Codable, Sendable {
     }
 }
 
-struct MSWMetricsResponse: Codable, Sendable {
+struct SiloMetricsResponse: Codable, Sendable {
     let workspace: String
     let available: Bool
-    let lifecycle: MSWLifecycle
-    let freshness: MSWFreshness
+    let lifecycle: SiloLifecycle
+    let freshness: SiloFreshness
     let reason: String?
     let snapshot: JSONValue?
 }
 
-struct MSWLogsResponse: Codable, Sendable {
+struct SiloLogsResponse: Codable, Sendable {
     let workspace: String
     let available: Bool
-    let lifecycle: MSWLifecycle
-    let freshness: MSWFreshness
+    let lifecycle: SiloLifecycle
+    let freshness: SiloFreshness
     let reason: String?
-    let lines: [MSWLogEntry]
+    let lines: [SiloLogEntry]
 }
 
-struct MSWLogEntry: Codable, Sendable {
+struct SiloLogEntry: Codable, Sendable {
     let workspace: String
     let observedAt: Date
     let source: String
@@ -654,16 +654,16 @@ struct MSWLogEntry: Codable, Sendable {
     }
 }
 
-struct MSWRepositoriesResponse: Codable, Sendable {
+struct SiloRepositoriesResponse: Codable, Sendable {
     let workspace: String
-    let repositories: [MSWRepositorySnapshot]
+    let repositories: [SiloRepositorySnapshot]
     let needsStart: Bool
-    let freshness: MSWFreshness
+    let freshness: SiloFreshness
     let worktreeStatusIncluded: Bool
     let notice: String?
 }
 
-struct MSWDirectoryResponse: Codable, Sendable, Equatable {
+struct SiloDirectoryResponse: Codable, Sendable, Equatable {
     let workspace: String
     let path: String
     let query: String?
@@ -698,7 +698,7 @@ struct MSWDirectoryResponse: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWEditorTarget: Codable, Sendable, Equatable {
+struct SiloEditorTarget: Codable, Sendable, Equatable {
     let workspace: String
     let path: String
     let host: String
@@ -740,7 +740,7 @@ struct MSWEditorTarget: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWRepositorySnapshot: Codable, Identifiable, Sendable {
+struct SiloRepositorySnapshot: Codable, Identifiable, Sendable {
     let path: String
     let canonicalRemote: String?
     let branch: String?
@@ -757,7 +757,7 @@ struct MSWRepositorySnapshot: Codable, Identifiable, Sendable {
     let remoteCommit: String?
     let pushability: Pushability
     let needsStart: Bool
-    let freshness: MSWFreshness
+    let freshness: SiloFreshness
     let checkedAt: Date?
 
     var id: String { path }
@@ -786,14 +786,14 @@ struct MSWRepositorySnapshot: Codable, Identifiable, Sendable {
     }
 }
 
-struct MSWGitHubStateResponse: Codable, Sendable {
-    let workspaces: [MSWGitHubWorkspaceState]
+struct SiloGitHubStateResponse: Codable, Sendable {
+    let workspaces: [SiloGitHubWorkspaceState]
 }
 
 /// Per-workspace host-secret configuration state from the app state protocol.
-/// Deliberately separate from `MSWCredentialSnapshot`; secret restart
+/// Deliberately separate from `SiloCredentialSnapshot`; secret restart
 /// requirements must never ride the GitHub credential state.
-struct MSWSecretsSnapshot: Codable, Sendable, Equatable {
+struct SiloSecretsSnapshot: Codable, Sendable, Equatable {
     let state: State
     let pendingCount: Int
     let reason: String?
@@ -806,9 +806,9 @@ struct MSWSecretsSnapshot: Codable, Sendable, Equatable {
     }
 }
 
-/// Nonsecret host-secret metadata from `msw app secrets-list --format json`.
+/// Nonsecret host-secret metadata from `silo app secrets-list --format json`.
 /// Never contains secret values.
-struct MSWSecretsListResponse: Codable, Sendable {
+struct SiloSecretsListResponse: Codable, Sendable {
     let entries: [Entry]
     let workspaces: [WorkspaceSummary]
 
@@ -817,7 +817,7 @@ struct MSWSecretsListResponse: Codable, Sendable {
         let workspaces: [String]
         let allowedDomains: [String]
         let status: Status
-        let pendingOperation: MSWSecretPendingOperation?
+        let pendingOperation: SiloSecretPendingOperation?
         let generation: Int
         /// Safe, nonsecret failure detail; `null` when there is none.
         let error: String?
@@ -832,7 +832,7 @@ struct MSWSecretsListResponse: Codable, Sendable {
 
         /// Pending mutation attached to the entry, or `null` when the entry
         /// has no staged change.
-        struct MSWSecretPendingOperation: Codable, Sendable, Equatable {
+        struct SiloSecretPendingOperation: Codable, Sendable, Equatable {
             let type: String
             let createdAt: Date
         }
@@ -849,18 +849,18 @@ struct MSWSecretsListResponse: Codable, Sendable {
     }
 }
 
-/// `msw app secret-plan --input-fd 0` request: operation plus nonsecret
+/// `silo app secret-plan --input-fd 0` request: operation plus nonsecret
 /// metadata, carried on stdin. The value is never part of planning.
-struct MSWSecretPlanRequest: Codable, Sendable, Equatable {
+struct SiloSecretPlanRequest: Codable, Sendable, Equatable {
     let operation: String
     let name: String
     let workspaces: [String]
     let allowedDomains: [String]
 }
 
-/// `msw app secret-plan --input-fd 0` result. Nonsecret; the real value is
+/// `silo app secret-plan --input-fd 0` result. Nonsecret; the real value is
 /// requested only at apply time and travels exclusively on stdin.
-struct MSWSecretPlanResult: Codable, Sendable, Equatable {
+struct SiloSecretPlanResult: Codable, Sendable, Equatable {
     let planId: String
     let operation: String
     let name: String
@@ -871,19 +871,19 @@ struct MSWSecretPlanResult: Codable, Sendable, Equatable {
     let expiresAt: Date
 }
 
-/// `msw app secret-apply PLAN_ID --input-fd 0` request. `value` is required
+/// `silo app secret-apply PLAN_ID --input-fd 0` request. `value` is required
 /// only when the plan reports `requiresSecret`, and it must never appear in
 /// argv, the environment, output, logs, or persisted metadata.
-struct MSWSecretApplyRequest: Codable, Sendable, Equatable {
+struct SiloSecretApplyRequest: Codable, Sendable, Equatable {
     let confirmation: String
     let value: String?
 }
 
-/// `msw app secret-apply` success result. Never contains the value. The app
+/// `silo app secret-apply` success result. Never contains the value. The app
 /// treats the operation as applied only when the envelope reports success,
 /// the result matches the reviewed plan, and `applied` is true; statuses are
 /// re-read from `secrets-list` afterwards.
-struct MSWSecretApplyResult: Codable, Sendable, Equatable {
+struct SiloSecretApplyResult: Codable, Sendable, Equatable {
     let applied: Bool
     let operation: String
     let name: String
@@ -898,20 +898,20 @@ struct MSWSecretApplyResult: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWGitHubBindResult: Codable, Sendable {
+struct SiloGitHubBindResult: Codable, Sendable {
     let workspace: String
     let accessMode: String
     let verificationRepository: String
     let verified: Bool
     let lifecycleRestored: Bool
 }
-struct MSWGitHubUnbindResult: Codable, Sendable {
+struct SiloGitHubUnbindResult: Codable, Sendable {
     let workspace: String
     let unbound: Bool
 }
 
 
-struct MSWGitHubWorkspaceState: Codable, Identifiable, Sendable {
+struct SiloGitHubWorkspaceState: Codable, Identifiable, Sendable {
     let workspace: String
     let provider: String
     let configured: Bool
@@ -925,7 +925,7 @@ struct MSWGitHubWorkspaceState: Codable, Identifiable, Sendable {
     let quarantined: Bool
     /// Local-mode only: the ticked repositories for this workspace from the
     /// policy file. Absent in Connect-mode CLI output.
-    let repos: [MSWGitHubPolicyRepo]?
+    let repos: [SiloGitHubPolicyRepo]?
     let policyUpdatedAt: Date?
     let hostCredential: String?
 
@@ -933,7 +933,7 @@ struct MSWGitHubWorkspaceState: Codable, Identifiable, Sendable {
 }
 
 /// A ticked repository as rendered from the local policy file.
-struct MSWGitHubPolicyRepo: Codable, Identifiable, Sendable, Equatable {
+struct SiloGitHubPolicyRepo: Codable, Identifiable, Sendable, Equatable {
     let canonical: String
     let mode: GitHubRepositoryAccessMode
 
@@ -941,86 +941,86 @@ struct MSWGitHubPolicyRepo: Codable, Identifiable, Sendable, Equatable {
     var modeLabel: String { mode.label }
 }
 
-/// `msw github status --format json` (local mode): top-level mode plus one
+/// `silo github status --format json` (local mode): top-level mode plus one
 /// entry per workspace with policy/capability/shuttle/credential presence.
-struct MSWGitHubStatusResponse: Codable, Sendable {
+struct SiloGitHubStatusResponse: Codable, Sendable {
     let mode: String
-    let workspaces: [MSWGitHubStatusWorkspace]
+    let workspaces: [SiloGitHubStatusWorkspace]
 }
 
-struct MSWGitHubStatusWorkspace: Codable, Sendable {
+struct SiloGitHubStatusWorkspace: Codable, Sendable {
     let workspace: String
     let capability: String?
-    let repos: [MSWGitHubStatusRepo]?
+    let repos: [SiloGitHubStatusRepo]?
     let shuttle: String?
     let hostCredential: String?
 }
 
-struct MSWGitHubStatusRepo: Codable, Sendable, Equatable {
+struct SiloGitHubStatusRepo: Codable, Sendable, Equatable {
     let canonical: String
     let mode: String
 }
 
-/// Nonsecret host-credential metadata from `msw github auth --json`. Never
+/// Nonsecret host-credential metadata from `silo github auth --json`. Never
 /// contains token bytes.
-struct MSWGitHubAuthMetadata: Codable, Sendable {
+struct SiloGitHubAuthMetadata: Codable, Sendable {
     let provider: String?
     let tokenKind: String?
     let accountLogin: String?
     let verifiedAt: Date?
     let generation: Int?
     let storedAt: Date?
-    let repoChecks: [MSWGitHubAuthRepoCheck]?
+    let repoChecks: [SiloGitHubAuthRepoCheck]?
 }
 
-struct MSWGitHubAuthRepoCheck: Codable, Sendable {
+struct SiloGitHubAuthRepoCheck: Codable, Sendable {
     let canonical: String?
     let mode: String?
     let push: Bool?
     let checkedAt: Date?
 }
 
-/// `msw app github-policy-apply` request: the FULL desired policy file
+/// `silo app github-policy-apply` request: the FULL desired policy file
 /// carried on stdin. Missing workspace keys are treated by the CLI as
 /// "clear this workspace", so the app always sends every configured workspace.
-struct MSWGitHubPolicyApplyRequest: Codable, Sendable, Equatable {
+struct SiloGitHubPolicyApplyRequest: Codable, Sendable, Equatable {
     let schemaVersion: Int
     let workspaces: [String: GitHubPolicyWorkspace]
 }
 
-/// `msw app github-policy-apply` success result. The app marks the operation
+/// `silo app github-policy-apply` success result. The app marks the operation
 /// applied ONLY when `applied`, `provisioned`, and `committed` are all true.
-struct MSWGitHubPolicyApplyResult: Codable, Sendable {
+struct SiloGitHubPolicyApplyResult: Codable, Sendable {
     let applied: Bool?
     let provisioned: Bool?
     let committed: Bool?
-    let workspaces: [MSWGitHubPolicyApplyWorkspace]?
+    let workspaces: [SiloGitHubPolicyApplyWorkspace]?
 }
 
-struct MSWGitHubPolicyApplyWorkspace: Codable, Sendable {
+struct SiloGitHubPolicyApplyWorkspace: Codable, Sendable {
     let workspace: String
     let capability: String?
-    let repos: [MSWGitHubStatusRepo]?
+    let repos: [SiloGitHubStatusRepo]?
 }
 
-/// Repository discovery entry from `msw github repos --format json`.
-struct MSWGitHubDiscoveredRepo: Codable, Sendable, Equatable {
+/// Repository discovery entry from `silo github repos --format json`.
+struct SiloGitHubDiscoveredRepo: Codable, Sendable, Equatable {
     let canonical: String
     let name: String
     let owner: String
     let `private`: Bool
-    let permissions: MSWGitHubRepoPermissions
+    let permissions: SiloGitHubRepoPermissions
     let inPolicy: Bool
 }
 
-struct MSWGitHubRepoPermissions: Codable, Sendable, Equatable {
+struct SiloGitHubRepoPermissions: Codable, Sendable, Equatable {
     let pull: Bool
     let push: Bool
 }
 
 /// Typed raw-CLI error document (non-app-protocol commands):
 /// `{"ok":false,"error":{"code":...,"message":...,"remedies":[...]}}`.
-struct MSWGitHubRawError: Codable, Sendable, Equatable {
+struct SiloGitHubRawError: Codable, Sendable, Equatable {
     let code: String?
     let message: String?
     let remedies: [String]?
@@ -1029,21 +1029,21 @@ struct MSWGitHubRawError: Codable, Sendable, Equatable {
 /// Union-shaped JSON document for the raw `github` commands
 /// (`repos`, `auth --device`, `auth --device-complete`). All fields optional;
 /// callers validate the fields their command needs.
-struct MSWGitHubCLIResponse: Codable, Sendable {
+struct SiloGitHubCLIResponse: Codable, Sendable {
     let ok: Bool?
     let mode: String?
-    let repos: [MSWGitHubDiscoveredRepo]?
+    let repos: [SiloGitHubDiscoveredRepo]?
     let status: String?
     let interval: Int?
     let deviceId: String?
     let code: String?
     let verificationUri: String?
     let expiresAt: Date?
-    let metadata: MSWGitHubAuthMetadata?
-    let error: MSWGitHubRawError?
+    let metadata: SiloGitHubAuthMetadata?
+    let error: SiloGitHubRawError?
 }
 
-struct MSWLifecyclePlan: Codable, Sendable, Equatable {
+struct SiloLifecyclePlan: Codable, Sendable, Equatable {
     let planId: String
     let action: String
     let workspace: String
@@ -1052,14 +1052,14 @@ struct MSWLifecyclePlan: Codable, Sendable, Equatable {
     let effects: String
 }
 
-struct MSWApplyResult: Codable, Sendable {
+struct SiloApplyResult: Codable, Sendable {
     let workspace: String
     let action: String
     let reconciled: Bool
     let outcome: String
 }
  
-struct MSWPushPlan: Codable, Sendable {
+struct SiloPushPlan: Codable, Sendable {
     let planId: String
     let workspace: String
     let repositoryPath: String
@@ -1074,7 +1074,7 @@ struct MSWPushPlan: Codable, Sendable {
     let effects: String
 }
 
-struct MSWPushApplyResult: Codable, Sendable {
+struct SiloPushApplyResult: Codable, Sendable {
     let workspace: String
     let repositoryPath: String
     let branch: String
@@ -1083,7 +1083,7 @@ struct MSWPushApplyResult: Codable, Sendable {
     let outcome: String
 }
 
-struct MSWBootstrapResult: Codable, Sendable {
+struct SiloBootstrapResult: Codable, Sendable {
     let resumed: Bool
     let phase: String
     let requiresApproval: Bool
@@ -1091,13 +1091,13 @@ struct MSWBootstrapResult: Codable, Sendable {
     let message: String
 }
 
-struct MSWURLResult: Codable, Sendable {
+struct SiloURLResult: Codable, Sendable {
     let workspace: String
     let url: String
     let started: Bool
 }
 
-struct MSWWorkspaceOperationResult: Codable, Sendable {
+struct SiloWorkspaceOperationResult: Codable, Sendable {
     let workspace: String
     let operation: String
     let target: String?
@@ -1105,14 +1105,14 @@ struct MSWWorkspaceOperationResult: Codable, Sendable {
     let outcome: String
 }
 
-struct MSWIdentityResult: Codable, Sendable {
+struct SiloIdentityResult: Codable, Sendable {
     let target: String
     let name: String
     let email: String
     let workspaces: [String]
 }
 
-struct MSWResourceResult: Codable, Sendable {
+struct SiloResourceResult: Codable, Sendable {
     let workspace: String
     let memory: String
     let cpus: String?
@@ -1120,21 +1120,21 @@ struct MSWResourceResult: Codable, Sendable {
     let outcome: String
 }
 
-struct MSWMaintenanceResult: Codable, Sendable {
+struct SiloMaintenanceResult: Codable, Sendable {
     let target: String
     let operation: String
     let volumesRemoved: Bool
     let outcome: String
 }
 
-struct MSWCheckResult: Codable, Sendable {
+struct SiloCheckResult: Codable, Sendable {
     let deep: Bool
     let passed: Bool
-    let checks: [MSWDiagnosticCheck]
+    let checks: [SiloDiagnosticCheck]
     let outcome: String
 }
 
-struct MSWBackupFinalResponse: Codable, Sendable, Equatable {
+struct SiloBackupFinalResponse: Codable, Sendable, Equatable {
     let archive: String
     let archiveBytes: Int64
     let checksum: String
@@ -1161,7 +1161,7 @@ struct MSWBackupFinalResponse: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWBackupEstimateResponse: Codable, Sendable, Equatable {
+struct SiloBackupEstimateResponse: Codable, Sendable, Equatable {
     let lowerBytes: Int64
     let upperBytes: Int64
     let basisRatio: Double
@@ -1183,10 +1183,10 @@ struct MSWBackupEstimateResponse: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWBackupPreviewResponse: Codable, Sendable {
+struct SiloBackupPreviewResponse: Codable, Sendable {
     let destination: String
     let sourceAllocatedBytes: Int64
-    let archiveEstimate: MSWBackupEstimateResponse?
+    let archiveEstimate: SiloBackupEstimateResponse?
     let runningWorkspaces: [String]
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -1198,12 +1198,12 @@ struct MSWBackupPreviewResponse: Codable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         destination = try container.decode(String.self, forKey: .destination)
         sourceAllocatedBytes = try container.decode(Int64.self, forKey: .sourceAllocatedBytes)
-        archiveEstimate = try container.decodeIfPresent(MSWBackupEstimateResponse.self, forKey: .archiveEstimate)
+        archiveEstimate = try container.decodeIfPresent(SiloBackupEstimateResponse.self, forKey: .archiveEstimate)
         runningWorkspaces = try container.decode([String].self, forKey: .runningWorkspaces)
     }
 }
 
-struct MSWBackupProgressResponse: Codable, Sendable, Equatable {
+struct SiloBackupProgressResponse: Codable, Sendable, Equatable {
     let processedBytes: Int64
     let writtenBytes: Int64
     let throughputBytesPerSecond: Int64
@@ -1225,7 +1225,7 @@ struct MSWBackupProgressResponse: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWBackupOperationErrorResponse: Codable, Sendable, Equatable {
+struct SiloBackupOperationErrorResponse: Codable, Sendable, Equatable {
     let code: String
     let message: String
     let recovery: String
@@ -1252,7 +1252,7 @@ struct MSWBackupOperationErrorResponse: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWBackupOperationResponse: Codable, Sendable, Equatable {
+struct SiloBackupOperationResponse: Codable, Sendable, Equatable {
     let kind: String
     let operationId: String
     let requestKey: String
@@ -1267,11 +1267,11 @@ struct MSWBackupOperationResponse: Codable, Sendable, Equatable {
     let ownerPid: Int32?
     let ownerProcessState: String
     let sourceAllocatedBytes: Int64
-    let archiveEstimate: MSWBackupEstimateResponse?
+    let archiveEstimate: SiloBackupEstimateResponse?
     let runningWorkspaces: [String]
-    let progress: MSWBackupProgressResponse
-    let result: MSWBackupFinalResponse?
-    let error: MSWBackupOperationErrorResponse?
+    let progress: SiloBackupProgressResponse
+    let result: SiloBackupFinalResponse?
+    let error: SiloBackupOperationErrorResponse?
     let warnings: [String]
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
@@ -1297,11 +1297,11 @@ struct MSWBackupOperationResponse: Codable, Sendable, Equatable {
         ownerPid = try container.decodeIfPresent(Int32.self, forKey: .ownerPid)
         ownerProcessState = try container.decode(String.self, forKey: .ownerProcessState)
         sourceAllocatedBytes = try container.decode(Int64.self, forKey: .sourceAllocatedBytes)
-        archiveEstimate = try container.decodeIfPresent(MSWBackupEstimateResponse.self, forKey: .archiveEstimate)
+        archiveEstimate = try container.decodeIfPresent(SiloBackupEstimateResponse.self, forKey: .archiveEstimate)
         runningWorkspaces = try container.decode([String].self, forKey: .runningWorkspaces)
-        progress = try container.decode(MSWBackupProgressResponse.self, forKey: .progress)
-        result = try container.decodeIfPresent(MSWBackupFinalResponse.self, forKey: .result)
-        error = try container.decodeIfPresent(MSWBackupOperationErrorResponse.self, forKey: .error)
+        progress = try container.decode(SiloBackupProgressResponse.self, forKey: .progress)
+        result = try container.decodeIfPresent(SiloBackupFinalResponse.self, forKey: .result)
+        error = try container.decodeIfPresent(SiloBackupOperationErrorResponse.self, forKey: .error)
         warnings = try container.decode([String].self, forKey: .warnings)
     }
 }
@@ -1340,7 +1340,7 @@ enum JSONValue: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWProgressEvent: Codable, Sendable {
+struct SiloProgressEvent: Codable, Sendable {
     let schemaVersion: Int
     let type: String
     let requestId: String
@@ -1351,7 +1351,7 @@ struct MSWProgressEvent: Codable, Sendable {
     let safeForDisplay: Bool
 }
 
-struct MSWRecoveryContext: Codable, Sendable, Equatable {
+struct SiloRecoveryContext: Codable, Sendable, Equatable {
     let code: String
     let reason: String
     let recovery: String?
@@ -1359,7 +1359,7 @@ struct MSWRecoveryContext: Codable, Sendable, Equatable {
     let retryable: Bool
 }
 
-struct MSWOperationState: Identifiable, Codable, Sendable, Equatable {
+struct SiloOperationState: Identifiable, Codable, Sendable, Equatable {
     enum Kind: String, Codable, Sendable {
         case lifecycle
         case push
@@ -1392,10 +1392,10 @@ struct MSWOperationState: Identifiable, Codable, Sendable, Equatable {
     var fraction: Double?
     var message: String
     var outcome: Outcome
-    var recovery: MSWRecoveryContext?
+    var recovery: SiloRecoveryContext?
 }
 
-struct MSWNotificationEvent: Identifiable, Codable, Sendable, Equatable {
+struct SiloNotificationEvent: Identifiable, Codable, Sendable, Equatable {
     enum Kind: String, Codable, Sendable {
         case sustainedUnavailability = "sustained-unavailability"
         case quarantine
@@ -1415,7 +1415,7 @@ struct MSWNotificationEvent: Identifiable, Codable, Sendable, Equatable {
     let generation: Int
 }
 
-struct MSWActivity: Identifiable, Codable, Sendable {
+struct SiloActivity: Identifiable, Codable, Sendable {
     let id: UUID
     let createdAt: Date
     let kind: Kind

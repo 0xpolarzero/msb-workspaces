@@ -3,13 +3,13 @@ import XCTest
 @testable import Silo
 
 /// Path C Phase 3 unit tests: local provider catalog/commit behavior against
-/// a fake `msw` CLI, policy-file strict decoding, the directory watcher, and
+/// a fake `silo` CLI, policy-file strict decoding, the directory watcher, and
 /// the §8 user-facing labels.
 @MainActor
 final class GitHubLocalProviderTests: XCTestCase {
     private func makeTemporaryDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("msw-github-local-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-github-local-\(UUID().uuidString)", isDirectory: true)
         try! FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
@@ -24,10 +24,10 @@ final class GitHubLocalProviderTests: XCTestCase {
         try! Data(json.utf8).write(to: url)
     }
 
-    private static let handshakeLine = #"{"schemaVersion":1,"requestId":"handshake","ok":true,"command":"handshake","observedAt":"2026-08-21T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
+    private static let handshakeLine = #"{"schemaVersion":1,"requestId":"handshake","ok":true,"command":"handshake","observedAt":"2026-08-21T00:00:00Z","result":{"protocolVersion":1,"siloVersion":"3.1.0","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
     private static let policyApplyLine = #"{"schemaVersion":1,"requestId":"apply","ok":true,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":{"applied":true,"provisioned":true,"committed":true,"workspaces":[{"workspace":"dev","capability":"0123456789abcdef0123456789abcdef0123456789abcdef","repos":[]}]},"warnings":[],"error":null}"#
-    private static let policyConflictLine = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":null,"warnings":[],"error":{"code":"MSW_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Wait for it to finish, then retry the policy apply.","workspace":null,"retryable":true}}"#
+    private static let policyConflictLine = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":null,"warnings":[],"error":{"code":"SILO_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Wait for it to finish, then retry the policy apply.","workspace":null,"retryable":true}}"#
 
     /// Single-quotes a value for /bin/sh so embedded JSON with apostrophes
     /// (e.g. remedies like "Run 'gh auth login'") cannot break the script.
@@ -35,10 +35,10 @@ final class GitHubLocalProviderTests: XCTestCase {
         "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
 
-    /// Builds a fake `msw` executable that logs every non-handshake call to a
+    /// Builds a fake `silo` executable that logs every non-handshake call to a
     /// log file (path baked in) and answers `github status`, `github auth`,
     /// `app github-policy-apply` (capturing stdin), and the device flow.
-    private func makeFakeMSW(
+    private func makeFakeSilo(
         directory: URL,
         statusJSON: String,
         authJSON: String? = nil,
@@ -58,7 +58,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         let log = directory.appendingPathComponent("calls.log")
         let applyStdin = directory.appendingPathComponent("apply.stdin.json")
         let policy = directory.appendingPathComponent("github-policy.json")
-        let executable = directory.appendingPathComponent("msw")
+        let executable = directory.appendingPathComponent("silo")
         var lines = [
             "#!/bin/sh",
             "LOG=\"\(log.path)\"",
@@ -191,7 +191,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         return (try? String(contentsOf: log, encoding: .utf8)) ?? ""
     }
 
-    /// Counts lines in the fake-MSW call log whose command token is
+    /// Counts lines in the fake-Silo call log whose command token is
     /// `github-policy-apply` (the log line is
     /// `policy-apply app github-policy-apply --format json`, so the substring
     /// appears twice per line — count LINES, not occurrences).
@@ -269,7 +269,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             phase: .failed,
             workspace: "dev",
             failure: GitHubApplyFailure(
-                code: "MSW_INVALID_REQUEST",
+                code: "SILO_INVALID_REQUEST",
                 message: "The repository policy is invalid.",
                 recovery: "Review the repository selection.",
                 workspace: "dev",
@@ -285,7 +285,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             phase: .failed,
             workspace: "dev",
             failure: GitHubApplyFailure(
-                code: "MSW_TRANSPORT_PROVISION_FAILED",
+                code: "SILO_TRANSPORT_PROVISION_FAILED",
                 message: "GitHub transport could not be configured.",
                 recovery: "Retry synchronization.",
                 workspace: "dev",
@@ -299,7 +299,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             phase: .failed,
             workspace: "dev",
             failure: GitHubApplyFailure(
-                code: "MSW_OPERATION_CONFLICT",
+                code: "SILO_OPERATION_CONFLICT",
                 message: "Another GitHub operation is already running.",
                 recovery: "Delete the stale lock and retry.",
                 workspace: "dev",
@@ -416,14 +416,14 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"present"}]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false},{"canonical":"acme/one","name":"one","owner":"acme","private":true,"permissions":{"pull":true,"push":false},"inPolicy":true},{"canonical":"org/repo","name":"repo","owner":"org","private":false,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
@@ -459,14 +459,14 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]},"playgrounds":{"capability":"def","repos":[]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"present"}]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         // Load, then refresh (a second load): BOTH must re-merge the grant.
         let first = try await provider.loadCatalog()
@@ -505,13 +505,13 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{\"dev\":{\"repos\":[{\"canonical\":\"acme/one\",\"mode\":\"read-only\"}]}}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"missing","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"missing"}]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let catalog = try await provider.loadCatalog()
 
@@ -534,14 +534,14 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[],"shuttle":"stopped","hostCredential":"present"}]}"#,
-            reposJSON: #"{"ok":false,"error":{"code":"MSW_REPOSITORY_DISCOVERY_FAILED","message":"GitHub API discovery failed","remedies":["Retry"]}}"#,
+            reposJSON: #"{"ok":false,"error":{"code":"SILO_REPOSITORY_DISCOVERY_FAILED","message":"GitHub API discovery failed","remedies":["Retry"]}}"#,
             reposExit: 1
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
             _ = try await provider.loadCatalog()
@@ -558,12 +558,12 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"connect","workspaces":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
             _ = try await provider.loadCatalog()
@@ -583,13 +583,13 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]},"playgrounds":{"capability":"def","repos":[{"canonical":"acme/three","mode":"read-only"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
@@ -634,7 +634,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         // workspaces replaced, untouched workspaces preserved.
         let stdin = readApplyStdin(directory)
         let payload = try XCTUnwrap(
-            MSWProtocolDecoder.decoder().decode(MSWGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
+            SiloProtocolDecoder.decoder().decode(SiloGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
         )
         XCTAssertEqual(payload.schemaVersion, 1)
         XCTAssertEqual(
@@ -657,18 +657,18 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyConflictsBeforeSuccess: 1
         )
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: directory,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
         let ownerID = GitHubLocalProvider.stableID("acme")
@@ -697,16 +697,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyConflictsBeforeSuccess: 5
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL),
             contentionBackoff: { _ in .milliseconds(80) }
@@ -746,7 +746,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let desired = MSWGitHubPolicyApplyRequest(
+        let desired = SiloGitHubPolicyApplyRequest(
             schemaVersion: 1,
             workspaces: [
                 "dev": GitHubPolicyWorkspace(
@@ -769,15 +769,15 @@ final class GitHubLocalProviderTests: XCTestCase {
             ),
             policyURL: policyURL
         )
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
         let restarted = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -798,7 +798,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let staleDesired = MSWGitHubPolicyApplyRequest(
+        let staleDesired = SiloGitHubPolicyApplyRequest(
             schemaVersion: 1,
             workspaces: [
                 "dev": GitHubPolicyWorkspace(
@@ -819,7 +819,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             ),
             policyURL: policyURL
         )
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
@@ -828,9 +828,9 @@ final class GitHubLocalProviderTests: XCTestCase {
         renamedWorkspace.name = "development"
         let configured = [renamedWorkspace]
         let restarted = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL),
             workspaceConfigurations: configured
@@ -839,8 +839,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         _ = await restarted.policySyncProgress()
         try await restarted.waitForPolicySync()
 
-        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let appliedRequest = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(Set(appliedRequest.workspaces.keys), ["development"])
@@ -855,15 +855,15 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -891,16 +891,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.4
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -935,8 +935,8 @@ final class GitHubLocalProviderTests: XCTestCase {
 
         let finalProgress = await provider.policySyncProgress()
         XCTAssertEqual(finalProgress?.generation, newest.generation)
-        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let appliedRequest = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(Set(appliedRequest.workspaces.keys), ["development"])
@@ -947,16 +947,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.3
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -979,13 +979,13 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"personal":{"capability":"ghi","repos":[{"canonical":"acme/two","mode":"read-write"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
@@ -1010,7 +1010,7 @@ final class GitHubLocalProviderTests: XCTestCase {
 
         let stdin = readApplyStdin(directory)
         let payload = try XCTUnwrap(
-            MSWProtocolDecoder.decoder().decode(MSWGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
+            SiloProtocolDecoder.decoder().decode(SiloGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
         )
         // Unedited personal workspace keeps its existing cross-owner entry.
         let personal = try XCTUnwrap(payload.workspaces["personal"])
@@ -1026,13 +1026,13 @@ final class GitHubLocalProviderTests: XCTestCase {
         // CLI reports applied=false (e.g. provisioning failed and the policy
         // was rolled back): the app must NOT claim the operation applied.
         let notApplied = #"{"schemaVersion":1,"requestId":"apply","ok":true,"command":"github-policy-apply","observedAt":"2026-08-21T00:00:00Z","result":{"applied":false,"provisioned":false,"committed":false,"workspaces":[]},"warnings":[],"error":null}"#
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: notApplied
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
@@ -1057,15 +1057,15 @@ final class GitHubLocalProviderTests: XCTestCase {
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
         // Typed rollback/failure envelope (transport provisioning failed).
-        let failure = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":null,"result":null,"warnings":[],"error":{"code":"MSW_TRANSPORT_PROVISION_FAILED","message":"Transport provisioning failed; the policy was rolled back","recovery":"Retry the policy apply","workspace":"dev","retryable":true}}"#
-        let executable = makeFakeMSW(
+        let failure = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":null,"result":null,"warnings":[],"error":{"code":"SILO_TRANSPORT_PROVISION_FAILED","message":"Transport provisioning failed; the policy was rolled back","recovery":"Retry the policy apply","workspace":"dev","retryable":true}}"#
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: failure,
             applyExit: 77
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
@@ -1081,7 +1081,7 @@ final class GitHubLocalProviderTests: XCTestCase {
             guard case .failed(let failure) = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
-            XCTAssertEqual(failure.code, "MSW_TRANSPORT_PROVISION_FAILED")
+            XCTAssertEqual(failure.code, "SILO_TRANSPORT_PROVISION_FAILED")
             XCTAssertTrue(failure.message.contains("rolled back"))
         }
     }
@@ -1090,17 +1090,17 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let failure = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":null,"result":null,"warnings":[],"error":{"code":"MSW_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Remove the stale lock and retry.","workspace":"dev","retryable":false}}"#
-        let executable = makeFakeMSW(
+        let failure = #"{"schemaVersion":1,"requestId":"apply","ok":false,"command":"github-policy-apply","observedAt":null,"result":null,"warnings":[],"error":{"code":"SILO_OPERATION_CONFLICT","message":"Another GitHub operation is already running for a workspace.","recovery":"Remove the stale lock and retry.","workspace":"dev","retryable":false}}"#
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: failure,
             applyExit: 75
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -1128,15 +1128,15 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.25
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
         let desired = [GitHubWorkspacePolicy(workspace: "dev", repositories: [
@@ -1163,12 +1163,12 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"0123456789abcdef0123456789abcdef0123456789abcdef","repos":[{"canonical":"acme/one","mode":"read-only"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let progress = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
@@ -1185,15 +1185,15 @@ final class GitHubLocalProviderTests: XCTestCase {
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
         let identity = #"{"schemaVersion":1,"requestId":"identity","ok":true,"command":"identity","observedAt":"2026-08-21T00:00:00Z","result":{"target":"dev","name":"Ada","email":"ada@example.test","workspaces":["dev"]},"warnings":[],"error":null}"#
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.35,
             identityJSON: identity
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
         let first = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [repositoryPolicy(workspace: "dev", fullName: "acme/one", mode: .readOnly)])
         ])
@@ -1211,8 +1211,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let progress = try XCTUnwrap(maybeProgress)
         XCTAssertEqual(progress.generation, newest.generation)
         XCTAssertEqual(progress.phase, .applied)
-        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let appliedRequest = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(appliedRequest.workspaces["dev"]?.repos.map(\.canonical), ["acme/two"])
@@ -1228,16 +1228,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.25
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -1279,8 +1279,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let finalProgress = await provider.policySyncProgress()
         XCTAssertEqual(finalProgress?.generation, latest.generation)
         XCTAssertEqual(finalProgress?.phase, .applied)
-        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let appliedRequest = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(appliedRequest.workspaces["dev"]?.repos.map(\.canonical), [latest.repository])
@@ -1290,16 +1290,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.4
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -1328,8 +1328,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let finalProgress = await provider.policySyncProgress()
         XCTAssertEqual(finalProgress?.generation, accepted.generation)
         XCTAssertEqual(finalProgress?.phase, .applied)
-        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let appliedRequest = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(appliedRequest.workspaces["dev"]?.repos.map(\.canonical), ["acme/accepted"])
@@ -1339,16 +1339,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.3
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -1372,14 +1372,14 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.35
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         _ = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
@@ -1399,8 +1399,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let completed = try XCTUnwrap(maybeCompleted)
         XCTAssertEqual(completed.generation, newest.generation)
         XCTAssertEqual(completed.phase, .applied, "A waiter must follow a superseding generation through completion")
-        let appliedRequest = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let appliedRequest = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(appliedRequest.workspaces["dev"]?.repos.map(\.canonical), ["acme/one"])
@@ -1411,14 +1411,14 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             applyDelay: 0.35
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         _ = try await provider.savePolicy([
             GitHubWorkspacePolicy(workspace: "dev", repositories: [
@@ -1448,13 +1448,13 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]},"playgrounds":{"capability":"def","repos":[]},"personal":{"capability":"ghi","repos":[{"canonical":"acme/two","mode":"read-write"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let store = GitHubPolicyStore(policyURL: policyURL)
         let provider = GitHubLocalProvider(client: client, policyStore: store)
 
@@ -1465,7 +1465,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(applyCalls, 1, "Removal must be a single apply invocation")
         let stdin = readApplyStdin(directory)
         let payload = try XCTUnwrap(
-            MSWProtocolDecoder.decoder().decode(MSWGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
+            SiloProtocolDecoder.decoder().decode(SiloGitHubPolicyApplyRequest.self, from: Data(stdin.utf8))
         )
         for workspace in SetupWorkspaceConfiguration.defaults.map(\.name) {
             let entry = try XCTUnwrap(payload.workspaces[workspace])
@@ -1479,16 +1479,16 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: """
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"abc","repos":[{"canonical":"acme/one","mode":"read-only"}]}}}
         """)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             applyJSON: Self.policyApplyLine,
             resetCommandsSucceed: true
         )
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: MSWCommandRunner(configuration: .init(
+            client: SiloClient(runner: SiloCommandRunner(configuration: .init(
                 homeDirectory: directory,
-                testMSWExecutable: executable
+                testSiloExecutable: executable
             ))),
             policyStore: GitHubPolicyStore(policyURL: policyURL)
         )
@@ -1512,18 +1512,18 @@ final class GitHubLocalProviderTests: XCTestCase {
         {"schemaVersion":1,"workspaces":{"dev":{"capability":"old","repos":[{"canonical":"acme/old","mode":"read-only"}]},"personal":{"capability":"keep","repos":[]}}}
         """)
         let identity = #"{"schemaVersion":1,"requestId":"identity","ok":true,"command":"identity","observedAt":"2026-08-21T00:00:00Z","result":{"target":"all","name":"Ada","email":"ada@example.test","workspaces":["development","personal","lab"]},"warnings":[],"error":null}"#
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"old","repos":[],"shuttle":"stopped","hostCredential":"present"}]}"#,
             applyJSON: Self.policyApplyLine,
             identityJSON: identity
         )
-        let runner = MSWCommandRunner(configuration: .init(
+        let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: directory,
-            testMSWExecutable: executable
+            testSiloExecutable: executable
         ))
         let provider = GitHubLocalProvider(
-            client: MSWClient(runner: runner),
+            client: SiloClient(runner: runner),
             policyStore: GitHubPolicyStore(policyURL: policyURL),
             workspaceConfigurations: SetupWorkspaceConfiguration.defaults
         )
@@ -1566,8 +1566,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         ])
         try await provider.waitForPolicySync()
 
-        let request = try MSWProtocolDecoder.decoder().decode(
-            MSWGitHubPolicyApplyRequest.self,
+        let request = try SiloProtocolDecoder.decoder().decode(
+            SiloGitHubPolicyApplyRequest.self,
             from: Data(readApplyStdin(directory).utf8)
         )
         XCTAssertEqual(Set(request.workspaces.keys), ["development", "personal", "lab"])
@@ -1588,13 +1588,13 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testConnectAccountReturnsAccountFromAuthMetadata() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":2,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let account = try await provider.connectAccount()
 
@@ -1605,13 +1605,13 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testConnectAccountSurfacesCLIFailure() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
-            authJSON: #"{"ok":false,"error":{"code":"MSW_HOST_CREDENTIAL_VERIFICATION_FAILED","message":"verification failed; nothing was stored","remedies":["Retry"]}}"#
+            authJSON: #"{"ok":false,"error":{"code":"SILO_HOST_CREDENTIAL_VERIFICATION_FAILED","message":"verification failed; nothing was stored","remedies":["Retry"]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
             _ = try await provider.connectAccount()
@@ -1627,13 +1627,13 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testConnectAccountRoutesToGhWebLoginWhenNotConfigured() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
-            authJSON: #"{"ok":false,"error":{"code":"MSW_HOST_OAUTH_NOT_CONFIGURED","message":"gh is not authenticated and the OAuth Device Flow client ID (MSW_HOST_OAUTH_CLIENT_ID) is not set","remedies":["Run 'gh auth login' then retry","Set MSW_HOST_OAUTH_CLIENT_ID to the release's public client ID, or use the device flow (--device)"]}}"#
+            authJSON: #"{"ok":false,"error":{"code":"SILO_HOST_OAUTH_NOT_CONFIGURED","message":"gh is not authenticated and the OAuth Device Flow client ID (SILO_HOST_OAUTH_CLIENT_ID) is not set","remedies":["Run 'gh auth login' then retry","Set SILO_HOST_OAUTH_CLIENT_ID to the release's public client ID, or use the device flow (--device)"]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
             _ = try await provider.connectAccount()
@@ -1648,13 +1648,13 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testConnectAccountRoutesToDeviceFlowWhenClientIDConfigured() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
-            authJSON: #"{"ok":false,"error":{"code":"MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED","message":"OAuth Device Flow requires an interactive terminal for plain 'msw github auth'","remedies":["Use 'msw github auth --device' and complete it with --device-complete"]}}"#
+            authJSON: #"{"ok":false,"error":{"code":"SILO_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED","message":"OAuth Device Flow requires an interactive terminal for plain 'silo github auth'","remedies":["Use 'silo github auth --device' and complete it with --device-complete"]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
             _ = try await provider.connectAccount()
@@ -1683,8 +1683,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         let fakeGh = makeFakeGh(directory)
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory))
-        let client = MSWClient(runner: runner, ghResolver: { fakeGh })
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory))
+        let client = SiloClient(runner: runner, ghResolver: { fakeGh })
         let provider = GitHubLocalProvider(client: client, policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         try await provider.launchGhWebLogin()
@@ -1702,8 +1702,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         let policyURL = directory.appendingPathComponent("github-policy.json")
         // The injected resolver reports no gh; the real host gh must never
         // be launched from a unit test.
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory))
-        let client = MSWClient(runner: runner, ghResolver: { nil })
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory))
+        let client = SiloClient(runner: runner, ghResolver: { nil })
         let provider = GitHubLocalProvider(client: client, policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
@@ -1717,19 +1717,19 @@ final class GitHubLocalProviderTests: XCTestCase {
     }
 
     func testGhWebLoginThenRetryAuthSucceeds() async throws {
-        // gh is unauthenticated (MSW_HOST_OAUTH_NOT_CONFIGURED) -> the app
-        // launches gh web login -> then retries `msw github auth --json`,
+        // gh is unauthenticated (SILO_HOST_OAUTH_NOT_CONFIGURED) -> the app
+        // launches gh web login -> then retries `silo github auth --json`,
         // which now succeeds via gh reuse.
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         let fakeGh = makeFakeGh(directory)
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner, ghResolver: { fakeGh })
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner, ghResolver: { fakeGh })
         let provider = GitHubLocalProvider(client: client, policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         // Retry-auth path: launch gh web login, then acquire the account.
@@ -1743,20 +1743,20 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testStartDeviceFlowSurfacesNotConfiguredRemedyVerbatim() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
-            deviceJSON: #"{"ok":false,"error":{"code":"MSW_HOST_OAUTH_NOT_CONFIGURED","message":"host GitHub credential is not configured: gh is not authenticated and the OAuth Device Flow client ID is not set (MSW_HOST_OAUTH_CLIENT_ID)","remedies":["Run 'gh auth login'"]}}"#,
+            deviceJSON: #"{"ok":false,"error":{"code":"SILO_HOST_OAUTH_NOT_CONFIGURED","message":"host GitHub credential is not configured: gh is not authenticated and the OAuth Device Flow client ID is not set (SILO_HOST_OAUTH_CLIENT_ID)","remedies":["Run 'gh auth login'"]}}"#,
             deviceExit: 66
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         do {
             _ = try await provider.startDeviceFlow()
             XCTFail("Expected notConfigured")
         } catch GitHubCatalogError.notConfigured(let message) {
-            XCTAssertTrue(message.contains("MSW_HOST_OAUTH_CLIENT_ID"))
+            XCTAssertTrue(message.contains("SILO_HOST_OAUTH_CLIENT_ID"))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -1765,13 +1765,13 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testStartDeviceFlowReturnsCodeAndPollHandle() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             deviceJSON: #"{"ok":true,"deviceId":"device-code-1","code":"ABCD-EFGH","verificationUri":"https://github.com/login/device","expiresAt":"2026-08-21T12:00:00Z","interval":5}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let start = try await provider.startDeviceFlow()
         XCTAssertEqual(start.deviceId, "device-code-1")
@@ -1787,7 +1787,7 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testDeviceFlowSessionPollingAndCompletion() async throws {
         let session = GitHubDeviceFlowSession(
             startDeviceFlow: {
-                MSWDeviceFlowStart(
+                SiloDeviceFlowStart(
                     deviceId: "d1",
                     code: "CODE-1",
                     verificationUri: "https://github.com/login/device",
@@ -1796,7 +1796,7 @@ final class GitHubLocalProviderTests: XCTestCase {
                 )
             },
             pollDeviceFlow: { _ in
-                MSWDeviceFlowPoll(status: .pending, interval: 5, accountLogin: nil)
+                SiloDeviceFlowPoll(status: .pending, interval: 5, accountLogin: nil)
             }
         )
         let firstDelay = await session.begin()
@@ -1816,7 +1816,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         var polls = 0
         let session = GitHubDeviceFlowSession(
             startDeviceFlow: {
-                MSWDeviceFlowStart(
+                SiloDeviceFlowStart(
                     deviceId: "d1",
                     code: "CODE-1",
                     verificationUri: "https://github.com/login/device",
@@ -1827,9 +1827,9 @@ final class GitHubLocalProviderTests: XCTestCase {
             pollDeviceFlow: { _ in
                 polls += 1
                 if polls == 1 {
-                    return MSWDeviceFlowPoll(status: .slowDown, interval: 15, accountLogin: nil)
+                    return SiloDeviceFlowPoll(status: .slowDown, interval: 15, accountLogin: nil)
                 }
-                return MSWDeviceFlowPoll(status: .authorized, interval: nil, accountLogin: "octocat")
+                return SiloDeviceFlowPoll(status: .authorized, interval: nil, accountLogin: "octocat")
             }
         )
         _ = await session.begin()
@@ -1843,8 +1843,8 @@ final class GitHubLocalProviderTests: XCTestCase {
 
     func testDeviceFlowSessionExpiredAndDeniedEndTheFlow() async throws {
         let expired = GitHubDeviceFlowSession(
-            startDeviceFlow: { MSWDeviceFlowStart(deviceId: "d", code: "C", verificationUri: "https://github.com/login/device", expiresAt: Date(), interval: 5) },
-            pollDeviceFlow: { _ in MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil) }
+            startDeviceFlow: { SiloDeviceFlowStart(deviceId: "d", code: "C", verificationUri: "https://github.com/login/device", expiresAt: Date(), interval: 5) },
+            pollDeviceFlow: { _ in SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil) }
         )
         _ = await expired.begin()
         let expiredPoll = await expired.poll()
@@ -1852,8 +1852,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(expired.phase, .expired)
 
         let denied = GitHubDeviceFlowSession(
-            startDeviceFlow: { MSWDeviceFlowStart(deviceId: "d", code: "C", verificationUri: "https://github.com/login/device", expiresAt: Date(), interval: 5) },
-            pollDeviceFlow: { _ in MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil) }
+            startDeviceFlow: { SiloDeviceFlowStart(deviceId: "d", code: "C", verificationUri: "https://github.com/login/device", expiresAt: Date(), interval: 5) },
+            pollDeviceFlow: { _ in SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil) }
         )
         _ = await denied.begin()
         let deniedPoll = await denied.poll()
@@ -1863,8 +1863,8 @@ final class GitHubLocalProviderTests: XCTestCase {
 
     func testDeviceFlowSessionStartFailureReportsFailed() async throws {
         let session = GitHubDeviceFlowSession(
-            startDeviceFlow: { throw MSWClientError.rawCLIError(code: "MSW_HOST_OAUTH_NOT_CONFIGURED", message: "not configured remedy") },
-            pollDeviceFlow: { _ in MSWDeviceFlowPoll(status: .pending, interval: nil, accountLogin: nil) }
+            startDeviceFlow: { throw SiloClientError.rawCLIError(code: "SILO_HOST_OAUTH_NOT_CONFIGURED", message: "not configured remedy") },
+            pollDeviceFlow: { _ in SiloDeviceFlowPoll(status: .pending, interval: nil, accountLogin: nil) }
         )
         let delay = await session.begin()
         XCTAssertNil(delay)
@@ -1875,45 +1875,45 @@ final class GitHubLocalProviderTests: XCTestCase {
     }
 
     func testDeviceFlowPollOutcomeMapsTypedCLIErrors() {
-        func poll(from error: MSWClientError) -> MSWDeviceFlowPoll {
+        func poll(from error: SiloClientError) -> SiloDeviceFlowPoll {
             GitHubDeviceFlowSession.pollOutcome(for: error)
         }
         XCTAssertEqual(
-            poll(from: .rawCLIError(code: "MSW_DEVICE_EXPIRED", message: nil)),
-            MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+            poll(from: .rawCLIError(code: "SILO_DEVICE_EXPIRED", message: nil)),
+            SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
         )
         XCTAssertEqual(
-            poll(from: .rawCLIError(code: "MSW_DEVICE_DENIED", message: nil)),
-            MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+            poll(from: .rawCLIError(code: "SILO_DEVICE_DENIED", message: nil)),
+            SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
         )
         XCTAssertEqual(
-            poll(from: .rawCLIError(code: "MSW_DEVICE_SLOW_DOWN", message: nil)),
-            MSWDeviceFlowPoll(status: .slowDown, interval: nil, accountLogin: nil)
+            poll(from: .rawCLIError(code: "SILO_DEVICE_SLOW_DOWN", message: nil)),
+            SiloDeviceFlowPoll(status: .slowDown, interval: nil, accountLogin: nil)
         )
         XCTAssertEqual(
-            poll(from: .rawCLIError(code: "MSW_HOST_CREDENTIAL_VERIFICATION_FAILED", message: nil)),
-            MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+            poll(from: .rawCLIError(code: "SILO_HOST_CREDENTIAL_VERIFICATION_FAILED", message: nil)),
+            SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
         )
         XCTAssertEqual(
-            poll(from: .protocolFailure(MSWProtocolError(code: "MSW_DEVICE_EXPIRED", message: "x", recovery: nil, workspace: nil, retryable: false))),
-            MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+            poll(from: .protocolFailure(SiloProtocolError(code: "SILO_DEVICE_EXPIRED", message: "x", recovery: nil, workspace: nil, retryable: false))),
+            SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
         )
         XCTAssertEqual(
             poll(from: .unavailable("network")),
-            MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+            SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
         )
     }
 
-    func testDeviceFlowDeviceCompleteDecodesThroughMSWClient() async throws {
+    func testDeviceFlowDeviceCompleteDecodesThroughSiloClient() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
             deviceCompleteJSON: #"{"ok":true,"status":"authorized","metadata":{"provider":"oauth-device-flow","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}}"#
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let client = MSWClient(runner: runner)
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let client = SiloClient(runner: runner)
         let provider = GitHubLocalProvider(client: client, policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let poll = try await provider.pollDeviceFlow(deviceId: "device-code-1")
@@ -1925,14 +1925,14 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testDeviceFlowDeviceCompleteExpiredAndDenied() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
-        let executable = makeFakeMSW(
+        let executable = makeFakeSilo(
             directory: directory,
             statusJSON: #"{"mode":"local","workspaces":[]}"#,
-            deviceCompleteJSON: #"{"ok":false,"status":"expired","error":{"code":"MSW_DEVICE_EXPIRED","message":"The code expired"}}"#,
+            deviceCompleteJSON: #"{"ok":false,"status":"expired","error":{"code":"SILO_DEVICE_EXPIRED","message":"The code expired"}}"#,
             deviceCompleteExit: 76
         )
-        let runner = MSWCommandRunner(configuration: .init(homeDirectory: directory, testMSWExecutable: executable))
-        let provider = GitHubLocalProvider(client: MSWClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
+        let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
+        let provider = GitHubLocalProvider(client: SiloClient(runner: runner), policyStore: GitHubPolicyStore(policyURL: policyURL))
 
         let poll = try await provider.pollDeviceFlow(deviceId: "device-code-1")
         XCTAssertEqual(poll.status, .expired)
@@ -2091,14 +2091,14 @@ final class GitHubLocalProviderTests: XCTestCase {
     private func makeSnapshot(
         skippedPorts: [Int]? = nil,
         portWarning: String? = nil
-    ) -> MSWWorkspaceSnapshot {
-        MSWWorkspaceSnapshot(
+    ) -> SiloWorkspaceSnapshot {
+        SiloWorkspaceSnapshot(
             id: "dev",
             purpose: "Test workspace",
             lifecycle: .stopped,
             freshness: .fresh,
-            quarantine: MSWQuarantineSnapshot(state: .clear, reason: nil),
-            credential: MSWCredentialSnapshot(
+            quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
+            credential: SiloCredentialSnapshot(
                 state: .ready,
                 accessMode: "guest-read",
                 verificationRepository: nil,
@@ -2108,15 +2108,15 @@ final class GitHubLocalProviderTests: XCTestCase {
                 refreshExpiresAt: nil,
                 needsRestart: false
             ),
-            resources: MSWResourceSnapshot(
+            resources: SiloResourceSnapshot(
                 cpus: "2",
                 maxCpus: "8",
                 memory: "4GiB",
                 maxMemory: "16GiB",
                 rootDisk: "20GiB"
             ),
-            network: MSWNetworkSnapshot(host: "dev.msw.test", ip: "127.0.0.10"),
-            actionCapabilities: MSWActionCapabilities(
+            network: SiloNetworkSnapshot(host: "dev.silo.test", ip: "127.0.0.10"),
+            actionCapabilities: SiloActionCapabilities(
                 canStart: true,
                 canStop: true,
                 canRestart: true,
@@ -2138,7 +2138,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertTrue(json.contains("\"skippedPorts\""), "Skipped ports must be encoded")
         XCTAssertTrue(json.contains("\"portWarning\""), "Port warning must be encoded")
 
-        let decoded = try MSWProtocolDecoder.decoder().decode(MSWWorkspaceSnapshot.self, from: data)
+        let decoded = try SiloProtocolDecoder.decoder().decode(SiloWorkspaceSnapshot.self, from: data)
         XCTAssertEqual(decoded.id, "dev")
         XCTAssertEqual(decoded.skippedPorts, [3000])
         XCTAssertEqual(decoded.portWarning, "Port 3000 is already in use; it was not published.")
@@ -2147,7 +2147,7 @@ final class GitHubLocalProviderTests: XCTestCase {
     func testWorkspaceSnapshotDecodesWithoutPortFields() throws {
         // Older CLI output has no port fields: decode must yield nil, not fail.
         let data = try JSONEncoder().encode(makeSnapshot())
-        let decoded = try MSWProtocolDecoder.decoder().decode(MSWWorkspaceSnapshot.self, from: data)
+        let decoded = try SiloProtocolDecoder.decoder().decode(SiloWorkspaceSnapshot.self, from: data)
         XCTAssertNil(decoded.skippedPorts)
         XCTAssertNil(decoded.portWarning)
     }

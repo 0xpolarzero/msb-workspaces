@@ -97,7 +97,7 @@ extension KeychainStore: CredentialKeychainStoring {}
 /// directly. The secret is never read, decoded, or migrated: it is deleted
 /// before credential-backed UI becomes available.
 enum LegacyDirectGitHubCredentialRetirement {
-    static let service = "org.microsandbox.Silo.github-device-session"
+    static let service = "org.silo.Silo.github-device-session"
     static let account = "session"
 
     static func remove(using keychain: any CredentialKeychainStoring = KeychainStore()) throws {
@@ -117,4 +117,4 @@ enum LegacyDirectGitHubCredentialRetirementError: Error, LocalizedError, Sendabl
     }
 }
 
-extension KeychainStore: MSWConnectKeychainStoring {}
+extension KeychainStore: SiloConnectKeychainStoring {}

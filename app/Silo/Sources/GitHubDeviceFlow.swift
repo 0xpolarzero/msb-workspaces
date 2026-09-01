@@ -6,9 +6,9 @@ import SwiftUI
 /// the token; the app only prints the code, opens the verification URI, and
 /// polls `--device-complete` until authorization, slow-down, expiry, or
 /// denial. These models mirror the CLI's JSON contract (raw CLI translation
-/// lives in MSWClient).
+/// lives in SiloClient).
 
-struct MSWDeviceFlowStart: Codable, Sendable, Equatable {
+struct SiloDeviceFlowStart: Codable, Sendable, Equatable {
     let deviceId: String
     let code: String
     let verificationUri: String
@@ -16,7 +16,7 @@ struct MSWDeviceFlowStart: Codable, Sendable, Equatable {
     let interval: Int
 }
 
-enum MSWDeviceFlowPollStatus: String, Codable, Sendable, Equatable {
+enum SiloDeviceFlowPollStatus: String, Codable, Sendable, Equatable {
     case pending
     case authorized
     case slowDown = "slow_down"
@@ -24,8 +24,8 @@ enum MSWDeviceFlowPollStatus: String, Codable, Sendable, Equatable {
     case denied
 }
 
-struct MSWDeviceFlowPoll: Codable, Sendable, Equatable {
-    let status: MSWDeviceFlowPollStatus
+struct SiloDeviceFlowPoll: Codable, Sendable, Equatable {
+    let status: SiloDeviceFlowPollStatus
     let interval: Int?
     let accountLogin: String?
 }
@@ -33,8 +33,8 @@ struct MSWDeviceFlowPoll: Codable, Sendable, Equatable {
 /// Injectable device-flow transport so the session state machine is unit
 /// testable with a mocked implementation.
 protocol DeviceFlowPolling: Sendable {
-    func startDeviceFlow() async throws -> MSWDeviceFlowStart
-    func pollDeviceFlow(deviceId: String) async throws -> MSWDeviceFlowPoll
+    func startDeviceFlow() async throws -> SiloDeviceFlowStart
+    func pollDeviceFlow(deviceId: String) async throws -> SiloDeviceFlowPoll
 }
 
 /// Deterministic device-flow state machine (plan.md §3.5): begin -> show
@@ -60,12 +60,12 @@ final class GitHubDeviceFlowSession {
     private(set) var phase: Phase = .idle
     private(set) var deviceId: String?
 
-    private let startDeviceFlow: () async throws -> MSWDeviceFlowStart
-    private let pollDeviceFlow: (String) async throws -> MSWDeviceFlowPoll
+    private let startDeviceFlow: () async throws -> SiloDeviceFlowStart
+    private let pollDeviceFlow: (String) async throws -> SiloDeviceFlowPoll
 
     init(
-        startDeviceFlow: @escaping () async throws -> MSWDeviceFlowStart,
-        pollDeviceFlow: @escaping (String) async throws -> MSWDeviceFlowPoll
+        startDeviceFlow: @escaping () async throws -> SiloDeviceFlowStart,
+        pollDeviceFlow: @escaping (String) async throws -> SiloDeviceFlowPoll
     ) {
         self.startDeviceFlow = startDeviceFlow
         self.pollDeviceFlow = pollDeviceFlow
@@ -99,7 +99,7 @@ final class GitHubDeviceFlowSession {
 
     /// Applies one poll result and returns the next delay in seconds, or nil
     /// when the session ended.
-    func handlePoll(_ poll: MSWDeviceFlowPoll) -> Int? {
+    func handlePoll(_ poll: SiloDeviceFlowPoll) -> Int? {
         switch poll.status {
         case .pending:
             phase = .polling
@@ -120,40 +120,40 @@ final class GitHubDeviceFlowSession {
     }
 
     /// Maps a poll transport failure (typed CLI errors) into a poll result.
-    static func pollOutcome(for error: Error) -> MSWDeviceFlowPoll {
-        if let clientError = error as? MSWClientError {
+    static func pollOutcome(for error: Error) -> SiloDeviceFlowPoll {
+        if let clientError = error as? SiloClientError {
             switch clientError {
-            case .rawCLIError(let code, _) where code == "MSW_DEVICE_EXPIRED" || code == "MSW_DEVICE_AUTHORIZATION_EXPIRED":
-                return MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
-            case .rawCLIError(let code, _) where code == "MSW_DEVICE_DENIED" || code == "MSW_DEVICE_AUTHORIZATION_DENIED":
-                return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
-            case .rawCLIError(let code, let message) where code == "MSW_DEVICE_SLOW_DOWN":
-                return MSWDeviceFlowPoll(status: .slowDown, interval: nil, accountLogin: nil)
-            case .rawCLIError(let code, _) where code == "MSW_HOST_CREDENTIAL_VERIFICATION_FAILED":
-                return MSWDeviceFlowPoll(
+            case .rawCLIError(let code, _) where code == "SILO_DEVICE_EXPIRED" || code == "SILO_DEVICE_AUTHORIZATION_EXPIRED":
+                return SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+            case .rawCLIError(let code, _) where code == "SILO_DEVICE_DENIED" || code == "SILO_DEVICE_AUTHORIZATION_DENIED":
+                return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+            case .rawCLIError(let code, let message) where code == "SILO_DEVICE_SLOW_DOWN":
+                return SiloDeviceFlowPoll(status: .slowDown, interval: nil, accountLogin: nil)
+            case .rawCLIError(let code, _) where code == "SILO_HOST_CREDENTIAL_VERIFICATION_FAILED":
+                return SiloDeviceFlowPoll(
                     status: .denied,
                     interval: nil,
                     accountLogin: nil
                 )
             case .protocolFailure(let protocolError):
                 switch protocolError.code {
-                case "MSW_DEVICE_EXPIRED", "MSW_DEVICE_AUTHORIZATION_EXPIRED":
-                    return MSWDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
-                case "MSW_DEVICE_DENIED", "MSW_DEVICE_AUTHORIZATION_DENIED":
-                    return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
-                case "MSW_DEVICE_SLOW_DOWN":
-                    return MSWDeviceFlowPoll(status: .slowDown, interval: nil, accountLogin: nil)
+                case "SILO_DEVICE_EXPIRED", "SILO_DEVICE_AUTHORIZATION_EXPIRED":
+                    return SiloDeviceFlowPoll(status: .expired, interval: nil, accountLogin: nil)
+                case "SILO_DEVICE_DENIED", "SILO_DEVICE_AUTHORIZATION_DENIED":
+                    return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+                case "SILO_DEVICE_SLOW_DOWN":
+                    return SiloDeviceFlowPoll(status: .slowDown, interval: nil, accountLogin: nil)
                 default:
-                    return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+                    return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
                 }
             default:
                 // Unknown/transient failures end the flow; the UI offers a
                 // fresh start (the CLI reports every device status as a typed
                 // code, so anything else is a genuine failure).
-                return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+                return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
             }
         }
-        return MSWDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
+        return SiloDeviceFlowPoll(status: .denied, interval: nil, accountLogin: nil)
     }
 
     /// Re-arms the session for a fresh code.

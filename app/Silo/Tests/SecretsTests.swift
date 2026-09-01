@@ -4,7 +4,7 @@ import XCTest
 
 // MARK: - Fixtures
 
-private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"mswVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
+private let protocolCompatibleHandshake = #"{"schemaVersion":1,"requestId":"test-handshake","ok":true,"command":"handshake","observedAt":"2026-08-08T00:00:00Z","result":{"protocolVersion":1,"siloVersion":"test","platform":{"os":"macOS","architecture":"arm64"},"configurationAvailable":true,"runtimeAvailable":true,"capabilities":{"jsonState":true,"jsonMetrics":true,"jsonLogs":true,"plans":true,"bootstrapEvents":true,"jq":true,"workspaceCount":3},"exitCodes":{}},"warnings":[],"error":null}"#
 
 private func writeSecretsExecutable(
     temporary: URL,
@@ -16,7 +16,7 @@ private func writeSecretsExecutable(
     applyStdinCapture: URL? = nil,
     envCapture: URL? = nil
 ) throws -> URL {
-    let executable = temporary.appendingPathComponent("msw")
+    let executable = temporary.appendingPathComponent("silo")
     var argvLine = ""
     if let argvCapture {
         argvLine = "printf '%s\\n' \"$@\" > '\(argvCapture.path)' 2>/dev/null || true\n"
@@ -52,10 +52,10 @@ private func writeSecretsExecutable(
     return executable
 }
 
-private func makeSecretsClient(temporary: URL, executable: URL) -> MSWClient {
-    MSWClient(runner: MSWCommandRunner(configuration: .init(
+private func makeSecretsClient(temporary: URL, executable: URL) -> SiloClient {
+    SiloClient(runner: SiloCommandRunner(configuration: .init(
         homeDirectory: temporary,
-        testMSWExecutable: executable
+        testSiloExecutable: executable
     )))
 }
 
@@ -78,8 +78,8 @@ final class SecretsTests: XCTestCase {
         let json = """
         {"entries":[{"name":"OPENAI_API_KEY","workspaces":["dev","personal"],"allowedDomains":["api.openai.com"],"status":"restart-required","pendingOperation":{"type":"add","createdAt":"2026-08-28T09:00:00Z"},"generation":3,"error":null},{"name":"SERVICE_TOKEN","workspaces":["playgrounds"],"allowedDomains":["*.example.com"],"status":"active","pendingOperation":null,"generation":1,"error":null}],"workspaces":[{"workspace":"dev","restartRequired":true,"pendingCount":1},{"workspace":"personal","restartRequired":false,"pendingCount":1},{"workspace":"playgrounds","restartRequired":false,"pendingCount":0}]}
         """
-        let response = try MSWProtocolDecoder.decoder().decode(
-            MSWSecretsListResponse.self,
+        let response = try SiloProtocolDecoder.decoder().decode(
+            SiloSecretsListResponse.self,
             from: Data(json.utf8)
         )
         XCTAssertEqual(response.entries.count, 2)
@@ -102,10 +102,10 @@ final class SecretsTests: XCTestCase {
 
     func testSecretsWorkspaceSnapshotDecodesExactKeysAndDefaultsWhenAbsent() throws {
         let withSecrets = """
-        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"refreshExpiresAt":null,"needsRestart":false},"secrets":{"state":"restart-required","pendingCount":2,"reason":"Host-held secret changes are pending."},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.msw.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null},"skippedPorts":[],"portWarning":""}
+        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"refreshExpiresAt":null,"needsRestart":false},"secrets":{"state":"restart-required","pendingCount":2,"reason":"Host-held secret changes are pending."},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null},"skippedPorts":[],"portWarning":""}
         """
-        let snapshot = try MSWProtocolDecoder.decoder().decode(
-            MSWWorkspaceSnapshot.self,
+        let snapshot = try SiloProtocolDecoder.decoder().decode(
+            SiloWorkspaceSnapshot.self,
             from: Data(withSecrets.utf8)
         )
         let secrets = try XCTUnwrap(snapshot.secrets)
@@ -114,10 +114,10 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(secrets.reason, "Host-held secret changes are pending.")
 
         let withoutSecrets = """
-        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"refreshExpiresAt":null,"needsRestart":false},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.msw.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null}}
+        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"refreshExpiresAt":null,"needsRestart":false},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null}}
         """
-        let legacy = try MSWProtocolDecoder.decoder().decode(
-            MSWWorkspaceSnapshot.self,
+        let legacy = try SiloProtocolDecoder.decoder().decode(
+            SiloWorkspaceSnapshot.self,
             from: Data(withoutSecrets.utf8)
         )
         XCTAssertNil(legacy.secrets)
@@ -127,8 +127,8 @@ final class SecretsTests: XCTestCase {
         let planJSON = """
         {"planId":"plan-42","operation":"add","name":"CI_TOKEN","affectedWorkspaces":["dev","playgrounds"],"requiresSecret":true,"confirmationPhrase":"ADD CI_TOKEN","effects":"Adds CI_TOKEN to dev and playgrounds.","expiresAt":"2026-08-28T09:05:00Z"}
         """
-        let plan = try MSWProtocolDecoder.decoder().decode(
-            MSWSecretPlanResult.self,
+        let plan = try SiloProtocolDecoder.decoder().decode(
+            SiloSecretPlanResult.self,
             from: Data(planJSON.utf8)
         )
         XCTAssertEqual(plan.planId, "plan-42")
@@ -142,8 +142,8 @@ final class SecretsTests: XCTestCase {
         let applyJSON = """
         {"applied":true,"operation":"add","name":"CI_TOKEN","workspaces":["dev","playgrounds"],"pending":[{"workspace":"dev","state":"restart-required"},{"workspace":"playgrounds","state":"applies-on-next-start"}],"valueStored":true,"outcome":"staged"}
         """
-        let apply = try MSWProtocolDecoder.decoder().decode(
-            MSWSecretApplyResult.self,
+        let apply = try SiloProtocolDecoder.decoder().decode(
+            SiloSecretApplyResult.self,
             from: Data(applyJSON.utf8)
         )
         XCTAssertEqual(apply.applied, true)
@@ -159,11 +159,11 @@ final class SecretsTests: XCTestCase {
 
     func testSecretValueTravelsOnlyOnStdinNeverInArgvOrEnvironment() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
-        let planResult = MSWSecretPlanResult(
+        let planResult = SiloSecretPlanResult(
             planId: "plan-stdin",
             operation: "add",
             name: "CI_TOKEN",
@@ -174,7 +174,7 @@ final class SecretsTests: XCTestCase {
             expiresAt: Date().addingTimeInterval(300)
         )
         let planURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-stdin",
                 ok: true,
@@ -186,13 +186,13 @@ final class SecretsTests: XCTestCase {
             name: "plan.json"
         )
         let applyURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "apply-stdin",
                 ok: true,
                 command: "secret-apply",
                 observedAt: Date(),
-                result: MSWSecretApplyResult(
+                result: SiloSecretApplyResult(
                     applied: true,
                     operation: "add",
                     name: "CI_TOKEN",
@@ -206,13 +206,13 @@ final class SecretsTests: XCTestCase {
             name: "apply.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-stdin",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(
+                result: SiloSecretsListResponse(
                     entries: [],
                     workspaces: [.init(workspace: "dev", restartRequired: false, pendingCount: 0)]
                 )
@@ -240,7 +240,7 @@ final class SecretsTests: XCTestCase {
         XCTAssertTrue(list.entries.isEmpty)
 
         let staged = try await client.prepareSecretPlan(
-            MSWSecretPlanRequest(
+            SiloSecretPlanRequest(
                 operation: "add",
                 name: "CI_TOKEN",
                 workspaces: ["dev"],
@@ -297,18 +297,18 @@ final class SecretsTests: XCTestCase {
 
     func testSecretApplyRejectsWrongConfirmation() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         let planURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-x",
                 ok: true,
                 command: "secret-plan",
                 observedAt: Date(),
-                result: MSWSecretPlanResult(
+                result: SiloSecretPlanResult(
                     planId: "plan-x",
                     operation: "edit",
                     name: "SERVICE_TOKEN",
@@ -323,13 +323,13 @@ final class SecretsTests: XCTestCase {
             name: "plan.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-x",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(entries: [], workspaces: [])
+                result: SiloSecretsListResponse(entries: [], workspaces: [])
             ),
             to: temporary,
             name: "list.json"
@@ -342,7 +342,7 @@ final class SecretsTests: XCTestCase {
         )
         let client = makeSecretsClient(temporary: temporary, executable: executable)
         let plan = try await client.prepareSecretPlan(
-            MSWSecretPlanRequest(
+            SiloSecretPlanRequest(
                 operation: "edit",
                 name: "SERVICE_TOKEN",
                 workspaces: ["playgrounds"],
@@ -351,26 +351,26 @@ final class SecretsTests: XCTestCase {
         )
         do {
             _ = try await client.applySecretPlan(plan, confirmation: "WRONG PHRASE", value: "x")
-            XCTFail("A wrong confirmation phrase must be rejected before spawning MSW")
-        } catch let error as MSWClientError {
+            XCTFail("A wrong confirmation phrase must be rejected before spawning Silo")
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .invalidArguments)
         }
     }
 
     func testSecretsListRejectsUnsafeMetadata() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-bad",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(
+                result: SiloSecretsListResponse(
                     entries: [
                         .init(
                             name: "OPENAI_API_KEY",
@@ -398,7 +398,7 @@ final class SecretsTests: XCTestCase {
         do {
             _ = try await client.secretsList()
             XCTFail("Unsafe workspace names in secrets-list must be rejected")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .malformedJSON(command: "secrets-list"))
         }
     }
@@ -462,8 +462,8 @@ final class SecretsTests: XCTestCase {
         let rejected = [
             "GH_TOKEN",
             "GITHUB_TOKEN",
-            "MSW_INTERNAL",
-            "msw_anything",
+            "SILO_INTERNAL",
+            "silo_anything",
             "PATH",
             "HOME",
             "HTTP_PROXY",
@@ -485,26 +485,26 @@ final class SecretsTests: XCTestCase {
 
     func testWorkspaceStateAppliesSecretsSnapshotSeparatelyFromCredentialState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsState-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsState-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         func snapshot(
             id: String,
-            lifecycle: MSWLifecycle,
+            lifecycle: SiloLifecycle,
             credentialNeedsRestart: Bool,
-            secrets: MSWSecretsSnapshot?,
+            secrets: SiloSecretsSnapshot?,
             canRestart: Bool = true,
             capabilityReason: String? = nil,
             capabilityRecovery: String? = nil
-        ) -> MSWWorkspaceSnapshot {
-            MSWWorkspaceSnapshot(
+        ) -> SiloWorkspaceSnapshot {
+            SiloWorkspaceSnapshot(
                 id: id,
                 purpose: "Test workspace",
                 lifecycle: lifecycle,
                 freshness: .fresh,
-                quarantine: MSWQuarantineSnapshot(state: .clear, reason: nil),
-                credential: MSWCredentialSnapshot(
+                quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
+                credential: SiloCredentialSnapshot(
                     state: .ready,
                     accessMode: "guest-read",
                     verificationRepository: nil,
@@ -515,11 +515,11 @@ final class SecretsTests: XCTestCase {
                     needsRestart: credentialNeedsRestart
                 ),
                 secrets: secrets,
-                resources: MSWResourceSnapshot(
+                resources: SiloResourceSnapshot(
                     cpus: "2", maxCpus: "8", memory: "4GiB", maxMemory: "16GiB", rootDisk: "20GiB"
                 ),
-                network: MSWNetworkSnapshot(host: "\(id).msw.test", ip: "127.0.0.10"),
-                actionCapabilities: MSWActionCapabilities(
+                network: SiloNetworkSnapshot(host: "\(id).silo.test", ip: "127.0.0.10"),
+                actionCapabilities: SiloActionCapabilities(
                     canStart: true, canStop: true, canRestart: canRestart,
                     canOpenTerminal: true, canPush: true,
                     reason: capabilityReason,
@@ -527,15 +527,15 @@ final class SecretsTests: XCTestCase {
                 )
             )
         }
-        let state = MSWStateResponse(
+        let state = SiloStateResponse(
             schemaVersion: 1,
-            mswVersion: "test",
+            siloVersion: "test",
             workspaces: [
                 snapshot(
                     id: "dev",
                     lifecycle: .running,
                     credentialNeedsRestart: false,
-                    secrets: MSWSecretsSnapshot(
+                    secrets: SiloSecretsSnapshot(
                         state: .restartRequired,
                         pendingCount: 1,
                         reason: "Host-held secret changes are pending."
@@ -548,7 +548,7 @@ final class SecretsTests: XCTestCase {
                     id: "playgrounds",
                     lifecycle: .stopped,
                     credentialNeedsRestart: true,
-                    secrets: MSWSecretsSnapshot(
+                    secrets: SiloSecretsSnapshot(
                         state: .appliesOnNextStart,
                         pendingCount: 2,
                         reason: nil
@@ -558,7 +558,7 @@ final class SecretsTests: XCTestCase {
             ]
         )
         let stateURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "state-secrets",
                 ok: true,
@@ -570,18 +570,18 @@ final class SecretsTests: XCTestCase {
             name: "state.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-secrets",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(entries: [], workspaces: [])
+                result: SiloSecretsListResponse(entries: [], workspaces: [])
             ),
             to: temporary,
             name: "list.json"
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -799,11 +799,11 @@ final class SecretsTests: XCTestCase {
 
     func testSecretApplyPlanValidationRequiresValueOnlyWhenPlanDoes() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
-        let removePlan = MSWSecretPlanResult(
+        let removePlan = SiloSecretPlanResult(
             planId: "plan-rm",
             operation: "remove",
             name: "CI_TOKEN",
@@ -814,7 +814,7 @@ final class SecretsTests: XCTestCase {
             expiresAt: Date().addingTimeInterval(300)
         )
         let planURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-rm",
                 ok: true,
@@ -826,13 +826,13 @@ final class SecretsTests: XCTestCase {
             name: "plan.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-rm",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(entries: [], workspaces: [])
+                result: SiloSecretsListResponse(entries: [], workspaces: [])
             ),
             to: temporary,
             name: "list.json"
@@ -845,7 +845,7 @@ final class SecretsTests: XCTestCase {
         )
         let client = makeSecretsClient(temporary: temporary, executable: executable)
         let plan = try await client.prepareSecretPlan(
-            MSWSecretPlanRequest(
+            SiloSecretPlanRequest(
                 operation: "remove",
                 name: "CI_TOKEN",
                 workspaces: ["dev"],
@@ -859,27 +859,27 @@ final class SecretsTests: XCTestCase {
                 confirmation: "REMOVE CI_TOKEN",
                 value: "must-not-be-sent"
             )
-            XCTFail("A removal must reject a supplied value before launching MSW.")
-        } catch let error as MSWClientError {
+            XCTFail("A removal must reject a supplied value before launching Silo.")
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .invalidArguments)
         }
     }
     func testSecretsEditPlanAppliesWithoutReplacementValue() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         // The backend plans edits with requiresSecret=true; a scopes/domains
         // edit that keeps the current Keychain value sends no value at all.
         let planURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-keep",
                 ok: true,
                 command: "secret-plan",
                 observedAt: Date(),
-                result: MSWSecretPlanResult(
+                result: SiloSecretPlanResult(
                     planId: "plan-keep",
                     operation: "edit",
                     name: "SERVICE_TOKEN",
@@ -894,25 +894,25 @@ final class SecretsTests: XCTestCase {
             name: "plan.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-keep",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(entries: [], workspaces: [])
+                result: SiloSecretsListResponse(entries: [], workspaces: [])
             ),
             to: temporary,
             name: "list.json"
         )
         let applyURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "apply-keep",
                 ok: true,
                 command: "secret-apply",
                 observedAt: Date(),
-                result: MSWSecretApplyResult(
+                result: SiloSecretApplyResult(
                     applied: true,
                     operation: "edit",
                     name: "SERVICE_TOKEN",
@@ -935,7 +935,7 @@ final class SecretsTests: XCTestCase {
         )
         let client = makeSecretsClient(temporary: temporary, executable: executable)
         let plan = try await client.prepareSecretPlan(
-            MSWSecretPlanRequest(
+            SiloSecretPlanRequest(
                 operation: "edit",
                 name: "SERVICE_TOKEN",
                 workspaces: ["dev", "playgrounds"],
@@ -995,18 +995,18 @@ final class SecretsTests: XCTestCase {
 
     func testSecretsMalformedListKeepsCacheAndBlocksMutations() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-cache",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(
+                result: SiloSecretsListResponse(
                     entries: [
                         .init(
                             name: "OPENAI_API_KEY",
@@ -1025,13 +1025,13 @@ final class SecretsTests: XCTestCase {
             name: "list.json"
         )
         let planURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-unused",
                 ok: true,
                 command: "secret-plan",
                 observedAt: Date(),
-                result: MSWSecretPlanResult(
+                result: SiloSecretPlanResult(
                     planId: "plan-unused",
                     operation: "add",
                     name: "UNUSED",
@@ -1070,13 +1070,13 @@ final class SecretsTests: XCTestCase {
         let responseEncoder = JSONEncoder()
         responseEncoder.dateEncodingStrategy = .iso8601
         try responseEncoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-ok",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(
+                result: SiloSecretsListResponse(
                     entries: [
                         .init(
                             name: "OPENAI_API_KEY",
@@ -1144,18 +1144,18 @@ final class SecretsTests: XCTestCase {
 
     func testSecretsListRefreshesAfterVerifiedRestart() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
-        func snapshot(lifecycle: MSWLifecycle, secrets: MSWSecretsSnapshot?) -> MSWWorkspaceSnapshot {
-            MSWWorkspaceSnapshot(
+        func snapshot(lifecycle: SiloLifecycle, secrets: SiloSecretsSnapshot?) -> SiloWorkspaceSnapshot {
+            SiloWorkspaceSnapshot(
                 id: "dev",
                 purpose: "Test workspace",
                 lifecycle: lifecycle,
                 freshness: .fresh,
-                quarantine: MSWQuarantineSnapshot(state: .clear, reason: nil),
-                credential: MSWCredentialSnapshot(
+                quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
+                credential: SiloCredentialSnapshot(
                     state: .ready,
                     accessMode: "guest-read",
                     verificationRepository: nil,
@@ -1166,23 +1166,23 @@ final class SecretsTests: XCTestCase {
                     needsRestart: false
                 ),
                 secrets: secrets,
-                resources: MSWResourceSnapshot(
+                resources: SiloResourceSnapshot(
                     cpus: "2", maxCpus: "8", memory: "4GiB", maxMemory: "16GiB", rootDisk: "20GiB"
                 ),
-                network: MSWNetworkSnapshot(host: "dev.msw.test", ip: "127.0.0.10"),
-                actionCapabilities: MSWActionCapabilities(
+                network: SiloNetworkSnapshot(host: "dev.silo.test", ip: "127.0.0.10"),
+                actionCapabilities: SiloActionCapabilities(
                     canStart: false, canStop: true, canRestart: true,
                     canOpenTerminal: true, canPush: true
                 )
             )
         }
-        let restartingState = MSWStateResponse(
+        let restartingState = SiloStateResponse(
             schemaVersion: 1,
-            mswVersion: "test",
+            siloVersion: "test",
             workspaces: [
                 snapshot(
                     lifecycle: .restarting,
-                    secrets: MSWSecretsSnapshot(
+                    secrets: SiloSecretsSnapshot(
                         state: .restartRequired,
                         pendingCount: 1,
                         reason: "Host-held secret changes are pending."
@@ -1190,13 +1190,13 @@ final class SecretsTests: XCTestCase {
                 )
             ]
         )
-        let runningState = MSWStateResponse(
+        let runningState = SiloStateResponse(
             schemaVersion: 1,
-            mswVersion: "test",
+            siloVersion: "test",
             workspaces: [
                 snapshot(
                     lifecycle: .running,
-                    secrets: MSWSecretsSnapshot(
+                    secrets: SiloSecretsSnapshot(
                         state: .active,
                         pendingCount: 0,
                         reason: nil
@@ -1205,7 +1205,7 @@ final class SecretsTests: XCTestCase {
             ]
         )
         let stateURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "state-restart",
                 ok: true,
@@ -1217,13 +1217,13 @@ final class SecretsTests: XCTestCase {
             name: "state.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-restart",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(
+                result: SiloSecretsListResponse(
                     entries: [
                         .init(
                             name: "OPENAI_API_KEY",
@@ -1241,7 +1241,7 @@ final class SecretsTests: XCTestCase {
             to: temporary,
             name: "list.json"
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -1271,7 +1271,7 @@ final class SecretsTests: XCTestCase {
         let stateEncoder = JSONEncoder()
         stateEncoder.dateEncodingStrategy = .iso8601
         try stateEncoder.encode(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "state-running",
                 ok: true,
@@ -1291,21 +1291,21 @@ final class SecretsTests: XCTestCase {
 
     func testSecretsListRefreshPreservesWorkspaceErrorState() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
-        let errorState = MSWStateResponse(
+        let errorState = SiloStateResponse(
             schemaVersion: 1,
-            mswVersion: "test",
+            siloVersion: "test",
             workspaces: [
-                MSWWorkspaceSnapshot(
+                SiloWorkspaceSnapshot(
                     id: "dev",
                     purpose: "Test workspace",
                     lifecycle: .running,
                     freshness: .fresh,
-                    quarantine: MSWQuarantineSnapshot(state: .clear, reason: nil),
-                    credential: MSWCredentialSnapshot(
+                    quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
+                    credential: SiloCredentialSnapshot(
                         state: .ready,
                         accessMode: "guest-read",
                         verificationRepository: nil,
@@ -1315,16 +1315,16 @@ final class SecretsTests: XCTestCase {
                         refreshExpiresAt: nil,
                         needsRestart: false
                     ),
-                    secrets: MSWSecretsSnapshot(
+                    secrets: SiloSecretsSnapshot(
                         state: .error,
                         pendingCount: 1,
                         reason: "Keychain write failed."
                     ),
-                    resources: MSWResourceSnapshot(
+                    resources: SiloResourceSnapshot(
                         cpus: "2", maxCpus: "8", memory: "4GiB", maxMemory: "16GiB", rootDisk: "20GiB"
                     ),
-                    network: MSWNetworkSnapshot(host: "dev.msw.test", ip: "127.0.0.10"),
-                    actionCapabilities: MSWActionCapabilities(
+                    network: SiloNetworkSnapshot(host: "dev.silo.test", ip: "127.0.0.10"),
+                    actionCapabilities: SiloActionCapabilities(
                         canStart: false, canStop: true, canRestart: true,
                         canOpenTerminal: true, canPush: true
                     )
@@ -1332,7 +1332,7 @@ final class SecretsTests: XCTestCase {
             ]
         )
         let stateURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "state-error",
                 ok: true,
@@ -1346,13 +1346,13 @@ final class SecretsTests: XCTestCase {
         // The list summary has no error field: pendingCount 0 must NOT
         // downgrade the authoritative workspace error to Active.
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-error",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(
+                result: SiloSecretsListResponse(
                     entries: [
                         .init(
                             name: "OPENAI_API_KEY",
@@ -1370,7 +1370,7 @@ final class SecretsTests: XCTestCase {
             to: temporary,
             name: "list.json"
         )
-        let executable = temporary.appendingPathComponent("msw")
+        let executable = temporary.appendingPathComponent("silo")
         let script = """
         #!/bin/sh
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
@@ -1405,18 +1405,18 @@ final class SecretsTests: XCTestCase {
 
     func testSecretApplyRejectsEmptyOrMismatchedSuccessDocument() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         let planURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "plan-ok",
                 ok: true,
                 command: "secret-plan",
                 observedAt: Date(),
-                result: MSWSecretPlanResult(
+                result: SiloSecretPlanResult(
                     planId: "plan-ok",
                     operation: "add",
                     name: "CI_TOKEN",
@@ -1431,13 +1431,13 @@ final class SecretsTests: XCTestCase {
             name: "plan.json"
         )
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-unused",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(entries: [], workspaces: [])
+                result: SiloSecretsListResponse(entries: [], workspaces: [])
             ),
             to: temporary,
             name: "list.json"
@@ -1460,7 +1460,7 @@ final class SecretsTests: XCTestCase {
         )
         let emptyClient = makeSecretsClient(temporary: temporary, executable: emptyExecutable)
         let plan = try await emptyClient.prepareSecretPlan(
-            MSWSecretPlanRequest(
+            SiloSecretPlanRequest(
                 operation: "add",
                 name: "CI_TOKEN",
                 workspaces: ["dev"],
@@ -1470,7 +1470,7 @@ final class SecretsTests: XCTestCase {
         do {
             _ = try await emptyClient.applySecretPlan(plan, confirmation: "ADD CI_TOKEN", value: "v")
             XCTFail("An empty success document must be rejected")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .malformedJSON(command: "secret-apply"))
         }
 
@@ -1484,25 +1484,25 @@ final class SecretsTests: XCTestCase {
         do {
             _ = try await mismatchedClient.applySecretPlan(plan, confirmation: "ADD CI_TOKEN", value: "v")
             XCTFail("A success document for a different operation must be rejected")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .malformedJSON(command: "secret-apply"))
         }
     }
 
     func testSecretPlanRejectsMismatchedStagedPlan() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MSWSecretsClient-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("SiloSecretsClient-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
         let listURL = try writeResponse(
-            MSWEnvelope(
+            SiloEnvelope(
                 schemaVersion: 1,
                 requestId: "list-unused",
                 ok: true,
                 command: "secrets-list",
                 observedAt: Date(),
-                result: MSWSecretsListResponse(entries: [], workspaces: [])
+                result: SiloSecretsListResponse(entries: [], workspaces: [])
             ),
             to: temporary,
             name: "list.json"
@@ -1521,7 +1521,7 @@ final class SecretsTests: XCTestCase {
         let wrongNameClient = makeSecretsClient(temporary: temporary, executable: wrongNameExecutable)
         do {
             _ = try await wrongNameClient.prepareSecretPlan(
-                MSWSecretPlanRequest(
+                SiloSecretPlanRequest(
                     operation: "add",
                     name: "CI_TOKEN",
                     workspaces: ["dev"],
@@ -1529,7 +1529,7 @@ final class SecretsTests: XCTestCase {
                 )
             )
             XCTFail("A staged plan for a different secret must be rejected")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .malformedJSON(command: "secret-plan"))
         }
 
@@ -1547,7 +1547,7 @@ final class SecretsTests: XCTestCase {
         let wrongSecretClient = makeSecretsClient(temporary: temporary, executable: wrongSecretExecutable)
         do {
             _ = try await wrongSecretClient.prepareSecretPlan(
-                MSWSecretPlanRequest(
+                SiloSecretPlanRequest(
                     operation: "add",
                     name: "CI_TOKEN",
                     workspaces: ["dev"],
@@ -1555,7 +1555,7 @@ final class SecretsTests: XCTestCase {
                 )
             )
             XCTFail("A staged plan with inconsistent requiresSecret must be rejected")
-        } catch let error as MSWClientError {
+        } catch let error as SiloClientError {
             XCTAssertEqual(error, .malformedJSON(command: "secret-plan"))
         }
     }

@@ -2,7 +2,7 @@ import Foundation
 
 /// Path C §2: the local GitHub policy file is the single source of truth for
 /// host-credential grants. The app never writes it directly — policy writes
-/// go through the journaled `msw app github-policy-apply` CLI so capability
+/// go through the journaled `silo app github-policy-apply` CLI so capability
 /// preservation, transport provisioning, atomic tmp+rename, and the
 /// per-workspace GitHub lock stay CLI-owned. This store only READS the file
 /// (for Settings/Detail/setup display) and watches the policy directory so
@@ -50,7 +50,7 @@ struct GitHubApplyPersistentState: Codable, Sendable, Equatable {
     let generation: Int
     let semanticHash: String
     let status: GitHubApplyPersistenceStatus
-    let desired: MSWGitHubPolicyApplyRequest
+    let desired: SiloGitHubPolicyApplyRequest
     let updatedAt: Date
     let failure: GitHubApplyFailure?
 }
@@ -124,7 +124,7 @@ final class GitHubPolicyStore {
     /// "no credential grants".
     nonisolated static func read(policyURL: URL) -> GitHubPolicyFile? {
         guard let data = try? Data(contentsOf: policyURL) else { return nil }
-        guard let file = try? MSWProtocolDecoder.decoder().decode(GitHubPolicyFile.self, from: data),
+        guard let file = try? SiloProtocolDecoder.decoder().decode(GitHubPolicyFile.self, from: data),
               file.schemaVersion == 1 else {
             return nil
         }
@@ -139,7 +139,7 @@ final class GitHubPolicyStore {
     nonisolated static func readIntent(policyURL: URL) -> GitHubApplyPersistentState? {
         let url = intentURL(for: policyURL)
         guard let data = try? Data(contentsOf: url) else { return nil }
-        guard let state = try? MSWProtocolDecoder.decoder().decode(
+        guard let state = try? SiloProtocolDecoder.decoder().decode(
             GitHubApplyPersistentState.self,
             from: data
         ), state.schemaVersion == 1, state.desired.schemaVersion == 1 else {
@@ -259,5 +259,5 @@ extension Notification.Name {
     /// Posted after the policy file changes (app write through the CLI, an
     /// external/CLI edit, or the directory watcher observing an atomic
     /// replace). Consumers re-read the shared store on receipt.
-    static let githubPolicyDidChange = Notification.Name("org.microsandbox.Silo.GitHubPolicyChanged")
+    static let githubPolicyDidChange = Notification.Name("org.silo.Silo.GitHubPolicyChanged")
 }

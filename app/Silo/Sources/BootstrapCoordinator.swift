@@ -3,7 +3,7 @@ import Darwin
 import Security
 import ServiceManagement
 
-struct MSWPreflightCheck: Codable, Identifiable, Sendable, Equatable {
+struct SiloPreflightCheck: Codable, Identifiable, Sendable, Equatable {
     enum Status: String, Codable, Sendable { case pass, needsAction, unavailable }
     let id: String
     let title: String
@@ -12,7 +12,7 @@ struct MSWPreflightCheck: Codable, Identifiable, Sendable, Equatable {
     let remediation: String?
 }
 
-struct MSWBootstrapState: Codable, Sendable, Equatable {
+struct SiloBootstrapState: Codable, Sendable, Equatable {
     enum Phase: String, Codable, Sendable, CaseIterable {
         case welcome
         case preflight
@@ -62,13 +62,13 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
         switch self {
         case .busy: return "Setup is already running."
         case .preflightBlocked: return "Setup cannot continue until required preflight checks pass."
-        case .unavailable: return "Setup is unavailable until the MSW runtime is installed."
+        case .unavailable: return "Setup is unavailable until the Silo runtime is installed."
         case .toolchainUnavailable:
-            return "The MSW runtime is not bundled with this build."
-        case .configurationUnavailable: return "The default MSW configuration is not included in this app build."
-        case .configurationInstallationFailed(let detail): return "The MSW configuration could not be installed: \(detail)"
+            return "The Silo runtime is not bundled with this build."
+        case .configurationUnavailable: return "The default Silo configuration is not included in this app build."
+        case .configurationInstallationFailed(let detail): return "The Silo configuration could not be installed: \(detail)"
         case .invalidWorkspaceConfiguration(let detail): return "Workspace configuration is invalid: \(detail)"
-        case .toolchainInstallationFailed(let detail): return "MSW runtime setup failed: \(detail)"
+        case .toolchainInstallationFailed(let detail): return "Silo runtime setup failed: \(detail)"
         case .hostRegistrationFailed(let detail): return "Host integration could not be completed: \(detail)"
         }
     }
@@ -76,7 +76,7 @@ enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {
 
 struct RuntimeRepairFailure: Error, LocalizedError, Sendable, Equatable {
     static let diagnosticLimit = 256 * 1024
-    static let summary = "MSW runtime repair could not complete. Show details, then retry."
+    static let summary = "Silo runtime repair could not complete. Show details, then retry."
 
     let diagnosticDetails: String?
 
@@ -110,7 +110,7 @@ struct RuntimeRepairFailure: Error, LocalizedError, Sendable, Equatable {
         return notice + String(decoding: data.suffix(suffixLimit), as: UTF8.self)
     }
 }
-enum MSWHostServiceStatus: String, Sendable {
+enum SiloHostServiceStatus: String, Sendable {
     case enabled
     case requiresApproval
     case notRegistered
@@ -118,7 +118,7 @@ enum MSWHostServiceStatus: String, Sendable {
     case unknown
 }
 
-enum MSWHostServicePackagingStatus: Sendable, Equatable {
+enum SiloHostServicePackagingStatus: Sendable, Equatable {
     case ready
     case missingPropertyList
     case invalidPropertyList
@@ -153,29 +153,29 @@ enum MSWHostServicePackagingStatus: Sendable, Equatable {
 }
 
 @MainActor
-protocol MSWHostServiceControlling: AnyObject, Sendable {
-    var status: MSWHostServiceStatus { get }
-    func packagingStatus() async -> MSWHostServicePackagingStatus
-    func registerIfNeeded() async throws -> MSWHostServiceStatus
+protocol SiloHostServiceControlling: AnyObject, Sendable {
+    var status: SiloHostServiceStatus { get }
+    func packagingStatus() async -> SiloHostServicePackagingStatus
+    func registerIfNeeded() async throws -> SiloHostServiceStatus
     func openApprovalSettings()
 }
 
-extension MSWHostServiceControlling {
-    func packagingStatus() async -> MSWHostServicePackagingStatus { .ready }
+extension SiloHostServiceControlling {
+    func packagingStatus() async -> SiloHostServicePackagingStatus { .ready }
 }
 
 /// Code-signature validation hashes every binary in the bundle and can take
 /// hundreds of milliseconds on large builds, so it must never run on the
 /// main actor. Callers on background executors invoke it directly.
 
-enum MSWHostPackagingInspector {
+enum SiloHostPackagingInspector {
     /// The constants below mirror the launchd plist contract enforced by the
-    /// controller; keep them in sync with MSWHostServiceController.
-    private static let plistName = "org.microsandbox.Silo.host-agent.plist"
-    private static let serviceName = "org.microsandbox.Silo.host-agent"
+    /// controller; keep them in sync with SiloHostServiceController.
+    private static let plistName = "org.silo.Silo.host-agent.plist"
+    private static let serviceName = "org.silo.Silo.host-agent"
     private static let executablePath = "Contents/Resources/SiloHostAgent"
 
-    static func inspect(bundleURL: URL) -> MSWHostServicePackagingStatus {
+    static func inspect(bundleURL: URL) -> SiloHostServicePackagingStatus {
         let propertyListURL = bundleURL
             .appending(path: "Contents/Library/LaunchDaemons", directoryHint: .isDirectory)
             .appending(path: plistName)
@@ -237,9 +237,9 @@ enum MSWHostPackagingInspector {
 }
 
 @MainActor
-final class MSWHostServiceController: MSWHostServiceControlling {
-    static let plistName = "org.microsandbox.Silo.host-agent.plist"
-    static let serviceName = "org.microsandbox.Silo.host-agent"
+final class SiloHostServiceController: SiloHostServiceControlling {
+    static let plistName = "org.silo.Silo.host-agent.plist"
+    static let serviceName = "org.silo.Silo.host-agent"
     static let executablePath = "Contents/Resources/SiloHostAgent"
 
     private let service: SMAppService
@@ -248,7 +248,7 @@ final class MSWHostServiceController: MSWHostServiceControlling {
         service = SMAppService.daemon(plistName: Self.plistName)
     }
 
-    var status: MSWHostServiceStatus {
+    var status: SiloHostServiceStatus {
         switch service.status {
         case .enabled: return .enabled
         case .requiresApproval: return .requiresApproval
@@ -260,11 +260,11 @@ final class MSWHostServiceController: MSWHostServiceControlling {
 
     /// Witnessed nonisolated so signature validation runs on the caller's
     /// background executor instead of the main thread.
-    nonisolated func packagingStatus() async -> MSWHostServicePackagingStatus {
-        MSWHostPackagingInspector.inspect(bundleURL: Bundle.main.bundleURL)
+    nonisolated func packagingStatus() async -> SiloHostServicePackagingStatus {
+        SiloHostPackagingInspector.inspect(bundleURL: Bundle.main.bundleURL)
     }
 
-    func registerIfNeeded() async throws -> MSWHostServiceStatus {
+    func registerIfNeeded() async throws -> SiloHostServiceStatus {
         let packaging = await packagingStatus()
         guard packaging == .ready else {
             throw BootstrapCoordinatorError.hostRegistrationFailed(packaging.detail)
@@ -291,7 +291,7 @@ final class MSWHostServiceController: MSWHostServiceControlling {
 
 actor BootstrapStateStore {
     private let url: URL
-    private var value: MSWBootstrapState
+    private var value: SiloBootstrapState
 
     init(url: URL? = nil) {
         let defaultDirectory = FileManager.default.urls(
@@ -302,7 +302,7 @@ actor BootstrapStateStore {
             .appendingPathComponent("Library/Application Support/Silo", isDirectory: true)
         self.url = url ?? (defaultDirectory ?? fallbackDirectory).appendingPathComponent("bootstrap-state.json")
         if FileManager.default.fileExists(atPath: self.url.path) {
-            do { value = try JSONDecoder().decode(MSWBootstrapState.self, from: Data(contentsOf: self.url)) }
+            do { value = try JSONDecoder().decode(SiloBootstrapState.self, from: Data(contentsOf: self.url)) }
             catch { value = .initial }
         } else {
             value = .initial
@@ -310,12 +310,12 @@ actor BootstrapStateStore {
     }
     nonisolated static func persistedWorkspaceConfigurations() -> [SetupWorkspaceConfiguration] {
         let workspaceConfigurationURL: URL = {
-            if let explicit = ProcessInfo.processInfo.environment["MSW_WORKSPACES_FILE"],
+            if let explicit = ProcessInfo.processInfo.environment["SILO_WORKSPACES_FILE"],
                !explicit.isEmpty {
                 return URL(fileURLWithPath: explicit)
             }
             return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-                .appendingPathComponent(".config/msw/workspaces.json")
+                .appendingPathComponent(".config/silo/workspaces.json")
         }()
         var workspaceFileMetadata = stat()
         let workspaceFileExists = Darwin.lstat(
@@ -330,7 +330,7 @@ actor BootstrapStateStore {
            let fileSize = values.fileSize,
            fileSize <= 256 * 1_024,
            let data = try? Data(contentsOf: workspaceConfigurationURL),
-           let boundary = MSWBootstrapConfiguration.decodeValidated(from: data) {
+           let boundary = SiloBootstrapConfiguration.decodeValidated(from: data) {
             return boundary.setupConfigurations
         }
         if workspaceFileExists {
@@ -352,7 +352,7 @@ actor BootstrapStateStore {
               let fileSize = values.fileSize,
               fileSize <= 256 * 1_024,
               let data = try? Data(contentsOf: url),
-              let state = try? JSONDecoder().decode(MSWBootstrapState.self, from: data),
+              let state = try? JSONDecoder().decode(SiloBootstrapState.self, from: data),
               let configurations = state.workspaceConfigurations,
               SetupWorkspaceConfiguration.validationMessage(for: configurations) == nil else {
             return SetupWorkspaceConfiguration.defaults
@@ -360,9 +360,9 @@ actor BootstrapStateStore {
         return configurations
     }
 
-    func load() -> MSWBootstrapState { value }
+    func load() -> SiloBootstrapState { value }
 
-    func save(_ state: MSWBootstrapState) throws {
+    func save(_ state: SiloBootstrapState) throws {
         value = state
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -372,15 +372,15 @@ actor BootstrapStateStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
-protocol MSWBootstrapCoordinating: AnyObject, Sendable {
-    func state() async -> MSWBootstrapState
+protocol SiloBootstrapCoordinating: AnyObject, Sendable {
+    func state() async -> SiloBootstrapState
     /// Runs every dependency check. When `onCheck` is provided it is invoked
     /// once per finished check so callers can surface results progressively
     /// while the remaining checks are still running.
-    func preflight(onCheck: (@Sendable (MSWPreflightCheck) -> Void)?) async -> [MSWPreflightCheck]
+    func preflight(onCheck: (@Sendable (SiloPreflightCheck) -> Void)?) async -> [SiloPreflightCheck]
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
-    ) async throws -> MSWBootstrapResult
+    ) async throws -> SiloBootstrapResult
     /// Repairs and verifies only the app-managed runtime. This path does not
     /// apply host integration, workspace configuration, or GitHub setup.
     func repairRuntime() async throws
@@ -393,42 +393,42 @@ protocol MSWBootstrapCoordinating: AnyObject, Sendable {
     func openHostApprovalSettings() async
 }
 
-extension MSWBootstrapCoordinating {
-    func run() async throws -> MSWBootstrapResult {
+extension SiloBootstrapCoordinating {
+    func run() async throws -> SiloBootstrapResult {
         try await run(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
     }
 }
 
-extension MSWBootstrapCoordinating {
+extension SiloBootstrapCoordinating {
     /// Non-streaming convenience for callers that only consume the final set.
-    func preflight() async -> [MSWPreflightCheck] {
+    func preflight() async -> [SiloPreflightCheck] {
         await preflight(onCheck: nil)
     }
 }
 
-actor BootstrapCoordinator: MSWBootstrapCoordinating {
-    private let client: MSWClient
-    private let runner: MSWCommandRunner
+actor BootstrapCoordinator: SiloBootstrapCoordinating {
+    private let client: SiloClient
+    private let runner: SiloCommandRunner
     private let stateStore: BootstrapStateStore
     private let hostAgent: any SiloHostAgentControlling
-    private let hostService: any MSWHostServiceControlling
-    private let userIntegration: any MSWUserIntegrationControlling
-    private let hostRepairVerifier: any MSWHostRepairVerifying
-    private let hostRepairAuthorization: any MSWHostRepairAuthorizing
+    private let hostService: any SiloHostServiceControlling
+    private let userIntegration: any SiloUserIntegrationControlling
+    private let hostRepairVerifier: any SiloHostRepairVerifying
+    private let hostRepairAuthorization: any SiloHostRepairAuthorizing
     private let freeDiskBytes: @Sendable () -> Int64?
     private var running = false
     /// Session cache for the expensive signature-validation query; packaging
     /// does not change while the app runs.
-    private var cachedPackagingStatus: MSWHostServicePackagingStatus?
+    private var cachedPackagingStatus: SiloHostServicePackagingStatus?
     init(
-        client: MSWClient,
-        runner: MSWCommandRunner,
+        client: SiloClient,
+        runner: SiloCommandRunner,
         stateStore: BootstrapStateStore = BootstrapStateStore(),
         hostAgent: any SiloHostAgentControlling = HostAgentClient(),
-        hostService: any MSWHostServiceControlling,
-        userIntegration: (any MSWUserIntegrationControlling)? = nil,
-        hostRepairVerifier: (any MSWHostRepairVerifying)? = nil,
-        hostRepairAuthorization: (any MSWHostRepairAuthorizing)? = nil,
+        hostService: any SiloHostServiceControlling,
+        userIntegration: (any SiloUserIntegrationControlling)? = nil,
+        hostRepairVerifier: (any SiloHostRepairVerifying)? = nil,
+        hostRepairAuthorization: (any SiloHostRepairAuthorizing)? = nil,
         freeDiskBytes: @escaping @Sendable () -> Int64? = {
             let attributes = try? FileManager.default
                 .attributesOfFileSystem(forPath: NSHomeDirectory())
@@ -440,15 +440,15 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         self.stateStore = stateStore
         self.hostAgent = hostAgent
         self.hostService = hostService
-        self.userIntegration = userIntegration ?? MSWUserIntegrationService(runner: runner)
-        self.hostRepairVerifier = hostRepairVerifier ?? MSWHostRepairVerifier(runner: runner)
-        self.hostRepairAuthorization = hostRepairAuthorization ?? MSWHostRepairAuthorization(runner: runner)
+        self.userIntegration = userIntegration ?? SiloUserIntegrationService(runner: runner)
+        self.hostRepairVerifier = hostRepairVerifier ?? SiloHostRepairVerifier(runner: runner)
+        self.hostRepairAuthorization = hostRepairAuthorization ?? SiloHostRepairAuthorization(runner: runner)
         self.freeDiskBytes = freeDiskBytes
     }
 
-    func state() async -> MSWBootstrapState { await stateStore.load() }
+    func state() async -> SiloBootstrapState { await stateStore.load() }
 
-    func hostServiceStatus() async -> MSWHostServiceStatus {
+    func hostServiceStatus() async -> SiloHostServiceStatus {
         await hostService.status
     }
 
@@ -458,8 +458,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
 
 
     func preflight(
-        onCheck: (@Sendable (MSWPreflightCheck) -> Void)? = nil
-    ) async -> [MSWPreflightCheck] {
+        onCheck: (@Sendable (SiloPreflightCheck) -> Void)? = nil
+    ) async -> [SiloPreflightCheck] {
         await preflight(workspaceConfigurations: nil, onCheck: onCheck)
     }
 
@@ -469,15 +469,15 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     /// boundary rather than the previously persisted/default boundary.
     private func preflight(
         workspaceConfigurations: [SetupWorkspaceConfiguration]?,
-        onCheck: (@Sendable (MSWPreflightCheck) -> Void)? = nil
-    ) async -> [MSWPreflightCheck] {
+        onCheck: (@Sendable (SiloPreflightCheck) -> Void)? = nil
+    ) async -> [SiloPreflightCheck] {
         let persistedWorkspaceConfigurations = (await stateStore.load()).workspaceConfigurations
         let targetWorkspaceConfigurations = workspaceConfigurations
             ?? persistedWorkspaceConfigurations
             ?? SetupWorkspaceConfiguration.defaults
-        var checks: [MSWPreflightCheck] = []
+        var checks: [SiloPreflightCheck] = []
         let osMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
-        checks.append(MSWPreflightCheck(
+        checks.append(SiloPreflightCheck(
             id: "macos-version",
             title: "macOS 26 or later",
             status: osMajor >= 26 ? .pass : .needsAction,
@@ -486,7 +486,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         ))
         let architecture = await commandOutput(executable: URL(fileURLWithPath: "/usr/bin/uname"), arguments: ["-m"])
         let isArm64 = architecture?.trimmingCharacters(in: .whitespacesAndNewlines) == "arm64"
-        checks.append(MSWPreflightCheck(
+        checks.append(SiloPreflightCheck(
             id: "architecture",
             title: "Apple Silicon",
             status: architecture == nil ? .unavailable : (isArm64 ? .pass : .needsAction),
@@ -495,7 +495,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         ))
         let freeBytes = freeDiskBytes()
         let diskPass = (freeBytes ?? 0) >= 20 * 1_024 * 1_024 * 1_024
-        checks.append(MSWPreflightCheck(
+        checks.append(SiloPreflightCheck(
             id: "disk-space",
             title: "Available disk space",
             status: freeBytes == nil ? .unavailable : (diskPass ? .pass : .needsAction),
@@ -503,7 +503,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             remediation: diskPass ? nil : "Free at least 20 GiB before continuing."
         ))
         let memoryGiB = ProcessInfo.processInfo.physicalMemory / (1_024 * 1_024 * 1_024)
-        checks.append(MSWPreflightCheck(
+        checks.append(SiloPreflightCheck(
             id: "memory",
             title: "Memory budget",
             status: memoryGiB >= 16 ? .pass : .needsAction,
@@ -511,7 +511,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             remediation: memoryGiB >= 16 ? nil : "At least 16 GiB is recommended for the configured workspaces."
         ))
 
-        // Tool resolution and the MSW-runtime handshake wait on subprocesses
+        // Tool resolution and the Silo-runtime handshake wait on subprocesses
         // while host integration waits on its own XPC chain. Running both
         // tails concurrently bounds checking by the slower branch instead of
         // the sum of both, and every finished check streams to `onCheck`.
@@ -525,20 +525,20 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         return checks
     }
 
-    /// Tool availability plus the MSW runtime handshake. Each finished check
+    /// Tool availability plus the Silo runtime handshake. Each finished check
     /// is reported immediately so setup can render results progressively.
     private func runtimePreflight(
-        report: (@Sendable (MSWPreflightCheck) -> Void)?
-    ) async -> [MSWPreflightCheck] {
-        var checks: [MSWPreflightCheck] = []
-        func record(_ check: MSWPreflightCheck) {
+        report: (@Sendable (SiloPreflightCheck) -> Void)?
+    ) async -> [SiloPreflightCheck] {
+        var checks: [SiloPreflightCheck] = []
+        func record(_ check: SiloPreflightCheck) {
             checks.append(check)
             report?(check)
         }
         for name in ["git", "tar", "zstd", "git-lfs", "msb"] {
             let resolved = await runner.resolveExecutable(named: name)
             let available = resolved != nil
-            record(MSWPreflightCheck(
+            record(SiloPreflightCheck(
                 id: "tool-\(name)",
                 title: name,
                 status: available ? .pass : .needsAction,
@@ -546,17 +546,17 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 remediation: available ? nil : "Install or select \(name) in Silo setup."
             ))
         }
-        let mswResolution = await runner.mswResolution(forceRefresh: true)
+        let siloResolution = await runner.siloResolution(forceRefresh: true)
         let canInstallToolchain = bundledToolchainAvailable
-        let repairRuntimeAction = "Use Repair… to reinstall the bundled MSW runtime."
-        if mswResolution.selected == nil {
-            record(MSWPreflightCheck(
-                id: "msw-runtime",
-                title: "MSW runtime",
+        let repairRuntimeAction = "Use Repair… to reinstall the bundled Silo runtime."
+        if siloResolution.selected == nil {
+            record(SiloPreflightCheck(
+                id: "silo-runtime",
+                title: "Silo runtime",
                 status: canInstallToolchain ? .needsAction : .unavailable,
                 detail: canInstallToolchain
-                    ? "The activated bundled MSW runtime needs repair."
-                    : "This app build is missing its bundled MSW runtime.",
+                    ? "The activated bundled Silo runtime needs repair."
+                    : "This app build is missing its bundled Silo runtime.",
                 remediation: canInstallToolchain
                     ? repairRuntimeAction
                     : "Reinstall Silo from a complete app bundle."
@@ -572,20 +572,20 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 let ready =
                     handshake.configurationAvailable && handshake.runtimeAvailable &&
                     handshake.capabilities.jq
-                record(MSWPreflightCheck(
-                    id: "msw-runtime",
-                    title: "MSW runtime",
+                record(SiloPreflightCheck(
+                    id: "silo-runtime",
+                    title: "Silo runtime",
                     status: ready ? .pass : .needsAction,
                     detail: ready ? "Silo verified its coupled runtime."
-                        : "MSW is present, but its configuration, JSON adapter, or MicroSandbox runtime is incomplete.",
+                        : "Silo is present, but its configuration, JSON adapter, or MicroSandbox runtime is incomplete.",
                     remediation: ready ? nil : (canInstallToolchain
                         ? repairRuntimeAction
                         : "Reinstall Silo from a complete app bundle.")
                 ))
             } else {
-                record(MSWPreflightCheck(
-                    id: "msw-runtime",
-                    title: "MSW runtime",
+                record(SiloPreflightCheck(
+                    id: "silo-runtime",
+                    title: "Silo runtime",
                     status: .needsAction,
                     detail: "Silo could not verify the installed runtime.",
                     remediation: canInstallToolchain
@@ -601,19 +601,19 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     /// main actor; code-signature validation never touches the UI thread.
     private func hostIntegrationPreflight(
         _ targetWorkspaceConfigurations: [SetupWorkspaceConfiguration],
-        report: (@Sendable (MSWPreflightCheck) -> Void)?
-    ) async -> [MSWPreflightCheck] {
-        var checks: [MSWPreflightCheck] = []
-        func record(_ check: MSWPreflightCheck) {
+        report: (@Sendable (SiloPreflightCheck) -> Void)?
+    ) async -> [SiloPreflightCheck] {
+        var checks: [SiloPreflightCheck] = []
+        func record(_ check: SiloPreflightCheck) {
             checks.append(check)
             report?(check)
         }
         let hostPackaging = await hostService.packagingStatus()
         if hostPackaging == .signingUnavailable {
-            let records = MSWWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
+            let records = SiloWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
             let ready = await hostRepairVerifier.isReady(records: records)
             if ready {
-                record(MSWPreflightCheck(
+                record(SiloPreflightCheck(
                     id: "host-integration",
                     title: "Host integration",
                     status: .pass,
@@ -628,7 +628,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             return checks
         }
         if hostPackaging != .ready {
-            record(MSWPreflightCheck(
+            record(SiloPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .unavailable,
@@ -641,28 +641,28 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         switch hostStatus {
         case .enabled:
             do {
-                let records = MSWWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
+                let records = SiloWorkspaceNetwork.records(for: targetWorkspaceConfigurations.map(\.name))
                 let snapshot = try await hostAgent.inspect(records: records)
                 let expectedAliases = records.map(\.address)
                 let ready = snapshot.fixedAliases == expectedAliases && snapshot.hostsBlockInstalled
-                record(MSWPreflightCheck(
+                record(SiloPreflightCheck(
                     id: "host-integration",
                     title: "Host integration",
                     status: ready ? .pass : .needsAction,
                     detail: ready ? "The fixed loopback aliases and managed host records are installed." : "The helper is enabled, but fixed loopback aliases or managed host records need repair.",
-                    remediation: ready ? nil : "Continue setup to repair only the fixed MSW-owned host integration."
+                    remediation: ready ? nil : "Continue setup to repair only the fixed Silo-owned host integration."
                 ))
             } catch {
-                record(MSWPreflightCheck(
+                record(SiloPreflightCheck(
                     id: "host-integration",
                     title: "Host integration",
                     status: .needsAction,
                     detail: "The registered host helper is not reachable.",
-                    remediation: "Restart or repair the MSW host helper, then check again."
+                    remediation: "Restart or repair the Silo host helper, then check again."
                 ))
             }
         case .notRegistered:
-            record(MSWPreflightCheck(
+            record(SiloPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .needsAction,
@@ -670,7 +670,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 remediation: "Continue setup to register the helper and request administrator approval."
             ))
         case .requiresApproval:
-            record(MSWPreflightCheck(
+            record(SiloPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .needsAction,
@@ -678,7 +678,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 remediation: "Open Login Items settings and approve the Silo host helper."
             ))
         case .notFound, .unknown:
-            record(MSWPreflightCheck(
+            record(SiloPreflightCheck(
                 id: "host-integration",
                 title: "Host integration",
                 status: .unavailable,
@@ -703,8 +703,8 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             cachedPackagingStatus = status
             guard status == .signingUnavailable else { return false }
         }
-        let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
-        return !MSWHostRepairVerifier.hostsFileMatches(records: records)
+        let records = SiloWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
+        return !SiloHostRepairVerifier.hostsFileMatches(records: records)
     }
     func installBundledToolchain() async throws -> ToolchainInstallResult {
         guard let bundledRoot = ToolchainLayout.bundledRoot() else {
@@ -725,7 +725,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
     private func installDefaultConfigurationIfNeeded() async throws {
         let homeDirectory = await runner.homeDirectory()
         let configurationDirectory = homeDirectory.appending(
-            path: ".config/msw",
+            path: ".config/silo",
             directoryHint: .isDirectory
         )
         let destination = configurationDirectory.appending(
@@ -793,10 +793,10 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         defer { running = false }
         do {
             let activated = try await installBundledToolchain()
-            await runner.invalidateMSWResolution()
-            let resolution = await runner.mswResolution(forceRefresh: true)
+            await runner.invalidateSiloResolution()
+            let resolution = await runner.siloResolution(forceRefresh: true)
             let expectedExecutable = activated.root
-                .appendingPathComponent("bin/msw")
+                .appendingPathComponent("bin/silo")
                 .standardizedFileURL
             guard resolution.selected?.standardizedFileURL == expectedExecutable else {
                 throw BootstrapCoordinatorError.unavailable
@@ -808,7 +808,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
 
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
-    ) async throws -> MSWBootstrapResult {
+    ) async throws -> SiloBootstrapResult {
         guard !running else { throw BootstrapCoordinatorError.busy }
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
@@ -827,7 +827,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         let toolchainStartedAt = Date()
         do {
             try await installDefaultConfigurationIfNeeded()
-            let resolution = await runner.mswResolution(forceRefresh: true)
+            let resolution = await runner.siloResolution(forceRefresh: true)
             let runtimeReady: Bool
             if resolution.selected != nil {
                 runtimeReady = await runtimeIsReady()
@@ -839,7 +839,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             current.completedPhases.insert(.toolchain)
             current.phase = .hostIntegration
             current.updatedAt = Date()
-            current.recordPhaseDuration(MSWBootstrapState.Phase.toolchain.rawValue, from: toolchainStartedAt)
+            current.recordPhaseDuration(SiloBootstrapState.Phase.toolchain.rawValue, from: toolchainStartedAt)
             try await stateStore.save(current)
         } catch {
             let failure = (error as? BootstrapCoordinatorError)
@@ -867,13 +867,13 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
 
         current.recordPhaseDuration(
-            MSWBootstrapState.Phase.preflight.rawValue,
+            SiloBootstrapState.Phase.preflight.rawValue,
             from: initialPreflightStartedAt
         )
         let hostIntegrationStartedAt = Date()
         let hostPackaging = await hostService.packagingStatus()
         if hostPackaging == .signingUnavailable {
-            let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
+            let records = SiloWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
             if !(await hostRepairVerifier.isReady(records: records)) {
                 do {
                     try await userIntegration.configureUserIntegrationIfAvailable()
@@ -902,7 +902,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             current.updatedAt = Date()
             try await stateStore.save(current)
         } else {
-            let registrationStatus: MSWHostServiceStatus
+            let registrationStatus: SiloHostServiceStatus
             do {
                 registrationStatus = try await hostService.registerIfNeeded()
             } catch {
@@ -927,9 +927,9 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
                 current.completedPhases.insert(.preflight)
                 current.updatedAt = Date()
                 try await stateStore.save(current)
-                return MSWBootstrapResult(
+                return SiloBootstrapResult(
                     resumed: current.startedAt != nil,
-                    phase: MSWBootstrapState.Phase.hostIntegration.rawValue,
+                    phase: SiloBootstrapState.Phase.hostIntegration.rawValue,
                     requiresApproval: true,
                     vmsStarted: false,
                     message: "Approve the Silo host helper in Login Items settings, then continue setup."
@@ -937,7 +937,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
             }
 
             do {
-                let records = MSWWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
+                let records = SiloWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
                 _ = try await hostAgent.ensureFixedLoopbackAliases(records: records)
                 _ = try await hostAgent.installFixedHostRecords(records: records)
             } catch {
@@ -951,7 +951,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
 
         current.recordPhaseDuration(
-            MSWBootstrapState.Phase.hostIntegration.rawValue,
+            SiloBootstrapState.Phase.hostIntegration.rawValue,
             from: hostIntegrationStartedAt
         )
         let finalPreflightStartedAt = Date()
@@ -964,7 +964,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
 
         current.recordPhaseDuration(
-            MSWBootstrapState.Phase.preflight.rawValue,
+            SiloBootstrapState.Phase.preflight.rawValue,
             from: finalPreflightStartedAt
         )
         current.phase = .workspaces
@@ -972,30 +972,30 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         do {
             let workspacesStartedAt = Date()
             let response = try await client.bootstrap(workspaceConfigurations: workspaceConfigurations)
-            guard let result = response.result else { throw MSWClientError.missingResult(command: "bootstrap") }
+            guard let result = response.result else { throw SiloClientError.missingResult(command: "bootstrap") }
             guard let installed = await runner.installedWorkspaceConfigurations(),
-                  MSWBootstrapConfiguration(installed) == MSWBootstrapConfiguration(workspaceConfigurations) else {
+                  SiloBootstrapConfiguration(installed) == SiloBootstrapConfiguration(workspaceConfigurations) else {
                 throw BootstrapCoordinatorError.configurationInstallationFailed(
                     "The installed workspace configuration did not match the selected configuration after bootstrap."
                 )
             }
-            current.phase = MSWBootstrapState.Phase(rawValue: result.phase) ?? .workspaces
-            if !result.requiresApproval && result.phase == MSWBootstrapState.Phase.complete.rawValue {
+            current.phase = SiloBootstrapState.Phase(rawValue: result.phase) ?? .workspaces
+            if !result.requiresApproval && result.phase == SiloBootstrapState.Phase.complete.rawValue {
                 current.completedPhases.formUnion([.preflight, .toolchain, .hostIntegration, .workspaces])
                 current.workspaceConfigurations = workspaceConfigurations
             } else {
                 current.completedPhases.insert(.preflight)
             }
             current.updatedAt = Date()
-            current.recordPhaseDuration(MSWBootstrapState.Phase.workspaces.rawValue, from: workspacesStartedAt)
+            current.recordPhaseDuration(SiloBootstrapState.Phase.workspaces.rawValue, from: workspacesStartedAt)
             try await stateStore.save(current)
             return result
         } catch {
-            if let clientError = error as? MSWClientError,
+            if let clientError = error as? SiloClientError,
                case .protocolFailure(let protocolError) = clientError,
-               protocolError.code == "MSW_GITHUB_RECONNECT_REQUIRED",
+               protocolError.code == "SILO_GITHUB_RECONNECT_REQUIRED",
                let installed = await runner.installedWorkspaceConfigurations(),
-               MSWBootstrapConfiguration(installed) == MSWBootstrapConfiguration(workspaceConfigurations) {
+               SiloBootstrapConfiguration(installed) == SiloBootstrapConfiguration(workspaceConfigurations) {
                 // The CLI reports reconnect only after it has atomically
                 // installed and reconciled the selected workspace boundary.
                 // Record that verified boundary before Setup enters GitHub;
@@ -1012,7 +1012,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
         }
     }
 
-    private func isPassingOrAdvisory(_ check: MSWPreflightCheck) -> Bool {
+    private func isPassingOrAdvisory(_ check: SiloPreflightCheck) -> Bool {
         check.status == .pass || (check.id == "memory" && check.status == .needsAction)
     }
 
@@ -1023,7 +1023,7 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
 
     private func commandOutput(executable: URL, arguments: [String]) async -> String? {
         do {
-            let result = try await runner.run(MSWCommand(executable: executable, arguments: arguments, timeout: .seconds(5)))
+            let result = try await runner.run(SiloCommand(executable: executable, arguments: arguments, timeout: .seconds(5)))
             return result.stdoutString
         } catch {
             return nil
@@ -1054,13 +1054,13 @@ actor BootstrapCoordinator: MSWBootstrapCoordinating {
 }
 
 /// Deterministic bootstrap fixture for UI tests. The first `run()` throws the
-/// typed GitHub reconnect protocol error a real `msw app bootstrap` reports for
+/// typed GitHub reconnect protocol error a real `silo app bootstrap` reports for
 /// a configured workspace whose credential is unavailable; later `run()` calls
 /// report a completed verification, mirroring a successful resume after the
 /// user reconnects GitHub.
 @MainActor
-final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
-    private var current: MSWBootstrapState
+final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
+    private var current: SiloBootstrapState
     private var runCount = 0
     private let failureWorkspace: String
     private let keepsFirstRunPending: Bool
@@ -1075,7 +1075,7 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
         self.keepsFirstRunPending = keepsFirstRunPending
         self.completesFirstRun = completesFirstRun
         let now = Date()
-        self.current = MSWBootstrapState(
+        self.current = SiloBootstrapState(
             phase: .workspaces,
             startedAt: now,
             updatedAt: now,
@@ -1084,16 +1084,16 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
         )
     }
 
-    func state() async -> MSWBootstrapState { current }
+    func state() async -> SiloBootstrapState { current }
 
     func preflight(
-        onCheck: (@Sendable (MSWPreflightCheck) -> Void)? = nil
-    ) async -> [MSWPreflightCheck] {
-        let checks: [MSWPreflightCheck] = [
-            MSWPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
-            MSWPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
-            MSWPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
-            MSWPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
+        onCheck: (@Sendable (SiloPreflightCheck) -> Void)? = nil
+    ) async -> [SiloPreflightCheck] {
+        let checks: [SiloPreflightCheck] = [
+            SiloPreflightCheck(id: "macos-version", title: "macOS 26 or later", status: .pass, detail: "Detected macOS 26.", remediation: nil),
+            SiloPreflightCheck(id: "architecture", title: "Apple Silicon", status: .pass, detail: "Detected arm64.", remediation: nil),
+            SiloPreflightCheck(id: "disk-space", title: "Available disk space", status: .pass, detail: "128 GiB available; setup estimates at least 20 GiB.", remediation: nil),
+            SiloPreflightCheck(id: "memory", title: "Memory budget", status: .pass, detail: "Detected 64 GiB physical memory.", remediation: nil)
         ]
         checks.forEach { onCheck?($0) }
         return checks
@@ -1101,7 +1101,7 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
 
     func run(
         workspaceConfigurations: [SetupWorkspaceConfiguration]
-    ) async throws -> MSWBootstrapResult {
+    ) async throws -> SiloBootstrapResult {
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)
         }
@@ -1117,8 +1117,8 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
             current.completedPhases.insert(.workspaces)
             current.phase = .github
             current.reconnectWorkspace = failureWorkspace
-            let failure = MSWClientError.protocolFailure(MSWProtocolError(
-                code: "MSW_GITHUB_RECONNECT_REQUIRED",
+            let failure = SiloClientError.protocolFailure(SiloProtocolError(
+                code: "SILO_GITHUB_RECONNECT_REQUIRED",
                 message: "GitHub is configured for '\(failureWorkspace)', but its credential is unavailable.",
                 recovery: "Reconnect '\(failureWorkspace)' in Silo, then resume Setup.",
                 workspace: failureWorkspace,
@@ -1129,14 +1129,14 @@ final class MSWBootstrapUITestStub: MSWBootstrapCoordinating {
             throw failure
         }
         current.phase = .complete
-        current.completedPhases = Set(MSWBootstrapState.Phase.allCases)
+        current.completedPhases = Set(SiloBootstrapState.Phase.allCases)
         current.workspaceConfigurations = workspaceConfigurations
         current.reconnectWorkspace = nil
         current.lastError = nil
         current.updatedAt = Date()
-        return MSWBootstrapResult(
+        return SiloBootstrapResult(
             resumed: true,
-            phase: MSWBootstrapState.Phase.complete.rawValue,
+            phase: SiloBootstrapState.Phase.complete.rawValue,
             requiresApproval: false,
             vmsStarted: true,
             message: "Workspace bootstrap and deep verification completed; the previous running set was restored."

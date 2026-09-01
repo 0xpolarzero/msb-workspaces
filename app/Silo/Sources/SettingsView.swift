@@ -192,7 +192,7 @@ final class GitHubSettingsState {
     }
 
     func installRuntimeRepairUITestFixture() {
-        error = "GitHub request failed because the MSW executable is unavailable. Use Repair… to reinstall the bundled runtime."
+        error = "GitHub request failed because the Silo executable is unavailable. Use Repair… to reinstall the bundled runtime."
     }
 
     func runtimeRepairDidSucceed() {
@@ -301,7 +301,7 @@ final class GitHubSettingsState {
                 hasLoaded = true
             } catch is CancellationError {
                 return
-            } catch let clientError as MSWClientError where clientError == .cancelled {
+            } catch let clientError as SiloClientError where clientError == .cancelled {
                 return
             } catch {
                 if !hasLoaded {
@@ -456,10 +456,10 @@ struct SettingsView: View {
     )
     @State private var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     @State private var notificationsEnabled = false
-    @State private var enabledNotificationCategories: Set<MSWNotificationCategory> = []
+    @State private var enabledNotificationCategories: Set<SiloNotificationCategory> = []
     @State private var notificationMessage: String?
     @State private var isUpdatingNotifications = false
-    @State private var updatingNotificationCategories: Set<MSWNotificationCategory> = []
+    @State private var updatingNotificationCategories: Set<SiloNotificationCategory> = []
 
     init(
         navigation: AppNavigationState,
@@ -1365,7 +1365,7 @@ struct SettingsView: View {
             }
 
             Section("Alert categories") {
-                ForEach(MSWNotificationCategory.allCases) { category in
+                ForEach(SiloNotificationCategory.allCases) { category in
                     VStack(alignment: .leading, spacing: 4) {
                         Toggle(
                             category.title,
@@ -1720,10 +1720,10 @@ struct SettingsView: View {
     /// presents the in-app device sheet (typed not-configured remedies are
     /// Runs the CLI-owned host-credential flow. gh reuse completes
     /// in-process. When the CLI reports gh is unauthenticated with no
-    /// device-flow client ID (MSW_HOST_OAUTH_NOT_CONFIGURED) the app
+    /// device-flow client ID (SILO_HOST_OAUTH_NOT_CONFIGURED) the app
     /// launches the installed gh web OAuth flow and then retries auth; when
     /// the CLI reports the Device Flow is available
-    /// (MSW_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
+    /// (SILO_HOST_DEVICE_FLOW_INTERACTIVE_REQUIRED) the app presents the
     /// in-app device sheet. Other typed remedies surface verbatim.
     private func connectGitHubAccount() {
         guard let provider, !isConnectingAccount else { return }
@@ -1800,7 +1800,7 @@ struct SettingsView: View {
         }
     }
 
-    private func updateNotificationCategory(_ category: MSWNotificationCategory, enabled: Bool) {
+    private func updateNotificationCategory(_ category: SiloNotificationCategory, enabled: Bool) {
         updatingNotificationCategories.insert(category)
         notificationMessage = nil
         Task {

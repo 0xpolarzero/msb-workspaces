@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MSW Keychain bridge (Path C §5 hygiene, reviewer re-review).
+"""Silo Keychain bridge (Path C §5 hygiene, reviewer re-review).
 
 Security.framework generic-password store used for the versioned JSON host
 GitHub credential record. The `security` CLI's prompted `-w` stdin mode reads
@@ -11,7 +11,7 @@ ACCOUNT` command is a parent process that reads the `put` record from NORMAL
 stdin and spawns the SAME helper as `--worker OP SERVICE ACCOUNT`, passing the
 secret bytes over the child's stdin (never argv, env, or files). The parent
 captures stdout/stderr and enforces a hard timeout
-(MSW_KEYCHAIN_TIMEOUT_SECS, default 10): a hidden keychain ACL prompt (e.g. a
+(SILO_KEYCHAIN_TIMEOUT_SECS, default 10): a hidden keychain ACL prompt (e.g. a
 legacy security(1)-created item) can never hang the CLI — the watchdog
 terminates then kills the worker and reports a typed timeout. The WORKER mode
 alone loads Security.framework and performs the SecItem operation.
@@ -24,7 +24,7 @@ Commands:
                            (exit 44 when the item does not exist)
   delete SERVICE ACCOUNT   parent: worker SecItemDelete + proof missing
 
-The writer (bin/msw) and readers (bin/msw-github-host-token, askpass) run the
+The writer (bin/silo) and readers (bin/silo-github-host-token, askpass) run the
 same python binary, so the item's creator trust extends to the worker's
 SecItemCopyMatching — no security(1) prompts. Service/account are strictly
 validated; OSStatus failures are typed errors on stderr with nonzero exit.
@@ -47,7 +47,7 @@ kCFStringEncodingUTF8 = 0x08000100
 ERR_ITEM_NOT_FOUND = -25300
 
 _COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
-TIMEOUT_SECS = max(1, int(float(os.environ.get("MSW_KEYCHAIN_TIMEOUT_SECS") or "10")))
+TIMEOUT_SECS = max(1, int(float(os.environ.get("SILO_KEYCHAIN_TIMEOUT_SECS") or "10")))
 
 
 class CFDictionaryKeyCallBacks(ctypes.Structure):
@@ -92,7 +92,7 @@ _held = []
 
 
 def _fail(message: str) -> int:
-    sys.stderr.write("msw-keychain-bridge: %s\n" % message)
+    sys.stderr.write("silo-keychain-bridge: %s\n" % message)
     return 1
 
 
@@ -125,13 +125,13 @@ def _base(service: str, account: str):
 
 # ---------------------------------------------------------------------------
 # Worker mode: the SecItem operation itself (no parent logic, no watchdog).
-# MSW_FAKE_BRIDGE_HANG is honored HERE, before the call, so a test can prove
+# SILO_FAKE_BRIDGE_HANG is honored HERE, before the call, so a test can prove
 # the parent watchdog bounds and kills a wedged worker.
 # ---------------------------------------------------------------------------
 
 
 def worker_put(service: str, account: str) -> int:
-    if os.environ.get("MSW_FAKE_BRIDGE_HANG") == "1":
+    if os.environ.get("SILO_FAKE_BRIDGE_HANG") == "1":
         time.sleep(60)  # seam: simulate a hidden ACL prompt hang
     data = sys.stdin.buffer.read()
     if not data:
@@ -152,7 +152,7 @@ def worker_put(service: str, account: str) -> int:
 
 
 def worker_get(service: str, account: str) -> int:
-    if os.environ.get("MSW_FAKE_BRIDGE_HANG") == "1":
+    if os.environ.get("SILO_FAKE_BRIDGE_HANG") == "1":
         time.sleep(60)
     query = _dict(_base(service, account) + [("r_Data", CF_TRUE)])
     result = c_CFTypeRef()
@@ -170,9 +170,9 @@ def worker_get(service: str, account: str) -> int:
 
 
 def worker_delete(service: str, account: str) -> int:
-    if os.environ.get("MSW_FAKE_BRIDGE_HANG") == "1":
+    if os.environ.get("SILO_FAKE_BRIDGE_HANG") == "1":
         time.sleep(60)
-    if os.environ.get("MSW_FAKE_KC_DELETE_FAIL") == "1":
+    if os.environ.get("SILO_FAKE_KC_DELETE_FAIL") == "1":
         return _fail("Keychain delete failure injected")
     query = _dict(_base(service, account))
     status = sec.SecItemDelete(query)
@@ -208,7 +208,7 @@ def run_worker(op: str, service: str, account: str, secret: bytes | None) -> int
     except subprocess.TimeoutExpired:
         # subprocess.run already terminated (then killed) the wedged worker;
         # report a typed timeout so no hidden ACL prompt can hang the CLI.
-        sys.stderr.write("msw-keychain-bridge: worker %s timed out after %ds "
+        sys.stderr.write("silo-keychain-bridge: worker %s timed out after %ds "
                          "(possible keychain ACL prompt); the child was killed\n"
                          % (op, TIMEOUT_SECS))
         return 124
@@ -234,7 +234,7 @@ def main() -> int:
         except RuntimeError as exc:
             return _fail(str(exc))
     if len(args) != 3:
-        sys.stderr.write("usage: msw-keychain-bridge put|get|delete SERVICE ACCOUNT\n")
+        sys.stderr.write("usage: silo-keychain-bridge put|get|delete SERVICE ACCOUNT\n")
         return 64
     op, service, account = args[0], args[1], args[2]
     if not _COMPONENT_RE.fullmatch(service) or not _COMPONENT_RE.fullmatch(account):

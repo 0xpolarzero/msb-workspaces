@@ -1,6 +1,6 @@
 import Foundation
 
-enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
+enum SiloClientError: Error, LocalizedError, Sendable, Equatable {
     case invalidExecutable
     case invalidArguments
     case timedOut(command: String)
@@ -10,7 +10,7 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
     case malformedJSON(command: String)
     case unsupportedSchema(Int)
     case missingResult(command: String)
-    case protocolFailure(MSWProtocolError)
+    case protocolFailure(SiloProtocolError)
     case unavailable(String)
     /// Typed error from a raw (non-app-protocol) CLI command that reports
     /// `{"ok":false,"error":{code,message,remedies}}` on stdout.
@@ -18,24 +18,24 @@ enum MSWClientError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidExecutable: return "MSW executable is unavailable."
-        case .invalidArguments: return "The requested MSW operation has invalid arguments."
-        case .timedOut(let command): return "MSW operation timed out: \(command)."
-        case .cancelled: return "The MSW operation was cancelled."
+        case .invalidExecutable: return "Silo executable is unavailable."
+        case .invalidArguments: return "The requested Silo operation has invalid arguments."
+        case .timedOut(let command): return "Silo operation timed out: \(command)."
+        case .cancelled: return "The Silo operation was cancelled."
         case .processFailed(let command, let status, let message):
-            return message ?? "MSW \(command) exited with status \(status) without returning error details."
-        case .invalidUTF8: return "MSW returned invalid UTF-8 output."
-        case .malformedJSON(let command): return "MSW returned malformed JSON for \(command)."
-        case .unsupportedSchema(let version): return "MSW returned unsupported schema version \(version)."
-        case .missingResult(let command): return "MSW returned no result for \(command)."
+            return message ?? "Silo \(command) exited with status \(status) without returning error details."
+        case .invalidUTF8: return "Silo returned invalid UTF-8 output."
+        case .malformedJSON(let command): return "Silo returned malformed JSON for \(command)."
+        case .unsupportedSchema(let version): return "Silo returned unsupported schema version \(version)."
+        case .missingResult(let command): return "Silo returned no result for \(command)."
         case .protocolFailure(let error): return error.localizedDescription
         case .unavailable(let message): return message
-        case .rawCLIError(_, let message): return message ?? "The MSW operation failed."
+        case .rawCLIError(_, let message): return message ?? "The Silo operation failed."
         }
     }
 }
 
-enum MSWProtocolDecoder {
+enum SiloProtocolDecoder {
     private static let envelopeKeys: Set<String> = [
         "schemaVersion", "requestId", "ok", "command", "observedAt", "result", "warnings", "error"
     ]
@@ -66,49 +66,49 @@ enum MSWProtocolDecoder {
         _ data: Data,
         as type: Value.Type,
         expectedCommand: String? = nil
-    ) throws -> MSWEnvelope<Value> {
-        let envelope: MSWEnvelope<Value>
+    ) throws -> SiloEnvelope<Value> {
+        let envelope: SiloEnvelope<Value>
         do {
-            envelope = try decoder().decode(MSWEnvelope<Value>.self, from: data)
+            envelope = try decoder().decode(SiloEnvelope<Value>.self, from: data)
         } catch {
-            throw MSWClientError.malformedJSON(command: expectedCommand ?? "unknown")
+            throw SiloClientError.malformedJSON(command: expectedCommand ?? "unknown")
         }
 
         guard envelope.schemaVersion == 1 else {
-            throw MSWClientError.unsupportedSchema(envelope.schemaVersion)
+            throw SiloClientError.unsupportedSchema(envelope.schemaVersion)
         }
         guard !envelope.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw MSWClientError.malformedJSON(command: expectedCommand ?? envelope.command)
+            throw SiloClientError.malformedJSON(command: expectedCommand ?? envelope.command)
         }
         if let expectedCommand, envelope.command != expectedCommand {
-            throw MSWClientError.malformedJSON(command: expectedCommand)
+            throw SiloClientError.malformedJSON(command: expectedCommand)
         }
         if envelope.ok {
             guard envelope.error == nil, envelope.observedAt != nil, envelope.result != nil else {
-                throw MSWClientError.malformedJSON(command: envelope.command)
+                throw SiloClientError.malformedJSON(command: envelope.command)
             }
         } else {
             guard envelope.result == nil, let error = envelope.error else {
-                throw MSWClientError.malformedJSON(command: envelope.command)
+                throw SiloClientError.malformedJSON(command: envelope.command)
             }
-            throw MSWClientError.protocolFailure(error)
+            throw SiloClientError.protocolFailure(error)
         }
         return envelope
     }
 
-    static func decodeStrictHandshake(_ data: Data) throws -> MSWEnvelope<MSWHandshake> {
+    static func decodeStrictHandshake(_ data: Data) throws -> SiloEnvelope<SiloHandshake> {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(root.keys) == envelopeKeys else {
-            throw MSWClientError.malformedJSON(command: "handshake")
+            throw SiloClientError.malformedJSON(command: "handshake")
         }
-        return try decodeEnvelope(data, as: MSWHandshake.self, expectedCommand: "handshake")
+        return try decodeEnvelope(data, as: SiloHandshake.self, expectedCommand: "handshake")
     }
 }
 
 
 
 
-struct MSWJSONLFramer: Sendable {
+struct SiloJSONLFramer: Sendable {
     private(set) var pending = Data()
     private(set) var bytesSeen = 0
     let maxLineBytes: Int
@@ -122,7 +122,7 @@ struct MSWJSONLFramer: Sendable {
     mutating func append(_ data: Data) throws -> [Data] {
         bytesSeen += data.count
         guard data.count <= maxBufferedBytes, pending.count + data.count <= maxBufferedBytes else {
-            throw MSWClientError.unavailable("MSW JSONL output exceeded the capture limit.")
+            throw SiloClientError.unavailable("Silo JSONL output exceeded the capture limit.")
         }
         pending.append(data)
         var lines: [Data] = []
@@ -130,12 +130,12 @@ struct MSWJSONLFramer: Sendable {
             let line = pending[..<newline]
             pending.removeSubrange(...newline)
             guard line.count <= maxLineBytes else {
-                throw MSWClientError.unavailable("MSW JSONL line exceeded the capture limit.")
+                throw SiloClientError.unavailable("Silo JSONL line exceeded the capture limit.")
             }
             if !line.isEmpty { lines.append(Data(line)) }
         }
         guard pending.count <= maxLineBytes else {
-            throw MSWClientError.unavailable("MSW JSONL line exceeded the capture limit.")
+            throw SiloClientError.unavailable("Silo JSONL line exceeded the capture limit.")
         }
         return lines
     }
@@ -143,18 +143,18 @@ struct MSWJSONLFramer: Sendable {
     mutating func finish() throws -> Data? {
         guard !pending.isEmpty else { return nil }
         guard pending.count <= maxLineBytes else {
-            throw MSWClientError.unavailable("MSW JSONL line exceeded the capture limit.")
+            throw SiloClientError.unavailable("Silo JSONL line exceeded the capture limit.")
         }
         defer { pending.removeAll(keepingCapacity: true) }
         return pending
     }
 }
 
-struct MSWProtocolRedactor: Sendable {
+struct SiloProtocolRedactor: Sendable {
     private let patterns: [String] = [
         #"(?i)bearer\s+[A-Za-z0-9._~+\-/]+=*"#,
         #"(?i)basic\s+[A-Za-z0-9+/=]+"#,
-        #"(?i)(token|authorization|x-access-token|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|MSW_GITHUB_READ_TOKEN(?:_[A-Za-z0-9_]+)?|MSW_GITHUB_WRITE_TOKEN(?:_[A-Za-z0-9_]+)?)=[^\s\"',;\}\]]+"#,
+        #"(?i)(token|authorization|x-access-token|GH_TOKEN|GITHUB_TOKEN|ACCESS_TOKEN|REFRESH_TOKEN|SILO_GITHUB_READ_TOKEN(?:_[A-Za-z0-9_]+)?|SILO_GITHUB_WRITE_TOKEN(?:_[A-Za-z0-9_]+)?)=[^\s\"',;\}\]]+"#,
         #"(?i)(gho_|ghs_|ghu_|ghr_|ghp_|github_pat_)[A-Za-z0-9_\-]+"#,
         #"(?i)https?://[^\s:@]+:[^\s@]+@"#
     ]

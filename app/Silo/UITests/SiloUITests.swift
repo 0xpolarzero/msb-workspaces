@@ -84,7 +84,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertEqual(statusItem.label, "Silo")
         XCTAssertEqual(
             statusItem.value as? String,
-            "Silo. Repair needed. MSW installation needs repair."
+            "Silo. Repair needed. Silo installation needs repair."
         )
 
         let applicationMenu = app.menuBars.menuBarItems["Silo"]
@@ -104,7 +104,7 @@ final class SiloUITests: XCTestCase {
         assertText("personal", identifier: "workspace.personal.name", in: app)
         assertText("Stopped", identifier: "workspace.personal.state", in: app)
         assertText(
-            "MSW installation needs repair",
+            "Silo installation needs repair",
             identifier: "runtime-repair.popover.message",
             in: app
         )
@@ -130,7 +130,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["runtime-repair.page"].exists)
         let repairTitle = app.descendants(matching: .any)["runtime-repair.title"]
         XCTAssertTrue(repairTitle.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["MSW installation needs repair"].exists)
+        XCTAssertTrue(app.staticTexts["Silo installation needs repair"].exists)
         XCTAssertTrue(app.buttons["runtime-repair.installation.action"].exists)
         XCTAssertTrue(app.buttons["runtime-repair.close"].exists)
         XCTAssertFalse(app.windows["setup.window"].exists)
@@ -147,7 +147,7 @@ final class SiloUITests: XCTestCase {
             XCTAssertTrue(tabButton.waitForExistence(timeout: 2), "Missing \(tab) tab")
             tabButton.click()
             assertText(
-                "MSW installation needs repair",
+                "Silo installation needs repair",
                 identifier: "runtime-repair.window.message",
                 in: app
             )
@@ -187,7 +187,7 @@ final class SiloUITests: XCTestCase {
         let repairResult = app.descendants(matching: .any)["runtime-repair.result"]
         XCTAssertTrue(repairResult.waitForExistence(timeout: 2))
         XCTAssertTrue(
-            app.staticTexts["MSW runtime repair could not complete. Show details, then retry."]
+            app.staticTexts["Silo runtime repair could not complete. Show details, then retry."]
                 .waitForExistence(timeout: 2)
         )
         XCTAssertFalse(app.descendants(matching: .any)["runtime-repair.details.text"].exists)
@@ -763,7 +763,7 @@ final class SiloUITests: XCTestCase {
             case "success":
                 assertText("Archive created", identifier: "backup.result.status", in: app)
                 assertText(
-                    "microsandbox-all-20260826-120000.tar.zst",
+                    "silo-all-20260826-120000.tar.zst",
                     identifier: "backup.result.archive",
                     in: app
                 )
@@ -774,7 +774,7 @@ final class SiloUITests: XCTestCase {
             case "partial":
                 assertText("Archive created", identifier: "backup.result.status", in: app)
                 assertText(
-                    "microsandbox-all-20260826-120000.tar.zst",
+                    "silo-all-20260826-120000.tar.zst",
                     identifier: "backup.result.archive",
                     in: app
                 )
@@ -934,7 +934,7 @@ final class SiloUITests: XCTestCase {
         copyDetails.click()
         let copiedDetails = NSPasteboard.general.string(forType: .string) ?? ""
         XCTAssertTrue(copiedDetails.contains("/dev/vdc"))
-        XCTAssertTrue(copiedDetails.contains("MSW_WORKSPACE_DISK_INVALID"))
+        XCTAssertTrue(copiedDetails.contains("SILO_WORKSPACE_DISK_INVALID"))
         let systemHealth = app.buttons["View system health"]
         XCTAssertTrue(systemHealth.waitForExistence(timeout: 2))
         systemHealth.click()
@@ -1209,7 +1209,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Retry status check"].exists)
         XCTAssertFalse(
             app.staticTexts[
-                "Launching at login observes MSW state. It never starts a workspace."
+                "Launching at login observes Silo state. It never starts a workspace."
             ].exists
         )
         XCTAssertFalse(

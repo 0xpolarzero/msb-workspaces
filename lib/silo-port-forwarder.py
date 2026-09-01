@@ -1,7 +1,7 @@
 #!/usr/bin/python3
-"""Host-managed published-port forwarder for one MSW workspace.
+"""Host-managed published-port forwarder for one Silo workspace.
 
-MicroSandbox Workspaces no longer asks msb to publish ports at create/boot.
+Silo no longer asks msb to publish ports at create/boot.
 Instead this unprivileged manager, run once per workspace (a launchd
 KeepAlive agent in production), keeps ONE OpenSSH control connection with one
 `-L <workspace-ip>:P:127.0.0.1:P` per currently free desired port, through
@@ -9,21 +9,21 @@ the existing workspace SSH config (ProxyCommand -> msb ssh serve).
 
 Rules:
 - The VM is NEVER auto-started: `msb ping -q` gates every cycle.
-- Desired ports come from the immutable config list (MSW_PUBLISHED_PORTS).
+- Desired ports come from the immutable config list (SILO_PUBLISHED_PORTS).
 - Occupied ports (or ports ssh refuses to bind) are omitted and persisted as
-  skippedPorts in ~/.config/msw/workspace-state/<box>.json so the Silo
+  skippedPorts in ~/.config/silo/workspace-state/<box>.json so the Silo
   app can surface a portWarning. State updates are fail-soft.
 - Every interval the forwarder reconciles: when a skipped port becomes free
   or an ssh bind fails, ONLY the ssh process is restarted — never the VM.
 - VM stop -> ssh exits -> the manager waits. ssh crash -> respawned.
 
-Environment seams (mirror the rest of the MSW toolchain):
-  MSW_MSB_BIN, MSW_SSH_BIN, MSW_CONFIG_FILE, MSW_SSH_PROXY_NO_START,
-  MSW_TEST_PORT_CONFLICTS (ip:port pairs or bare ports to probe; unset in
-  production probes every desired port), MSW_PORT_FORWARDER_INTERVAL,
-  MSW_PORT_FORWARDER_ONESHOT (run a single reconcile cycle and exit),
-  MSW_PORT_FORWARDER_SSH_ERR (ssh stderr log path; defaults under
-  ~/.local/state/msw).
+Environment seams (mirror the rest of the Silo toolchain):
+  SILO_MSB_BIN, SILO_SSH_BIN, SILO_CONFIG_FILE, SILO_SSH_PROXY_NO_START,
+  SILO_TEST_PORT_CONFLICTS (ip:port pairs or bare ports to probe; unset in
+  production probes every desired port), SILO_PORT_FORWARDER_INTERVAL,
+  SILO_PORT_FORWARDER_ONESHOT (run a single reconcile cycle and exit),
+  SILO_PORT_FORWARDER_SSH_ERR (ssh stderr log path; defaults under
+  ~/.local/state/silo).
 """
 from __future__ import annotations
 
@@ -46,15 +46,15 @@ WORKSPACE_KEYS = {
 
 
 def log(msg: str) -> None:
-    print(f"msw-port-forwarder: {msg}", file=sys.stderr, flush=True)
+    print(f"silo-port-forwarder: {msg}", file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------
-# Configuration (the same config.sh the msw CLI sources)
+# Configuration (the same config.sh the silo CLI sources)
 # --------------------------------------------------------------------------
 
 def load_config() -> dict:
-    path = os.environ.get("MSW_CONFIG_FILE", os.path.expanduser("~/.config/msw/config.sh"))
+    path = os.environ.get("SILO_CONFIG_FILE", os.path.expanduser("~/.config/silo/config.sh"))
     values: dict = {}
     if os.path.isfile(path):
         try:
@@ -72,10 +72,10 @@ def load_config() -> dict:
 
 
 def expand_published(config: dict) -> List[int]:
-    """Expand the MSW_PUBLISHED_PORTS config into a sorted list of ports."""
+    """Expand the SILO_PUBLISHED_PORTS config into a sorted list of ports."""
     ports: List[int] = []
     seen: Set[int] = set()
-    raw = config.get("MSW_PUBLISHED_PORTS") or DEFAULT_PUBLISHED_PORTS
+    raw = config.get("SILO_PUBLISHED_PORTS") or DEFAULT_PUBLISHED_PORTS
     for token in raw.split(","):
         token = token.strip()
         if not token:
@@ -96,9 +96,9 @@ def expand_published(config: dict) -> List[int]:
 
 def load_workspace_names(config: dict) -> Optional[List[str]]:
     workspace_file = Path(
-        os.environ.get("MSW_WORKSPACES_FILE")
-        or config.get("MSW_WORKSPACES_FILE")
-        or os.path.expanduser("~/.config/msw/workspaces.json")
+        os.environ.get("SILO_WORKSPACES_FILE")
+        or config.get("SILO_WORKSPACES_FILE")
+        or os.path.expanduser("~/.config/silo/workspaces.json")
     )
     try:
         document = json.loads(workspace_file.read_text())
@@ -153,7 +153,7 @@ def workspace_ip(config: dict, box: str) -> str:
 
 
 def state_file(box: str) -> Path:
-    return Path(os.path.expanduser("~/.config/msw/workspace-state")) / f"{box}.json"
+    return Path(os.path.expanduser("~/.config/silo/workspace-state")) / f"{box}.json"
 
 
 def read_state(box: str) -> dict:
@@ -182,7 +182,7 @@ def write_state(box: str, desired: List[str], skipped: List[int], still: List[in
     }
     tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
     with open(tmp, "w") as f:
-        # Compact separators: bin/msw's sed-based state reader expects
+        # Compact separators: bin/silo's sed-based state reader expects
         # integer arrays without spaces.
         json.dump(doc, f, separators=(",", ":"))
     try:
@@ -201,21 +201,21 @@ def utc_now() -> str:
 # --------------------------------------------------------------------------
 
 def seam_probe_set() -> Set[str]:
-    """MSW_TEST_PORT_CONFLICTS: 'ip:port' pairs (matched to the bind ip) or
+    """SILO_TEST_PORT_CONFLICTS: 'ip:port' pairs (matched to the bind ip) or
     bare ports (probed on every workspace). An empty env seam set means every
     desired port is probed (production)."""
-    raw = os.environ.get("MSW_TEST_PORT_CONFLICTS", "")
+    raw = os.environ.get("SILO_TEST_PORT_CONFLICTS", "")
     if not raw:
         return set()
     return {token.strip() for token in raw.split(",") if token.strip()}
 
 
 def seam_simulated_set() -> Set[str]:
-    """MSW_TEST_PORT_CONFLICTS_FILE (re-read every cycle, same format as the
+    """SILO_TEST_PORT_CONFLICTS_FILE (re-read every cycle, same format as the
     env seam): entries are treated as blocked WITHOUT a real bind probe, so
     tests can flip the occupied set deterministically regardless of what else
     is listening on the host. Not used in production."""
-    path = os.environ.get("MSW_TEST_PORT_CONFLICTS_FILE", "")
+    path = os.environ.get("SILO_TEST_PORT_CONFLICTS_FILE", "")
     if not path:
         return set()
     try:
@@ -234,7 +234,7 @@ def probe_blocked(bind_ip: str, ports: List[int], launched: Set[int], seam: Set[
       - simulated entries count as blocked (no real probe);
       - with a real env seam set, only its entries are probed, everything
         else is assumed free;
-      - with no seam at all, MSW_TEST_MODE=1 skips probing (all free) so the
+      - with no seam at all, SILO_TEST_MODE=1 skips probing (all free) so the
         suite never depends on what else listens on the host, and production
         probes every desired port."""
     blocked: Set[int] = set()
@@ -247,7 +247,7 @@ def probe_blocked(bind_ip: str, ports: List[int], launched: Set[int], seam: Set[
         if seam:
             if not _seam_matches(seam, bind_ip, p):
                 continue
-        elif os.environ.get("MSW_TEST_MODE") == "1":
+        elif os.environ.get("SILO_TEST_MODE") == "1":
             continue
         if not _bind_ok(bind_ip, p):
             blocked.add(p)
@@ -307,10 +307,10 @@ class Forwarder:
             return False
 
     def _err_path(self) -> Path:
-        override = os.environ.get("MSW_PORT_FORWARDER_SSH_ERR", "")
+        override = os.environ.get("SILO_PORT_FORWARDER_SSH_ERR", "")
         if override:
             return Path(override)
-        return Path.home() / ".local/state/msw" / f"port-forwarder-{self.box}.ssh.err"
+        return Path.home() / ".local/state/silo" / f"port-forwarder-{self.box}.ssh.err"
 
     def _ssh_argv(self, ports: List[int]) -> List[str]:
         argv = [
@@ -443,18 +443,18 @@ def main() -> int:
     desired = [f"{bind_ip}:{p}:{p}" for p in desired_ports]
     seam = seam_probe_set()
 
-    msb_bin = os.environ.get("MSW_MSB_BIN", "")
+    msb_bin = os.environ.get("SILO_MSB_BIN", "")
     if not msb_bin:
         for candidate in ("/usr/local/bin/msb", "/opt/homebrew/bin/msb",
                           str(Path.home() / ".local/bin/msb")):
             if os.path.exists(candidate):
                 msb_bin = candidate
                 break
-    ssh_bin = os.environ.get("MSW_SSH_BIN", "ssh")
+    ssh_bin = os.environ.get("SILO_SSH_BIN", "ssh")
     fwd = Forwarder(box, bind_ip, ssh_bin, msb_bin)
 
-    oneshot = os.environ.get("MSW_PORT_FORWARDER_ONESHOT") == "1"
-    interval = float(os.environ.get("MSW_PORT_FORWARDER_INTERVAL", str(DEFAULT_INTERVAL)))
+    oneshot = os.environ.get("SILO_PORT_FORWARDER_ONESHOT") == "1"
+    interval = float(os.environ.get("SILO_PORT_FORWARDER_INTERVAL", str(DEFAULT_INTERVAL)))
     while True:
         try:
             reconcile_once(box, fwd, desired, desired_ports, bind_ip, seam, oneshot)

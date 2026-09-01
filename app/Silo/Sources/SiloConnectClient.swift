@@ -2,7 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 
-struct MSWConnectConfiguration: Sendable, Equatable {
+struct SiloConnectConfiguration: Sendable, Equatable {
     let baseURL: URL
     let clientID: String
     let redirectURL: URL
@@ -15,7 +15,7 @@ struct MSWConnectConfiguration: Sendable, Equatable {
     init(
         baseURL: URL = URL(string: "https://connect.invalid")!,
         clientID: String = "",
-        redirectURL: URL = URL(string: "msw://connect.microsandbox.dev/oauth/callback")!,
+        redirectURL: URL = URL(string: "silo://connect.silo.dev/oauth/callback")!,
         authorizationPath: String = "/oauth/authorize",
         callbackPath: String = "/oauth/callback",
         installationURL: URL? = nil,
@@ -92,16 +92,16 @@ struct MSWConnectConfiguration: Sendable, Equatable {
               callbackPath == redirectURL.path,
               installationURL.map(Self.isSafeInstallationURL) ?? true,
               let redirectScheme = redirectURL.scheme?.lowercased(),
-              redirectScheme == "msw",
+              redirectScheme == "silo",
               redirectURL.user == nil,
               redirectURL.password == nil,
               redirectURL.port == nil,
               redirectURL.query == nil,
               redirectURL.fragment == nil,
               redirectURL.path == "/oauth/callback",
-              redirectURL.host?.lowercased() == "connect.microsandbox.dev",
+              redirectURL.host?.lowercased() == "connect.silo.dev",
               !requiresScopeAttestation || Self.isValidScopeAttestationKey(scopeAttestationPublicKey) else {
-            throw MSWConnectError.invalidConfiguration
+            throw SiloConnectError.invalidConfiguration
         }
     }
 
@@ -118,10 +118,10 @@ struct MSWConnectConfiguration: Sendable, Equatable {
             }
     }
 
-    var callbackScheme: String { redirectURL.scheme ?? "msw" }
+    var callbackScheme: String { redirectURL.scheme ?? "silo" }
 }
 
-enum MSWConnectError: Error, LocalizedError, Sendable, Equatable {
+enum SiloConnectError: Error, LocalizedError, Sendable, Equatable {
     case invalidConfiguration
     case invalidCallback
     case callbackStateMismatch
@@ -184,11 +184,11 @@ enum MSWConnectError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-protocol MSWConnectHTTPTransport: Sendable {
+protocol SiloConnectHTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse)
 }
 
-struct URLSessionMSWConnectTransport: MSWConnectHTTPTransport, Sendable {
+struct URLSessionSiloConnectTransport: SiloConnectHTTPTransport, Sendable {
     let session: URLSession
 
     init(session: URLSession = .shared) {
@@ -199,37 +199,37 @@ struct URLSessionMSWConnectTransport: MSWConnectHTTPTransport, Sendable {
         do {
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
-                throw MSWConnectError.transportUnavailable
+                throw SiloConnectError.transportUnavailable
             }
             return (data, httpResponse)
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             throw error
         } catch is CancellationError {
-            throw MSWConnectError.cancelled
+            throw SiloConnectError.cancelled
         } catch {
-            throw MSWConnectError.transportUnavailable
+            throw SiloConnectError.transportUnavailable
         }
     }
 }
 
 @MainActor
-protocol MSWConnectBrowserAuthenticating: Sendable {
+protocol SiloConnectBrowserAuthenticating: Sendable {
     func authenticate(url: URL, callbackScheme: String) async throws -> URL
 }
 
 /// Opens the Connect authorization page in the user's default browser and
-/// resumes when macOS delivers the `msw://` callback URL to the app.
+/// resumes when macOS delivers the `silo://` callback URL to the app.
 ///
 /// The wait is bound to the exact authorization it opened: the expected
 /// callback scheme, host, path, and `state` are parsed from the authorize URL,
 /// and any other callback is ignored. A stale tab from a cancelled attempt
 /// therefore cannot terminate the retry that replaced it.
 @MainActor
-final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Sendable {
-    /// Single shared instance. The app delegate routes `msw://` URL events to
+final class SiloConnectBrowser: SiloConnectBrowserAuthenticating, @unchecked Sendable {
+    /// Single shared instance. The app delegate routes `silo://` URL events to
     /// this instance, so any pending authorization must live here rather than
     /// in a view-local instance.
-    static let shared = MSWConnectBrowser()
+    static let shared = SiloConnectBrowser()
 
     private struct ExpectedCallback {
         let scheme: String
@@ -272,7 +272,7 @@ final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Senda
     private var timeoutTask: Task<Void, Never>?
 
     /// The authorization page expires after ten minutes
-    /// (`MSWConnectClient.startAuthorization`), so abandon the wait at the
+    /// (`SiloConnectClient.startAuthorization`), so abandon the wait at the
     /// same point rather than hanging forever on a browser tab nobody returns to.
     private static let callbackTimeout: Duration = .seconds(600)
 
@@ -288,10 +288,10 @@ final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Senda
 
     func authenticate(url: URL, callbackScheme: String) async throws -> URL {
         guard !Task.isCancelled else {
-            throw MSWConnectError.cancelled
+            throw SiloConnectError.cancelled
         }
         guard let expected = ExpectedCallback(authorizeURL: url, scheme: callbackScheme) else {
-            throw MSWConnectError.invalidConfiguration
+            throw SiloConnectError.invalidConfiguration
         }
         // Displace any previous attempt's wait before installing this one, so
         // a cancel/retry cannot leave two generations competing for the slot.
@@ -303,18 +303,18 @@ final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Senda
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 guard expectedCallback != nil, self.continuation == nil else {
-                    continuation.resume(throwing: MSWConnectError.cancelled)
+                    continuation.resume(throwing: SiloConnectError.cancelled)
                     return
                 }
                 self.continuation = continuation
                 guard opener(url) else {
-                    complete(.failure(MSWConnectError.transportUnavailable))
+                    complete(.failure(SiloConnectError.transportUnavailable))
                     return
                 }
                 timeoutTask = Task { [weak self] in
                     try? await Task.sleep(for: Self.callbackTimeout)
                     guard !Task.isCancelled else { return }
-                    self?.fail(generation: currentGeneration, with: MSWConnectError.callbackExpired)
+                    self?.fail(generation: currentGeneration, with: SiloConnectError.callbackExpired)
                 }
             }
         }, onCancel: {
@@ -341,14 +341,14 @@ final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Senda
         timeoutTask?.cancel()
         timeoutTask = nil
         expectedCallback = nil
-        complete(.failure(MSWConnectError.cancelled))
+        complete(.failure(SiloConnectError.cancelled))
     }
 
     private func cancel(generation: Int) {
         guard generation == self.generation else { return }
         timeoutTask?.cancel()
         timeoutTask = nil
-        complete(.failure(MSWConnectError.cancelled))
+        complete(.failure(SiloConnectError.cancelled))
     }
 
     private func fail(generation: Int, with error: Error) {
@@ -372,7 +372,7 @@ final class MSWConnectBrowser: MSWConnectBrowserAuthenticating, @unchecked Senda
     }
 }
 
-protocol MSWConnectKeychainStoring: CredentialKeychainStoring {}
+protocol SiloConnectKeychainStoring: CredentialKeychainStoring {}
 
 struct GitHubAccount: Codable, Sendable, Equatable {
     let login: String
@@ -435,20 +435,20 @@ struct GitHubRepository: Codable, Sendable, Equatable, Identifiable {
 
 
 
-struct MSWConnectAuthorizationStart: Sendable, Equatable {
+struct SiloConnectAuthorizationStart: Sendable, Equatable {
     let url: URL
     let state: String
     let codeVerifier: String
     let expiresAt: Date
 }
 
-struct MSWConnectSession: Sendable, Equatable {
+struct SiloConnectSession: Sendable, Equatable {
     let sessionID: UUID
     let opaqueServiceToken: String
     let account: GitHubAccount
     let expiresAt: Date
 }
-struct MSWConnectScopeAttestation: Codable, Sendable, Equatable {
+struct SiloConnectScopeAttestation: Codable, Sendable, Equatable {
     let digest: String
     let signature: String
     let keyID: String
@@ -460,7 +460,7 @@ struct MSWConnectScopeAttestation: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWConnectRevocationReceipt: Codable, Sendable, Equatable {
+struct SiloConnectRevocationReceipt: Codable, Sendable, Equatable {
     let grantID: UUID
     let revoked: Bool
     let terminal: Bool
@@ -474,7 +474,7 @@ struct MSWConnectRevocationReceipt: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWConnectDisconnectReceipt: Codable, Sendable, Equatable {
+struct SiloConnectDisconnectReceipt: Codable, Sendable, Equatable {
     let revokedGrantIDs: [UUID]
     let terminal: Bool
 
@@ -484,7 +484,7 @@ struct MSWConnectDisconnectReceipt: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWConnectGrantAssignment: Codable, Sendable, Equatable, Identifiable {
+struct SiloConnectGrantAssignment: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     let workspace: String
     let role: CredentialRole
@@ -527,7 +527,7 @@ struct MSWConnectGrantAssignment: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-struct MSWConnectGrant: Codable, Sendable, Equatable, Identifiable {
+struct SiloConnectGrant: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     let workspace: String
     let role: CredentialRole
@@ -615,16 +615,16 @@ struct MSWConnectGrant: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-actor MSWConnectClient {
-    let configuration: MSWConnectConfiguration
-    private let transport: any MSWConnectHTTPTransport
-    private let keychain: any MSWConnectKeychainStoring
+actor SiloConnectClient {
+    let configuration: SiloConnectConfiguration
+    private let transport: any SiloConnectHTTPTransport
+    private let keychain: any SiloConnectKeychainStoring
     private let now: @Sendable () -> Date
     private let sessionService: String
     private let sessionAccount: String
     private var pending: [String: PendingAuthorization]
     private var consumedStates: Set<String>
-    private var session: MSWConnectSession?
+    private var session: SiloConnectSession?
 
     private struct PendingAuthorization: Sendable {
         let codeVerifier: String
@@ -632,11 +632,11 @@ actor MSWConnectClient {
     }
 
     init(
-        configuration: MSWConnectConfiguration = MSWConnectConfiguration(),
-        transport: any MSWConnectHTTPTransport = URLSessionMSWConnectTransport(),
-        keychain: any MSWConnectKeychainStoring = KeychainStore(),
+        configuration: SiloConnectConfiguration = SiloConnectConfiguration(),
+        transport: any SiloConnectHTTPTransport = URLSessionSiloConnectTransport(),
+        keychain: any SiloConnectKeychainStoring = KeychainStore(),
         now: @escaping @Sendable () -> Date = Date.init,
-        sessionService: String = "org.microsandbox.Silo.connect-session",
+        sessionService: String = "org.silo.Silo.connect-session",
         sessionAccount: String = "session"
     ) {
         self.configuration = configuration
@@ -650,7 +650,7 @@ actor MSWConnectClient {
         self.session = nil
     }
 
-    func startAuthorization() throws -> MSWConnectAuthorizationStart {
+    func startAuthorization() throws -> SiloConnectAuthorizationStart {
         try configuration.validate()
         let currentDate = now()
         pending = pending.filter { $0.value.expiresAt > currentDate }
@@ -676,12 +676,12 @@ actor MSWConnectClient {
             URLQueryItem(name: "code_challenge", value: Self.pkceChallenge(for: verifier)),
             URLQueryItem(name: "code_challenge_method", value: "S256")
         ]
-        guard let url = components?.url else { throw MSWConnectError.invalidConfiguration }
-        return MSWConnectAuthorizationStart(url: url, state: state, codeVerifier: verifier, expiresAt: expiresAt)
+        guard let url = components?.url else { throw SiloConnectError.invalidConfiguration }
+        return SiloConnectAuthorizationStart(url: url, state: state, codeVerifier: verifier, expiresAt: expiresAt)
     }
 
 
-    func authorize(browser: MSWConnectBrowserAuthenticating) async throws -> GitHubAuthorizationDiscovery {
+    func authorize(browser: SiloConnectBrowserAuthenticating) async throws -> GitHubAuthorizationDiscovery {
         try configuration.validate()
         if let restored = try restoreSession() {
             let installations = try await self.installations()
@@ -707,7 +707,7 @@ actor MSWConnectClient {
         }
     }
 
-    func completeAuthorization(callbackURL: URL) async throws -> MSWConnectSession {
+    func completeAuthorization(callbackURL: URL) async throws -> SiloConnectSession {
         try configuration.validate()
         guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
               callbackURL.scheme?.lowercased() == configuration.redirectURL.scheme?.lowercased(),
@@ -721,13 +721,13 @@ actor MSWConnectClient {
               queryItems.filter({ $0.name == "state" }).count == 1,
               let state = queryItems.first(where: { $0.name == "state" })?.value,
               !state.isEmpty else {
-            throw MSWConnectError.invalidCallback
+            throw SiloConnectError.invalidCallback
         }
         guard let authorization = pending.removeValue(forKey: state) else {
             if consumedStates.contains(state) {
-                throw MSWConnectError.callbackReplayed
+                throw SiloConnectError.callbackReplayed
             }
-            throw MSWConnectError.callbackStateMismatch
+            throw SiloConnectError.callbackStateMismatch
         }
         consumedStates.insert(state)
         if consumedStates.count > 1024 {
@@ -735,18 +735,18 @@ actor MSWConnectClient {
             consumedStates.insert(state)
         }
         guard authorization.expiresAt > now() else {
-            throw MSWConnectError.callbackExpired
+            throw SiloConnectError.callbackExpired
         }
         let codeItems = queryItems.filter { $0.name == "code" }
         let errorItems = queryItems.filter { $0.name == "error" || $0.name == "error_description" }
-        guard codeItems.count <= 1 else { throw MSWConnectError.invalidCallback }
+        guard codeItems.count <= 1 else { throw SiloConnectError.invalidCallback }
         if codeItems.first?.value != nil, !errorItems.isEmpty {
-            throw MSWConnectError.invalidCallback
+            throw SiloConnectError.invalidCallback
         }
         guard let code = codeItems.first?.value, !code.isEmpty else {
             let reason = errorItems.first(where: { $0.name == "error_description" })?.value
                 ?? errorItems.first(where: { $0.name == "error" })?.value
-            throw MSWConnectError.authorizationDenied(reason)
+            throw SiloConnectError.authorizationDenied(reason)
         }
 
         var request = try makeRequest(path: configuration.callbackPath, method: "POST")
@@ -758,7 +758,7 @@ actor MSWConnectClient {
             redirectURI: configuration.redirectURL.absoluteString
         ))
         let response: CallbackResponse = try await send(request)
-        let connected = MSWConnectSession(
+        let connected = SiloConnectSession(
             sessionID: response.sessionID,
             opaqueServiceToken: response.sessionToken,
             account: response.account,
@@ -768,21 +768,21 @@ actor MSWConnectClient {
               connected.account.id > 0,
               Self.isSafeGitHubIdentifier(connected.account.login),
               connected.expiresAt > now() else {
-            throw MSWConnectError.malformedResponse
+            throw SiloConnectError.malformedResponse
         }
         try persistSession(connected)
         session = connected
         return connected
     }
 
-    func restoreSession() throws -> MSWConnectSession? {
+    func restoreSession() throws -> SiloConnectSession? {
         let data: Data
         do {
             data = try keychain.load(service: sessionService, account: sessionAccount)
         } catch KeychainStoreError.itemNotFound {
             return nil
         } catch {
-            throw MSWConnectError.transportUnavailable
+            throw SiloConnectError.transportUnavailable
         }
         do {
             let stored = try Self.decoder.decode(StoredSession.self, from: data)
@@ -803,9 +803,9 @@ actor MSWConnectClient {
                   stored.account.id > 0,
                   Self.isSafeGitHubIdentifier(stored.account.login) else {
                 try keychain.delete(service: sessionService, account: sessionAccount)
-                throw MSWConnectError.malformedResponse
+                throw SiloConnectError.malformedResponse
             }
-            let restored = MSWConnectSession(
+            let restored = SiloConnectSession(
                 sessionID: stored.sessionID,
                 opaqueServiceToken: stored.sessionToken,
                 account: stored.account,
@@ -813,13 +813,13 @@ actor MSWConnectClient {
             )
             session = restored
             return restored
-        } catch let error as MSWConnectError {
+        } catch let error as SiloConnectError {
             throw error
         } catch {
-            throw MSWConnectError.malformedResponse
+            throw SiloConnectError.malformedResponse
         }
     }
-    func currentSession() -> MSWConnectSession? {
+    func currentSession() -> SiloConnectSession? {
         guard let session, session.expiresAt > now() else { return nil }
         return session
     }
@@ -837,10 +837,10 @@ actor MSWConnectClient {
         var request = try makeAuthorizedRequest(path: "/v1/session/revoke", method: "POST", session: connected)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try Self.encoder.encode(DisconnectRequest(grantIDs: expectedGrantIDs))
-        let receipt: MSWConnectDisconnectReceipt = try await send(request)
+        let receipt: SiloConnectDisconnectReceipt = try await send(request)
         guard receipt.terminal,
               Set(expectedGrantIDs).isSubset(of: Set(receipt.revokedGrantIDs)) else {
-            throw MSWConnectError.malformedResponse
+            throw SiloConnectError.malformedResponse
         }
     }
 
@@ -848,7 +848,7 @@ actor MSWConnectClient {
         do {
             try keychain.delete(service: sessionService, account: sessionAccount)
         } catch {
-            throw MSWConnectError.sessionCleanupFailed
+            throw SiloConnectError.sessionCleanupFailed
         }
         session = nil
     }
@@ -861,24 +861,24 @@ actor MSWConnectClient {
         let installations = response.installations
         guard installations.count == Set(installations.map(\.id)).count,
               installations.allSatisfy(Self.isValidInstallationResponse) else {
-            throw MSWConnectError.accountBoundaryViolation
+            throw SiloConnectError.accountBoundaryViolation
         }
         return installations
     }
 
     func repositories(installationID: Int) async throws -> [GitHubRepository] {
-        guard installationID > 0 else { throw MSWConnectError.installationUnavailable }
+        guard installationID > 0 else { throw SiloConnectError.installationUnavailable }
         let path = "/v1/installations/\(installationID)/repositories"
         let response: RepositoryResponse = try await sendAuthorized(path: path, method: "GET")
         let repositories = response.repositories
         guard repositories.count == Set(repositories.map(\.id)).count,
               repositories.allSatisfy(Self.isValidRepositoryResponse) else {
-            throw MSWConnectError.accountBoundaryViolation
+            throw SiloConnectError.accountBoundaryViolation
         }
         return repositories
     }
 
-    func createGrant(_ assignment: MSWConnectGrantAssignment) async throws -> MSWConnectGrant {
+    func createGrant(_ assignment: SiloConnectGrantAssignment) async throws -> SiloConnectGrant {
         let normalizedNames = assignment.repositoryNames.map(Self.normalizedRepositoryName)
         let normalizedVerification = Self.normalizedRepositoryName(assignment.verificationRepository)
         let roleMatchesAccessMode =
@@ -903,7 +903,7 @@ actor MSWConnectClient {
         var request = try makeAuthorizedRequest(path: "/v1/grants", method: "POST", session: connected)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
-        let grant: MSWConnectGrant = try await send(request)
+        let grant: SiloConnectGrant = try await send(request)
         let grantNames = grant.repositoryNames.map(Self.normalizedRepositoryName)
         guard grant.workspace == assignment.workspace,
               grant.role == assignment.role,
@@ -924,26 +924,26 @@ actor MSWConnectClient {
               Set(grantNames) == Set(normalizedNames),
               grant.repositoryNames.allSatisfy(Self.isSafeRepositoryName),
               assignment.repositoryIDs.allSatisfy({ grant.repositoryIDs.contains($0) }) else {
-            throw MSWConnectError.scopeMismatch
+            throw SiloConnectError.scopeMismatch
         }
         guard grant.credential.isStructurallyValid,
               Self.isValidGrantLifetime(grant, now: now()) else {
-            throw MSWConnectError.malformedResponse
+            throw SiloConnectError.malformedResponse
         }
         try validateScopeAttestation(grant: grant, assignment: assignment)
         return grant
     }
 
     private func validateScopeAttestation(
-        grant: MSWConnectGrant,
-        assignment: MSWConnectGrantAssignment
+        grant: SiloConnectGrant,
+        assignment: SiloConnectGrantAssignment
     ) throws {
         let expectedDigest = Self.scopeDigest(assignment)
         guard Self.scopeDigest(grant) == expectedDigest else {
-            throw MSWConnectError.scopeMismatch
+            throw SiloConnectError.scopeMismatch
         }
         if let grantDigest = grant.scopeDigest, grantDigest != expectedDigest {
-            throw MSWConnectError.scopeMismatch
+            throw SiloConnectError.scopeMismatch
         }
         let hasAttestationFields = grant.scopeDigest != nil ||
             grant.scopeSignature != nil ||
@@ -955,8 +955,8 @@ actor MSWConnectClient {
               let keyID = grant.scopeKeyID,
               let credentialDigest = grant.credentialDigest else {
             throw configuration.requiresScopeAttestation
-                ? MSWConnectError.scopeAttestationMissing
-                : MSWConnectError.scopeAttestationInvalid
+                ? SiloConnectError.scopeAttestationMissing
+                : SiloConnectError.scopeAttestationInvalid
         }
         guard digest == expectedDigest,
               Self.isSafeGitHubIdentifier(keyID),
@@ -975,22 +975,22 @@ actor MSWConnectClient {
               let publicKeyData = configuration.scopeAttestationPublicKey,
               let publicKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData),
               publicKey.isValidSignature(signature, for: signedPayload) else {
-            throw MSWConnectError.scopeAttestationInvalid
+            throw SiloConnectError.scopeAttestationInvalid
         }
     }
 
-    private func requiredSession() throws -> MSWConnectSession {
+    private func requiredSession() throws -> SiloConnectSession {
         if let session, session.expiresAt > now() { return session }
         if let restored = try restoreSession() {
             return restored
         }
-        throw MSWConnectError.sessionExpired
+        throw SiloConnectError.sessionExpired
     }
 
     func renewGrant(
         grantID: UUID,
-        expectedScope: MSWConnectGrantAssignment? = nil
-    ) async throws -> MSWConnectGrant {
+        expectedScope: SiloConnectGrantAssignment? = nil
+    ) async throws -> SiloConnectGrant {
         let connected = try requiredSession()
         var request = try makeAuthorizedRequest(
             path: "/v1/grants/\(grantID.uuidString)",
@@ -1003,13 +1003,13 @@ actor MSWConnectClient {
             scopeDigest: expectedScope.map(Self.scopeDigest)
         ))
         do {
-            let grant: MSWConnectGrant = try await send(request)
+            let grant: SiloConnectGrant = try await send(request)
             guard grant.id == grantID,
                   Self.isSafeGitHubIdentifier(grant.accountLogin),
                   grant.accountLogin.caseInsensitiveCompare(connected.account.login) == .orderedSame,
                   grant.credential.isStructurallyValid,
                   Self.isValidGrantLifetime(grant, now: now()) else {
-                throw MSWConnectError.malformedResponse
+                throw SiloConnectError.malformedResponse
             }
             if let expectedScope {
                 let expectedNames = Set(expectedScope.repositoryNames.map(Self.normalizedRepositoryName))
@@ -1029,34 +1029,34 @@ actor MSWConnectClient {
                       returnedNames.count == expectedScope.repositoryNames.count,
                       Set(returnedNames) == expectedNames,
                       grant.repositoryNames.allSatisfy(Self.isSafeRepositoryName) else {
-                    throw MSWConnectError.scopeMismatch
+                    throw SiloConnectError.scopeMismatch
                 }
                 try validateScopeAttestation(grant: grant, assignment: expectedScope)
             } else if configuration.requiresScopeAttestation {
-                throw MSWConnectError.scopeAttestationMissing
+                throw SiloConnectError.scopeAttestationMissing
             }
             return grant
-        } catch MSWConnectError.httpStatus(404) {
-            throw MSWConnectError.grantNotFound
+        } catch SiloConnectError.httpStatus(404) {
+            throw SiloConnectError.grantNotFound
         }
     }
 
-    func revokeGrant(grantID: UUID) async throws -> MSWConnectRevocationReceipt {
+    func revokeGrant(grantID: UUID) async throws -> SiloConnectRevocationReceipt {
         let request = try makeAuthorizedRequest(
             path: "/v1/grants/\(grantID.uuidString)",
             method: "DELETE",
             session: try requiredSession()
         )
         do {
-            let receipt: MSWConnectRevocationReceipt = try await send(request)
+            let receipt: SiloConnectRevocationReceipt = try await send(request)
             guard receipt.grantID == grantID, receipt.revoked, receipt.terminal else {
-                throw MSWConnectError.malformedResponse
+                throw SiloConnectError.malformedResponse
             }
             return receipt
-        } catch MSWConnectError.grantNotFound, MSWConnectError.grantRevoked, MSWConnectError.httpStatus(404) {
+        } catch SiloConnectError.grantNotFound, SiloConnectError.grantRevoked, SiloConnectError.httpStatus(404) {
             // DELETE is intentionally idempotent for transaction recovery: a
             // grant that is already gone or already revoked counts as revoked.
-            return MSWConnectRevocationReceipt(
+            return SiloConnectRevocationReceipt(
                 grantID: grantID,
                 revoked: true,
                 terminal: true,
@@ -1082,12 +1082,12 @@ actor MSWConnectClient {
         var request = URLRequest(url: configuration.baseURL.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))))
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-MSW-Connect-Version")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-Silo-Connect-Version")
         return request
     }
 
-    private func makeAuthorizedRequest(path: String, method: String, session: MSWConnectSession?) throws -> URLRequest {
-        guard let session else { throw MSWConnectError.sessionExpired }
+    private func makeAuthorizedRequest(path: String, method: String, session: SiloConnectSession?) throws -> URLRequest {
+        guard let session else { throw SiloConnectError.sessionExpired }
         var request = try makeRequest(path: path, method: method)
         request.setValue("Bearer \(session.opaqueServiceToken)", forHTTPHeaderField: "Authorization")
         return request
@@ -1097,7 +1097,7 @@ actor MSWConnectClient {
         let (data, response) = try await transport.send(request)
         try validate(response, data: data, path: request.url?.path ?? "")
         do { return try Self.decoder.decode(Value.self, from: data) }
-        catch { throw MSWConnectError.malformedResponse }
+        catch { throw SiloConnectError.malformedResponse }
     }
 
     private func validate(_ response: HTTPURLResponse, data: Data, path: String) throws {
@@ -1107,34 +1107,34 @@ actor MSWConnectClient {
                 do {
                     try keychain.delete(service: sessionService, account: sessionAccount)
                 } catch {
-                    throw MSWConnectError.sessionCleanupFailed
+                    throw SiloConnectError.sessionCleanupFailed
                 }
-                throw MSWConnectError.sessionExpired
+                throw SiloConnectError.sessionExpired
             }
             if response.statusCode == 429 {
                 let retryAfter = response.value(forHTTPHeaderField: "Retry-After").flatMap(Int.init)
-                throw MSWConnectError.rateLimited(retryAfter)
+                throw SiloConnectError.rateLimited(retryAfter)
             }
             if let serviceError = try? Self.decoder.decode(ServiceErrorResponse.self, from: data),
                let code = serviceError.resolvedCode {
                 switch code {
-                case "grant_not_found": throw MSWConnectError.grantNotFound
-                case "grant_revoked": throw MSWConnectError.grantRevoked
-                case "installation_removed": throw MSWConnectError.installationRemoved
-                case "repository_not_allowed": throw MSWConnectError.repositoryNotAllowed
-                case "account_boundary_violation": throw MSWConnectError.accountBoundaryViolation
+                case "grant_not_found": throw SiloConnectError.grantNotFound
+                case "grant_revoked": throw SiloConnectError.grantRevoked
+                case "installation_removed": throw SiloConnectError.installationRemoved
+                case "repository_not_allowed": throw SiloConnectError.repositoryNotAllowed
+                case "account_boundary_violation": throw SiloConnectError.accountBoundaryViolation
                 default:
-                    throw MSWConnectError.serviceValidation(
-                        serviceError.resolvedMessage ?? "MSW Connect rejected the request for \(path)."
+                    throw SiloConnectError.serviceValidation(
+                        serviceError.resolvedMessage ?? "Silo Connect rejected the request for \(path)."
                     )
                 }
             }
-            throw MSWConnectError.httpStatus(response.statusCode)
+            throw SiloConnectError.httpStatus(response.statusCode)
         }
     }
 
 
-    private func persistSession(_ session: MSWConnectSession) throws {
+    private func persistSession(_ session: SiloConnectSession) throws {
         let stored = StoredSession(
             sessionID: session.sessionID,
             sessionToken: session.opaqueServiceToken,
@@ -1317,7 +1317,7 @@ actor MSWConnectClient {
         return encoder
     }()
 
-    private static func scopeDigest(_ assignment: MSWConnectGrantAssignment) -> String {
+    private static func scopeDigest(_ assignment: SiloConnectGrantAssignment) -> String {
         scopeDigest(
             workspace: assignment.workspace,
             role: assignment.role,
@@ -1330,7 +1330,7 @@ actor MSWConnectClient {
         )
     }
 
-    private static func scopeDigest(_ grant: MSWConnectGrant) -> String {
+    private static func scopeDigest(_ grant: SiloConnectGrant) -> String {
         scopeDigest(
             workspace: grant.workspace,
             role: grant.role,
@@ -1369,7 +1369,7 @@ actor MSWConnectClient {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func isValidGrantLifetime(_ grant: MSWConnectGrant, now: Date) -> Bool {
+    private static func isValidGrantLifetime(_ grant: SiloConnectGrant, now: Date) -> Bool {
         guard grant.accessExpiresAt > now else { return false }
         if let issuedAt = grant.issuedAt {
             return issuedAt <= now &&
@@ -1392,7 +1392,7 @@ actor MSWConnectClient {
     }
 
     private static func scopeAttestationPayload(
-        grant: MSWConnectGrant,
+        grant: SiloConnectGrant,
         scopeDigest: String,
         credentialDigest: String
     ) -> Data? {

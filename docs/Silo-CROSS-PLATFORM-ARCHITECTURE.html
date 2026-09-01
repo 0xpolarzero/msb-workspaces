@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MSW — Cross-platform desktop architecture</title>
+  <title>Silo — Cross-platform desktop architecture</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -108,9 +108,9 @@
 <body>
 <main>
   <header class="hero">
-    <div class="eyebrow">MSW · Product and architecture recommendation</div>
+    <div class="eyebrow">Silo · Product and architecture recommendation</div>
     <h1>Yes, a macOS, Linux, and Windows app is possible.</h1>
-    <p class="lede">MicroSandbox itself now supports local hosts on all three operating systems. The important constraint is that the current <strong>MSW product does not</strong>: its installer, CLI integrations, credential handling, background services, and SwiftUI application are deliberately macOS-specific. The right move is a new cross-platform shell over a portable core—not a line-by-line port of the current app.</p>
+    <p class="lede">MicroSandbox itself now supports local hosts on all three operating systems. The important constraint is that the current <strong>Silo product does not</strong>: its installer, CLI integrations, credential handling, background services, and SwiftUI application are deliberately macOS-specific. The right move is a new cross-platform shell over a portable core—not a line-by-line port of the current app.</p>
     <div class="meta">
       <span class="pill">Recommendation: Tauri 2</span>
       <span class="pill">UI: React + TypeScript + Vite</span>
@@ -122,7 +122,7 @@
   <section class="grid">
     <article class="card verdict span-8">
       <h2>Executive decision</h2>
-      <p><strong>Build it, but separate “MicroSandbox support” from “MSW support.”</strong> MicroSandbox documents local operation on glibc Linux with KVM, Apple-Silicon macOS, and Windows 11 with Windows Hypervisor Platform. Windows is explicitly preview.</p>
+      <p><strong>Build it, but separate “MicroSandbox support” from “Silo support.”</strong> MicroSandbox documents local operation on glibc Linux with KVM, Apple-Silicon macOS, and Windows 11 with Windows Hypervisor Platform. Windows is explicitly preview.</p>
       <p>Use one Tauri desktop app and one portable Rust domain/runtime layer. Keep the browser-like UI unprivileged. Put all process execution, secrets, filesystem mutation, and host integration behind narrow typed Rust commands. Implement small OS adapters for the unavoidable differences.</p>
     </article>
     <article class="card warning span-4">
@@ -138,15 +138,15 @@
     <h2>What is supported today</h2>
     <div class="card">
       <table>
-        <thead><tr><th>Host</th><th>MicroSandbox local runtime</th><th>Current MSW app/repository</th><th>Cross-platform product position</th></tr></thead>
+        <thead><tr><th>Host</th><th>MicroSandbox local runtime</th><th>Current Silo app/repository</th><th>Cross-platform product position</th></tr></thead>
         <tbody>
           <tr><td>macOS</td><td><span class="good">Yes</span> — Apple Silicon.</td><td><span class="good">Yes</span> — the current product targets macOS 26+ on Apple Silicon.</td><td>First-class supported release.</td></tr>
           <tr><td>Linux</td><td><span class="good">Yes</span> — glibc Linux with KVM.</td><td><span class="no">No</span> — current setup hard-fails outside Darwin and relies on Homebrew, launchd, Keychain, <code>open</code>, and macOS networking.</td><td>First new platform after the portable core is proven.</td></tr>
           <tr><td>Windows</td><td><span class="caution">Preview</span> — Windows 11 with Windows Hypervisor Platform.</td><td><span class="no">No</span> — the Bash/Python host stack and SwiftUI app do not run as a native Windows product.</td><td>Public beta with explicit diagnostics and no GA claim.</td></tr>
-          <tr><td>Cloud mode</td><td>MicroSandbox says the same CLI can drive MicroSandbox Cloud; some commands remain local-only.</td><td>Not the current MSW operating model.</td><td>Optional later fallback for unsupported or locked-down hosts, not a substitute for local parity.</td></tr>
+          <tr><td>Cloud mode</td><td>MicroSandbox says the same CLI can drive MicroSandbox Cloud; some commands remain local-only.</td><td>Not the current Silo operating model.</td><td>Optional later fallback for unsupported or locked-down hosts, not a substitute for local parity.</td></tr>
         </tbody>
       </table>
-      <p class="small" style="margin-top:14px">Repository evidence: <code>README.md:3-11</code>, <code>setup.sh:39-40</code>, <code>bin/msw:55-57</code>, <code>bin/msw:846-850</code>, and <code>app/Silo/Sources/BootstrapCoordinator.swift:314-322</code>.</p>
+      <p class="small" style="margin-top:14px">Repository evidence: <code>README.md:3-11</code>, <code>setup.sh:39-40</code>, <code>bin/silo:55-57</code>, <code>bin/silo:846-850</code>, and <code>app/Silo/Sources/BootstrapCoordinator.swift:314-322</code>.</p>
     </div>
   </section>
 
@@ -175,14 +175,14 @@
 
   <section class="section">
     <h2>Architecture</h2>
-    <p class="section-intro">One UI and one domain model. Platform-specific code exists only at host boundaries. The existing typed <code>msw app … --format json</code> surface is a useful contract to preserve while the shell implementation is replaced.</p>
+    <p class="section-intro">One UI and one domain model. Platform-specific code exists only at host boundaries. The existing typed <code>silo app … --format json</code> surface is a useful contract to preserve while the shell implementation is replaced.</p>
     <div class="card">
       <div class="architecture" aria-label="Recommended application architecture">
         <div class="layer"><div class="layer-label">React UI</div><div class="layer-body"><strong>Setup, dashboard, workspace detail, logs, settings.</strong> Renders state and sends typed intents. No shell access, no credential access, no arbitrary path execution.</div></div>
         <div class="arrow">↓ typed Tauri commands and events</div>
         <div class="layer"><div class="layer-label">Tauri command API</div><div class="layer-body"><strong>Narrow allowlist:</strong> <code>doctor</code>, <code>list_workspaces</code>, <code>start</code>, <code>stop</code>, <code>inspect</code>, <code>stream_logs</code>, <code>open_workspace</code>, <code>configure_access</code>. Validate every ID, path, URL, and transition in Rust.</div></div>
         <div class="arrow">↓ domain operations</div>
-        <div class="layer"><div class="layer-label">msw-core</div><div class="layer-body"><strong>Portable Rust library:</strong> lifecycle state machine, freshness semantics, action planning/confirmation, protocol envelopes, redaction, cancellation, resource policy, GitHub policy, and recovery rules.</div></div>
+        <div class="layer"><div class="layer-label">silo-core</div><div class="layer-body"><strong>Portable Rust library:</strong> lifecycle state machine, freshness semantics, action planning/confirmation, protocol envelopes, redaction, cancellation, resource policy, GitHub policy, and recovery rules.</div></div>
         <div class="arrow">↓ traits, not conditionals spread through the app</div>
         <div class="layer"><div class="layer-label">Host adapters</div><div class="layer-body">
           <div class="adapter-grid">
@@ -222,8 +222,8 @@
     <div class="card">
       <ol class="phase-list">
         <li><div><strong>Platform spike</strong>On one real host per OS, run <code>msb doctor</code>, create/start/inspect/stop a sandbox, publish a loopback port, stream bounded logs, and update the runtime. Record unsupported behavior. Windows remains beta if preview limitations surface.</div></li>
-        <li><div><strong>Freeze the app protocol</strong>Turn the current <code>msw app</code> JSON envelopes into versioned schemas and golden fixtures. Define capability flags so unsupported features are hidden or disabled honestly, never guessed from the OS name.</div></li>
-        <li><div><strong>Extract <code>msw-core</code></strong>Move state transitions, plans, validation, redaction, and MicroSandbox process control into portable Rust. Keep platform integrations behind traits. Do not keep growing the Bash CLI as the cross-platform core.</div></li>
+        <li><div><strong>Freeze the app protocol</strong>Turn the current <code>silo app</code> JSON envelopes into versioned schemas and golden fixtures. Define capability flags so unsupported features are hidden or disabled honestly, never guessed from the OS name.</div></li>
+        <li><div><strong>Extract <code>silo-core</code></strong>Move state transitions, plans, validation, redaction, and MicroSandbox process control into portable Rust. Keep platform integrations behind traits. Do not keep growing the Bash CLI as the cross-platform core.</div></li>
         <li><div><strong>Build the thin Tauri shell</strong>Ship Setup, Monitor, workspace detail, logs, Settings, tray actions, and one clear recovery surface. The UI consumes state; it does not own state.</div></li>
         <li><div><strong>Implement adapters in risk order</strong>macOS parity first, Linux second, Windows third. Credential storage, background services, host networking, browser/terminal opening, and update/install flows each need native implementations.</div></li>
         <li><div><strong>Package and sign per OS</strong>Build on native runners or machines. Produce macOS app/DMG with signing and notarization, Linux AppImage/deb/rpm as chosen from tested distributions, and signed Windows MSI/NSIS artifacts. Sign updater payloads independently.</div></li>
@@ -294,7 +294,7 @@
       <li><a href="https://v2.tauri.app/security/capabilities/">Tauri 2 capabilities</a> — platform/window-specific permission boundaries.</li>
       <li><a href="https://v2.tauri.app/plugin/updater/">Tauri 2 updater</a> — signed update configuration.</li>
     </ul>
-    <p>Local code evidence was read from the current repository. Static recommendations are architecture decisions, not claims that Linux or Windows MSW integrations already exist.</p>
+    <p>Local code evidence was read from the current repository. Static recommendations are architecture decisions, not claims that Linux or Windows Silo integrations already exist.</p>
   </footer>
 </main>
 </body>

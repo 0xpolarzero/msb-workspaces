@@ -1,6 +1,6 @@
 import Foundation
 
-struct MSWPushReview: Codable, Sendable, Equatable, Identifiable {
+struct SiloPushReview: Codable, Sendable, Equatable, Identifiable {
     let id: UUID
     let workspace: String
     let repositoryPath: String
@@ -13,7 +13,7 @@ struct MSWPushReview: Codable, Sendable, Equatable, Identifiable {
     let confirmationPhrase: String
 }
 
-enum MSWOperationServiceError: Error, LocalizedError, Sendable, Equatable {
+enum SiloOperationServiceError: Error, LocalizedError, Sendable, Equatable {
     case invalidWorkspace
     case repositoryUnavailable
     case pushBlocked
@@ -23,85 +23,85 @@ enum MSWOperationServiceError: Error, LocalizedError, Sendable, Equatable {
         switch self {
         case .invalidWorkspace: return "The workspace identifier is invalid."
         case .repositoryUnavailable: return "The repository state is unavailable; refresh before continuing."
-        case .pushBlocked: return "MSW policy does not allow a push for this repository state."
-        case .unsupportedURL: return "MSW returned a URL with an unsupported scheme."
+        case .pushBlocked: return "Silo policy does not allow a push for this repository state."
+        case .unsupportedURL: return "Silo returned a URL with an unsupported scheme."
         }
     }
 }
 
-actor MSWOperationService {
-    private let client: MSWClient
-    private let coordinator: MSWOperationCoordinator
+actor SiloOperationService {
+    private let client: SiloClient
+    private let coordinator: SiloOperationCoordinator
 
-    init(client: MSWClient, coordinator: MSWOperationCoordinator? = nil) {
+    init(client: SiloClient, coordinator: SiloOperationCoordinator? = nil) {
         self.client = client
-        self.coordinator = coordinator ?? MSWOperationCoordinator(client: client)
+        self.coordinator = coordinator ?? SiloOperationCoordinator(client: client)
     }
 
-    func state(workspace: String? = nil) async throws -> MSWStateResponse {
+    func state(workspace: String? = nil) async throws -> SiloStateResponse {
         let response = try await client.state(workspace: workspace)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "state") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "state") }
         return result
     }
 
-    func repositories(workspace: String, includeWorktreeStatus: Bool = true) async throws -> MSWRepositoriesResponse {
-        guard WorkspaceID.isValid(workspace) else { throw MSWOperationServiceError.invalidWorkspace }
+    func repositories(workspace: String, includeWorktreeStatus: Bool = true) async throws -> SiloRepositoriesResponse {
+        guard WorkspaceID.isValid(workspace) else { throw SiloOperationServiceError.invalidWorkspace }
         let response = try await client.repositories(workspace: workspace, ifRunning: true, includeWorktreeStatus: includeWorktreeStatus)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "repositories") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "repositories") }
         return result
     }
 
-    func metrics(workspace: String) async throws -> MSWMetricsResponse {
-        guard WorkspaceID.isValid(workspace) else { throw MSWOperationServiceError.invalidWorkspace }
+    func metrics(workspace: String) async throws -> SiloMetricsResponse {
+        guard WorkspaceID.isValid(workspace) else { throw SiloOperationServiceError.invalidWorkspace }
         let response = try await client.metrics(workspace: workspace)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "metrics") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "metrics") }
         return result
     }
-    func logs(workspace: String) async throws -> MSWLogsResponse {
-        guard WorkspaceID.isValid(workspace) else { throw MSWOperationServiceError.invalidWorkspace }
+    func logs(workspace: String) async throws -> SiloLogsResponse {
+        guard WorkspaceID.isValid(workspace) else { throw SiloOperationServiceError.invalidWorkspace }
         return try await client.logs(workspace: workspace)
     }
 
-    func ports(workspace: String? = nil) async throws -> MSWPortsResponse {
+    func ports(workspace: String? = nil) async throws -> SiloPortsResponse {
         let response = try await client.ports(workspace: workspace)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "ports") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "ports") }
         return result
     }
 
-    func githubState(workspace: String? = nil) async throws -> MSWGitHubStateResponse {
+    func githubState(workspace: String? = nil) async throws -> SiloGitHubStateResponse {
         let response = try await client.githubState(workspace: workspace)
-        guard let result = response.result else { throw MSWClientError.missingResult(command: "github-state") }
+        guard let result = response.result else { throw SiloClientError.missingResult(command: "github-state") }
         return result
     }
 
-    func lifecycle(_ action: MSWLifecycleAction, workspace: String) async throws -> MSWApplyResult {
+    func lifecycle(_ action: SiloLifecycleAction, workspace: String) async throws -> SiloApplyResult {
         (try await coordinator.lifecycle(action, workspace: workspace)).result
     }
  
-    func pushPlan(workspace: String, repositories: [String]) async throws -> MSWPushPlan {
+    func pushPlan(workspace: String, repositories: [String]) async throws -> SiloPushPlan {
         guard WorkspaceID.isValid(workspace), !repositories.isEmpty else {
-            throw MSWOperationServiceError.repositoryUnavailable
+            throw SiloOperationServiceError.repositoryUnavailable
         }
         let response = try await client.preparePushPlan(workspace: workspace, repositories: repositories)
-        guard let plan = response.result else { throw MSWClientError.missingResult(command: "push-plan") }
+        guard let plan = response.result else { throw SiloClientError.missingResult(command: "push-plan") }
         return plan
     }
 
-    func applyPushPlan(_ plan: MSWPushPlan, confirmation: String) async throws -> MSWPushApplyResult {
+    func applyPushPlan(_ plan: SiloPushPlan, confirmation: String) async throws -> SiloPushApplyResult {
         let result = try await coordinator.applyPushPlan(plan, confirmation: confirmation)
-        guard result.pushed, result.reconciled else { throw MSWOperationServiceError.pushBlocked }
+        guard result.pushed, result.reconciled else { throw SiloOperationServiceError.pushBlocked }
         return result
     }
 
 
-    func pushReview(workspace: String, repository: MSWRepositorySnapshot) throws -> MSWPushReview {
+    func pushReview(workspace: String, repository: SiloRepositorySnapshot) throws -> SiloPushReview {
         guard WorkspaceID.isValid(workspace), let branch = repository.branch, let localCommit = repository.localCommit else {
-            throw MSWOperationServiceError.repositoryUnavailable
+            throw SiloOperationServiceError.repositoryUnavailable
         }
-        guard repository.pushability == .pushable || repository.pushability == .publish else { throw MSWOperationServiceError.pushBlocked }
-        guard repository.pushability == .publish || repository.aheadCount > 0 else { throw MSWOperationServiceError.pushBlocked }
+        guard repository.pushability == .pushable || repository.pushability == .publish else { throw SiloOperationServiceError.pushBlocked }
+        guard repository.pushability == .publish || repository.aheadCount > 0 else { throw SiloOperationServiceError.pushBlocked }
         let warning = repository.worktreeState == .localChanges ? "Uncommitted changes will not be included." : nil
-        return MSWPushReview(
+        return SiloPushReview(
             id: UUID(), workspace: workspace, repositoryPath: repository.path, branch: branch,
             localCommit: localCommit, remoteCommit: repository.remoteCommit, aheadCount: repository.aheadCount,
             behindCount: repository.behindCount, warning: warning, confirmationPhrase: "PUSH"
@@ -111,7 +111,7 @@ actor MSWOperationService {
 
 
 
-struct MSWDiagnosticCheck: Codable, Sendable, Equatable, Identifiable {
+struct SiloDiagnosticCheck: Codable, Sendable, Equatable, Identifiable {
     enum Status: String, Codable, Sendable { case pass, failed, unavailable }
     let id: String
     let title: String
@@ -120,7 +120,7 @@ struct MSWDiagnosticCheck: Codable, Sendable, Equatable, Identifiable {
     let recovery: String?
 }
 
-struct MSWBackupResult: Codable, Sendable, Equatable {
+struct SiloBackupResult: Codable, Sendable, Equatable {
     let archive: URL
     let archiveBytes: Int64
     let completedAt: Date
@@ -133,7 +133,7 @@ struct MSWBackupResult: Codable, Sendable, Equatable {
     }
 }
 
-struct MSWBackupEstimate: Codable, Sendable, Equatable {
+struct SiloBackupEstimate: Codable, Sendable, Equatable {
     let lowerBytes: Int64
     let upperBytes: Int64
     let basisRatio: Double
@@ -141,14 +141,14 @@ struct MSWBackupEstimate: Codable, Sendable, Equatable {
     let provenance: String
 }
 
-struct MSWBackupPreview: Codable, Sendable, Equatable {
+struct SiloBackupPreview: Codable, Sendable, Equatable {
     let destination: URL
     let sourceAllocatedBytes: Int64
-    let archiveEstimate: MSWBackupEstimate?
+    let archiveEstimate: SiloBackupEstimate?
     let runningWorkspaces: [String]
 }
 
-struct MSWBackupOperation: Codable, Sendable, Equatable, Identifiable {
+struct SiloBackupOperation: Codable, Sendable, Equatable, Identifiable {
     enum State: String, Codable, Sendable { case queued, running, completed, failed }
     enum Phase: String, Codable, Sendable {
         case preparing
@@ -172,29 +172,29 @@ struct MSWBackupOperation: Codable, Sendable, Equatable, Identifiable {
     let ownerPID: Int32?
     let ownerProcessState: String
     let sourceAllocatedBytes: Int64
-    let archiveEstimate: MSWBackupEstimate?
+    let archiveEstimate: SiloBackupEstimate?
     let processedBytes: Int64
     let writtenBytes: Int64
     let throughputBytesPerSecond: Int64
     let totalBytes: Int64?
     let etaSeconds: Int64?
-    let result: MSWBackupResult?
-    let error: MSWBackupOperationErrorResponse?
+    let result: SiloBackupResult?
+    let error: SiloBackupOperationErrorResponse?
     let warnings: [String]
 }
 
-actor MSWDiagnostics {
-    private let client: MSWClient
+actor SiloDiagnostics {
+    private let client: SiloClient
 
-    init(client: MSWClient) {
+    init(client: SiloClient) {
         self.client = client
     }
 
 
-    func previewBackup(to directory: URL) async throws -> MSWBackupPreview {
+    func previewBackup(to directory: URL) async throws -> SiloBackupPreview {
         try validateDirectory(directory)
         let envelope = try await client.previewBackup(directory: directory)
-        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-preview") }
+        guard let result = envelope.result else { throw SiloClientError.missingResult(command: "backup-preview") }
         let selectedDestination = directory.resolvingSymlinksInPath().standardizedFileURL
         let previewDestination = URL(fileURLWithPath: result.destination)
             .resolvingSymlinksInPath()
@@ -209,13 +209,13 @@ actor MSWDiagnostics {
               }) ?? true,
               Set(result.runningWorkspaces).count == result.runningWorkspaces.count,
               result.runningWorkspaces.allSatisfy(WorkspaceID.isValid) else {
-            throw MSWClientError.malformedJSON(command: "backup-preview")
+            throw SiloClientError.malformedJSON(command: "backup-preview")
         }
-        return MSWBackupPreview(
+        return SiloBackupPreview(
             destination: previewDestination,
             sourceAllocatedBytes: result.sourceAllocatedBytes,
             archiveEstimate: result.archiveEstimate.map {
-                MSWBackupEstimate(
+                SiloBackupEstimate(
                     lowerBytes: $0.lowerBytes,
                     upperBytes: $0.upperBytes,
                     basisRatio: $0.basisRatio,
@@ -227,51 +227,51 @@ actor MSWDiagnostics {
         )
     }
 
-    func startBackup(to directory: URL, requestKey: String) async throws -> MSWBackupOperation {
+    func startBackup(to directory: URL, requestKey: String) async throws -> SiloBackupOperation {
         try validateDirectory(directory)
         let envelope = try await client.startBackup(directory: directory, requestKey: requestKey)
-        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-start") }
+        guard let result = envelope.result else { throw SiloClientError.missingResult(command: "backup-start") }
         return try validate(result, command: "backup-start")
     }
 
-    func listBackups() async throws -> [MSWBackupOperation] {
+    func listBackups() async throws -> [SiloBackupOperation] {
         let envelope = try await client.listBackups()
-        guard let results = envelope.result else { throw MSWClientError.missingResult(command: "backup-list") }
+        guard let results = envelope.result else { throw SiloClientError.missingResult(command: "backup-list") }
         let operations = try results.map { try validate($0, command: "backup-list") }
         guard Set(operations.map(\.id)).count == operations.count else {
-            throw MSWClientError.malformedJSON(command: "backup-list")
+            throw SiloClientError.malformedJSON(command: "backup-list")
         }
         return operations
     }
 
-    func backupStatus(id: String) async throws -> MSWBackupOperation {
+    func backupStatus(id: String) async throws -> SiloBackupOperation {
         let envelope = try await client.backupStatus(id: id)
-        guard let result = envelope.result else { throw MSWClientError.missingResult(command: "backup-status") }
+        guard let result = envelope.result else { throw SiloClientError.missingResult(command: "backup-status") }
         return try validate(result, command: "backup-status")
     }
 
     func restore(archive: URL, confirmation: String) async throws {
         guard confirmation == "RESTORE", archive.pathExtension == "zst", FileManager.default.fileExists(atPath: archive.path) else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
         let envelope = try await client.restore(archive: archive, confirmation: confirmation)
-        guard envelope.result != nil else { throw MSWClientError.missingResult(command: "restore") }
+        guard envelope.result != nil else { throw SiloClientError.missingResult(command: "restore") }
     }
 
     private func validateDirectory(_ directory: URL) throws {
         guard directory.isFileURL,
               directory.path.hasPrefix("/"),
               directory.path.rangeOfCharacter(from: .controlCharacters) == nil else {
-            throw MSWClientError.invalidArguments
+            throw SiloClientError.invalidArguments
         }
     }
 
-    private func validate(_ value: MSWBackupOperationResponse, command: String) throws -> MSWBackupOperation {
+    private func validate(_ value: SiloBackupOperationResponse, command: String) throws -> SiloBackupOperation {
         guard value.kind == "backup",
               value.operationId.range(of: #"^[a-z0-9-]{8,64}$"#, options: .regularExpression) != nil,
               value.requestKey.range(of: #"^[A-Za-z0-9._-]{1,128}$"#, options: .regularExpression) != nil,
-              let state = MSWBackupOperation.State(rawValue: value.state),
-              let phase = MSWBackupOperation.Phase(rawValue: value.phase),
+              let state = SiloBackupOperation.State(rawValue: value.state),
+              let phase = SiloBackupOperation.Phase(rawValue: value.phase),
               !value.message.isEmpty,
               value.destination.hasPrefix("/"), !value.destination.contains("\0"),
               value.updatedAt >= value.startedAt, value.elapsedSeconds >= 0,
@@ -289,9 +289,9 @@ actor MSWDiagnostics {
               value.progress.totalBytes.map({ value.progress.processedBytes <= $0 }) ?? true,
               value.progress.etaSeconds == nil || value.progress.totalBytes != nil,
               value.progress.etaSeconds.map({ $0 >= 0 }) ?? true else {
-            throw MSWClientError.malformedJSON(command: command)
+            throw SiloClientError.malformedJSON(command: command)
         }
-        let result: MSWBackupResult?
+        let result: SiloBackupResult?
         if let final = value.result {
             guard final.archive.hasPrefix("/"), !final.archive.contains("\0"), final.archiveBytes > 0,
                   final.checksum.hasPrefix("/"), !final.checksum.contains("\0"),
@@ -301,9 +301,9 @@ actor MSWDiagnostics {
                   final.stoppedWorkspaces == value.runningWorkspaces,
                   final.stoppedWorkspaces.allSatisfy(WorkspaceID.isValid),
                   final.restartedWorkspaces.allSatisfy(WorkspaceID.isValid) else {
-                throw MSWClientError.malformedJSON(command: command)
+                throw SiloClientError.malformedJSON(command: command)
             }
-            result = MSWBackupResult(
+            result = SiloBackupResult(
                 archive: URL(fileURLWithPath: final.archive), archiveBytes: final.archiveBytes,
                 completedAt: final.completedAt, checksum: URL(fileURLWithPath: final.checksum),
                 stoppedWorkspaces: final.stoppedWorkspaces, restartedWorkspaces: final.restartedWorkspaces
@@ -325,16 +325,16 @@ actor MSWDiagnostics {
               (state == .completed || state == .failed) == (value.completedAt != nil),
               (state == .queued || state == .running) == (result == nil && value.error == nil),
               result.map({ value.progress.writtenBytes == $0.archiveBytes }) ?? true else {
-            throw MSWClientError.malformedJSON(command: command)
+            throw SiloClientError.malformedJSON(command: command)
         }
-        return MSWBackupOperation(
+        return SiloBackupOperation(
             id: value.operationId, requestKey: value.requestKey, state: state, phase: phase,
             message: value.message, destination: URL(fileURLWithPath: value.destination),
             startedAt: value.startedAt, updatedAt: value.updatedAt, completedAt: value.completedAt,
             elapsedSeconds: value.elapsedSeconds, ownerPID: value.ownerPid,
             ownerProcessState: value.ownerProcessState, sourceAllocatedBytes: value.sourceAllocatedBytes,
             archiveEstimate: value.archiveEstimate.map {
-                MSWBackupEstimate(lowerBytes: $0.lowerBytes, upperBytes: $0.upperBytes,
+                SiloBackupEstimate(lowerBytes: $0.lowerBytes, upperBytes: $0.upperBytes,
                     basisRatio: $0.basisRatio, changedSourceRatio: $0.changedSourceRatio,
                     provenance: $0.provenance)
             }, processedBytes: value.progress.processedBytes, writtenBytes: value.progress.writtenBytes,
