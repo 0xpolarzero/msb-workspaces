@@ -2745,7 +2745,7 @@ Host *.msb
   IdentityFile $HOME/.ssh/silo_ed25519
   IdentitiesOnly yes
   UserKnownHostsFile $HOME/.ssh/silo_known_hosts
-  ProxyCommand $SILO_SCRIPT_ROOT/silo-ssh-proxy %h
+  ProxyCommand "$SILO_SCRIPT_ROOT/silo-ssh-proxy" %h
 SSH
   chmod 600 "$HOME/.ssh/config.d/silo.conf"
   touch "$HOME/.ssh/silo_known_hosts"; chmod 600 "$HOME/.ssh/silo_known_hosts"
@@ -2755,38 +2755,38 @@ configure_user_integration() {
   local workspace_file="$1" public_key authorized include_line ssh_tmp
   app_workspace_configuration_valid "$workspace_file" || return 1
   if [[ "${SILO_TEST_MODE:-0}" == 1 ]]; then
-    configure_user_integration_test
-    return
-  fi
-
-  mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
-  chmod 700 "$HOME/.ssh" "$HOME/.ssh/config.d"
-  if [[ ! -f "$HOME/.ssh/silo_ed25519" ]]; then
-    ssh-keygen -t ed25519 -f "$HOME/.ssh/silo_ed25519" -N '' -C silo
-  fi
-  chmod 600 "$HOME/.ssh/silo_ed25519"
-  chmod 644 "$HOME/.ssh/silo_ed25519.pub"
-  public_key="$(cat "$HOME/.ssh/silo_ed25519.pub")"
-  authorized="$HOME/.microsandbox/ssh/authorized_keys"
-  if [[ ! -f "$authorized" ]] || ! grep -qxF "$public_key" "$authorized"; then
-    "$MSB_BIN" ssh authorize --file "$HOME/.ssh/silo_ed25519.pub"
-  fi
-  cat >"$HOME/.ssh/config.d/silo.conf" <<SSH
+    configure_user_integration_test || return 1
+  else
+    mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
+    chmod 700 "$HOME/.ssh" "$HOME/.ssh/config.d"
+    if [[ ! -f "$HOME/.ssh/silo_ed25519" ]]; then
+      ssh-keygen -t ed25519 -f "$HOME/.ssh/silo_ed25519" -N '' -C silo
+    fi
+    chmod 600 "$HOME/.ssh/silo_ed25519"
+    chmod 644 "$HOME/.ssh/silo_ed25519.pub"
+    public_key="$(cat "$HOME/.ssh/silo_ed25519.pub")"
+    authorized="$HOME/.microsandbox/ssh/authorized_keys"
+    if [[ ! -f "$authorized" ]] || ! grep -qxF "$public_key" "$authorized"; then
+      "$MSB_BIN" ssh authorize --file "$HOME/.ssh/silo_ed25519.pub"
+    fi
+    cat >"$HOME/.ssh/config.d/silo.conf" <<SSH
 Host *.msb
   User root
   IdentityFile $HOME/.ssh/silo_ed25519
   IdentitiesOnly yes
   UserKnownHostsFile $HOME/.ssh/silo_known_hosts
-  ProxyCommand $SILO_SCRIPT_ROOT/silo-ssh-proxy %h
+  ProxyCommand "$SILO_SCRIPT_ROOT/silo-ssh-proxy" %h
   ServerAliveInterval 30
   ServerAliveCountMax 3
   StrictHostKeyChecking accept-new
   SetEnv TERM=xterm-256color
 SSH
-  chmod 600 "$HOME/.ssh/config.d/silo.conf"
-  touch "$HOME/.ssh/silo_known_hosts"; chmod 600 "$HOME/.ssh/silo_known_hosts"
+    chmod 600 "$HOME/.ssh/config.d/silo.conf"
+    touch "$HOME/.ssh/silo_known_hosts"; chmod 600 "$HOME/.ssh/silo_known_hosts"
+  fi
+
   touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
-  include_line="Include $HOME/.ssh/config.d/*"
+  include_line="Include $HOME/.ssh/config.d/silo.conf"
   if ! grep -qxF "$include_line" "$HOME/.ssh/config"; then
     ssh_tmp="$(mktemp "${TMPDIR:-/tmp}/silo-ssh.XXXXXX")"
     { printf '%s\n\n' "$include_line"; cat "$HOME/.ssh/config"; } >"$ssh_tmp"

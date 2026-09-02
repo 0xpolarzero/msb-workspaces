@@ -742,6 +742,23 @@ class InstallerAndDailyTests(SiloTestCase):
         self.assertIn("silo_known_hosts", config)
         self.assertEqual(oct(known_hosts.stat().st_mode & 0o777), "0o600")
 
+    def test_host_repair_quotes_and_loads_silo_proxy(self) -> None:
+        ssh_dir = self.env.home / ".ssh"
+        config_dir = ssh_dir / "config.d"
+        (ssh_dir / "config").write_text("")
+
+        self.env.silo("host", "repair")
+
+        main_config = (ssh_dir / "config").read_text().splitlines()
+        self.assertEqual(main_config[0], f"Include {config_dir}/silo.conf")
+        proxy_line = next(
+            line.strip()
+            for line in (config_dir / "silo.conf").read_text().splitlines()
+            if line.strip().startswith("ProxyCommand ")
+        )
+        self.assertTrue(proxy_line.startswith('ProxyCommand "'))
+        self.assertTrue(proxy_line.endswith('/silo-ssh-proxy" %h'))
+
     def test_setup_is_idempotent(self) -> None:
         before = self.env.state()
         before_create = sum(e["event"] == "create" for e in before["events"])
