@@ -4971,8 +4971,31 @@ struct RepositoryWorkspacePolicyEditor: View {
     private func filteredRepositories(for workspace: String) -> [RepositoryEntry] {
         let query = searchQueries[workspace, default: ""]
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return allRepositories }
-        return allRepositories.filter { $0.repository.fullName.localizedCaseInsensitiveContains(query) }
+        let matches = query.isEmpty
+            ? allRepositories
+            : allRepositories.filter { $0.repository.fullName.localizedCaseInsensitiveContains(query) }
+        return Self.selectedFirst(matches) {
+            isSelected(workspace, repository: $0.repository, installation: $0.installation)
+        }
+    }
+
+    static func selectedFirst<Value>(
+        _ values: [Value],
+        isSelected: (Value) -> Bool
+    ) -> [Value] {
+        var selected: [Value] = []
+        var unselected: [Value] = []
+        selected.reserveCapacity(values.count)
+        unselected.reserveCapacity(values.count)
+        for value in values {
+            if isSelected(value) {
+                selected.append(value)
+            } else {
+                unselected.append(value)
+            }
+        }
+        selected.append(contentsOf: unselected)
+        return selected
     }
 
     private func selectedRepositories(for workspace: String) -> [RepositoryEntry] {

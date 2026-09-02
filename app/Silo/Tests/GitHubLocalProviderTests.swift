@@ -241,6 +241,21 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(GitHubLocalStrings.settingsNoCredential, "GitHub account not connected on this Mac")
     }
 
+    func testRepositoryPickerPlacesSelectedRepositoriesFirst() {
+        let repositories = ["acme/alpha", "acme/bravo", "acme/charlie", "acme/delta"]
+        let selected = Set(["acme/bravo", "acme/delta"])
+
+        let ordered = RepositoryWorkspacePolicyEditor.selectedFirst(repositories) {
+            selected.contains($0)
+        }
+
+        XCTAssertEqual(
+            ordered,
+            ["acme/bravo", "acme/delta", "acme/alpha", "acme/charlie"],
+            "Selected and unchecked groups must preserve the catalog's alphabetical order"
+        )
+    }
+
     func testPolicySyncPresentationUsesTruthfulStatesAndActions() {
         let phases: [(GitHubApplyPhase, String, Bool)] = [
             (.saved, "Saved", false),
