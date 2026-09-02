@@ -422,13 +422,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let setupFixtureOwnsGitHubLoading = arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
             arguments.contains("--ui-test-setup-reconnect") ||
-            arguments.contains("--ui-test-setup-installing")
+            arguments.contains("--ui-test-setup-installing") ||
+            arguments.contains("--ui-test-setup-registration-failure")
         githubSettingsState.setPollingVisible(false)
         if appNavigation.workspace == nil {
             appNavigation.workspace = model.selectedWorkspace ?? model.workspaces.first?.id
         }
         let bootstrap: (any SiloBootstrapCoordinating)?
-        if arguments.contains("--ui-test-setup-reconnect") {
+        if arguments.contains("--ui-test-setup-registration-failure") {
+            bootstrap = SiloBootstrapUITestStub(
+                failureWorkspace: "dev",
+                registrationFailure: "MicroSandbox failed Silo's disk-safety check. Update or repair MicroSandbox, then retry Setup. Safety-check detail: the disposable probe disk changed length after guest fstrim; the runtime truncated the raw image."
+            )
+        } else if arguments.contains("--ui-test-setup-reconnect") {
             bootstrap = SiloBootstrapUITestStub(
                 failureWorkspace: "dev",
                 keepsFirstRunPending: arguments.contains("--ui-test-setup-registration-pending")

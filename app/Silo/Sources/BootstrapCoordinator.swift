@@ -859,7 +859,6 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
             let records = SiloWorkspaceNetwork.records(for: workspaceConfigurations.map(\.name))
             if !(await hostRepairVerifier.isReady(records: records)) {
                 do {
-                    try await userIntegration.configureUserIntegrationIfAvailable()
                     try await hostRepairAuthorization.repair(records: records)
                 } catch {
                     let failure = BootstrapCoordinatorError.hostRegistrationFailed(error.localizedDescription)
@@ -976,15 +975,16 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
         } catch {
             if let clientError = error as? SiloClientError,
                case .protocolFailure(let protocolError) = clientError,
-               protocolError.code == "SILO_GITHUB_RECONNECT_REQUIRED",
-               let installed = await runner.installedWorkspaceConfigurations(),
-               SiloBootstrapConfiguration(installed) == SiloBootstrapConfiguration(workspaceConfigurations) {
-                // The CLI reports reconnect only after it has atomically
-                // installed and reconciled the selected workspace boundary.
-                // Record that verified boundary before Setup enters GitHub;
-                // the later retry still owns deep workspace verification.
-                current.workspaceConfigurations = workspaceConfigurations
-                current.completedPhases.formUnion([.preflight, .toolchain, .hostIntegration, .workspaces])
+               protocolError.code == "SILO_GITHUB_RECONNECT_REQUIRED" {
+                // Reconnect can interrupt first-run bootstrap while the CLI's
+                // selected configuration is still staged. Route to GitHub,
+                // but only mark the workspace boundary applied when a prior
+                // committed configuration already matches the selection.
+                if let installed = await runner.installedWorkspaceConfigurations(),
+                   SiloBootstrapConfiguration(installed) == SiloBootstrapConfiguration(workspaceConfigurations) {
+                    current.workspaceConfigurations = workspaceConfigurations
+                    current.completedPhases.formUnion([.preflight, .toolchain, .hostIntegration, .workspaces])
+                }
                 current.phase = .github
                 current.reconnectWorkspace = protocolError.workspace
             }
@@ -1046,17 +1046,20 @@ final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
     private let keepsFirstRunPending: Bool
     private let completesFirstRun: Bool
     private let simulatesRuntimeInstallation: Bool
+    private let registrationFailure: String?
 
     init(
         failureWorkspace: String,
         keepsFirstRunPending: Bool = false,
         completesFirstRun: Bool = false,
-        simulatesRuntimeInstallation: Bool = false
+        simulatesRuntimeInstallation: Bool = false,
+        registrationFailure: String? = nil
     ) {
         self.failureWorkspace = failureWorkspace
         self.keepsFirstRunPending = keepsFirstRunPending
         self.completesFirstRun = completesFirstRun
         self.simulatesRuntimeInstallation = simulatesRuntimeInstallation
+        self.registrationFailure = registrationFailure
         let now = Date()
         self.current = SiloBootstrapState(
             phase: .workspaces,
@@ -1117,6 +1120,13 @@ final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
             defer { continuation.finish() }
             for await _ in pending {}
             try Task.checkCancellation()
+        }
+        if runCount == 1, let registrationFailure {
+            current.workspaceConfigurations = workspaceConfigurations
+            current.phase = .workspaces
+            current.lastError = registrationFailure
+            current.updatedAt = Date()
+            throw BootstrapCoordinatorError.hostRegistrationFailed(registrationFailure)
         }
         if runCount == 1, !completesFirstRun {
             current.workspaceConfigurations = workspaceConfigurations

@@ -28,6 +28,20 @@ private final class EnabledHostService: SiloHostServiceControlling {
 
     func openApprovalSettings() {}
 }
+@MainActor
+private final class UnsignedHostService: SiloHostServiceControlling {
+    let status: SiloHostServiceStatus = .notRegistered
+    private(set) var registerInvocationCount = 0
+
+    func packagingStatus() async -> SiloHostServicePackagingStatus { .signingUnavailable }
+
+    func registerIfNeeded() throws -> SiloHostServiceStatus {
+        registerInvocationCount += 1
+        return .notRegistered
+    }
+
+    func openApprovalSettings() {}
+}
 
 private actor RecordingHostAgent: SiloHostAgentControlling {
     private(set) var ensureAliasInvocationCount = 0
@@ -66,17 +80,30 @@ private struct AvailableUserIntegration: SiloUserIntegrationControlling {
     func configureUserIntegrationIfAvailable() async throws {}
 }
 private actor RecordingUserIntegration: SiloUserIntegrationControlling {
-    private let workspaceConfigurationURL: URL
-    private(set) var workspaceConfigurationAvailableAtInvocation = false
-
-    init(workspaceConfigurationURL: URL) {
-        self.workspaceConfigurationURL = workspaceConfigurationURL
-    }
+    private(set) var invocationCount = 0
 
     func configureUserIntegrationIfAvailable() async throws {
-        workspaceConfigurationAvailableAtInvocation = FileManager.default.fileExists(
-            atPath: workspaceConfigurationURL.path
-        )
+        invocationCount += 1
+    }
+}
+
+private actor RecordingHostRepair: SiloHostRepairVerifying, SiloHostRepairAuthorizing {
+    private let markerURL: URL
+    private(set) var authorizationRecords: [[SiloWorkspaceNetworkRecord]] = []
+    private(set) var verificationRecords: [[SiloWorkspaceNetworkRecord]] = []
+
+    init(markerURL: URL) {
+        self.markerURL = markerURL
+    }
+
+    func isReady(records: [SiloWorkspaceNetworkRecord]) async -> Bool {
+        verificationRecords.append(records)
+        return FileManager.default.fileExists(atPath: markerURL.path)
+    }
+
+    func repair(records: [SiloWorkspaceNetworkRecord]) async throws {
+        authorizationRecords.append(records)
+        try Data("repaired\n".utf8).write(to: markerURL)
     }
 }
 
@@ -3332,7 +3359,7 @@ final class AppModelTests: XCTestCase {
     }
 
 
-    func testBootstrapRunCompletesWithInjectedSetupAndHostFakes() async throws {
+    func testUnsignedBootstrapRepairsHostNetworkingBeforeCLIAndLeavesSSHToTransaction() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-success-test-\(UUID().uuidString)", isDirectory: true)
         let managedToolchainRoot = ToolchainLayout.managedRoot(homeDirectory: temporary)
@@ -3358,6 +3385,7 @@ final class AppModelTests: XCTestCase {
         let bootstrapURL = temporary.appendingPathComponent("bootstrap.json")
         let bootstrapArgumentsURL = temporary.appendingPathComponent("bootstrap-arguments.txt")
         let bootstrapInputURL = temporary.appendingPathComponent("bootstrap-input.json")
+        let hostRepairMarker = temporary.appendingPathComponent("host-repair-complete")
         let bootstrapResponse = #"""
         {"schemaVersion":1,"requestId":"bootstrap-success","ok":true,"command":"bootstrap","observedAt":"2026-08-08T00:00:00Z","result":{"resumed":false,"phase":"complete","requiresApproval":false,"vmsStarted":false,"message":"Setup complete."},"warnings":[],"error":null}
         """#
@@ -3369,6 +3397,7 @@ final class AppModelTests: XCTestCase {
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
             printf '%s\\n' '\(protocolCompatibleHandshake)'
         elif [ "$1" = "app" ] && [ "$2" = "bootstrap" ]; then
+            [ -f "\(hostRepairMarker.path)" ] || exit 70
             printf '%s\\n' "$@" > "\(bootstrapArgumentsURL.path)"
             /usr/bin/tee "\(bootstrapInputURL.path)" > "\(configDirectory.appendingPathComponent("workspaces.json").path)"
             /bin/cat "\(bootstrapURL.path)"
@@ -3396,11 +3425,10 @@ final class AppModelTests: XCTestCase {
             runtimeResolution.selected?.standardizedFileURL,
             executable.standardizedFileURL
         )
-        let hostService = EnabledHostService()
+        let hostService = UnsignedHostService()
         let hostAgent = RecordingHostAgent()
-        let userIntegration = RecordingUserIntegration(
-            workspaceConfigurationURL: configDirectory.appendingPathComponent("workspaces.json")
-        )
+        let userIntegration = RecordingUserIntegration()
+        let hostRepair = RecordingHostRepair(markerURL: hostRepairMarker)
         let coordinator = BootstrapCoordinator(
             client: SiloClient(runner: runner),
             runner: runner,
@@ -3410,6 +3438,8 @@ final class AppModelTests: XCTestCase {
             hostAgent: hostAgent,
             hostService: hostService,
             userIntegration: userIntegration,
+            hostRepairVerifier: hostRepair,
+            hostRepairAuthorization: hostRepair,
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
 
@@ -3433,22 +3463,30 @@ final class AppModelTests: XCTestCase {
         ]
         let result = try await coordinator.run(workspaceConfigurations: configurations)
 
-        let workspaceConfigurationAvailableAtIntegration = await userIntegration
-            .workspaceConfigurationAvailableAtInvocation
-        XCTAssertTrue(
-            workspaceConfigurationAvailableAtIntegration,
-            "User integration must run after bootstrap atomically installs workspaces.json."
+        let userIntegrationInvocationCount = await userIntegration.invocationCount
+        XCTAssertEqual(
+            userIntegrationInvocationCount,
+            0,
+            "The unsigned-build fallback must leave user SSH integration inside the CLI bootstrap transaction."
         )
         XCTAssertEqual(result.phase, SiloBootstrapState.Phase.complete.rawValue)
         let ensureAliasCount = await hostAgent.ensureAliasInvocationCount
         let installRecordsCount = await hostAgent.installRecordsInvocationCount
-        let inspectRequests = await hostAgent.inspectRequests
-        XCTAssertEqual(ensureAliasCount, 1)
-        XCTAssertEqual(installRecordsCount, 1)
+        XCTAssertEqual(ensureAliasCount, 0)
+        XCTAssertEqual(installRecordsCount, 0)
+        XCTAssertEqual(hostService.registerInvocationCount, 0)
+        let authorizationRecords = await hostRepair.authorizationRecords
+        let verificationRecords = await hostRepair.verificationRecords
+        XCTAssertEqual(authorizationRecords.count, 1)
         XCTAssertEqual(
-            inspectRequests.last?.map(\.hostname),
+            authorizationRecords.first?.map(\.hostname),
             ["development.silo.test", "personal.silo.test", "lab.silo.test"],
-            "Post-repair verification must inspect the selected configuration before bootstrap reports verified completion."
+            "The native unsigned-build fallback still owns privileged networking repair for the selected configuration."
+        )
+        XCTAssertEqual(
+            verificationRecords.last?.map(\.hostname),
+            ["development.silo.test", "personal.silo.test", "lab.silo.test"],
+            "Post-repair verification must inspect the selected configuration before CLI bootstrap begins."
         )
         let finalState = await coordinator.state()
         XCTAssertEqual(finalState.phase, .complete)
@@ -3595,7 +3633,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(withoutRecovery.localizedDescription, "runtime unavailable (Silo error code: SILO_RUNTIME_UNAVAILABLE.)")
     }
 
-    func testRealBootstrapReconnectPublishesAppliedConfigurationBeforeReturning() async throws {
+    func testRealBootstrapReconnectRoutesWithoutPublishingStagedConfiguration() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-reconnect-test-\(UUID().uuidString)", isDirectory: true)
         let siloBin = ToolchainLayout.managedRoot(homeDirectory: temporary)
@@ -3625,7 +3663,7 @@ final class AppModelTests: XCTestCase {
         if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
             printf '%s\\n' '\(protocolCompatibleHandshake)'
         elif [ "$1" = "app" ] && [ "$2" = "bootstrap" ]; then
-            /bin/cat > "\(configDirectory.appendingPathComponent("workspaces.json").path)"
+            /bin/cat > /dev/null
             printf '%s\\n' '\(reconnectResponse)'
             exit 69
         else
@@ -3642,9 +3680,7 @@ final class AppModelTests: XCTestCase {
             homeDirectory: temporary,
             testSiloExecutable: executable
         ))
-        let userIntegration = RecordingUserIntegration(
-            workspaceConfigurationURL: configDirectory.appendingPathComponent("workspaces.json")
-        )
+        let userIntegration = RecordingUserIntegration()
         let coordinator = BootstrapCoordinator(
             client: SiloClient(runner: runner),
             runner: runner,
@@ -3679,21 +3715,23 @@ final class AppModelTests: XCTestCase {
             }
             XCTAssertEqual(protocolError.workspace, "development")
         }
-        let reconnectConfigurationAvailable = await userIntegration
-            .workspaceConfigurationAvailableAtInvocation
-        XCTAssertTrue(
-            reconnectConfigurationAvailable,
-            "Reconnect handling must configure user integration only after workspaces.json is readable."
-        )
+        let userIntegrationInvocationCount = await userIntegration.invocationCount
+        XCTAssertEqual(userIntegrationInvocationCount, 0)
 
         let state = await coordinator.state()
         XCTAssertEqual(state.phase, .github)
         XCTAssertEqual(state.reconnectWorkspace, "development")
-        XCTAssertEqual(state.workspaceConfigurations?.map(\.name), ["development", "personal", "lab"])
-        XCTAssertTrue(SetupView.workspaceConfigurationIsApplied(
+        XCTAssertNil(state.workspaceConfigurations)
+        XCTAssertFalse(SetupView.workspaceConfigurationIsApplied(
             selected,
             persisted: state.workspaceConfigurations
         ))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: configDirectory.appendingPathComponent("workspaces.json").path
+            ),
+            "Reconnect routing must not publish the CLI's unverified staged configuration."
+        )
     }
 
     @MainActor

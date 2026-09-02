@@ -941,10 +941,11 @@ struct SiloGitHubPolicyRepo: Codable, Identifiable, Sendable, Equatable {
     var modeLabel: String { mode.label }
 }
 
-/// `silo github status --format json` (local mode): top-level mode plus one
-/// entry per workspace with policy/capability/shuttle/credential presence.
+/// `silo github status --format json`: global host-credential state plus
+/// workspace-scoped policy, capability, and shuttle state.
 struct SiloGitHubStatusResponse: Codable, Sendable {
     let mode: String
+    let hostCredential: String?
     let workspaces: [SiloGitHubStatusWorkspace]
 }
 
@@ -953,7 +954,6 @@ struct SiloGitHubStatusWorkspace: Codable, Sendable {
     let capability: String?
     let repos: [SiloGitHubStatusRepo]?
     let shuttle: String?
-    let hostCredential: String?
 }
 
 struct SiloGitHubStatusRepo: Codable, Sendable, Equatable {

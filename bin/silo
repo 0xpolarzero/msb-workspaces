@@ -5,9 +5,11 @@ SILO_CLI_VERSION="3.2.2"
 readonly SILO_CLI_VERSION
 
 CONFIG_FILE="${SILO_CONFIG_FILE:-$HOME/.config/silo/config.sh}"
+SILO_COMMAND="${1:-}"
+SILO_SUBCOMMAND="${2:-}"
 SILO_APP_MODE=0
-[[ "${1:-}" == app ]] && SILO_APP_MODE=1
-SILO_APP_SUBCOMMAND="${2:-}"
+[[ "$SILO_COMMAND" == app ]] && SILO_APP_MODE=1
+SILO_APP_SUBCOMMAND="$SILO_SUBCOMMAND"
 SILO_APP_ROOT_SUBSHELL="${BASH_SUBSHELL:-0}"
 SILO_APP_RESPONSE_EMITTED=0
 SILO_APP_COMMAND="app"
@@ -28,6 +30,7 @@ fi
 : "${SILO_WORKSPACES_FILE:=$(dirname "$CONFIG_FILE")/workspaces.json}"
 
 WORKSPACES=()
+WORKSPACE_COUNT=0
 readonly READ_KEYCHAIN_SERVICE="silo.github.read"
 readonly WRITE_KEYCHAIN_SERVICE="silo.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/silo/github"
@@ -113,17 +116,24 @@ runtime_discard_safety_attested() {
 
 require_runtime_discard_safety() {
   runtime_discard_safety_attested ||
-    fatal "the installed MicroSandbox runtime has not passed the raw-disk discard safety check; run this repository's setup.sh before starting or attaching workspace disks"
+    fatal "the installed MicroSandbox runtime has not passed the raw-disk discard safety check; run 'silo app runtime-attest --format json' before starting or attaching workspace disks"
 }
 
 invalidate_runtime_discard_attestation() {
   rm -f "$SILO_RUNTIME_COMPAT_CACHE"
 }
 
+workspace_configuration_optional_for_command() {
+  case "$SILO_COMMAND:$SILO_SUBCOMMAND" in
+    app:handshake|app:runtime-attest|app:bootstrap|github:|github:status|github:auth|github:repos) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 load_workspace_configuration() {
   local value
   if [[ ! -e "$SILO_WORKSPACES_FILE" && ! -L "$SILO_WORKSPACES_FILE" ]]; then
-    if (( SILO_APP_MODE == 1 )) && [[ "$SILO_APP_SUBCOMMAND" == handshake ]]; then
+    if workspace_configuration_optional_for_command; then
       return 0
     fi
     (( SILO_CONFIG_AVAILABLE == 0 )) && return 0
@@ -153,6 +163,7 @@ load_workspace_configuration() {
   ' "$SILO_WORKSPACES_FILE" >/dev/null 2>&1 || fatal "invalid workspace configuration: $SILO_WORKSPACES_FILE"
   WORKSPACES=()
   while IFS= read -r value; do WORKSPACES+=("$value"); done < <("$JQ_BIN" -r '.workspaces[].name' "$SILO_WORKSPACES_FILE")
+  WORKSPACE_COUNT="${#WORKSPACES[@]}"
 }
 
 workspace_configuration_value() {
@@ -191,6 +202,7 @@ require_command_path() {
 
 is_workspace() {
   local candidate="${1:-}" box
+  (( WORKSPACE_COUNT > 0 )) || return 1
   [[ "$candidate" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || return 1
   for box in "${WORKSPACES[@]}"; do [[ "$candidate" == "$box" ]] && return 0; done
   return 1
@@ -203,6 +215,7 @@ validate_workspace() {
 for_targets() {
   local target="${1:-all}" box
   if [[ "$target" == all ]]; then
+    (( WORKSPACE_COUNT > 0 )) || return 0
     for box in "${WORKSPACES[@]}"; do printf '%s\n' "$box"; done
   else
     validate_workspace "$target"
@@ -1574,6 +1587,262 @@ ensure_new_ext4_volume() {
     return 2
   fi
 }
+
+# Native onboarding enters through `silo app bootstrap`, without running the
+# repository installer that normally creates the reusable development base.
+# Keep the same builder, temporary runtime disk, guest bootstrap recipe, and
+# integrity snapshot contract as setup.sh, then verify the snapshot before the
+# disposable runtime-safety probe tries to start from it.
+BASE_SNAPSHOT_PREPARATION_FAILURE=""
+
+base_snapshot_preparation_fail() {
+  BASE_SNAPSHOT_PREPARATION_FAILURE="$1"
+  return 1
+}
+
+base_snapshot_bootstrap_script() {
+  local bundled="$SILO_SCRIPT_ROOT/../lib/bootstrap-base.sh"
+  local installed="$HOME/.config/silo/bootstrap-base.sh"
+  if [[ -f "$bundled" && ! -L "$bundled" ]]; then
+    printf '%s\n' "$bundled"
+    return 0
+  fi
+  if [[ -f "$installed" && ! -L "$installed" ]]; then
+    printf '%s\n' "$installed"
+    return 0
+  fi
+  return 1
+}
+
+ensure_base_snapshot_for_app_bootstrap() {
+  local bootstrap_script="" host_cpus="" base_cpus=8 base_max_cpus=12
+  local temporary_volume="silo-base-runtime-temporary"
+  BASE_SNAPSHOT_PREPARATION_FAILURE=""
+
+  if snapshot_exists "$SILO_BASE_SNAPSHOT"; then
+    "$MSB_BIN" snapshot verify "$SILO_BASE_SNAPSHOT" >/dev/null 2>&1 \
+      || { base_snapshot_preparation_fail "MicroSandbox could not verify the existing base snapshot '$SILO_BASE_SNAPSHOT'"; return 1; }
+    return 0
+  fi
+
+  bootstrap_script="$(base_snapshot_bootstrap_script)" \
+    || { base_snapshot_preparation_fail "the packaged base bootstrap recipe is missing"; return 1; }
+  host_cpus="${SILO_TEST_HOST_CPUS:-}"
+  if [[ -z "$host_cpus" ]]; then
+    host_cpus="$(/usr/sbin/sysctl -n hw.logicalcpu 2>/dev/null)" \
+      || { base_snapshot_preparation_fail "the host CPU count could not be read"; return 1; }
+  fi
+  [[ "$host_cpus" =~ ^[1-9][0-9]*$ ]] \
+    || { base_snapshot_preparation_fail "the host CPU count is invalid"; return 1; }
+  (( base_cpus > host_cpus )) && base_cpus="$host_cpus"
+  (( base_max_cpus > host_cpus )) && base_max_cpus="$host_cpus"
+  (( base_cpus > base_max_cpus )) && base_cpus="$base_max_cpus"
+
+  if sandbox_exists "$SILO_BASE_BUILDER" && ! "$MSB_BIN" rm -f "$SILO_BASE_BUILDER" >/dev/null 2>&1; then
+    base_snapshot_preparation_fail "the stale base-builder sandbox could not be removed"
+    return 1
+  fi
+  if volume_exists "$temporary_volume" && ! remove_owned_volume "$temporary_volume"; then
+    base_snapshot_preparation_fail "the stale base-builder runtime volume could not be removed"
+    return 1
+  fi
+  if ! ensure_new_ext4_volume "$temporary_volume" 24G; then
+    base_snapshot_preparation_fail "the temporary base-builder runtime volume could not be created or verified"
+    return 1
+  fi
+
+  if ! "$MSB_BIN" create "$SILO_BASE_IMAGE" \
+    --name "$SILO_BASE_BUILDER" \
+    --cpus "$base_cpus" --max-cpus "$base_max_cpus" \
+    --memory 16G --max-memory 24G \
+    --root-disk "$SILO_ROOT_DISK" \
+    --mount-named "$temporary_volume:/var/lib/silo-runtime:kind=disk,size=24G" \
+    --mkdir /workspace --mkdir /var/lib/silo-runtime \
+    --workdir /workspace --init auto --security default --net public \
+    --label silo.role=base-builder >/dev/null; then
+    remove_owned_volume "$temporary_volume" >/dev/null 2>&1 || true
+    base_snapshot_preparation_fail "MicroSandbox could not create the base-builder sandbox"
+    return 1
+  fi
+  if ! "$MSB_BIN" exec --no-tty "$SILO_BASE_BUILDER" -- bash -s <"$bootstrap_script" >/dev/null; then
+    "$MSB_BIN" rm -f "$SILO_BASE_BUILDER" >/dev/null 2>&1 || true
+    remove_owned_volume "$temporary_volume" >/dev/null 2>&1 || true
+    base_snapshot_preparation_fail "the base bootstrap recipe failed inside the builder sandbox"
+    return 1
+  fi
+  if ! "$MSB_BIN" stop -t 120 "$SILO_BASE_BUILDER" >/dev/null; then
+    "$MSB_BIN" rm -f "$SILO_BASE_BUILDER" >/dev/null 2>&1 || true
+    remove_owned_volume "$temporary_volume" >/dev/null 2>&1 || true
+    base_snapshot_preparation_fail "MicroSandbox could not stop the completed base-builder sandbox"
+    return 1
+  fi
+  if ! "$MSB_BIN" snapshot create "$SILO_BASE_SNAPSHOT" --from "$SILO_BASE_BUILDER" \
+    --integrity --label silo.role=development-base >/dev/null; then
+    "$MSB_BIN" rm -f "$SILO_BASE_BUILDER" >/dev/null 2>&1 || true
+    remove_owned_volume "$temporary_volume" >/dev/null 2>&1 || true
+    base_snapshot_preparation_fail "MicroSandbox could not create the base snapshot"
+    return 1
+  fi
+  if ! "$MSB_BIN" snapshot verify "$SILO_BASE_SNAPSHOT" >/dev/null 2>&1; then
+    "$MSB_BIN" snapshot rm "$SILO_BASE_SNAPSHOT" --force >/dev/null 2>&1 || true
+    "$MSB_BIN" rm -f "$SILO_BASE_BUILDER" >/dev/null 2>&1 || true
+    remove_owned_volume "$temporary_volume" >/dev/null 2>&1 || true
+    base_snapshot_preparation_fail "MicroSandbox created the base snapshot but its integrity verification failed"
+    return 1
+  fi
+  if ! "$MSB_BIN" rm "$SILO_BASE_BUILDER" >/dev/null; then
+    base_snapshot_preparation_fail "the verified base snapshot was created, but its builder sandbox could not be removed"
+    return 1
+  fi
+  if ! remove_owned_volume "$temporary_volume"; then
+    base_snapshot_preparation_fail "the verified base snapshot was created, but its temporary runtime volume could not be removed"
+    return 1
+  fi
+  printf '%s\n' "$SILO_VERSION" >"$HOME/.config/silo/base-version" \
+    || { base_snapshot_preparation_fail "the verified base snapshot version could not be recorded"; return 1; }
+  return 0
+}
+
+# The exact installed msb binary must prove that an EOF-reaching discard does
+# not truncate a raw ext4 image. Both setup.sh and native app bootstrap use
+# this one implementation; the cache is keyed to the binary's SHA-256.
+RUNTIME_ATTESTATION_PREFIX="silo-compat-probe"
+RUNTIME_ATTESTATION_SANDBOX=""
+RUNTIME_ATTESTATION_VOLUME=""
+RUNTIME_ATTESTATION_MOUNT="/mnt/silo-compat-probe"
+RUNTIME_ATTESTATION_FAILURE=""
+RUNTIME_ATTESTATION_SANDBOX_CREATED=0
+RUNTIME_ATTESTATION_VOLUME_CREATED=0
+RUNTIME_ATTESTATION_CACHED=0
+
+runtime_attestation_cleanup() {
+  local failed=0
+  if (( RUNTIME_ATTESTATION_SANDBOX_CREATED )); then
+    workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" rm -f "$RUNTIME_ATTESTATION_SANDBOX" >/dev/null 2>&1 || failed=1
+  fi
+  if (( RUNTIME_ATTESTATION_VOLUME_CREATED )); then
+    remove_owned_volume "$RUNTIME_ATTESTATION_VOLUME" >/dev/null 2>&1 || failed=1
+  fi
+  RUNTIME_ATTESTATION_SANDBOX_CREATED=0
+  RUNTIME_ATTESTATION_VOLUME_CREATED=0
+  return "$failed"
+}
+
+runtime_attestation_fail() {
+  RUNTIME_ATTESTATION_FAILURE="$1"
+  return 1
+}
+
+runtime_discard_safety_probe() {
+  local attempt=0 path="" raw_len="" declared_len="" output="" validate_geometry=1
+  local probe_bytes=$((2 * 1024 * 1024 * 1024))
+  if [[ "${SILO_TEST_MODE:-0}" == 1 && "${SILO_TEST_VALIDATE_COMPAT_PROBE:-0}" != 1 ]]; then
+    validate_geometry=0
+  fi
+  RUNTIME_ATTESTATION_FAILURE=""
+  RUNTIME_ATTESTATION_SANDBOX_CREATED=0
+  RUNTIME_ATTESTATION_VOLUME_CREATED=0
+  ensure_new_ext4_volume "$RUNTIME_ATTESTATION_VOLUME" 2G \
+    || { runtime_attestation_fail "the disposable probe volume could not be created"; return 1; }
+  RUNTIME_ATTESTATION_VOLUME_CREATED=1
+  workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" run --detach \
+    --name "$RUNTIME_ATTESTATION_SANDBOX" --from-snapshot "$SILO_BASE_SNAPSHOT" \
+    --cpus 2 --max-cpus 2 --memory 4G --max-memory 4G \
+    --mount-named "$RUNTIME_ATTESTATION_VOLUME:${RUNTIME_ATTESTATION_MOUNT}:kind=disk,size=2G" \
+    --workdir / --init auto --security default --net public \
+    --label silo.role=compat-probe \
+    -- sleep infinity >/dev/null \
+    || { runtime_attestation_fail "the disposable probe sandbox could not be created"; return 1; }
+  RUNTIME_ATTESTATION_SANDBOX_CREATED=1
+  until workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" exec --no-tty "$RUNTIME_ATTESTATION_SANDBOX" -- systemctl daemon-reload >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    (( attempt < 120 )) \
+      || { runtime_attestation_fail "the disposable probe guest systemd did not become ready"; return 1; }
+    sleep 1
+  done
+  if (( validate_geometry )); then
+    volume_probe "$RUNTIME_ATTESTATION_VOLUME" \
+      || { runtime_attestation_fail "the disposable probe disk could not be inspected"; return 1; }
+    path="$(volume_inspect_field Path)"
+    [[ "$path" == "$HOME/.microsandbox/volumes/$RUNTIME_ATTESTATION_VOLUME/disk.raw" && -f "$path" && ! -L "$path" ]] \
+      || { runtime_attestation_fail "the disposable probe disk is not a regular raw image at the expected path"; return 1; }
+    raw_len="$(file_size_bytes "$path")" \
+      || { runtime_attestation_fail "the disposable probe disk length could not be read"; return 1; }
+    declared_len="$(ext4_declared_bytes "$path")" \
+      || { runtime_attestation_fail "the disposable probe disk geometry could not be read: ${VOLUME_EXT4_DETAIL}"; return 1; }
+    (( raw_len == probe_bytes && declared_len == probe_bytes )) \
+      || { runtime_attestation_fail "the disposable probe disk was not created at the requested geometry (raw ${raw_len}, ext4 ${declared_len}, requested ${probe_bytes})"; return 1; }
+  fi
+  workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" exec --no-tty "$RUNTIME_ATTESTATION_SANDBOX" -- fstrim -v "$RUNTIME_ATTESTATION_MOUNT" >/dev/null \
+    || { runtime_attestation_fail "guest fstrim on the disposable probe disk failed"; return 1; }
+  workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" stop -t 90 "$RUNTIME_ATTESTATION_SANDBOX" >/dev/null \
+    || { runtime_attestation_fail "the disposable probe sandbox could not be stopped"; return 1; }
+  if (( validate_geometry )); then
+    raw_len="$(file_size_bytes "$path")" \
+      || { runtime_attestation_fail "the disposable probe disk length could not be read"; return 1; }
+    declared_len="$(ext4_declared_bytes "$path")" \
+      || { runtime_attestation_fail "the disposable probe disk geometry could not be read: ${VOLUME_EXT4_DETAIL}"; return 1; }
+    (( raw_len == probe_bytes && declared_len == probe_bytes )) \
+      || { runtime_attestation_fail "the disposable probe disk changed length after guest fstrim (raw ${raw_len}, ext4 ${declared_len}, requested ${probe_bytes}); the runtime truncated the raw image"; return 1; }
+  fi
+  workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" start "$RUNTIME_ATTESTATION_SANDBOX" >/dev/null \
+    || { runtime_attestation_fail "the disposable probe sandbox could not be restarted"; return 1; }
+  if ! output="$(workspace_msb "$RUNTIME_ATTESTATION_SANDBOX" exec --no-tty "$RUNTIME_ATTESTATION_SANDBOX" -- findmnt -n -o FSTYPE "$RUNTIME_ATTESTATION_MOUNT" 2>/dev/null)" || [[ "$output" != ext4 ]]; then
+    runtime_attestation_fail "the disposable probe disk did not mount as ext4 after restart"
+    return 1
+  fi
+}
+
+attest_runtime_discard_safety() {
+  local box sha="" cache_tmp="" probe_id=""
+  RUNTIME_ATTESTATION_FAILURE=""
+  RUNTIME_ATTESTATION_CACHED=0
+  if (( WORKSPACE_COUNT > 0 )); then
+    for box in "${WORKSPACES[@]}"; do
+      if [[ "$box" == silo-compat-probe* || "$box" == compat-probe* ]]; then
+        runtime_attestation_fail "workspace name '$box' collides with the disposable runtime-probe prefix"
+        return 1
+      fi
+    done
+  fi
+  sha="$(/usr/bin/shasum -a 256 "$MSB_BIN" 2>/dev/null | /usr/bin/awk '{print $1}')" \
+    || { runtime_attestation_fail "the installed msb binary could not be hashed"; return 1; }
+  [[ -n "$sha" ]] \
+    || { runtime_attestation_fail "the installed msb binary could not be hashed"; return 1; }
+  if [[ -f "$SILO_RUNTIME_COMPAT_CACHE" && ! -L "$SILO_RUNTIME_COMPAT_CACHE" && "$(<"$SILO_RUNTIME_COMPAT_CACHE")" == "$sha" ]]; then
+    RUNTIME_ATTESTATION_CACHED=1
+    return 0
+  fi
+  snapshot_exists "$SILO_BASE_SNAPSHOT" \
+    || { runtime_attestation_fail "the base snapshot required by the disposable disk-safety probe is missing"; return 1; }
+  probe_id="${RUNTIME_ATTESTATION_PREFIX}-$$-${sha:0:8}"
+  RUNTIME_ATTESTATION_SANDBOX="${probe_id}-sb"
+  RUNTIME_ATTESTATION_VOLUME="${probe_id}-vol"
+  trap 'runtime_attestation_cleanup >/dev/null 2>&1 || true; exit 130' INT
+  trap 'runtime_attestation_cleanup >/dev/null 2>&1 || true; exit 143' TERM HUP
+  if ! runtime_discard_safety_probe; then
+    runtime_attestation_cleanup \
+      || RUNTIME_ATTESTATION_FAILURE+="; the disposable probe state could not be removed"
+    trap - INT TERM HUP
+    return 1
+  fi
+  if ! runtime_attestation_cleanup; then
+    RUNTIME_ATTESTATION_FAILURE="the disposable probe state could not be removed after a successful safety check"
+    trap - INT TERM HUP
+    return 1
+  fi
+  trap - INT TERM HUP
+  mkdir -p "$(dirname "$SILO_RUNTIME_COMPAT_CACHE")" \
+    || { runtime_attestation_fail "the runtime safety cache directory could not be created"; return 1; }
+  cache_tmp="$(mktemp "$(dirname "$SILO_RUNTIME_COMPAT_CACHE")/.runtime-compat-cache.XXXXXX")" \
+    || { runtime_attestation_fail "the runtime safety cache could not be staged"; return 1; }
+  if ! printf '%s\n' "$sha" >"$cache_tmp" || ! chmod 0600 "$cache_tmp" || ! mv "$cache_tmp" "$SILO_RUNTIME_COMPAT_CACHE"; then
+    rm -f "$cache_tmp"
+    runtime_attestation_fail "the runtime safety result could not be persisted"
+    return 1
+  fi
+}
+
 quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_file() { printf '%s/%s.lock\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_reclaim_legacy() {
@@ -2439,15 +2708,20 @@ cmd_tunnel() {
   exec "$SSH_BIN" -N -o ExitOnForwardFailure=yes -L "${local_port}:127.0.0.1:${remote_port}" "$(workspace_ssh_host "$box")"
 }
 
-cmd_host_repair_test() {
-  local root="$HOME/.config/silo/test-host" box ip host
-  mkdir -p "$root" "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
+configure_test_host_network() {
+  local workspace_file="$1" root="$HOME/.config/silo/test-host" box ip host
+  app_workspace_configuration_valid "$workspace_file" || return 1
+  mkdir -p "$root"
   : >"$root/hosts"; : >"$root/loopback"
   for box in "${WORKSPACES[@]}"; do
     ip="$(workspace_ip "$box")"; host="$(workspace_host "$box")"
     printf '%s %s\n' "$ip" "$host" >>"$root/hosts"
     printf '%s\n' "$ip" >>"$root/loopback"
   done
+}
+
+configure_user_integration_test() {
+  mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
   if [[ ! -f "$HOME/.ssh/silo_ed25519" ]]; then
     printf 'fake-private-key\n' >"$HOME/.ssh/silo_ed25519"
     printf 'ssh-ed25519 AAAATEST silo\n' >"$HOME/.ssh/silo_ed25519.pub"
@@ -2463,6 +2737,55 @@ Host *.msb
 SSH
   chmod 600 "$HOME/.ssh/config.d/silo.conf"
   touch "$HOME/.ssh/silo_known_hosts"; chmod 600 "$HOME/.ssh/silo_known_hosts"
+}
+
+configure_user_integration() {
+  local workspace_file="$1" public_key authorized include_line ssh_tmp
+  app_workspace_configuration_valid "$workspace_file" || return 1
+  if [[ "${SILO_TEST_MODE:-0}" == 1 ]]; then
+    configure_user_integration_test
+    return
+  fi
+
+  mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
+  chmod 700 "$HOME/.ssh" "$HOME/.ssh/config.d"
+  if [[ ! -f "$HOME/.ssh/silo_ed25519" ]]; then
+    ssh-keygen -t ed25519 -f "$HOME/.ssh/silo_ed25519" -N '' -C silo
+  fi
+  chmod 600 "$HOME/.ssh/silo_ed25519"
+  chmod 644 "$HOME/.ssh/silo_ed25519.pub"
+  public_key="$(cat "$HOME/.ssh/silo_ed25519.pub")"
+  authorized="$HOME/.microsandbox/ssh/authorized_keys"
+  if [[ ! -f "$authorized" ]] || ! grep -qxF "$public_key" "$authorized"; then
+    "$MSB_BIN" ssh authorize --file "$HOME/.ssh/silo_ed25519.pub"
+  fi
+  cat >"$HOME/.ssh/config.d/silo.conf" <<SSH
+Host *.msb
+  User root
+  IdentityFile $HOME/.ssh/silo_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile $HOME/.ssh/silo_known_hosts
+  ProxyCommand $SILO_SCRIPT_ROOT/silo-ssh-proxy %h
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  StrictHostKeyChecking accept-new
+  SetEnv TERM=xterm-256color
+SSH
+  chmod 600 "$HOME/.ssh/config.d/silo.conf"
+  touch "$HOME/.ssh/silo_known_hosts"; chmod 600 "$HOME/.ssh/silo_known_hosts"
+  touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
+  include_line="Include $HOME/.ssh/config.d/*"
+  if ! grep -qxF "$include_line" "$HOME/.ssh/config"; then
+    ssh_tmp="$(mktemp "${TMPDIR:-/tmp}/silo-ssh.XXXXXX")"
+    { printf '%s\n\n' "$include_line"; cat "$HOME/.ssh/config"; } >"$ssh_tmp"
+    mv "$ssh_tmp" "$HOME/.ssh/config"
+    chmod 600 "$HOME/.ssh/config"
+  fi
+}
+
+cmd_host_repair_test() {
+  configure_test_host_network "$SILO_WORKSPACES_FILE" || return
+  configure_user_integration "$SILO_WORKSPACES_FILE" || return
 }
 
 cmd_host_repair() {
@@ -2531,42 +2854,7 @@ PLIST
   fi
 
   note "Configuring SSH for Ghostty and Zed"
-  mkdir -p "$HOME/.ssh/config.d" "$HOME/.microsandbox/ssh"
-  chmod 700 "$HOME/.ssh" "$HOME/.ssh/config.d"
-  if [[ ! -f "$HOME/.ssh/silo_ed25519" ]]; then
-    ssh-keygen -t ed25519 -f "$HOME/.ssh/silo_ed25519" -N '' -C silo
-  fi
-  chmod 600 "$HOME/.ssh/silo_ed25519"
-  chmod 644 "$HOME/.ssh/silo_ed25519.pub"
-  local public_key authorized
-  public_key="$(cat "$HOME/.ssh/silo_ed25519.pub")"
-  authorized="$HOME/.microsandbox/ssh/authorized_keys"
-  if [[ ! -f "$authorized" ]] || ! grep -qxF "$public_key" "$authorized"; then
-    "$MSB_BIN" ssh authorize --file "$HOME/.ssh/silo_ed25519.pub"
-  fi
-  cat >"$HOME/.ssh/config.d/silo.conf" <<SSH
-Host *.msb
-  User root
-  IdentityFile $HOME/.ssh/silo_ed25519
-  IdentitiesOnly yes
-  UserKnownHostsFile $HOME/.ssh/silo_known_hosts
-  ProxyCommand $SILO_SCRIPT_ROOT/silo-ssh-proxy %h
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-  StrictHostKeyChecking accept-new
-  SetEnv TERM=xterm-256color
-SSH
-  chmod 600 "$HOME/.ssh/config.d/silo.conf"
-  touch "$HOME/.ssh/silo_known_hosts"; chmod 600 "$HOME/.ssh/silo_known_hosts"
-  touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
-  local include_line="Include $HOME/.ssh/config.d/*"
-  if ! grep -qxF "$include_line" "$HOME/.ssh/config"; then
-    local ssh_tmp
-    ssh_tmp="$(mktemp "${TMPDIR:-/tmp}/silo-ssh.XXXXXX")"
-    { printf '%s\n\n' "$include_line"; cat "$HOME/.ssh/config"; } >"$ssh_tmp"
-    mv "$ssh_tmp" "$HOME/.ssh/config"
-    chmod 600 "$HOME/.ssh/config"
-  fi
+  configure_user_integration "$SILO_WORKSPACES_FILE"
   ok "host browser names and SSH integration configured"
 }
 
@@ -3334,7 +3622,7 @@ INFO
 }
 
 cmd_github_status() {
-  local target="all" format="text" box repo read_state write_state cap_state repo_summary shuttle_state host_cred_state mode
+  local target="all" format="text" box repo read_state write_state cap_state repo_summary shuttle_state mode global_host_cred_state
   while (( $# > 0 )); do
     case "$1" in
       --format)
@@ -3349,14 +3637,17 @@ cmd_github_status() {
   done
   case "$format" in json|text) ;; *) fatal "status format must be json or text" ;; esac
   mode="$SILO_GITHUB_MODE"
+  global_host_cred_state=""
+  if [[ "$mode" == local ]]; then
+    global_host_cred_state="$(host_credential_state | tr -d '\n')"
+  fi
   if [[ "$format" == json ]]; then
     local items="" entry
     while IFS= read -r box; do
       if [[ "$mode" == local ]]; then
         cap_state="$(policy_capability_state "$box")"
         shuttle_state="$(shuttle_state "$box")"
-        host_cred_state="$(host_credential_state | tr -d '\n')"
-        entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"shuttle\":$(app_json_string "$shuttle_state"),\"hostCredential\":$(app_json_string "$host_cred_state")}"
+        entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"shuttle\":$(app_json_string "$shuttle_state")}"
       else
         if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
         if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
@@ -3366,7 +3657,7 @@ cmd_github_status() {
       [[ -n "$items" ]] && items+=","
       items+="$entry"
     done < <(for_targets "$target")
-    printf '{"mode":%s,"workspaces":[%s]}\n' "$(app_json_string "$mode")" "$items"
+    printf '{"mode":%s,"hostCredential":%s,"workspaces":[%s]}\n' "$(app_json_string "$mode")" "$(app_json_optional "$global_host_cred_state")" "$items"
     return
   fi
   if [[ "$mode" == local ]]; then
@@ -3375,8 +3666,7 @@ cmd_github_status() {
       cap_state="$(policy_capability_state "$box")"
       shuttle_state="$(shuttle_state "$box")"
       repo_summary="$(policy_repo_summary "$box")"
-      host_cred_state="$(host_credential_state | tr -d '\n')"
-      printf '%-13s %-8s %-10s %-12s %-12s %s\n' "$box" local "$cap_state" "$repo_summary" "$host_cred_state" "$shuttle_state"
+      printf '%-13s %-8s %-10s %-12s %-12s %s\n' "$box" local "$cap_state" "$repo_summary" "$global_host_cred_state" "$shuttle_state"
     done < <(for_targets "$target")
   else
     printf '%-13s %-10s %-10s %-18s %s\n' WORKSPACE GUEST_READ HOST_WRITE VERIFICATION_REPO MODE
@@ -9309,6 +9599,7 @@ app_reconcile_workspace_configuration() {
   chmod 600 "$input" || return
   WORKSPACES=()
   while IFS= read -r box; do WORKSPACES+=("$box"); done < <("$JQ_BIN" -r '.workspaces[].name' "$input")
+  WORKSPACE_COUNT="${#WORKSPACES[@]}"
 
   # A full policy may still contain a removed workspace. Prune only those
   # keys atomically so remaining grants stay usable; malformed policy remains
@@ -9341,7 +9632,7 @@ app_reconcile_workspace_configuration() {
   fi
 
   if [[ "${SILO_TEST_MODE:-0}" == 1 ]]; then
-    cmd_host_repair_test || return
+    configure_test_host_network "$input" || return
   fi
 
   for box in "${WORKSPACES[@]}"; do
@@ -9384,6 +9675,33 @@ app_reconcile_workspace_configuration() {
   rm -f "$old_copy"
 }
 
+app_bootstrap_discard_staged_configuration() {
+  local reason="${1:-bootstrap transaction failed}" box
+  if (( ${#WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]} > 0 )); then
+    for box in "${WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]}"; do
+      workspace_config_state_write "$box" needs-configuration "$reason" || true
+    done
+  fi
+  if [[ -n "$WORKSPACE_CONFIGURATION_STAGED_FILE" ]]; then
+    rm -f "$WORKSPACE_CONFIGURATION_STAGED_FILE"
+    WORKSPACE_CONFIGURATION_STAGED_FILE=""
+  fi
+}
+
+app_cmd_runtime_attest() {
+  [[ $# -eq 2 && "$1" == --format && "$2" == json ]] \
+    || app_usage_error runtime-attest "usage: silo app runtime-attest --format json"
+  app_require_config runtime-attest
+  app_require_runtime runtime-attest
+  if ! attest_runtime_discard_safety; then
+    app_emit_error runtime-attest "SILO_RUNTIME_DISCARD_ATTESTATION_FAILED" \
+      "MicroSandbox failed Silo's disk-safety check." \
+      "Update or repair MicroSandbox, then retry Setup. Safety-check detail: ${RUNTIME_ATTESTATION_FAILURE:-unknown failure}." \
+      "" true 69
+  fi
+  app_emit_success runtime-attest "{\"attested\":true,\"cached\":$([[ "$RUNTIME_ATTESTATION_CACHED" == 1 ]] && printf true || printf false)}"
+}
+
 app_cmd_bootstrap() {
   local resume=0 events_fd="" workspace_config_fd="" format="" phase request_id output recovery detail
   local secrets_file="" missing_secret="" box
@@ -9403,6 +9721,18 @@ app_cmd_bootstrap() {
   request_id="${SILO_APP_REQUEST_ID:-$(app_request_id)}"
   app_require_config bootstrap
   app_require_runtime bootstrap
+  if ! ensure_base_snapshot_for_app_bootstrap; then
+    app_emit_error bootstrap "SILO_BASE_SNAPSHOT_PREPARATION_FAILED" \
+      "Silo could not build or verify its required base snapshot." \
+      "Base-snapshot detail: ${BASE_SNAPSHOT_PREPARATION_FAILURE:-unknown preparation failure}. Retry Setup after resolving that failure." \
+      "" true 69
+  fi
+  if ! attest_runtime_discard_safety; then
+    app_emit_error bootstrap "SILO_RUNTIME_DISCARD_ATTESTATION_FAILED" \
+      "MicroSandbox failed Silo's disk-safety check." \
+      "Update or repair MicroSandbox, then retry Setup. Safety-check detail: ${RUNTIME_ATTESTATION_FAILURE:-unknown failure}." \
+      "" true 69
+  fi
 
   if ! app_reconcile_workspace_configuration "$workspace_config_fd"; then
     if [[ -n "$WORKSPACE_CONFIGURATION_FAILURE_CODE" ]]; then
@@ -9428,6 +9758,17 @@ app_cmd_bootstrap() {
       "Review workspace names and limits, then retry Setup." "" true 78
   fi
 
+  # The selected configuration remains private to this transaction. Reuse the
+  # same user-owned SSH integration as `silo host repair`, but pass the staged
+  # candidate explicitly so first-run setup never depends on a prematurely
+  # published workspaces.json. Deep verification still owns the final gate.
+  if ! configure_user_integration "$WORKSPACE_CONFIGURATION_STAGED_FILE" >/dev/null; then
+    app_bootstrap_discard_staged_configuration "user SSH integration failed"
+    app_emit_error bootstrap "SILO_USER_INTEGRATION_FAILED" \
+      "Silo could not configure user SSH integration." \
+      "Repair the reported SSH integration issue, then resume Setup." "" true 69
+  fi
+
   for phase in preflight toolchain host-integration workspaces; do
     if [[ -n "$events_fd" ]]; then
       printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":%s,"fraction":1,"message":%s,"safeForDisplay":true}\n' \
@@ -9445,6 +9786,7 @@ app_cmd_bootstrap() {
     if { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; } &&
       ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
       ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
+      app_bootstrap_discard_staged_configuration "GitHub reconnect required"
       app_emit_error bootstrap "SILO_GITHUB_RECONNECT_REQUIRED" \
         "GitHub is configured for '$box', but its credential is unavailable." \
         "Connect GitHub for '$box' in Silo, then resume Setup." "$box" true 69
@@ -9457,13 +9799,16 @@ app_cmd_bootstrap() {
   # from `silo check --deep` in the app protocol.
   secrets_file="$(secrets_meta_file)"
   if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
-    secrets_meta_valid "$secrets_file" || app_emit_error bootstrap \
-      "SILO_SECRETS_METADATA_INVALID" \
-      "The host-held secrets metadata is unreadable." \
-      "Open Silo Secrets, repair or remove the invalid secret configuration, then resume Setup." \
-      "" false 78
+    if ! secrets_meta_valid "$secrets_file"; then
+      app_bootstrap_discard_staged_configuration "secrets metadata invalid"
+      app_emit_error bootstrap "SILO_SECRETS_METADATA_INVALID" \
+        "The host-held secrets metadata is unreadable." \
+        "Open Silo Secrets, repair or remove the invalid secret configuration, then resume Setup." \
+        "" false 78
+    fi
     for box in "${WORKSPACES[@]}"; do
       if missing_secret="$(secret_missing_value_for_workspace "$box")"; then
+        app_bootstrap_discard_staged_configuration "secret value missing"
         app_emit_error bootstrap "SILO_SECRET_VALUE_MISSING" \
           "Secret '$missing_secret' cannot be applied to '$box' because its Keychain value is missing." \
           "Open Silo Secrets, re-enter '$missing_secret' for '$box', then resume Setup." \
@@ -9481,12 +9826,7 @@ app_cmd_bootstrap() {
     # needs-configuration so a retry recreates their unverified VMs instead
     # of trusting them. (bash 3.2 + set -u: an empty array must not be
     # expanded; check the length first, like app_apply_release_all.)
-    if (( ${#WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]} > 0 )); then
-      for box in "${WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]}"; do
-        workspace_config_state_write "$box" needs-configuration "deep verification failed" || true
-      done
-    fi
-    rm -f "$WORKSPACE_CONFIGURATION_STAGED_FILE"
+    app_bootstrap_discard_staged_configuration "deep verification failed"
     recovery="Repair the reported Silo configuration or runtime issue, then resume Setup."
     if [[ -n "$output" ]]; then
       detail="$(app_redact "$output" | /usr/bin/tail -n 12 | /usr/bin/tr '\n' ' ')"
@@ -9506,10 +9846,12 @@ app_cmd_bootstrap() {
     workspace_config_state_write "$box" configured || true
   done
   mv "$WORKSPACE_CONFIGURATION_STAGED_FILE" "$SILO_WORKSPACES_FILE" || {
+    app_bootstrap_discard_staged_configuration "workspace configuration commit failed"
     app_emit_error bootstrap "SILO_WORKSPACE_CONFIGURATION_FAILED" \
       "Workspace verification passed but the configuration could not be committed." \
       "Review workspace names and limits, then retry Setup." "" true 78
   }
+  WORKSPACE_CONFIGURATION_STAGED_FILE=""
   app_emit_success bootstrap '{"resumed":true,"phase":"complete","requiresApproval":false,"vmsStarted":true,"message":"Workspace bootstrap and deep verification completed; the previous running set was restored."}'
 }
 
@@ -10649,6 +10991,7 @@ Machine-readable `silo app` commands:
   silo app restore --archive ARCHIVE --confirmation-fd FD --format json
   silo app plan ACTION --workspace WORKSPACE --format json
   silo app apply PLAN_ID --confirmation-fd FD --format json
+  silo app runtime-attest --format json
   silo app bootstrap --resume --workspace-config-fd FD [--events-fd FD] --format json
 
 Every finite command returns one schemaVersion=1 JSON envelope. Lifecycle
@@ -10701,6 +11044,7 @@ cmd_app() {
     secret-apply) app_cmd_secret_apply "$@" ;;
     plan) app_cmd_plan "$@" ;;
     apply) app_cmd_apply "$@" ;;
+    runtime-attest) app_cmd_runtime_attest "$@" ;;
     bootstrap) app_cmd_bootstrap "$@" ;;
     help|--help|-h) app_cmd_help ;;
     *) app_emit_error app "SILO_UNKNOWN_COMMAND" "Unknown app command." "Run 'silo app help'." "" false 64 ;;

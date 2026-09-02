@@ -418,7 +418,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         """)
         let executable = makeFakeSilo(
             directory: directory,
-            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"present"}]}"#,
+            statusJSON: #"{"mode":"local","hostCredential":"present","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped"}]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false},{"canonical":"acme/one","name":"one","owner":"acme","private":true,"permissions":{"pull":true,"push":false},"inPolicy":true},{"canonical":"org/repo","name":"repo","owner":"org","private":false,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
         )
@@ -461,7 +461,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         """)
         let executable = makeFakeSilo(
             directory: directory,
-            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"present"}]}"#,
+            statusJSON: #"{"mode":"local","hostCredential":"present","workspaces":[{"workspace":"dev","capability":"minted","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped"}]}"#,
             authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[{"canonical":"acme/two","name":"two","owner":"acme","private":true,"permissions":{"pull":true,"push":true},"inPolicy":false}]}"#
         )
@@ -507,7 +507,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{\"dev\":{\"repos\":[{\"canonical\":\"acme/one\",\"mode\":\"read-only\"}]}}}")
         let executable = makeFakeSilo(
             directory: directory,
-            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"missing","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped","hostCredential":"missing"}]}"#,
+            statusJSON: #"{"mode":"local","hostCredential":"missing","workspaces":[{"workspace":"dev","capability":"missing","repos":[{"canonical":"acme/one","mode":"read-only"}],"shuttle":"stopped"}]}"#,
             reposJSON: #"{"ok":true,"mode":"local","repos":[]}"#
         )
         let runner = SiloCommandRunner(configuration: .init(homeDirectory: directory, testSiloExecutable: executable))
@@ -536,7 +536,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         writePolicy(policyURL, json: "{\"schemaVersion\":1,\"workspaces\":{}}")
         let executable = makeFakeSilo(
             directory: directory,
-            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"minted","repos":[],"shuttle":"stopped","hostCredential":"present"}]}"#,
+            statusJSON: #"{"mode":"local","hostCredential":"present","workspaces":[{"workspace":"dev","capability":"minted","repos":[],"shuttle":"stopped"}]}"#,
             reposJSON: #"{"ok":false,"error":{"code":"SILO_REPOSITORY_DISCOVERY_FAILED","message":"GitHub API discovery failed","remedies":["Retry"]}}"#,
             reposExit: 1
         )
@@ -1514,7 +1514,9 @@ final class GitHubLocalProviderTests: XCTestCase {
         let identity = #"{"schemaVersion":1,"requestId":"identity","ok":true,"command":"identity","observedAt":"2026-08-21T00:00:00Z","result":{"target":"all","name":"Ada","email":"ada@example.test","workspaces":["development","personal","lab"]},"warnings":[],"error":null}"#
         let executable = makeFakeSilo(
             directory: directory,
-            statusJSON: #"{"mode":"local","workspaces":[{"workspace":"dev","capability":"old","repos":[],"shuttle":"stopped","hostCredential":"present"}]}"#,
+            statusJSON: #"{"mode":"local","hostCredential":"present","workspaces":[{"workspace":"dev","capability":"old","repos":[],"shuttle":"stopped"}]}"#,
+            authJSON: #"{"provider":"gh-cli","tokenKind":"oauth","accountLogin":"octocat","verifiedAt":"2026-08-21T00:00:00Z","generation":1,"storedAt":"2026-08-21T00:00:00Z","repoChecks":[]}"#,
+            reposJSON: #"{"ok":true,"mode":"local","repos":[]}"#,
             applyJSON: Self.policyApplyLine,
             identityJSON: identity
         )
@@ -1548,9 +1550,9 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertNil(scopedPolicy.workspaces["dev"])
         XCTAssertNil(scopedPolicy.workspaces["playgrounds"])
         let scopedCatalog = try await provider.loadCatalog()
-        XCTAssertFalse(
+        XCTAssertTrue(
             scopedCatalog.hostCredentialPresent,
-            "A credential belonging only to a removed workspace must not make the applied target set look connected."
+            "The host credential is global and must not disappear when the selected workspace set changes."
         )
         _ = try await provider.savePolicy([
             GitHubWorkspacePolicy(

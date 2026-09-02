@@ -990,6 +990,153 @@ class InstallerAndDailyTests(SiloTestCase):
         self.assertNotEqual(state.returncode, 0)
         self.assertIn("missing workspace configuration", state.stderr)
 
+    def test_app_bootstrap_stages_user_ssh_before_verification_and_atomic_commit(self) -> None:
+        workspaces = self.env.home / ".config/silo/workspaces.json"
+        ssh_fragment = self.env.home / ".ssh/config.d/silo.conf"
+        test_host = self.env.home / ".config/silo/test-host"
+        desired = workspaces.read_text()
+        workspaces.unlink()
+        ssh_fragment.unlink()
+        shutil.rmtree(test_host)
+
+        verification_trace = self.env.root / "bootstrap-verification.trace"
+        guarded_ssh = self.env.root / "tools/guarded-bootstrap-ssh"
+        guarded_ssh.write_text(
+            "#!/bin/sh\n"
+            f'canonical="{workspaces}"\n'
+            f'fragment="{ssh_fragment}"\n'
+            f'hosts="{test_host / "hosts"}"\n'
+            f'trace="{verification_trace}"\n'
+            '[ ! -e "$canonical" ] || { echo "canonical workspace configuration published before verification" >&2; exit 90; }\n'
+            '[ -f "$fragment" ] || { echo "SSH integration did not precede verification" >&2; exit 91; }\n'
+            'grep -q "127.0.0.10 dev.silo.test" "$hosts" || { echo "staged candidate missing during SSH integration" >&2; exit 92; }\n'
+            'printf "verification saw staged candidate and SSH integration\\n" >>"$trace"\n'
+            '[ "${SILO_TEST_BOOTSTRAP_FAIL_VERIFICATION:-0}" != 1 ] || exit 93\n'
+            f'exec "{FAKE_SSH}" "$@"\n'
+        )
+        guarded_ssh.chmod(0o755)
+
+        failed = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=desired, check=False, timeout=90,
+            extra_env={
+                "SILO_SSH_BIN": str(guarded_ssh),
+                "SILO_TEST_BOOTSTRAP_FAIL_VERIFICATION": "1",
+            },
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        failed_envelope = json.loads(failed.stdout)
+        self.assertEqual(failed_envelope["error"]["code"], "SILO_BOOTSTRAP_VERIFICATION_FAILED")
+        self.assertNotIn("missing workspace configuration", failed.stdout + failed.stderr)
+        self.assertNotIn("SSH config missing", failed.stdout + failed.stderr)
+        self.assertFalse(workspaces.exists(), "failed verification must not commit workspaces.json")
+        self.assertTrue(ssh_fragment.is_file(), "idempotent SSH integration may survive rollback")
+        self.assertEqual(list(workspaces.parent.glob(".workspaces-input.*")), [])
+        failed_trace = verification_trace.read_text().splitlines()
+        self.assertTrue(failed_trace)
+        self.assertEqual(set(failed_trace), {"verification saw staged candidate and SSH integration"})
+
+        ssh_fragment.unlink()
+        verification_trace.unlink()
+        succeeded = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=desired, timeout=90,
+            extra_env={"SILO_SSH_BIN": str(guarded_ssh)},
+        )
+        succeeded_envelope = json.loads(succeeded.stdout)
+        self.assertTrue(succeeded_envelope["ok"])
+        self.assertNotIn("missing workspace configuration", succeeded.stdout + succeeded.stderr)
+        self.assertNotIn("SSH config missing", succeeded.stdout + succeeded.stderr)
+        self.assertEqual(json.loads(workspaces.read_text()), json.loads(desired))
+        self.assertTrue(ssh_fragment.is_file())
+        self.assertEqual(list(workspaces.parent.glob(".workspaces-input.*")), [])
+        succeeded_trace = verification_trace.read_text().splitlines()
+        self.assertTrue(succeeded_trace)
+        self.assertEqual(set(succeeded_trace), {"verification saw staged candidate and SSH integration"})
+
+    def test_app_bootstrap_builds_and_verifies_missing_base_before_attestation(self) -> None:
+        workspaces = self.env.home / ".config/silo/workspaces.json"
+        cache = self.env.home / ".config/silo/runtime-compat-cache"
+        desired = workspaces.read_text()
+        workspaces.unlink()
+        cache.unlink(missing_ok=True)
+        state = self.env.state()
+        state["snapshots"].pop("silo-base-v1")
+        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
+        trace = self.env.root / "msb-bootstrap-trace.log"
+        traced_msb = self.env.root / "tools/traced-msb"
+        traced_msb.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$*" >>"$SILO_MSB_TRACE"\n'
+            f'exec "{FAKE_MSB}" "$@"\n'
+        )
+        traced_msb.chmod(0o755)
+
+        proc = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=desired, timeout=90,
+            extra_env={
+                "SILO_MSB_BIN": str(traced_msb),
+                "SILO_MSB_TRACE": str(trace),
+            },
+        )
+        envelope = json.loads(proc.stdout)
+        self.assertTrue(envelope["ok"])
+        self.assertEqual(envelope["result"]["phase"], "complete")
+        self.assertEqual(json.loads(workspaces.read_text()), json.loads(desired))
+        after = self.env.state()
+        self.assertTrue(after["snapshots"]["silo-base-v1"]["integrity"])
+        self.assertNotIn("silo-base-builder", after["sandboxes"])
+        self.assertNotIn("silo-base-runtime-temporary", after["volumes"])
+        commands = trace.read_text().splitlines()
+        builder = next(index for index, command in enumerate(commands)
+                       if command.startswith("create ") and "--name silo-base-builder" in command)
+        snapshot_create = commands.index(
+            "snapshot create silo-base-v1 --from silo-base-builder --integrity --label silo.role=development-base"
+        )
+        snapshot_verify = commands.index("snapshot verify silo-base-v1")
+        attestation = next(index for index, command in enumerate(commands)
+                           if command.startswith("run --detach --name silo-compat-probe-")
+                           and "--from-snapshot silo-base-v1" in command)
+        self.assertLess(builder, snapshot_create)
+        self.assertLess(snapshot_create, snapshot_verify)
+        self.assertLess(snapshot_verify, attestation)
+        self.assertEqual(cache.read_text().strip(), hashlib.sha256(traced_msb.read_bytes()).hexdigest())
+
+    def test_app_bootstrap_verifies_existing_base_without_rebuilding_it(self) -> None:
+        cache = self.env.home / ".config/silo/runtime-compat-cache"
+        cache.unlink(missing_ok=True)
+        trace = self.env.root / "msb-existing-base-trace.log"
+        traced_msb = self.env.root / "tools/traced-msb"
+        traced_msb.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$*" >>"$SILO_MSB_TRACE"\n'
+            f'exec "{FAKE_MSB}" "$@"\n'
+        )
+        traced_msb.chmod(0o755)
+
+        proc = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=(self.env.home / ".config/silo/workspaces.json").read_text(), timeout=90,
+            extra_env={
+                "SILO_MSB_BIN": str(traced_msb),
+                "SILO_MSB_TRACE": str(trace),
+            },
+        )
+        envelope = json.loads(proc.stdout)
+        self.assertTrue(envelope["ok"])
+        commands = trace.read_text().splitlines()
+        snapshot_verify = commands.index("snapshot verify silo-base-v1")
+        attestation = next(index for index, command in enumerate(commands)
+                           if command.startswith("run --detach --name silo-compat-probe-")
+                           and "--from-snapshot silo-base-v1" in command)
+        self.assertLess(snapshot_verify, attestation)
+        self.assertFalse(any(command.startswith("create ") and "--name silo-base-builder" in command
+                             for command in commands))
+        self.assertFalse(any(command.startswith("snapshot create silo-base-v1 ")
+                             for command in commands))
+
+
     def test_app_bootstrap_runs_deep_verification_and_restores_running_set(self) -> None:
         self.env.silo("start", "dev")
         before = {
@@ -7432,6 +7579,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.seed_host_credential(self.host_record(generation=7))
         self.seed_host_meta(generation=7)
         before = self.host_key_path.read_text()
+        (self.env.home / ".config/silo/workspaces.json").unlink()
         proc = self.env.silo("github", "auth", "--json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
@@ -7575,18 +7723,29 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
         self.assertEqual(result["mode"], "local")
+        self.assertEqual(result["hostCredential"], "missing")
         dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["capability"], "minted")
         self.assertEqual(dev["repos"], [{"canonical": "acme/demo", "mode": "read-only"}])
-        self.assertEqual(dev["hostCredential"], "missing")
+        self.assertNotIn("hostCredential", dev)
         # missing policy still yields a repos array
         (self.policy_path).unlink()
         proc = self.env.silo("github", "status", "--format", "json")
         result = json.loads(proc.stdout)
+        self.assertEqual(result["hostCredential"], "missing")
         dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["capability"], "missing")
         self.assertEqual(dev["repos"], [])
-        self.assertEqual(dev["hostCredential"], "missing")
+
+    def test_status_json_without_workspace_configuration_reports_global_state(self) -> None:
+        (self.env.home / ".config/silo/workspaces.json").unlink()
+        proc = self.env.silo("github", "status", "--format", "json")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), {
+            "mode": "local",
+            "hostCredential": "missing",
+            "workspaces": [],
+        })
 
     # ---- app github-policy-get/set (journaled) --------------------------
 
@@ -7971,6 +8130,30 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                                 extra_env=env)
             self.assertEqual(len(json.loads(proc.stdout)["repos"]), 150)
 
+    def test_repos_discovery_without_workspace_configuration(self) -> None:
+        self.seed_host_credential()
+        self.seed_host_meta()
+        (self.env.home / ".config/silo/workspaces.json").unlink()
+        with self.env.start_fake_github() as fake:
+            (fake.state_dir / "user-repos.json").write_text(json.dumps([{
+                "full_name": "acme/demo",
+                "name": "demo",
+                "owner": {"login": "acme"},
+                "private": True,
+                "permissions": {"pull": True, "push": True},
+            }]))
+            (fake.state_dir / "orgs.json").write_text("[]")
+            env = self.env.env.copy()
+            env.update({
+                "SILO_CURL_BIN": str(FAKE_API_CURL),
+                "SILO_PROXY_UPSTREAM_ROOT": fake.base_url,
+            })
+            proc = self.env.silo("github", "repos", "--format", "json", extra_env=env)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            repos = json.loads(proc.stdout)["repos"]
+            self.assertEqual([repo["canonical"] for repo in repos], ["acme/demo"])
+            self.assertFalse(repos[0]["inPolicy"])
+
     def test_repos_discovery_missing_credential_json_error(self) -> None:
         proc = self.env.silo("github", "repos", "--format", "json", check=False)
         self.assertEqual(proc.returncode, 1)
@@ -8297,8 +8480,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # (would need gh) instead of reporting the stale record as present
         proc = self.env.silo("github", "status", "--format", "json", extra_env=env, check=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        dev = next(w for w in json.loads(proc.stdout)["workspaces"] if w["workspace"] == "dev")
-        self.assertEqual(dev["hostCredential"], "missing")
+        self.assertEqual(json.loads(proc.stdout)["hostCredential"], "missing")
 
     def test_remove_local_primary_marker_failure_uses_deny_item_safely(self) -> None:
         """If the primary file marker cannot be written, the independent
@@ -8345,8 +8527,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # availability also denies (status reports missing)
         proc = self.env.silo("github", "status", "--format", "json", extra_env=env, check=False)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        dev = next(w for w in json.loads(proc.stdout)["workspaces"] if w["workspace"] == "dev")
-        self.assertEqual(dev["hostCredential"], "missing")
+        self.assertEqual(json.loads(proc.stdout)["hostCredential"], "missing")
 
     def test_remove_local_no_primary_deny_uses_global_quarantine(self) -> None:
         """If every earlier deny/deletion path fails, a durable global
@@ -8692,9 +8873,9 @@ class MigrationTests(_LocalModeGitHubBase):
         proc = self.env.silo("github", "status", "--format", "json", "dev")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)  # stdout stays pure JSON despite the trigger
+        self.assertEqual(result["hostCredential"], "missing")
         dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["capability"], "minted")
-        self.assertEqual(dev["hostCredential"], "missing")
         self.assertFalse((self.github_meta_dir / "dev.conf").exists())
 
     def test_migration_trigger_on_first_push(self) -> None:

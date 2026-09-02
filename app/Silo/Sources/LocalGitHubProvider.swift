@@ -44,7 +44,7 @@ protocol GitHubProviding: Sendable {
     func cancelPolicySync() async
     func setIdentity(name: String, email: String, workspace: String?) async throws -> SiloIdentityResult
     /// Rebuilds every workspace-scoped target from the validated configuration
-    /// published by Setup, independently of bootstrap registration.
+    /// installed and verified by bootstrap.
     func reloadWorkspaceConfiguration(_ configurations: [SetupWorkspaceConfiguration]) async throws
 }
 
@@ -342,10 +342,7 @@ actor GitHubLocalProvider: GitHubProviding {
                 "GitHub is in \(status.mode) mode on this Mac; local repository access is unavailable."
             )
         }
-        let configured = Set(configuredWorkspaces)
-        let hasCredential = status.workspaces.contains {
-            configured.contains($0.workspace) && $0.hostCredential == "present"
-        }
+        let hasCredential = status.hostCredential == "present"
         var account: GitHubAccount?
         if hasCredential, let metadata = try? await client.githubAuthMetadata(),
            let login = metadata.accountLogin, !login.isEmpty {
