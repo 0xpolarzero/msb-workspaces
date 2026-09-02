@@ -33,6 +33,21 @@ private func requireExactKeys<Key: CodingKey & CaseIterable>(
     }
 }
 
+private func requireKnownKeys<Key: CodingKey & CaseIterable>(
+    in decoder: Decoder,
+    _: Key.Type,
+    required: Set<String>
+) throws {
+    let container = try decoder.container(keyedBy: SiloAnyCodingKey.self)
+    let actual = Set(container.allKeys.map(\.stringValue))
+    let allowed = Set(Key.allCases.map(\.stringValue))
+    guard required.isSubset(of: actual), actual.isSubset(of: allowed) else {
+        throw DecodingError.dataCorrupted(
+            .init(codingPath: decoder.codingPath, debugDescription: "Wire object keys do not match the supported protocol schema.")
+        )
+    }
+}
+
 struct SetupWorkspaceConfiguration: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     var name: String
@@ -1345,10 +1360,43 @@ struct SiloProgressEvent: Codable, Sendable {
     let type: String
     let requestId: String
     let phase: String
+    let step: String?
     let workspace: String?
+    let revision: Int?
     let fraction: Double?
     let message: String
     let safeForDisplay: Bool
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion, type, requestId, phase, step, workspace, revision
+        case fraction, message, safeForDisplay
+    }
+
+    init(from decoder: Decoder) throws {
+        try requireKnownKeys(
+            in: decoder,
+            CodingKeys.self,
+            required: [
+                CodingKeys.schemaVersion.rawValue,
+                CodingKeys.type.rawValue,
+                CodingKeys.requestId.rawValue,
+                CodingKeys.phase.rawValue,
+                CodingKeys.message.rawValue,
+                CodingKeys.safeForDisplay.rawValue
+            ]
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        type = try container.decode(String.self, forKey: .type)
+        requestId = try container.decode(String.self, forKey: .requestId)
+        phase = try container.decode(String.self, forKey: .phase)
+        step = try container.decodeIfPresent(String.self, forKey: .step)
+        workspace = try container.decodeIfPresent(String.self, forKey: .workspace)
+        revision = try container.decodeIfPresent(Int.self, forKey: .revision)
+        fraction = try container.decodeIfPresent(Double.self, forKey: .fraction)
+        message = try container.decode(String.self, forKey: .message)
+        safeForDisplay = try container.decode(Bool.self, forKey: .safeForDisplay)
+    }
 }
 
 struct SiloRecoveryContext: Codable, Sendable, Equatable {

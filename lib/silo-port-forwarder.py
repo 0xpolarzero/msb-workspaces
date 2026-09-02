@@ -22,14 +22,18 @@ Environment seams (mirror the rest of the Silo toolchain):
   SILO_TEST_PORT_CONFLICTS (ip:port pairs or bare ports to probe; unset in
   production probes every desired port), SILO_PORT_FORWARDER_INTERVAL,
   SILO_PORT_FORWARDER_ONESHOT (run a single reconcile cycle and exit),
+  SILO_PORT_FORWARDER_TRANSACTION (fail closed and report candidate readiness),
+  SILO_PORT_FORWARDER_READY_FILE, SILO_PORT_FORWARDER_REVISION,
   SILO_PORT_FORWARDER_SSH_ERR (ssh stderr log path; defaults under
   ~/.local/state/silo).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -95,13 +99,9 @@ def expand_published(config: dict) -> List[int]:
 
 
 def load_workspace_names(config: dict) -> Optional[List[str]]:
-    workspace_file = Path(
-        os.environ.get("SILO_WORKSPACES_FILE")
-        or config.get("SILO_WORKSPACES_FILE")
-        or os.path.expanduser("~/.config/silo/workspaces.json")
-    )
+    path = workspace_file(config)
     try:
-        document = json.loads(workspace_file.read_text())
+        document = json.loads(path.read_text())
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
@@ -143,6 +143,18 @@ def load_workspace_names(config: dict) -> Optional[List[str]]:
     if len(set(names)) != len(names):
         return None
     return names
+
+
+def workspace_file(config: dict) -> Path:
+    return Path(
+        os.environ.get("SILO_WORKSPACES_FILE")
+        or config.get("SILO_WORKSPACES_FILE")
+        or os.path.expanduser("~/.config/silo/workspaces.json")
+    )
+
+
+def candidate_revision(config: dict) -> str:
+    return hashlib.sha256(workspace_file(config).read_bytes()).hexdigest()
 
 
 def workspace_ip(config: dict, box: str) -> str:
@@ -313,10 +325,11 @@ class Forwarder:
         return Path.home() / ".local/state/silo" / f"port-forwarder-{self.box}.ssh.err"
 
     def _ssh_argv(self, ports: List[int]) -> List[str]:
+        exit_on_failure = "yes" if os.environ.get("SILO_PORT_FORWARDER_TRANSACTION") == "1" else "no"
         argv = [
             self.ssh_bin,
             "-N", "-T",
-            "-o", "ExitOnForwardFailure=no",
+            "-o", f"ExitOnForwardFailure={exit_on_failure}",
             "-o", "ConnectTimeout=10",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
@@ -396,16 +409,25 @@ class Forwarder:
 # --------------------------------------------------------------------------
 
 def reconcile_once(box: str, fwd: Forwarder, desired: List[str], desired_ports: List[int],
-                   bind_ip: str, seam: Set[str], oneshot: bool = False) -> None:
+                   bind_ip: str, seam: Set[str], oneshot: bool = False,
+                   required_ports: Optional[Set[int]] = None,
+                   state_ports: Optional[Set[int]] = None) -> bool:
     if not fwd.msb_running():
         # Never auto-start a stopped VM; while it is stopped nothing is
         # published and there is nothing to warn about.
         fwd.stop()
         write_state(box, desired, [], [], utc_now())
-        return
+        return False
 
     simulated = seam_simulated_set()
     blocked = probe_blocked(bind_ip, desired_ports, fwd.launched, seam, simulated)
+    state_blocked = blocked if state_ports is None else blocked & state_ports
+    if required_ports and blocked & required_ports:
+        fwd.stop()
+        write_state(box, desired, sorted(state_blocked), sorted(state_blocked), utc_now())
+        raise RuntimeError(
+            f"required published ports are unavailable: {sorted(blocked & required_ports)}"
+        )
     still = set(blocked)
     target = sorted(set(desired_ports) - blocked)
 
@@ -425,7 +447,25 @@ def reconcile_once(box: str, fwd: Forwarder, desired: List[str], desired_ports: 
             # the next cycle re-probes those ports.
             fwd.launched -= fwd.bind_failures()
 
-    write_state(box, desired, sorted(blocked), sorted(still), utc_now())
+    state_still = still if state_ports is None else still & state_ports
+    write_state(box, desired, sorted(state_blocked), sorted(state_still), utc_now())
+    return fwd.alive() and fwd.launched == set(target)
+
+
+def write_ready(path: Path, box: str, revision: str) -> None:
+    document = {
+        "schemaVersion": 1,
+        "workspace": box,
+        "revision": revision,
+        "status": "ready",
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+    with open(tmp, "w") as handle:
+        json.dump(document, handle, separators=(",", ":"))
+        handle.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 def main() -> int:
@@ -439,8 +479,14 @@ def main() -> int:
         print(f"unknown configured workspace: {box}", file=sys.stderr)
         return 64
     bind_ip = workspace_ip(config, box)
-    desired_ports = expand_published(config)
-    desired = [f"{bind_ip}:{p}:{p}" for p in desired_ports]
+    published_ports = expand_published(config)
+    desired_ports = list(published_ports)
+    required_raw = os.environ.get("SILO_PORT_FORWARDER_REQUIRED_PORTS", "")
+    required_ports: Set[int] = set()
+    if required_raw:
+        required_ports = set(expand_published({"SILO_PUBLISHED_PORTS": required_raw}))
+        desired_ports = sorted(set(desired_ports) | required_ports)
+    desired = [f"{bind_ip}:{p}:{p}" for p in published_ports]
     seam = seam_probe_set()
 
     msb_bin = os.environ.get("SILO_MSB_BIN", "")
@@ -454,17 +500,55 @@ def main() -> int:
     fwd = Forwarder(box, bind_ip, ssh_bin, msb_bin)
 
     oneshot = os.environ.get("SILO_PORT_FORWARDER_ONESHOT") == "1"
-    interval = float(os.environ.get("SILO_PORT_FORWARDER_INTERVAL", str(DEFAULT_INTERVAL)))
-    while True:
+    transaction = os.environ.get("SILO_PORT_FORWARDER_TRANSACTION") == "1"
+    ready_path_value = os.environ.get("SILO_PORT_FORWARDER_READY_FILE", "")
+    revision = os.environ.get("SILO_PORT_FORWARDER_REVISION", "")
+    if transaction:
+        if not ready_path_value or not re.fullmatch(r"[0-9a-f]{64}", revision):
+            print("candidate forwarding requires a readiness file and revision", file=sys.stderr)
+            return 64
         try:
-            reconcile_once(box, fwd, desired, desired_ports, bind_ip, seam, oneshot)
-        except Exception as exc:  # fail-soft: never let the agent die on a bad cycle
-            log(f"reconcile error for {box}: {exc}")
-        if oneshot:
-            # State-only cycle (tests / kick probe): no ssh is spawned, so
-            # nothing is left behind.
-            return 0
-        time.sleep(interval)
+            if candidate_revision(config) != revision:
+                print("candidate forwarding revision does not match configuration", file=sys.stderr)
+                return 78
+        except OSError:
+            print("candidate forwarding configuration is unreadable", file=sys.stderr)
+            return 78
+    ready_path = Path(ready_path_value) if ready_path_value else None
+    interval = float(os.environ.get("SILO_PORT_FORWARDER_INTERVAL", str(DEFAULT_INTERVAL)))
+    def stop_requested(_signum: int, _frame: object) -> None:
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop_requested)
+    signal.signal(signal.SIGINT, stop_requested)
+    try:
+        while True:
+            try:
+                ready = reconcile_once(
+                    box, fwd, desired, desired_ports, bind_ip, seam, oneshot,
+                    required_ports=required_ports if transaction else None,
+                    state_ports=set(published_ports),
+                )
+                if transaction and ready and ready_path is not None and not ready_path.exists():
+                    # ExitOnForwardFailure plus a live ssh process proves that
+                    # every unblocked candidate bind was accepted.
+                    time.sleep(float(os.environ.get("SILO_PORT_FORWARDER_READY_DELAY", "0.25")))
+                    if fwd.alive() and not fwd.bind_failures():
+                        write_ready(ready_path, box, revision)
+                    else:
+                        return 69
+            except Exception as exc:
+                if transaction:
+                    log(f"candidate reconcile failed for {box}: {exc}")
+                    return 69
+                log(f"reconcile error for {box}: {exc}")
+            if oneshot:
+                # State-only cycle (tests / kick probe): no ssh is spawned, so
+                # nothing is left behind.
+                return 0
+            time.sleep(interval)
+    finally:
+        fwd.stop()
 
 
 if __name__ == "__main__":

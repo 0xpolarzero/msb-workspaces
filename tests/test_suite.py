@@ -121,6 +121,7 @@ class ReleaseBase:
                 "SILO_FAKE_STATE": str(home / ".microsandbox"),
                 "SILO_MSB_BIN": str(FAKE_MSB),
                 "SILO_SSH_BIN": str(FAKE_SSH),
+                "SILO_PORT_FORWARDER_SSH_BIN": str(FAKE_SSH_FORWARDER),
                 "SILO_CURL_BIN": str(FAKE_CURL),
                 "SILO_OPEN_BIN": str(FAKE_OPEN),
                 "SILO_ZED_BIN": str(FAKE_ZED),
@@ -1011,6 +1012,7 @@ class InstallerAndDailyTests(SiloTestCase):
             '[ -f "$fragment" ] || { echo "SSH integration did not precede verification" >&2; exit 91; }\n'
             'grep -q "127.0.0.10 dev.silo.test" "$hosts" || { echo "staged candidate missing during SSH integration" >&2; exit 92; }\n'
             'printf "verification saw staged candidate and SSH integration\\n" >>"$trace"\n'
+            f'case " $* " in *" -N "*) exec "{FAKE_SSH_FORWARDER}" "$@" ;; esac\n'
             '[ "${SILO_TEST_BOOTSTRAP_FAIL_VERIFICATION:-0}" != 1 ] || exit 93\n'
             f'exec "{FAKE_SSH}" "$@"\n'
         )
@@ -1021,6 +1023,7 @@ class InstallerAndDailyTests(SiloTestCase):
             input_text=desired, check=False, timeout=90,
             extra_env={
                 "SILO_SSH_BIN": str(guarded_ssh),
+                "SILO_PORT_FORWARDER_SSH_BIN": str(guarded_ssh),
                 "SILO_TEST_BOOTSTRAP_FAIL_VERIFICATION": "1",
             },
         )
@@ -1041,7 +1044,10 @@ class InstallerAndDailyTests(SiloTestCase):
         succeeded = self.env.silo(
             "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
             input_text=desired, timeout=90,
-            extra_env={"SILO_SSH_BIN": str(guarded_ssh)},
+            extra_env={
+                "SILO_SSH_BIN": str(guarded_ssh),
+                "SILO_PORT_FORWARDER_SSH_BIN": str(guarded_ssh),
+            },
         )
         succeeded_envelope = json.loads(succeeded.stdout)
         self.assertTrue(succeeded_envelope["ok"])
@@ -1053,6 +1059,150 @@ class InstallerAndDailyTests(SiloTestCase):
         succeeded_trace = verification_trace.read_text().splitlines()
         self.assertTrue(succeeded_trace)
         self.assertEqual(set(succeeded_trace), {"verification saw staged candidate and SSH integration"})
+
+    def test_app_bootstrap_candidate_forwarding_is_ready_before_first_run_verification(self) -> None:
+        workspaces = self.env.home / ".config/silo/workspaces.json"
+        desired = workspaces.read_text()
+        revision = hashlib.sha256(desired.encode()).hexdigest()
+        workspaces.unlink()
+        trace = self.env.root / "candidate-network.trace"
+        forwarding = self.env.root / "tools/candidate-forwarding-ssh"
+        forwarding.write_text(
+            "#!/bin/sh\n"
+            f'[ ! -e "{workspaces}" ] || exit 90\n'
+            '[ -f "$SILO_WORKSPACES_FILE" ] || exit 91\n'
+            'actual=$(/usr/bin/shasum -a 256 "$SILO_WORKSPACES_FILE" | /usr/bin/awk \'{print $1}\')\n'
+            '[ "$actual" = "$SILO_PORT_FORWARDER_REVISION" ] || exit 92\n'
+            f'printf "forwarding:%s\\n" "$actual" >>"{trace}"\n'
+            f'exec "{FAKE_SSH_FORWARDER}" "$@"\n'
+        )
+        forwarding.chmod(0o755)
+        verification = self.env.root / "tools/candidate-verification-ssh"
+        verification.write_text(
+            "#!/bin/sh\n"
+            f'grep -q "forwarding:{revision}" "{trace}" || exit 93\n'
+            f'[ ! -e "{workspaces}" ] || exit 94\n'
+            f'printf "verification:{revision}\\n" >>"{trace}"\n'
+            f'exec "{FAKE_SSH}" "$@"\n'
+        )
+        verification.chmod(0o755)
+
+        proc = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=desired, timeout=90,
+            extra_env={
+                "SILO_SSH_BIN": str(verification),
+                "SILO_PORT_FORWARDER_SSH_BIN": str(forwarding),
+            },
+        )
+
+        self.assertTrue(json.loads(proc.stdout)["ok"], proc.stdout + proc.stderr)
+        lines = trace.read_text().splitlines()
+        self.assertTrue(lines)
+        self.assertLess(
+            max(index for index, line in enumerate(lines) if line.startswith("forwarding:")),
+            min(index for index, line in enumerate(lines) if line.startswith("verification:")),
+        )
+        self.assertEqual(json.loads(workspaces.read_text()), json.loads(desired))
+
+    def test_app_bootstrap_forwarding_failure_precedes_deep_verification_and_keeps_canonical(self) -> None:
+        workspaces = self.env.home / ".config/silo/workspaces.json"
+        before = workspaces.read_bytes()
+        verification_trace = self.env.root / "deep-verification-must-not-run"
+        guarded_ssh = self.env.root / "tools/deep-verification-marker"
+        guarded_ssh.write_text(
+            "#!/bin/sh\n"
+            f'printf "deep verification ran\\n" >>"{verification_trace}"\n'
+            f'exec "{FAKE_SSH}" "$@"\n'
+        )
+        guarded_ssh.chmod(0o755)
+        pid_file = self.env.root / "failed-candidate-forwarder.pid"
+        candidate_ssh = self.env.root / "tools/failing-candidate-forwarder"
+        candidate_ssh.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *"playgrounds.msb"*) exit 255;; esac\n'
+            f'exec "{FAKE_SSH_FORWARDER}" "$@"\n'
+        )
+        candidate_ssh.chmod(0o755)
+
+        proc = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=before.decode(), check=False, timeout=90,
+            extra_env={
+                "SILO_SSH_BIN": str(guarded_ssh),
+                "SILO_PORT_FORWARDER_SSH_BIN": str(candidate_ssh),
+                "SILO_FAKE_SSH_PIDFILE": str(pid_file),
+            },
+        )
+
+        self.assertEqual(proc.returncode, 69, proc.stdout + proc.stderr)
+        error = json.loads(proc.stdout)["error"]
+        self.assertEqual(error["code"], "SILO_CANDIDATE_NETWORKING_FAILED")
+        self.assertEqual(error["workspace"], "playgrounds")
+        self.assertNotIn("Docker", error["message"] + error["recovery"])
+        self.assertFalse(verification_trace.exists())
+        self.assertEqual(workspaces.read_bytes(), before)
+        self.assertEqual(list(workspaces.parent.glob(".bootstrap-network.*")), [])
+        staged_pid = int(pid_file.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(staged_pid, 0)
+
+    def test_app_bootstrap_progress_is_revisioned_jsonl_separate_from_final_envelope(self) -> None:
+        request = (self.env.home / ".config/silo/workspaces.json").read_text()
+        revision = hashlib.sha256(request.encode()).hexdigest()
+        events_file = self.env.root / "bootstrap-events.jsonl"
+        proc = self.env.run(
+            "/bin/sh", "-c",
+            'exec 3>"$SILO_TEST_EVENTS"; exec "$SILO_TEST_CLI" app bootstrap --resume '
+            '--events-fd 3 --workspace-config-fd 0 --format json',
+            input_text=request, timeout=90,
+            extra_env={
+                "SILO_TEST_EVENTS": str(events_file),
+                "SILO_TEST_CLI": str(self.env.silo_bin),
+            },
+        )
+
+        self.assertTrue(json.loads(proc.stdout)["ok"])
+        self.assertEqual(len(proc.stdout.splitlines()), 1)
+        events = [json.loads(line) for line in events_file.read_text().splitlines()]
+        allowed = {
+            "schemaVersion", "type", "requestId", "phase", "fraction", "message",
+            "safeForDisplay", "step", "workspace", "revision",
+        }
+        self.assertTrue(events)
+        self.assertTrue(all(set(event) <= allowed for event in events))
+        self.assertTrue(all(event["schemaVersion"] == 1 and event["type"] == "progress" for event in events))
+        workspace_events = [event for event in events if event.get("workspace")]
+        self.assertEqual({event.get("revision") for event in workspace_events}, {revision})
+        for box in ("dev", "playgrounds", "personal"):
+            for step in ("workspace-configuration", "workspace-networking", "workspace-verification"):
+                fractions = [
+                    event["fraction"] for event in workspace_events
+                    if event["workspace"] == box and event.get("step") == step
+                ]
+                self.assertIn(0, fractions)
+                self.assertIn(1, fractions)
+
+    def test_app_bootstrap_verification_failure_is_typed_and_sanitized(self) -> None:
+        failed = self.env.silo(
+            "app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json",
+            input_text=(self.env.home / ".config/silo/workspaces.json").read_text(),
+            check=False, timeout=90,
+            extra_env={"SILO_FAKE_DEEP_CHECK_FAIL": "1", "SILO_FAKE_DEEP_CHECK_NOISE": "1"},
+        )
+        self.assertEqual(failed.returncode, 69, failed.stdout + failed.stderr)
+        error = json.loads(failed.stdout)["error"]
+        self.assertEqual(error["code"], "SILO_BOOTSTRAP_VERIFICATION_FAILED")
+        self.assertEqual(error["workspace"], "dev")
+        self.assertEqual(error["message"], "Workspace runtime health checks failed.")
+        self.assertIn("runtime", error["recovery"])
+        combined = failed.stdout + failed.stderr
+        self.assertNotIn("Pulling verification image", combined)
+        self.assertNotIn("no GitHub policy", combined)
+        self.assertNotIn("Docker/containerd", combined)
+        self.assertNotIn("framing", combined)
+        self.assertNotIn("\x1b", combined)
+        self.assertEqual(failed.stdout.count("SILO_BOOTSTRAP_VERIFICATION_FAILED"), 1)
 
     def test_app_bootstrap_builds_and_verifies_missing_base_before_attestation(self) -> None:
         workspaces = self.env.home / ".config/silo/workspaces.json"
@@ -1294,8 +1444,9 @@ class InstallerAndDailyTests(SiloTestCase):
         envelope = json.loads(proc.stdout)
         self.assertFalse(envelope["ok"])
         self.assertEqual(envelope["error"]["code"], "SILO_BOOTSTRAP_VERIFICATION_FAILED")
-        self.assertIn("Verification reported:", envelope["error"]["recovery"])
-        self.assertIn("quarantined", envelope["error"]["recovery"])
+        self.assertEqual(envelope["error"]["workspace"], "dev")
+        self.assertIn("quarantined", envelope["error"]["message"])
+        self.assertIn("quarantine", envelope["error"]["recovery"])
         quarantine.unlink()
 
     def test_app_github_unbind_clears_legacy_metadata_so_bootstrap_completes(self) -> None:

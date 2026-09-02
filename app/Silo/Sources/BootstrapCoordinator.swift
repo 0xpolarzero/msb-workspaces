@@ -389,7 +389,8 @@ protocol SiloBootstrapCoordinating: AnyObject, Sendable {
         onProgress: (@Sendable (SiloRuntimeSetupPhase) -> Void)?
     ) async throws
     func run(
-        workspaceConfigurations: [SetupWorkspaceConfiguration]
+        workspaceConfigurations: [SetupWorkspaceConfiguration],
+        onProgress: (@Sendable (SiloProgressEvent) -> Void)?
     ) async throws -> SiloBootstrapResult
     /// Repairs and verifies only the app-managed runtime. This path does not
     /// apply host integration, workspace configuration, or GitHub setup.
@@ -405,7 +406,16 @@ protocol SiloBootstrapCoordinating: AnyObject, Sendable {
 
 extension SiloBootstrapCoordinating {
     func run() async throws -> SiloBootstrapResult {
-        try await run(workspaceConfigurations: SetupWorkspaceConfiguration.defaults)
+        try await run(
+            workspaceConfigurations: SetupWorkspaceConfiguration.defaults,
+            onProgress: nil
+        )
+    }
+
+    func run(
+        workspaceConfigurations: [SetupWorkspaceConfiguration]
+    ) async throws -> SiloBootstrapResult {
+        try await run(workspaceConfigurations: workspaceConfigurations, onProgress: nil)
     }
 }
 
@@ -795,7 +805,8 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
     }
 
     func run(
-        workspaceConfigurations: [SetupWorkspaceConfiguration]
+        workspaceConfigurations: [SetupWorkspaceConfiguration],
+        onProgress: (@Sendable (SiloProgressEvent) -> Void)?
     ) async throws -> SiloBootstrapResult {
         guard !running else { throw BootstrapCoordinatorError.busy }
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) {
@@ -953,7 +964,10 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
         try await stateStore.save(current)
         do {
             let workspacesStartedAt = Date()
-            let response = try await client.bootstrap(workspaceConfigurations: workspaceConfigurations)
+            let response = try await client.bootstrap(
+                workspaceConfigurations: workspaceConfigurations,
+                onProgress: onProgress
+            )
             guard let result = response.result else { throw SiloClientError.missingResult(command: "bootstrap") }
             guard let installed = await runner.installedWorkspaceConfigurations(),
                   SiloBootstrapConfiguration(installed) == SiloBootstrapConfiguration(workspaceConfigurations) else {
@@ -1109,7 +1123,8 @@ final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
     }
 
     func run(
-        workspaceConfigurations: [SetupWorkspaceConfiguration]
+        workspaceConfigurations: [SetupWorkspaceConfiguration],
+        onProgress: (@Sendable (SiloProgressEvent) -> Void)?
     ) async throws -> SiloBootstrapResult {
         if let validation = SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) {
             throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(validation)

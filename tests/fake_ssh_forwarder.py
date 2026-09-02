@@ -7,6 +7,8 @@ With SILO_FAKE_SSH_EXIT=1 it exits immediately (simulating an unavailable ssh
 binary / an ssh that cannot connect).
 """
 import os
+import signal
+import socket
 import sys
 import time
 
@@ -21,7 +23,34 @@ if pid_path:
         f.write(str(os.getpid()) + "\n")
 
 if os.environ.get("SILO_FAKE_SSH_EXIT") == "1":
+    sys.exit(255)
+
+listeners = []
+args = sys.argv[1:]
+for index, arg in enumerate(args):
+    if arg != "-L" or index + 1 >= len(args):
+        continue
+    bind_ip, port, _remote_ip, _remote_port = args[index + 1].split(":", 3)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        listener.bind((bind_ip, int(port)))
+        listener.listen(1)
+    except OSError:
+        listener.close()
+        if "ExitOnForwardFailure=yes" in args:
+            sys.exit(255)
+        continue
+    listeners.append(listener)
+
+
+def stop(_signum, _frame):
+    for listener in listeners:
+        listener.close()
     sys.exit(0)
 
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
 while True:
     time.sleep(3600)

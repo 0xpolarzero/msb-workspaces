@@ -84,8 +84,14 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(failure.waitForExistence(timeout: 3))
         let failureText = [failure.label, failure.value as? String ?? "", visibleText(in: failure)]
             .joined(separator: " ")
-        XCTAssertTrue(failureText.contains("Workspace bootstrap verification failed"))
+        XCTAssertTrue(failureText.contains("Create workspaces"))
         XCTAssertTrue(failureText.contains(detailText))
+        XCTAssertFalse(failureText.contains("Workspace bootstrap verification failed:"))
+
+        XCTAssertEqual(
+            app.buttons["setup.step.review"].value as? String,
+            "Current step"
+        )
 
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
@@ -2239,17 +2245,10 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
         identitySkip.click()
 
-        // Review is the only verification barrier: Done remains blocked and
-        // exposes the targeted workspace completion action.
+        // Review reflects the same queue while its serial worker resumes the
+        // pending workspace verification after GitHub succeeds.
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
-        XCTAssertFalse(done.isEnabled)
-        let verify = app.buttons["setup.review.verify.button"]
-        XCTAssertTrue(verify.waitForExistence(timeout: 2))
-        XCTAssertTrue(verify.isEnabled)
-        verify.click()
-        // The first bootstrap attempt reported reconnect-required in the
-        // background; this targeted retry completes verification.
         XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
         done.click()
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
@@ -2296,7 +2295,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(
             [backgroundStatus.label, backgroundStatus.value as? String ?? "", visibleText(in: backgroundStatus)]
                 .joined(separator: " ")
-                .contains("background")
+                .contains("Create workspaces")
         )
 
         let back = app.buttons["setup.back.button"]

@@ -75,6 +75,8 @@ struct GitIdentityPrefill: Sendable, Equatable {
 }
 
 actor SiloCommandRunner {
+    static let progressEventsFileDescriptor: Int32 = 3
+
     struct Configuration: Sendable {
         let homeDirectory: URL
         let additionalSearchPaths: [URL]
@@ -96,6 +98,7 @@ actor SiloCommandRunner {
 
     private struct RunningProcess: Sendable {
         let processIdentifier: pid_t
+        let eventDelivery: EventDeliveryGate?
     }
 
     private let configuration: Configuration
@@ -110,12 +113,24 @@ actor SiloCommandRunner {
         self.configuration = configuration
     }
 
-    func run(_ command: SiloCommand, operationID: UUID = UUID()) async throws -> SiloCommandResult {
+    func run(
+        _ command: SiloCommand,
+        operationID: UUID = UUID(),
+        eventsFileDescriptor: Int32? = nil,
+        onEventLine: (@Sendable (Data) throws -> Void)? = nil
+    ) async throws -> SiloCommandResult {
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         let stdinPipe = command.stdin.map { _ in Pipe() }
+        let eventsPipe = eventsFileDescriptor.map { _ in Pipe() }
+        let eventDelivery = onEventLine.map { _ in EventDeliveryGate() }
         let environment = processEnvironment(for: command)
         let processIdentifier: pid_t
+
+        guard (eventsPipe == nil) == (onEventLine == nil),
+              eventsFileDescriptor.map({ $0 >= 3 }) ?? true else {
+            throw SiloClientError.invalidArguments
+        }
 
         do {
             processIdentifier = try Self.spawn(
@@ -127,7 +142,10 @@ actor SiloCommandRunner {
                 stdoutReadDescriptor: stdoutPipe.fileHandleForReading.fileDescriptor,
                 stdoutWriteDescriptor: stdoutPipe.fileHandleForWriting.fileDescriptor,
                 stderrReadDescriptor: stderrPipe.fileHandleForReading.fileDescriptor,
-                stderrWriteDescriptor: stderrPipe.fileHandleForWriting.fileDescriptor
+                stderrWriteDescriptor: stderrPipe.fileHandleForWriting.fileDescriptor,
+                eventsReadDescriptor: eventsPipe?.fileHandleForReading.fileDescriptor,
+                eventsWriteDescriptor: eventsPipe?.fileHandleForWriting.fileDescriptor,
+                eventsTargetDescriptor: eventsFileDescriptor
             )
         } catch {
             try? stdoutPipe.fileHandleForReading.close()
@@ -138,6 +156,10 @@ actor SiloCommandRunner {
                 try? stdinPipe.fileHandleForReading.close()
                 try? stdinPipe.fileHandleForWriting.close()
             }
+            if let eventsPipe {
+                try? eventsPipe.fileHandleForReading.close()
+                try? eventsPipe.fileHandleForWriting.close()
+            }
             throw error
         }
 
@@ -145,6 +167,7 @@ actor SiloCommandRunner {
         // parent's write ends is required for readers to observe EOF.
         try? stdoutPipe.fileHandleForWriting.close()
         try? stderrPipe.fileHandleForWriting.close()
+        try? eventsPipe?.fileHandleForWriting.close()
         if let stdinPipe {
             try? stdinPipe.fileHandleForReading.close()
         }
@@ -155,7 +178,10 @@ actor SiloCommandRunner {
             try? stdinPipe.fileHandleForWriting.close()
         }
 
-        runningProcesses[operationID] = RunningProcess(processIdentifier: processIdentifier)
+        runningProcesses[operationID] = RunningProcess(
+            processIdentifier: processIdentifier,
+            eventDelivery: eventDelivery
+        )
         defer {
             runningProcesses.removeValue(forKey: operationID)
             cancelledOperations.remove(operationID)
@@ -176,30 +202,60 @@ actor SiloCommandRunner {
                 preserveTail: command.preserveOutputTail
             )
         }
+        let eventsTask = eventsPipe.map { pipe in
+            Task.detached(priority: .userInitiated) {
+                Self.readBoundedJSONLines(
+                    pipe.fileHandleForReading,
+                    delivery: eventDelivery!,
+                    onEventLine: onEventLine!
+                )
+            }
+        }
 
-        let status: Int32
+        let completion: (status: Int32, stdout: Data, stderr: Data, eventError: SiloClientError?)
         do {
-            status = try await wait(for: processIdentifier, command: command)
+            completion = try await withTaskCancellationHandler {
+                let status = try await wait(for: processIdentifier, command: command)
+                let stdout = await stdoutTask.value
+                let stderr = await stderrTask.value
+                let eventError: SiloClientError?
+                if let eventsTask {
+                    eventError = await eventsTask.value
+                } else {
+                    eventError = nil
+                }
+                return (status, stdout, stderr, eventError)
+            } onCancel: {
+                eventDelivery?.cancel()
+            }
         } catch {
+            eventDelivery?.cancel()
             await Self.terminate(processIdentifier, grace: command.terminationGrace)
             _ = await stdoutTask.value
             _ = await stderrTask.value
+            _ = await eventsTask?.value
             throw error
         }
-        let stdout = await stdoutTask.value
-        let stderr = await stderrTask.value
         if cancelledOperations.contains(operationID) || Task.isCancelled {
+            eventDelivery?.cancel()
             throw SiloClientError.cancelled
         }
+        if let eventError = completion.eventError { throw eventError }
         let duration = startedAt.duration(to: .now)
-        let redactedStdout = Data(redactor.redact(String(decoding: stdout, as: UTF8.self)).utf8)
-        let redactedStderr = Data(redactor.redact(String(decoding: stderr, as: UTF8.self)).utf8)
-        return SiloCommandResult(status: status, stdout: redactedStdout, stderr: redactedStderr, duration: duration)
+        let redactedStdout = Data(redactor.redact(String(decoding: completion.stdout, as: UTF8.self)).utf8)
+        let redactedStderr = Data(redactor.redact(String(decoding: completion.stderr, as: UTF8.self)).utf8)
+        return SiloCommandResult(
+            status: completion.status,
+            stdout: redactedStdout,
+            stderr: redactedStderr,
+            duration: duration
+        )
     }
 
     func cancel(operationID: UUID) async {
         guard let process = runningProcesses[operationID] else { return }
         cancelledOperations.insert(operationID)
+        process.eventDelivery?.cancel()
         await Self.terminate(process.processIdentifier, grace: .milliseconds(250))
     }
 
@@ -514,7 +570,10 @@ actor SiloCommandRunner {
         stdoutReadDescriptor: Int32,
         stdoutWriteDescriptor: Int32,
         stderrReadDescriptor: Int32,
-        stderrWriteDescriptor: Int32
+        stderrWriteDescriptor: Int32,
+        eventsReadDescriptor: Int32?,
+        eventsWriteDescriptor: Int32?,
+        eventsTargetDescriptor: Int32?
     ) throws -> pid_t {
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
@@ -540,6 +599,13 @@ actor SiloCommandRunner {
         } else if actionStatus == 0 {
             actionStatus = "/dev/null".withCString { path in
                 posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, path, O_RDONLY, 0)
+            }
+        }
+        if let eventsReadDescriptor, let eventsWriteDescriptor, let eventsTargetDescriptor {
+            actionStatus = actionStatus == 0 ? posix_spawn_file_actions_adddup2(&actions, eventsWriteDescriptor, eventsTargetDescriptor) : actionStatus
+            actionStatus = actionStatus == 0 ? posix_spawn_file_actions_addclose(&actions, eventsReadDescriptor) : actionStatus
+            if eventsWriteDescriptor != eventsTargetDescriptor {
+                actionStatus = actionStatus == 0 ? posix_spawn_file_actions_addclose(&actions, eventsWriteDescriptor) : actionStatus
             }
         }
         guard actionStatus == 0 else {
@@ -656,5 +722,64 @@ actor SiloCommandRunner {
             }
         }
         return result
+    }
+
+    private nonisolated static func readBoundedJSONLines(
+        _ handle: FileHandle,
+        delivery: EventDeliveryGate,
+        onEventLine: @Sendable (Data) throws -> Void
+    ) -> SiloClientError? {
+        defer { try? handle.close() }
+        let streamLimit = 4 * 1024 * 1024
+        var bytesSeen = 0
+        var framer = SiloJSONLFramer(maxLineBytes: 256 * 1024, maxBufferedBytes: streamLimit)
+        var failure: SiloClientError?
+
+        while true {
+            let chunk = handle.readData(ofLength: 64 * 1024)
+            guard !chunk.isEmpty else { break }
+            guard failure == nil else { continue }
+            bytesSeen += chunk.count
+            guard bytesSeen <= streamLimit else {
+                failure = .unavailable("Silo progress events exceeded the capture limit.")
+                continue
+            }
+            do {
+                for line in try framer.append(chunk) {
+                    try delivery.deliver(line, to: onEventLine)
+                }
+            } catch {
+                failure = .malformedJSON(command: "bootstrap events")
+            }
+        }
+
+        guard failure == nil else { return failure }
+        do {
+            if let line = try framer.finish() {
+                try delivery.deliver(line, to: onEventLine)
+            }
+            return nil
+        } catch {
+            return .malformedJSON(command: "bootstrap events")
+        }
+    }
+}
+
+private final class EventDeliveryGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var acceptsEvents = true
+
+    func cancel() {
+        lock.withLock { acceptsEvents = false }
+    }
+
+    func deliver(
+        _ line: Data,
+        to callback: @Sendable (Data) throws -> Void
+    ) throws {
+        try lock.withLock {
+            guard acceptsEvents else { return }
+            try callback(line)
+        }
     }
 }

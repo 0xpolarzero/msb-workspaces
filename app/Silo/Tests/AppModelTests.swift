@@ -3499,7 +3499,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(
             try String(contentsOf: bootstrapArgumentsURL, encoding: .utf8)
                 .split(whereSeparator: \.isNewline).map(String.init),
-            ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json"]
+            ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--events-fd", "3", "--format", "json"]
         )
         let durations = try XCTUnwrap(finalState.phaseDurations)
         XCTAssertEqual(
@@ -4901,13 +4901,80 @@ final class AppModelTests: XCTestCase {
         ))
     }
 
-    func testBootstrapPhaseProgressCoversEveryPhaseWithPlainLanguage() {
-        for phase in SiloBootstrapState.Phase.allCases {
-            XCTAssertFalse(SetupView.bootstrapPhaseProgress(for: phase).isEmpty)
-        }
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .toolchain), "Checking the Silo runtime")
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .hostIntegration), "Updating system records")
-        XCTAssertEqual(SetupView.bootstrapPhaseProgress(for: .workspaces), "Registering your workspaces")
+    func testSetupPlanHasStableOrderLabelsAndVerificationDependencies() {
+        let state = SetupState()
+        XCTAssertEqual(state.items.map(\.id), SetupPlan.orderedIDs)
+        XCTAssertEqual(
+            state.items.map(\.label),
+            [
+                "Create workspaces",
+                "Verify workspaces",
+                "Save GitHub access",
+                "Verify GitHub access",
+                "Save Git identity",
+                "Verify Git identity",
+                "Finish setup"
+            ]
+        )
+
+        let revision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        XCTAssertFalse(state.begin(.workspaceVerify, revision: revision))
+        XCTAssertTrue(state.begin(.workspaceRun, revision: revision))
+        XCTAssertFalse(state.begin(.workspaceVerify, revision: revision))
+        XCTAssertEqual(state.items.filter { $0.status == .running }.count, 1)
+        XCTAssertEqual(state.currentLabel, "Create workspaces")
+        state.succeed(.workspaceRun, revision: revision)
+        XCTAssertTrue(state.begin(.workspaceVerify, revision: revision))
+        XCTAssertEqual(state.currentLabel, "Verify workspaces")
+    }
+
+    func testSetupQueueRetryRetainsLaterInputsAndResumesFailedItem() {
+        let state = SetupState()
+        let revision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        let identity = SetupIdentityQueueInput(
+            name: "Taylor Example",
+            email: "taylor@example.com",
+            target: nil
+        )
+        state.submitIdentity(identity)
+        XCTAssertTrue(state.begin(.workspaceRun, revision: revision))
+        state.fail(.workspaceRun, message: "registration rejected", revision: revision)
+
+        XCTAssertEqual(state.retryFailedItem(), .workspaceRun)
+        XCTAssertEqual(state.item(.workspaceRun).status, .queued)
+        XCTAssertEqual(state.item(.identityRun).input, .identity(identity))
+        XCTAssertEqual(state.item(.identityVerify).input, .identity(identity))
+        XCTAssertTrue(state.begin(.workspaceRun, revision: revision))
+    }
+
+    func testSetupQueueConsumesCoordinatorProgressAtCandidateRevision() throws {
+        let state = SetupState()
+        let revision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        XCTAssertTrue(state.begin(.workspaceRun, revision: revision))
+        let event = try JSONDecoder().decode(
+            SiloProgressEvent.self,
+            from: Data(#"{"schemaVersion":1,"type":"progress","requestId":"setup","phase":"running","step":"verification","workspace":"dev","revision":1,"fraction":0.5,"message":"Verifying","safeForDisplay":true}"#.utf8)
+        )
+        state.consume(event, candidateRevision: revision)
+
+        XCTAssertEqual(state.item(.workspaceRun).status, .succeeded)
+        XCTAssertEqual(state.item(.workspaceVerify).status, .running)
+        XCTAssertEqual(state.currentLabel, "Verify workspaces")
+    }
+
+    func testSetupQueueRejectsStaleRevisionAndDerivesDoneFromFinalItem() {
+        let state = SetupState()
+        let staleRevision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        let currentRevision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        XCTAssertFalse(state.begin(.workspaceRun, revision: staleRevision))
+        XCTAssertTrue(state.begin(.workspaceRun, revision: currentRevision))
+        state.succeed(.workspaceRun, revision: currentRevision)
+        XCTAssertTrue(state.begin(.workspaceVerify, revision: currentRevision))
+        state.succeed(.workspaceVerify, revision: currentRevision)
+        state.submitGitHubSkip()
+        state.submitIdentitySkip()
+        state.deriveCompletion(requirementsSatisfied: true)
+        XCTAssertTrue(state.isDone)
     }
 
     func testBootstrapStateWithoutPhaseDurationsStillDecodes() throws {
@@ -5116,29 +5183,6 @@ final class AppModelTests: XCTestCase {
             validationMessage: nil,
             bootstrapInputReady: false
         ))
-    }
-
-    func testBootstrapVerificationTreatsPendingAsPendingAndOnlyTerminalErrorAsFailure() {
-        XCTAssertEqual(SetupView.bootstrapVerification(
-            registrationOutstanding: true,
-            completed: false,
-            failure: "stale error"
-        ), .pending)
-        XCTAssertEqual(SetupView.bootstrapVerification(
-            registrationOutstanding: false,
-            completed: false,
-            failure: nil
-        ), .pending)
-        XCTAssertEqual(SetupView.bootstrapVerification(
-            registrationOutstanding: false,
-            completed: false,
-            failure: "registration rejected"
-        ), .failed("registration rejected"))
-        XCTAssertEqual(SetupView.bootstrapVerification(
-            registrationOutstanding: false,
-            completed: true,
-            failure: nil
-        ), .succeeded)
     }
 
     func testIdentityContinueRequiresClientAvailabilityAndValidIdentity() {

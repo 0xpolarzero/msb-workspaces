@@ -426,7 +426,17 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
             save(state)
             return 0
         if "findmnt -n -o FSTYPE /workspace" in text and "docker buildx version" in text:
+            trace = os.environ.get("SILO_FAKE_DEEP_CHECK_TRACE", "")
+            if trace:
+                with open(trace, "a") as handle:
+                    handle.write(f"{box}\n")
             if os.environ.get("SILO_FAKE_DEEP_CHECK_FAIL") == "1":
+                if os.environ.get("SILO_FAKE_DEEP_CHECK_NOISE") == "1":
+                    sys.stderr.buffer.write(
+                        b"\x1b[31mPulling verification image\x1b[0m\n"
+                        b"no GitHub policy; skipping proxy reachability\n"
+                        b"\x00\x00framing SILO_BOOTSTRAP_VERIFICATION_FAILED\x7f\n"
+                    )
                 print("Docker/containerd did not become ready within 30 seconds", file=sys.stderr)
                 return 1
             return 0

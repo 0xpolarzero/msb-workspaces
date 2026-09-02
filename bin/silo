@@ -1320,6 +1320,14 @@ WORKSPACE_CONFIGURATION_TOUCHED_BOXES=()
 # Staged desired configuration (app_reconcile_workspace_configuration input)
 # awaiting the deep verification that gates the atomic commit.
 WORKSPACE_CONFIGURATION_STAGED_FILE=""
+WORKSPACE_CONFIGURATION_CANONICAL_BOXES=()
+BOOTSTRAP_NETWORK_PIDS=()
+BOOTSTRAP_NETWORK_DIR=""
+BOOTSTRAP_NETWORK_ORIGINAL_LIFECYCLES=""
+BOOTSTRAP_NETWORK_FAILURE_WORKSPACE=""
+BOOTSTRAP_NETWORK_REVISION=""
+BOOTSTRAP_EVENTS_FD=""
+BOOTSTRAP_REQUEST_ID=""
 VOLUME_INSPECT_OUTPUT=""
 VOLUME_EXT4_DETAIL=""
 
@@ -2443,6 +2451,7 @@ port_forwarder_launchd_start() {
     <key>SILO_MSB_BIN</key><string>$MSB_BIN</string>
     <key>SILO_SSH_BIN</key><string>$SSH_BIN</string>
     <key>SILO_SSH_PROXY_NO_START</key><string>1</string>
+    <key>SILO_WORKSPACES_FILE</key><string>$SILO_WORKSPACES_FILE</string>
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
@@ -2477,6 +2486,9 @@ port_forwarder_kick() {
   # one-shot helper process probes and updates the state synchronously so
   # fixtures and assertions observe a deterministic reconcile.
   local box="$1"
+  # Bootstrap owns transaction-scoped forwarders against its validated
+  # candidate. Never let a lifecycle helper fall back to canonical state.
+  (( ${#BOOTSTRAP_NETWORK_PIDS[@]} > 0 )) && return 0
   if [[ "${SILO_TEST_MODE:-0}" == 1 ]]; then
     if [[ -n "$PORT_FORWARDER_BIN" && -x "$PORT_FORWARDER_BIN" ]]; then
       SILO_PORT_FORWARDER_ONESHOT=1 "$SILO_PYTHON_BIN" "$PORT_FORWARDER_BIN" "$box" >/dev/null 2>&1 || true
@@ -5043,13 +5055,31 @@ cmd_check_quick() {
   ok "quick checks passed"
 }
 
+deep_check_failure() {
+  local box="$1" component="$2" message="$3"
+  if (( SILO_APP_MODE == 1 )); then
+    printf 'SILO_VERIFY_FAILURE\t%s\t%s\t%s\n' "$box" "$component" "$message" >&2
+  else
+    printf '%s: %s\n' "$box" "$message" >&2
+  fi
+}
+
 check_one_deep() {
   local box="$1" was_running=0 failed=0 host direct_url docker_url direct_unit docker_name probe_repo probe_code
   workspace_msb "$box" ping -q "$box" >/dev/null 2>&1 && was_running=1
-  ensure_running "$box"
+  if app_workspace_quarantined "$box"; then
+    deep_check_failure "$box" github "The workspace is quarantined and cannot be verified."
+    return 1
+  fi
+  if ! (ensure_running "$box"); then
+    deep_check_failure "$box" runtime "The workspace could not start for verification."
+    return 1
+  fi
   # Published ports are host-forwarded over SSH; make sure the forwarder has
   # reconciled before probing them.
-  port_forwarder_kick "$box" || true
+  if (( ${#BOOTSTRAP_NETWORK_PIDS[@]} == 0 )); then
+    port_forwarder_kick "$box" || true
+  fi
   host="$(workspace_host "$box")"
   direct_unit="silo-health-direct-${box}"
   docker_name="silo-health-docker-${box}"
@@ -5088,9 +5118,15 @@ for attempt in 1 2 3; do
 done
 [ "$github_ready" = 1 ] || { echo "GitHub connectivity check failed after 3 attempts" >&2; exit 1; }
 SCRIPT
-  guest_script "$box" "$script" || failed=1
+  guest_script "$box" "$script" || {
+    deep_check_failure "$box" runtime "Workspace runtime health checks failed."
+    failed=1
+  }
 
-  "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=20 "$(workspace_ssh_host "$box")" true || failed=1
+  "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=20 "$(workspace_ssh_host "$box")" true || {
+    deep_check_failure "$box" ssh "Workspace SSH verification failed."
+    failed=1
+  }
 
   guest_control_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
   guest_control_exec "$box" bash -lc "printf '%s\\n' '$box-direct-ok' >/tmp/silo-health.txt && systemd-run --quiet --unit='$direct_unit' --collect python3 -m http.server 24678 --bind 0.0.0.0 --directory /tmp" || failed=1
@@ -5098,16 +5134,25 @@ SCRIPT
   until body="$("$CURL_BIN" -fsS --max-time 2 "$direct_url" 2>/dev/null)"; do
     attempt=$((attempt + 1)); (( attempt < 30 )) || break; sleep 0.2
   done
-  [[ "$body" == "$box-direct-ok" ]] || { echo "$box: direct published port failed" >&2; failed=1; }
+  [[ "$body" == "$box-direct-ok" ]] || {
+    deep_check_failure "$box" forwarding "Direct published-port verification failed."
+    failed=1
+  }
   guest_control_exec "$box" systemctl stop "$direct_unit.service" >/dev/null 2>&1 || true
 
   guest_control_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
-  guest_control_exec "$box" docker run -d --name "$docker_name" -p 24679:80 nginx:alpine >/dev/null || failed=1
+  guest_control_exec "$box" docker run -d --name "$docker_name" -p 24679:80 nginx:alpine >/dev/null || {
+    deep_check_failure "$box" containers "The verification container could not start."
+    failed=1
+  }
   attempt=0; body=""
   until body="$("$CURL_BIN" -fsS --max-time 2 "$docker_url" 2>/dev/null)"; do
     attempt=$((attempt + 1)); (( attempt < 60 )) || break; sleep 0.5
   done
-  [[ "$body" == *"Welcome to nginx"* ]] || { echo "$box: Docker published port failed" >&2; failed=1; }
+  [[ "$body" == *"Welcome to nginx"* ]] || {
+    deep_check_failure "$box" forwarding "Container published-port verification failed."
+    failed=1
+  }
   guest_control_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
 
   # Path C §7/§9: local mode asserts the guest carries NO GH_TOKEN at all and
@@ -5115,19 +5160,22 @@ SCRIPT
   # legacy placeholder assertion.
   if [[ "$SILO_GITHUB_MODE" == local ]]; then
     guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in "") exit 0;; *) exit 1;; esac' || {
-      echo "$box: local mode must not expose GH_TOKEN inside the guest" >&2; failed=1;
+      deep_check_failure "$box" github "The workspace exposed an unexpected GitHub credential."
+      failed=1
     }
     if [[ -f "$(policy_file)" ]]; then
       probe_repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
       if [[ -n "$probe_repo" ]]; then
         if host_credential_available; then
           guest_control_exec "$box" env GIT_TERMINAL_PROMPT=0 git ls-remote "http://127.0.0.1:18446/github.com/$probe_repo.git" >/dev/null 2>&1 || {
-            echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
+            deep_check_failure "$box" github "The GitHub proxy endpoint is unreachable from the workspace."
+            failed=1
           }
         else
           probe_code="$(guest_control_exec "$box" curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18446/github.com/$probe_repo.git/info/refs?service=git-upload-pack" 2>/dev/null || true)"
           if [[ ! "$probe_code" =~ ^[0-9]{3}$ ]]; then
-            echo "$box: GitHub proxy endpoint unreachable from the guest (relay/shuttle/proxy not running?)" >&2; failed=1;
+            deep_check_failure "$box" github "The GitHub proxy endpoint is unreachable from the workspace."
+            failed=1
           else
             note "$box: proxy reachable (HTTP $probe_code); anonymous public git requests proceed, host-credential injection waits for provisioning (silo github auth)"
           fi
@@ -5140,7 +5188,8 @@ SCRIPT
     fi
   elif keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
     guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
-      echo "$box: GitHub secret is not represented by a guest placeholder" >&2; failed=1;
+      deep_check_failure "$box" github "The GitHub credential placeholder is invalid."
+      failed=1
     }
   fi
 
@@ -5157,7 +5206,18 @@ cmd_check() {
   (( deep == 1 )) || return 0
   require_command_path ssh "$SSH_BIN"
   require_command_path curl "$CURL_BIN"
-  for box in "${WORKSPACES[@]}"; do check_one_deep "$box" || failed=1; done
+  for box in "${WORKSPACES[@]}"; do
+    app_bootstrap_progress "$BOOTSTRAP_EVENTS_FD" "$BOOTSTRAP_REQUEST_ID" verification 0 \
+      "Verifying '$box'." workspace-verification "$box" "$BOOTSTRAP_NETWORK_REVISION"
+    if check_one_deep "$box"; then
+      app_bootstrap_progress "$BOOTSTRAP_EVENTS_FD" "$BOOTSTRAP_REQUEST_ID" verification 1 \
+        "Verification passed for '$box'." workspace-verification "$box" "$BOOTSTRAP_NETWORK_REVISION"
+    else
+      app_bootstrap_progress "$BOOTSTRAP_EVENTS_FD" "$BOOTSTRAP_REQUEST_ID" verification 0 \
+        "Verification failed for '$box'." workspace-verification "$box" "$BOOTSTRAP_NETWORK_REVISION"
+      failed=1
+    fi
+  done
   (( failed == 0 )) || fatal "deep checks failed"
   ok "all live VM, Docker, SSH, internet, and published-port checks passed"
 }
@@ -6469,12 +6529,28 @@ app_emit_error() {
   return "$exit_code"
 }
 
+app_bootstrap_emit_progress() {
+  local phase="$1" fraction="$2" message="$3" step="${4:-}" workspace="${5:-}" revision="${6:-}"
+  local optional=""
+  [[ -n "$BOOTSTRAP_EVENTS_FD" ]] || return 0
+  [[ -n "$step" ]] && optional+=",\"step\":$(app_json_string "$step")"
+  [[ -n "$workspace" ]] && optional+=",\"workspace\":$(app_json_string "$workspace")"
+  [[ -n "$revision" ]] && optional+=",\"revision\":$(app_json_string "$revision")"
+  printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":%s,"fraction":%s,"message":%s,"safeForDisplay":true%s}\n' \
+    "$(app_json_string "$BOOTSTRAP_REQUEST_ID")" \
+    "$(app_json_string "$phase")" "$fraction" \
+    "$(app_json_string "$message")" "$optional" >&"$BOOTSTRAP_EVENTS_FD"
+}
+
 app_unexpected_error() {
   local status="$?"
   if [[ "${BASH_SUBSHELL:-0}" != "$SILO_APP_ROOT_SUBSHELL" ]]; then
     return "$status"
   fi
   trap - ERR
+  if [[ "$SILO_APP_COMMAND" == bootstrap ]] && (( ${#BOOTSTRAP_NETWORK_PIDS[@]} > 0 )); then
+    app_bootstrap_network_cleanup 1
+  fi
   if [[ "$SILO_APP_RESPONSE_EMITTED" != 1 ]]; then
     app_emit_error "$SILO_APP_COMMAND" "SILO_INTERNAL_ERROR" \
       "Silo could not complete the machine-readable operation." \
@@ -9548,6 +9624,7 @@ app_reconcile_workspace_configuration() {
   WORKSPACE_CONFIGURATION_FAILURE_RETRYABLE=false
   WORKSPACE_CONFIGURATION_FAILURE_EXIT=1
   WORKSPACE_CONFIGURATION_TOUCHED_BOXES=()
+  WORKSPACE_CONFIGURATION_CANONICAL_BOXES=()
   config_dir="$(dirname "$SILO_WORKSPACES_FILE")"
   mkdir -p "$config_dir" || return
   chmod 700 "$config_dir" || return
@@ -9556,7 +9633,20 @@ app_reconcile_workspace_configuration() {
   dd bs=262145 count=1 <&"$fd" >"$input" 2>/dev/null || { rm -f "$input" "$old_copy"; return 1; }
   [[ $(wc -c <"$input") -le 262144 ]] || { rm -f "$input" "$old_copy"; return 1; }
   app_workspace_configuration_valid "$input" || { rm -f "$input" "$old_copy"; return 1; }
-  if [[ -f "$SILO_WORKSPACES_FILE" ]]; then cp -p "$SILO_WORKSPACES_FILE" "$old_copy" || return; else : >"$old_copy"; fi
+  BOOTSTRAP_NETWORK_REVISION="$(/usr/bin/shasum -a 256 "$input" 2>/dev/null | /usr/bin/awk '{print $1}')" || {
+    rm -f "$input" "$old_copy"
+    return 1
+  }
+  [[ "$BOOTSTRAP_NETWORK_REVISION" =~ ^[0-9a-f]{64}$ ]] || {
+    rm -f "$input" "$old_copy"
+    return 1
+  }
+  if [[ -f "$SILO_WORKSPACES_FILE" ]]; then
+    cp -p "$SILO_WORKSPACES_FILE" "$old_copy" || return
+    while IFS= read -r box; do WORKSPACE_CONFIGURATION_CANONICAL_BOXES+=("$box"); done < <("$JQ_BIN" -r '.workspaces[].name' "$old_copy")
+  else
+    : >"$old_copy"
+  fi
 
   # Resolve the storage boundary before removing a VM root or committing the
   # requested configuration. Only a genuinely new workspace may allocate its
@@ -9636,6 +9726,8 @@ app_reconcile_workspace_configuration() {
   fi
 
   for box in "${WORKSPACES[@]}"; do
+    app_bootstrap_emit_progress workspaces 0 "Configuring workspace '$box'." \
+      workspace-configuration "$box" "$BOOTSTRAP_NETWORK_REVISION"
     if sandbox_exists "$box" && { app_workspace_configuration_changed "$old_copy" "$input" "$box" || workspace_configuration_needs_setup "$box"; }; then
       port_forwarder_stop "$box"
       port_forwarder_stop_launchd "$box"
@@ -9663,7 +9755,8 @@ app_reconcile_workspace_configuration() {
       app_create_configured_workspace "$box" "$input" || return
       WORKSPACE_CONFIGURATION_TOUCHED_BOXES+=("$box")
     fi
-    port_forwarder_start "$box" || return
+    app_bootstrap_emit_progress workspaces 1 "Workspace '$box' is configured." \
+      workspace-configuration "$box" "$BOOTSTRAP_NETWORK_REVISION"
   done
 
   # The desired configuration stays STAGED: workspaces.json is replaced only
@@ -9677,6 +9770,7 @@ app_reconcile_workspace_configuration() {
 
 app_bootstrap_discard_staged_configuration() {
   local reason="${1:-bootstrap transaction failed}" box
+  app_bootstrap_network_cleanup 1
   if (( ${#WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]} > 0 )); then
     for box in "${WORKSPACE_CONFIGURATION_TOUCHED_BOXES[@]}"; do
       workspace_config_state_write "$box" needs-configuration "$reason" || true
@@ -9686,6 +9780,176 @@ app_bootstrap_discard_staged_configuration() {
     rm -f "$WORKSPACE_CONFIGURATION_STAGED_FILE"
     WORKSPACE_CONFIGURATION_STAGED_FILE=""
   fi
+}
+
+app_bootstrap_progress() {
+  local fd="$1" request_id="$2" phase="$3" fraction="$4" message="$5"
+  local step="${6:-}" workspace="${7:-}" revision="${8:-}" event
+  [[ -n "$fd" ]] || return 0
+  event="$($JQ_BIN -nc \
+    --arg requestId "$request_id" --arg phase "$phase" --argjson fraction "$fraction" \
+    --arg message "$message" --arg step "$step" --arg workspace "$workspace" --arg revision "$revision" '
+      {schemaVersion:1,type:"progress",requestId:$requestId,phase:$phase,
+       fraction:$fraction,message:$message,safeForDisplay:true}
+      + (if $step == "" then {} else {step:$step} end)
+      + (if $workspace == "" then {} else {workspace:$workspace} end)
+      + (if $revision == "" then {} else {revision:$revision} end)
+    ')" || return 1
+  printf '%s\n' "$event" >&"$fd"
+}
+
+app_bootstrap_start_canonical_forwarders() {
+  local box
+  (( ${#WORKSPACE_CONFIGURATION_CANONICAL_BOXES[@]} > 0 )) || return 0
+  for box in "${WORKSPACE_CONFIGURATION_CANONICAL_BOXES[@]}"; do
+    port_forwarder_start "$box" >/dev/null 2>&1 || true
+  done
+}
+
+app_bootstrap_network_cleanup() {
+  local restart_canonical="${1:-0}" pid box lifecycle
+  if (( ${#BOOTSTRAP_NETWORK_PIDS[@]} > 0 )); then
+    for pid in "${BOOTSTRAP_NETWORK_PIDS[@]}"; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      kill "$pid" >/dev/null 2>&1 || true
+    done
+    for pid in "${BOOTSTRAP_NETWORK_PIDS[@]}"; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      wait "$pid" >/dev/null 2>&1 || true
+    done
+  fi
+  while IFS=: read -r box lifecycle; do
+    [[ -n "$box" && "$lifecycle" == stopped ]] || continue
+    workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1 || true
+  done <<<"$BOOTSTRAP_NETWORK_ORIGINAL_LIFECYCLES"
+  if [[ -n "$BOOTSTRAP_NETWORK_DIR" ]]; then
+    for box in "${WORKSPACES[@]}"; do
+      rm -f "$BOOTSTRAP_NETWORK_DIR/$box.ready" "$BOOTSTRAP_NETWORK_DIR/$box.log" \
+        "$BOOTSTRAP_NETWORK_DIR/$box.start.log" "$BOOTSTRAP_NETWORK_DIR/$box.ssh.err"
+    done
+    rmdir "$BOOTSTRAP_NETWORK_DIR" >/dev/null 2>&1 || true
+  fi
+  BOOTSTRAP_NETWORK_PIDS=()
+  BOOTSTRAP_NETWORK_DIR=""
+  BOOTSTRAP_NETWORK_ORIGINAL_LIFECYCLES=""
+  (( restart_canonical == 0 )) || app_bootstrap_start_canonical_forwarders
+}
+
+app_bootstrap_network_candidate() {
+  local candidate="$1" events_fd="$2" request_id="$3" box ready log pid attempt
+  BOOTSTRAP_NETWORK_FAILURE_WORKSPACE=""
+  BOOTSTRAP_NETWORK_REVISION="$(/usr/bin/shasum -a 256 "$candidate" | /usr/bin/awk '{print $1}')" || return 1
+  [[ "$BOOTSTRAP_NETWORK_REVISION" =~ ^[0-9a-f]{64}$ ]] || return 1
+  BOOTSTRAP_NETWORK_DIR="$(mktemp -d "$(dirname "$candidate")/.bootstrap-network.XXXXXX")" || return 1
+  for box in "${WORKSPACES[@]}"; do
+    app_bootstrap_progress "$events_fd" "$request_id" workspaces 0 \
+      "Queued candidate networking for '$box'." workspace-networking "$box" "$BOOTSTRAP_NETWORK_REVISION" || return 1
+  done
+  for box in "${WORKSPACES[@]}"; do
+    BOOTSTRAP_NETWORK_FAILURE_WORKSPACE="$box"
+    ready="$BOOTSTRAP_NETWORK_DIR/$box.ready"
+    log="$BOOTSTRAP_NETWORK_DIR/$box.log"
+    port_forwarder_stop "$box"
+    port_forwarder_stop_launchd "$box"
+    if workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
+      BOOTSTRAP_NETWORK_ORIGINAL_LIFECYCLES+="${box}:running"$'\n'
+    else
+      BOOTSTRAP_NETWORK_ORIGINAL_LIFECYCLES+="${box}:stopped"$'\n'
+      if ! (ensure_running "$box") >"$BOOTSTRAP_NETWORK_DIR/$box.start.log" 2>&1; then
+        app_bootstrap_progress "$events_fd" "$request_id" workspaces 0 \
+          "Candidate networking failed for '$box'." workspace-networking "$box" "$BOOTSTRAP_NETWORK_REVISION" || true
+        app_bootstrap_network_cleanup 1
+        return 1
+      fi
+    fi
+    app_bootstrap_progress "$events_fd" "$request_id" workspaces 0 \
+      "Starting candidate networking for '$box'." workspace-networking "$box" "$BOOTSTRAP_NETWORK_REVISION" || return 1
+    SILO_WORKSPACES_FILE="$candidate" \
+      SILO_SSH_BIN="${SILO_PORT_FORWARDER_SSH_BIN:-$SSH_BIN}" \
+      SILO_SSH_PROXY_NO_START=1 \
+      SILO_PORT_FORWARDER_TRANSACTION=1 \
+      SILO_PORT_FORWARDER_READY_FILE="$ready" \
+      SILO_PORT_FORWARDER_REVISION="$BOOTSTRAP_NETWORK_REVISION" \
+      SILO_PORT_FORWARDER_REQUIRED_PORTS="24678,24679" \
+      SILO_PORT_FORWARDER_SSH_ERR="$BOOTSTRAP_NETWORK_DIR/$box.ssh.err" \
+      "$SILO_PYTHON_BIN" "$PORT_FORWARDER_BIN" "$box" >"$log" 2>&1 &
+    pid=$!
+    BOOTSTRAP_NETWORK_PIDS+=("$pid")
+    attempt=0
+    until "$JQ_BIN" -e --arg box "$box" --arg revision "$BOOTSTRAP_NETWORK_REVISION" \
+      '.schemaVersion == 1 and .workspace == $box and .revision == $revision and .status == "ready"' \
+      "$ready" >/dev/null 2>&1; do
+      kill -0 "$pid" >/dev/null 2>&1 || break
+      attempt=$((attempt + 1))
+      (( attempt < 120 )) || break
+      sleep 0.25
+    done
+    if ! "$JQ_BIN" -e --arg box "$box" --arg revision "$BOOTSTRAP_NETWORK_REVISION" \
+      '.schemaVersion == 1 and .workspace == $box and .revision == $revision and .status == "ready"' \
+      "$ready" >/dev/null 2>&1; then
+      app_bootstrap_progress "$events_fd" "$request_id" workspaces 0 \
+        "Candidate networking failed for '$box'." workspace-networking "$box" "$BOOTSTRAP_NETWORK_REVISION" || true
+      app_bootstrap_network_cleanup 1
+      return 1
+    fi
+    app_bootstrap_progress "$events_fd" "$request_id" workspaces 1 \
+      "Candidate networking is ready for '$box'." workspace-networking "$box" "$BOOTSTRAP_NETWORK_REVISION" || return 1
+  done
+  BOOTSTRAP_NETWORK_FAILURE_WORKSPACE=""
+}
+
+app_bootstrap_verification_failure() {
+  "$SILO_PYTHON_BIN" -c '
+import json, re, sys
+ansi = re.compile(r"(?:\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~])")
+current = ""
+items = []
+markers = []
+skip = ("no GitHub policy", "no GitHub repositories ticked", "Pulling ", "Pulled ")
+for raw in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines():
+    line = ansi.sub("", raw)
+    line = "".join(ch for ch in line if ch in "\t\n" or ord(ch) >= 32 and ord(ch) != 127).strip()
+    marker = line.split("\t", 3)
+    if len(marker) == 4 and marker[0] == "SILO_VERIFY_FAILURE":
+        key = (marker[1], marker[2], marker[3])
+        if key not in markers:
+            markers.append(key)
+        continue
+    match = re.search(r"Deep-checking ([a-z][a-z0-9-]{0,31})", line)
+    if match:
+        current = match.group(1)
+        continue
+    if not line or any(value in line for value in skip):
+        continue
+    if re.search(r"\bSILO_[A-Z0-9_]+\b", line):
+        continue
+    line = re.sub(r"^(?:silo:\s*|warning:\s*|==>\s*|✓\s*)", "", line).strip()
+    if line in {"deep checks failed", "one or more checks failed; rerun setup.sh"}:
+        continue
+    if not re.search(r"failed|missing|unreachable|quarantined|did not|invalid|error|could not", line, re.I):
+        continue
+    workspace_match = re.match(r"([a-z][a-z0-9-]{0,31}):\s*(.*)", line)
+    workspace = workspace_match.group(1) if workspace_match else current
+    message = workspace_match.group(2) if workspace_match else line
+    lower = message.lower()
+    if "docker" in lower or "containerd" in lower:
+        component = "Docker"
+    elif "published port" in lower or "ssh" in lower or "hostname" in lower or "loopback" in lower:
+        component = "networking"
+    elif "github" in lower or "proxy" in lower or "quarantin" in lower:
+        component = "GitHub"
+    elif "volume" in lower or "snapshot" in lower or "ext4" in lower or "storage" in lower:
+        component = "storage"
+    elif "sandbox" in lower or "systemd" in lower or "microsandbox" in lower:
+        component = "runtime"
+    else:
+        component = "configuration"
+    key = (workspace, component, message)
+    if key not in items:
+        items.append(key)
+workspace, component, message = (markers or items or [("", "configuration", "The verification command did not identify a safe actionable detail.")])[0]
+print(json.dumps({"workspace": workspace, "component": component, "message": message}, separators=(",", ":")))
+'
 }
 
 app_cmd_runtime_attest() {
@@ -9704,7 +9968,7 @@ app_cmd_runtime_attest() {
 
 app_cmd_bootstrap() {
   local resume=0 events_fd="" workspace_config_fd="" format="" phase request_id output recovery detail
-  local secrets_file="" missing_secret="" box
+  local secrets_file="" missing_secret="" box failure_record failure_workspace failure_component
   while (( $# > 0 )); do
     case "$1" in
       --resume) resume=1; shift ;;
@@ -9719,6 +9983,8 @@ app_cmd_bootstrap() {
   [[ -n "$workspace_config_fd" ]] || app_usage_error bootstrap "bootstrap requires --workspace-config-fd"
   [[ "$workspace_config_fd" =~ ^[0-9]+$ ]] || app_usage_error bootstrap "workspace config fd must be numeric"
   request_id="${SILO_APP_REQUEST_ID:-$(app_request_id)}"
+  BOOTSTRAP_EVENTS_FD="$events_fd"
+  BOOTSTRAP_REQUEST_ID="$request_id"
   app_require_config bootstrap
   app_require_runtime bootstrap
   if ! ensure_base_snapshot_for_app_bootstrap; then
@@ -9769,13 +10035,11 @@ app_cmd_bootstrap() {
       "Repair the reported SSH integration issue, then resume Setup." "" true 69
   fi
 
+  BOOTSTRAP_NETWORK_REVISION="$(/usr/bin/shasum -a 256 "$WORKSPACE_CONFIGURATION_STAGED_FILE" | /usr/bin/awk '{print $1}')"
+
   for phase in preflight toolchain host-integration workspaces; do
-    if [[ -n "$events_fd" ]]; then
-      printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":%s,"fraction":1,"message":%s,"safeForDisplay":true}\n' \
-        "$(app_json_string "$request_id")" \
-        "$(app_json_string "$phase")" \
-        "$(app_json_string "The native setup coordinator completed this phase.")" >&"$events_fd"
-    fi
+    app_bootstrap_progress "$events_fd" "$request_id" "$phase" 1 \
+      "The native setup coordinator completed this phase." "$phase" "" "$BOOTSTRAP_NETWORK_REVISION"
   done
 
   # Deep verification must start each stopped workspace. A workspace whose
@@ -9783,6 +10047,12 @@ app_cmd_bootstrap() {
   # let the app route the user into the GitHub connection flow instead of
   # failing with a generic verification error.
   for box in "${WORKSPACES[@]}"; do
+    if app_workspace_quarantined "$box"; then
+      app_bootstrap_discard_staged_configuration "workspace quarantined"
+      app_emit_error bootstrap "SILO_BOOTSTRAP_VERIFICATION_FAILED" \
+        "Workspace '$box' is quarantined and cannot be verified." \
+        "Clear the quarantine by repairing the GitHub configuration for '$box', then resume Setup." "$box" true 69
+    fi
     if { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; } &&
       ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
       ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
@@ -9816,28 +10086,42 @@ app_cmd_bootstrap() {
       fi
     done
   fi
-  if [[ -n "$events_fd" ]]; then
-    printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":0,"message":"Starting the complete deep verification. Workspaces may start temporarily and the previous running set will be restored.","safeForDisplay":true}\n' \
-      "$(app_json_string "$request_id")" >&"$events_fd"
+  if ! app_bootstrap_network_candidate "$WORKSPACE_CONFIGURATION_STAGED_FILE" "$events_fd" "$request_id"; then
+    failure_workspace="$BOOTSTRAP_NETWORK_FAILURE_WORKSPACE"
+    app_bootstrap_discard_staged_configuration "candidate networking failed"
+    app_emit_error bootstrap "SILO_CANDIDATE_NETWORKING_FAILED" \
+      "Candidate networking could not become ready${failure_workspace:+ for '$failure_workspace'}." \
+      "Repair workspace startup or SSH forwarding${failure_workspace:+ for '$failure_workspace'}, then resume Setup." \
+      "$failure_workspace" true 69
   fi
-  if ! output="$(cmd_check --deep 2>&1)"; then
+  trap 'app_bootstrap_network_cleanup 1; exit 130' INT
+  trap 'app_bootstrap_network_cleanup 1; exit 143' TERM HUP
+  app_bootstrap_progress "$events_fd" "$request_id" verification 0 \
+    "Starting the complete deep verification. Workspaces may start temporarily and the previous running set will be restored." \
+    verification "" "$BOOTSTRAP_NETWORK_REVISION"
+  if ! output="$(SILO_WORKSPACES_FILE="$WORKSPACE_CONFIGURATION_STAGED_FILE" cmd_check --deep 2>&1)"; then
     # Deep verification failed: keep the previously committed configuration
     # byte-identical and mark this run's new/recreated boxes
     # needs-configuration so a retry recreates their unverified VMs instead
     # of trusting them. (bash 3.2 + set -u: an empty array must not be
     # expanded; check the length first, like app_apply_release_all.)
+    failure_record="$(app_redact "$output" | app_bootstrap_verification_failure)"
+    failure_workspace="$($JQ_BIN -r '.workspace // ""' <<<"$failure_record")"
+    failure_component="$($JQ_BIN -r '.component // "configuration"' <<<"$failure_record")"
+    detail="$($JQ_BIN -r '.message // "Workspace bootstrap verification failed."' <<<"$failure_record")"
     app_bootstrap_discard_staged_configuration "deep verification failed"
-    recovery="Repair the reported Silo configuration or runtime issue, then resume Setup."
-    if [[ -n "$output" ]]; then
-      detail="$(app_redact "$output" | /usr/bin/tail -n 12 | /usr/bin/tr '\n' ' ')"
-      [[ -z "$detail" ]] || recovery="Verification reported: ${detail}"
+    if [[ "$detail" == *quarantined* && -n "$failure_workspace" ]]; then
+      recovery="Clear the quarantine for '$failure_workspace' after repairing its GitHub configuration, then resume Setup."
+    else
+      recovery="Repair the $failure_component check${failure_workspace:+ for '$failure_workspace'}, then resume Setup."
     fi
-    app_emit_error bootstrap "SILO_BOOTSTRAP_VERIFICATION_FAILED" "Workspace bootstrap verification failed." "$recovery" "" true 69
+    app_emit_error bootstrap "SILO_BOOTSTRAP_VERIFICATION_FAILED" "$detail" "$recovery" "$failure_workspace" true 69
   fi
-  if [[ -n "$events_fd" ]]; then
-    printf '{"schemaVersion":1,"type":"progress","requestId":%s,"phase":"verification","fraction":1,"message":"Deep verification passed and the previous running set was restored.","safeForDisplay":true}\n' \
-      "$(app_json_string "$request_id")" >&"$events_fd"
-  fi
+  app_bootstrap_progress "$events_fd" "$request_id" verification 1 \
+    "Deep verification passed and the previous running set was restored." \
+    verification "" "$BOOTSTRAP_NETWORK_REVISION"
+  app_bootstrap_network_cleanup 0
+  trap - INT TERM HUP
 
   # Deep verification passed: record configured journals for every verified
   # workspace (this also upgrades legacy workspaces that predate the journal)
@@ -9846,12 +10130,20 @@ app_cmd_bootstrap() {
     workspace_config_state_write "$box" configured || true
   done
   mv "$WORKSPACE_CONFIGURATION_STAGED_FILE" "$SILO_WORKSPACES_FILE" || {
+    app_bootstrap_start_canonical_forwarders
     app_bootstrap_discard_staged_configuration "workspace configuration commit failed"
     app_emit_error bootstrap "SILO_WORKSPACE_CONFIGURATION_FAILED" \
       "Workspace verification passed but the configuration could not be committed." \
       "Review workspace names and limits, then retry Setup." "" true 78
   }
   WORKSPACE_CONFIGURATION_STAGED_FILE=""
+  for box in "${WORKSPACES[@]}"; do
+    port_forwarder_start "$box" || {
+      app_emit_error bootstrap "SILO_CANDIDATE_NETWORKING_FAILED" \
+        "Workspace configuration committed, but persistent forwarding could not start for '$box'." \
+        "Repair SSH forwarding for '$box', then resume Setup." "$box" true 69
+    }
+  done
   app_emit_success bootstrap '{"resumed":true,"phase":"complete","requiresApproval":false,"vmsStarted":true,"message":"Workspace bootstrap and deep verification completed; the previous running set was restored."}'
 }
 

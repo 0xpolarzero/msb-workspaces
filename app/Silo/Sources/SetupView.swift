@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 
 @MainActor
@@ -243,10 +244,257 @@ private enum SetupStep: String, CaseIterable, Identifiable {
 }
 
 
-enum SetupBootstrapVerification: Equatable {
-    case pending
+enum SetupQueueItemID: String, CaseIterable, Identifiable, Sendable, Hashable {
+    case workspaceRun
+    case workspaceVerify
+    case githubRun
+    case githubVerify
+    case identityRun
+    case identityVerify
+    case completion
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .workspaceRun: return "Create workspaces"
+        case .workspaceVerify: return "Verify workspaces"
+        case .githubRun: return "Save GitHub access"
+        case .githubVerify: return "Verify GitHub access"
+        case .identityRun: return "Save Git identity"
+        case .identityVerify: return "Verify Git identity"
+        case .completion: return "Finish setup"
+        }
+    }
+}
+
+enum SetupQueueItemStatus: String, Sendable, Equatable {
+    case queued
+    case running
     case succeeded
-    case failed(String)
+    case failed
+}
+
+struct SetupIdentityQueueInput: Equatable, Sendable {
+    let name: String
+    let email: String
+    let target: String?
+}
+
+enum SetupQueueInput: Equatable, Sendable {
+    case workspaces([SetupWorkspaceConfiguration])
+    case github([GitHubWorkspacePolicy])
+    case identity(SetupIdentityQueueInput)
+    case skipped
+    case completion
+}
+
+struct SetupQueueItem: Identifiable, Equatable, Sendable {
+    let id: SetupQueueItemID
+    let label: String
+    var status: SetupQueueItemStatus
+    var input: SetupQueueInput?
+    var failure: String?
+    var candidateRevision: Int?
+}
+
+enum SetupPlan {
+    static let orderedIDs = SetupQueueItemID.allCases
+    static let dependencies: [SetupQueueItemID: [SetupQueueItemID]] = [
+        .workspaceRun: [],
+        .workspaceVerify: [.workspaceRun],
+        .githubRun: [.workspaceRun],
+        .githubVerify: [.githubRun],
+        .identityRun: [.githubVerify],
+        .identityVerify: [.identityRun],
+        .completion: [.workspaceVerify, .identityVerify]
+    ]
+}
+
+/// The setup queue is the sole owner of operation ordering and presentation.
+/// Views submit retained inputs and render this store; they never infer a
+/// second progress label from task-local flags.
+@MainActor
+@Observable
+final class SetupState {
+    private(set) var items: [SetupQueueItem] = SetupPlan.orderedIDs.map {
+        SetupQueueItem(id: $0, label: $0.label, status: .queued)
+    }
+    private(set) var revision = 0
+
+    var runningItem: SetupQueueItem? { items.first { $0.status == .running } }
+    var failedItem: SetupQueueItem? { items.first { $0.status == .failed } }
+    var currentLabel: String? { runningItem?.label }
+    var isDone: Bool { status(of: .completion) == .succeeded }
+
+    func item(_ id: SetupQueueItemID) -> SetupQueueItem {
+        items[SetupPlan.orderedIDs.firstIndex(of: id)!]
+    }
+
+    func status(of id: SetupQueueItemID) -> SetupQueueItemStatus {
+        item(id).status
+    }
+
+    @discardableResult
+    func submitWorkspaces(_ configurations: [SetupWorkspaceConfiguration]) -> Int {
+        revision &+= 1
+        for index in items.indices {
+            items[index].status = .queued
+            items[index].failure = nil
+            items[index].candidateRevision = revision
+        }
+        setInput(.workspaces(configurations), for: [.workspaceRun, .workspaceVerify])
+        return revision
+    }
+
+    func submitGitHub(_ input: SetupQueueInput) {
+        if item(.githubRun).input != input || status(of: .githubRun) == .succeeded {
+            reset(from: .githubRun)
+        }
+        setInput(input, for: [.githubRun, .githubVerify])
+    }
+
+    func submitIdentity(_ input: SetupIdentityQueueInput) {
+        let retained = SetupQueueInput.identity(input)
+        if item(.identityRun).input != retained || status(of: .identityRun) == .succeeded {
+            reset(from: .identityRun)
+        }
+        setInput(retained, for: [.identityRun, .identityVerify])
+    }
+
+    func submitIdentitySkip() {
+        if item(.identityRun).input != .skipped { reset(from: .identityRun) }
+        setInput(.skipped, for: [.identityRun, .identityVerify])
+        settleRetainedDecisions()
+    }
+
+    func submitGitHubSkip() {
+        if item(.githubRun).input != .skipped { reset(from: .githubRun) }
+        setInput(.skipped, for: [.githubRun, .githubVerify])
+        settleRetainedDecisions()
+    }
+
+    @discardableResult
+    func begin(_ id: SetupQueueItemID, revision candidateRevision: Int? = nil) -> Bool {
+        guard runningItem == nil, failedItem == nil,
+              let index = index(of: id), items[index].status == .queued,
+              candidateRevision == nil || candidateRevision == revision,
+              dependenciesSucceeded(for: id, revision: items[index].candidateRevision) else {
+            return false
+        }
+        items[index].status = .running
+        return true
+    }
+
+    func succeed(_ id: SetupQueueItemID, revision candidateRevision: Int? = nil) {
+        guard let index = index(of: id),
+              candidateRevision == nil || candidateRevision == revision,
+              items[index].status == .running || items[index].status == .queued,
+              dependenciesSucceeded(for: id, revision: items[index].candidateRevision) else { return }
+        items[index].status = .succeeded
+        items[index].failure = nil
+        settleRetainedDecisions()
+    }
+
+    func fail(_ id: SetupQueueItemID, message: String, revision candidateRevision: Int? = nil) {
+        guard let index = index(of: id),
+              candidateRevision == nil || candidateRevision == revision else { return }
+        if let running = runningItem, running.id != id { return }
+        items[index].status = .failed
+        items[index].failure = message
+    }
+
+    func deferItem(_ id: SetupQueueItemID, revision candidateRevision: Int) {
+        guard candidateRevision == revision, let index = index(of: id),
+              items[index].status == .running else { return }
+        items[index].status = .queued
+    }
+
+    @discardableResult
+    func retryFailedItem() -> SetupQueueItemID? {
+        guard let failed = failedItem, let index = index(of: failed.id) else { return nil }
+        items[index].status = .queued
+        items[index].failure = nil
+        return failed.id
+    }
+
+    func deriveCompletion(requirementsSatisfied: Bool) {
+        guard let index = index(of: .completion) else { return }
+        items[index].input = .completion
+        if requirementsSatisfied,
+           dependenciesSucceeded(for: .completion, revision: items[index].candidateRevision),
+           failedItem == nil,
+           runningItem == nil {
+            items[index].status = .succeeded
+            items[index].failure = nil
+        } else if items[index].status == .succeeded {
+            items[index].status = .queued
+        }
+    }
+
+    func consume(_ event: SiloProgressEvent, candidateRevision: Int? = nil) {
+        let reportedRevision = event.revision ?? candidateRevision
+        guard reportedRevision == nil || reportedRevision == revision else { return }
+        let normalized = (event.step ?? event.phase).lowercased()
+        let id: SetupQueueItemID = normalized.contains("verif")
+            ? .workspaceVerify
+            : .workspaceRun
+        if id == .workspaceVerify, status(of: .workspaceRun) == .running {
+            succeed(.workspaceRun, revision: reportedRevision)
+        }
+        if status(of: id) == .queued {
+            _ = begin(id, revision: reportedRevision)
+        }
+    }
+
+    func settleRetainedDecisions() {
+        for pair in [
+            (SetupQueueItemID.githubRun, SetupQueueItemID.githubVerify),
+            (.identityRun, .identityVerify)
+        ] {
+            guard item(pair.0).input == .skipped else { continue }
+            if status(of: pair.0) == .queued,
+               dependenciesSucceeded(for: pair.0, revision: item(pair.0).candidateRevision) {
+                items[index(of: pair.0)!].status = .succeeded
+            }
+            if status(of: pair.1) == .queued,
+               dependenciesSucceeded(for: pair.1, revision: item(pair.1).candidateRevision) {
+                items[index(of: pair.1)!].status = .succeeded
+            }
+        }
+    }
+
+    private func setInput(_ input: SetupQueueInput, for ids: [SetupQueueItemID]) {
+        for id in ids where index(of: id) != nil {
+            let index = index(of: id)!
+            items[index].input = input
+            items[index].candidateRevision = revision
+        }
+    }
+
+    private func reset(from id: SetupQueueItemID) {
+        guard let first = SetupPlan.orderedIDs.firstIndex(of: id) else { return }
+        for candidate in SetupPlan.orderedIDs[first...] {
+            guard let index = index(of: candidate) else { continue }
+            items[index].status = .queued
+            items[index].failure = nil
+            items[index].candidateRevision = revision
+        }
+    }
+
+    private func dependenciesSucceeded(
+        for id: SetupQueueItemID,
+        revision candidateRevision: Int?
+    ) -> Bool {
+        (SetupPlan.dependencies[id] ?? []).allSatisfy { dependency in
+            let item = item(dependency)
+            return item.status == .succeeded && item.candidateRevision == candidateRevision
+        }
+    }
+
+    private func index(of id: SetupQueueItemID) -> Int? {
+        items.firstIndex { $0.id == id }
+    }
 }
 
 @MainActor
@@ -282,13 +530,10 @@ struct SetupView: View {
     let startupRecoveryBlockedReason: String?
     let retryStartupRecovery: () -> Void
     let setupLifecycle: SetupLifecycleGate
+    @State private var setupQueue = SetupState()
     @State private var checks: [SiloPreflightCheck] = []
     @State private var state = SiloBootstrapState.initial
-    @State private var isRunning = false
     @State private var registrationTask: Task<Void, Never>?
-    @State private var registrationConfiguration: [SetupWorkspaceConfiguration]?
-    @State private var queuedRegistrationConfiguration: [SetupWorkspaceConfiguration]?
-    @State private var registrationFailure: String?
     @State private var isChecking = true
     @State private var runtimeSetupPhase = SiloRuntimeSetupPhase.installingRuntime
     @State private var runtimeSetupError: String?
@@ -512,6 +757,9 @@ struct SetupView: View {
         .onChange(of: activeStep) { _, step in
             if step == .workspaces { refreshWorkspaceNameApprovalHint() }
         }
+        .onChange(of: reviewRequirementsSatisfied, initial: true) { _, satisfied in
+            setupQueue.deriveCompletion(requirementsSatisfied: satisfied)
+        }
         .sheet(isPresented: $deviceFlowShown) {
             if let session = deviceFlowSession {
                 GitHubDeviceFlowView(
@@ -606,7 +854,17 @@ struct SetupView: View {
     }
 
     private var registrationOutstanding: Bool {
-        isRunning || queuedRegistrationConfiguration != nil
+        [SetupQueueItemID.workspaceRun, .workspaceVerify].contains {
+            let status = setupQueue.status(of: $0)
+            return status == .queued || status == .running
+        } && setupQueue.item(.workspaceRun).input != nil
+    }
+
+    private var registrationFailure: String? {
+        for id in [SetupQueueItemID.workspaceRun, .workspaceVerify] {
+            if let failure = setupQueue.item(id).failure { return failure }
+        }
+        return nil
     }
 
     private var systemReady: Bool {
@@ -675,21 +933,6 @@ struct SetupView: View {
         guard let issueWorkspace else { return false }
         return committedWorkspaces.contains(issueWorkspace)
     }
-
-    /// Plain-language status for the phase currently being applied while the
-    /// Continue button is disabled and spinning.
-    static func bootstrapPhaseProgress(for phase: SiloBootstrapState.Phase) -> String {
-        switch phase {
-        case .welcome, .preflight: return "Running system checks"
-        case .toolchain: return "Checking the Silo runtime"
-        case .hostIntegration: return "Updating system records"
-        case .workspaces: return "Registering your workspaces"
-        case .github, .identity: return "Saving access choices"
-        case .complete: return "Finishing verification"
-        }
-    }
-
-
 
     private var showsGitHubConnectAction: Bool {
         account == nil
@@ -777,17 +1020,7 @@ struct SetupView: View {
         validationMessage == nil && bootstrapInputReady
     }
 
-    static func bootstrapVerification(
-        registrationOutstanding: Bool,
-        completed: Bool,
-        failure: String?
-    ) -> SetupBootstrapVerification {
-        if registrationOutstanding { return .pending }
-        if let failure { return .failed(failure) }
-        return completed ? .succeeded : .pending
-    }
-
-    private var canCompleteReview: Bool {
+    private var reviewRequirementsSatisfied: Bool {
         workspaceValidationMessage == nil && Self.allowsReviewCompletion(
             contextLoaded: githubContextLoaded,
             systemReady: canFinishWithoutGitHub,
@@ -797,6 +1030,8 @@ struct SetupView: View {
             registrationOutstanding: registrationOutstanding
         )
     }
+
+    private var canCompleteReview: Bool { setupQueue.isDone }
 
     private var hostIntegrationNeedsPackagedBuild: Bool {
         checks.contains { $0.id == "host-integration" && $0.status == .unavailable }
@@ -877,7 +1112,7 @@ struct SetupView: View {
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
                 .disabled(!canSelectStep(step))
-                .opacity(canSelectStep(step) ? 1 : 0.55)
+                .opacity(activeStep == step || canSelectStep(step) ? 1 : 0.55)
                 .help(stepHelpText(step))
                 .accessibilityIdentifier(step.accessibilityIdentifier)
                 .accessibilityValue(
@@ -970,11 +1205,17 @@ struct SetupView: View {
             validationMessage: workspaceValidationMessage,
             bootstrapInputReady: bootstrapInputReady
         ) else { return }
-        registrationFailure = nil
         workspaceConfigurationAccepted = true
         rebuildWorkspaceScopedState()
         if !uiTestMode {
             persistResumeState()
+        }
+        if case .workspaces(let retained)? = setupQueue.item(.workspaceRun).input,
+           retained == workspaceConfigurations {
+            // Keep the in-flight candidate and its progress when navigation
+            // revisits Workspaces without changing the submitted values.
+        } else {
+            setupQueue.submitWorkspaces(workspaceConfigurations)
         }
         startWorkspaceRegistration()
         startGitHubContextLoad()
@@ -993,6 +1234,10 @@ struct SetupView: View {
     /// on this step with a retryable issue rather than bypassing cleanup.
     private func skipGitHub() {
         guard !githubSkipped, !isConnectingGitHub, !isApplyingGitHub, !isSkippingGitHub else { return }
+        if let failed = setupQueue.failedItem,
+           failed.id == .githubRun || failed.id == .githubVerify {
+            _ = setupQueue.retryFailedItem()
+        }
         if accessMode == .local {
             if githubReconnectRequired {
                 guard let provider else {
@@ -1000,6 +1245,11 @@ struct SetupView: View {
                     return
                 }
                 isSkippingGitHub = true
+                setupQueue.submitGitHub(.skipped)
+                guard setupQueue.begin(.githubRun, revision: setupQueue.revision) else {
+                    isSkippingGitHub = false
+                    return
+                }
                 githubSkipTask?.cancel()
                 githubSkipTask = Task {
                     do {
@@ -1008,6 +1258,8 @@ struct SetupView: View {
                         isSkippingGitHub = false
                         githubSkipTask = nil
                         githubSkipped = true
+                        setupQueue.succeed(.githubRun, revision: setupQueue.revision)
+                        _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
                         githubReconnectRequired = false
                         githubAttentionWorkspace = nil
                         repositoryPolicyApplied = false
@@ -1020,6 +1272,7 @@ struct SetupView: View {
                     } catch {
                         isSkippingGitHub = false
                         githubSkipTask = nil
+                        setupQueue.fail(.githubRun, message: error.localizedDescription)
                         githubSkipIssue = "GitHub credential grants were not disabled: \(error.localizedDescription) Retry before continuing."
                         githubSkipIssueWorkspace = githubAttentionWorkspace
                     }
@@ -1027,6 +1280,7 @@ struct SetupView: View {
                 return
             }
             githubSkipped = true
+            setupQueue.submitGitHubSkip()
             authorizationIssue = nil
             localCatalogIssue = nil
             githubStatus = "GitHub credential grants skipped. You can go back and connect GitHub later."
@@ -1049,12 +1303,20 @@ struct SetupView: View {
         // state models a verified unbind so test navigation can be exercised
         // without invoking a developer's Silo runtime.
         let usesFixtureGitHubSkip = uiTestMode
+        if affectedWorkspace != nil {
+            setupQueue.submitGitHub(.skipped)
+            guard setupQueue.begin(.githubRun, revision: setupQueue.revision) else {
+                isSkippingGitHub = false
+                return
+            }
+        }
         githubSkipTask = Task {
             if let affectedWorkspace, !usesFixtureGitHubSkip {
                 guard let coordinator else {
                     await MainActor.run {
                         isSkippingGitHub = false
                         githubSkipTask = nil
+                        setupQueue.fail(.githubRun, message: "GitHub access could not be updated.")
                         githubSkipIssue = "GitHub access for \(affectedWorkspace) could not be updated. Existing access remains unchanged; reconnect \(affectedWorkspace) instead."
                         githubSkipIssueWorkspace = nil
                     }
@@ -1070,6 +1332,7 @@ struct SetupView: View {
                         isSkippingGitHub = false
                         githubSkipTask = nil
                         existingMetadata = refreshedMetadata
+                        setupQueue.fail(.githubRun, message: error.localizedDescription)
                         githubSkipIssue = "GitHub access for \(affectedWorkspace) could not be turned off safely: \(error.localizedDescription) Try again when the workspace is available, or reconnect GitHub instead."
                         githubSkipIssueWorkspace = affectedWorkspace
                     }
@@ -1092,6 +1355,13 @@ struct SetupView: View {
                 isSkippingGitHub = false
                 githubSkipTask = nil
                 githubSkipped = true
+                if affectedWorkspace != nil {
+                    setupQueue.succeed(.githubRun, revision: setupQueue.revision)
+                    _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
+                    setupQueue.succeed(.githubVerify, revision: setupQueue.revision)
+                } else {
+                    setupQueue.submitGitHubSkip()
+                }
                 authorizationIssue = nil
                 githubAttentionWorkspace = nil
                 githubReconnectRequired = false
@@ -2116,28 +2386,8 @@ struct SetupView: View {
                 ready: workspaceValidationMessage == nil,
                 accessibilityIdentifier: "setup.final-review.workspaces"
             )
-            workspaceBootstrapReviewStatus
-            if !canFinishWithoutGitHub && systemReady {
-                Button(registrationOutstanding ? "Finishing workspace setup…" : "Finish workspace setup") {
-                    startWorkspaceRegistration()
-                }
-                .disabled(registrationOutstanding || coordinator == nil)
-                .controlSize(.small)
-                .accessibilityIdentifier("setup.review.verify.button")
-            }
-            reviewStatusLine(
-                title: "GitHub credential grants",
-                value: "Public repositories remain cloneable without a grant.",
-                ready: githubDecisionMade && verificationAllowsCompletion
-            )
+            setupQueueReview
             githubApplyProgressView
-            reviewStatusLine(
-                title: "Name for Git changes",
-                value: identityReviewMessage,
-                ready: identityDecisionMade,
-                pending: isSavingIdentity,
-                accessibilityIdentifier: "setup.final-review.identity"
-            )
             reviewStatusLine(
                 title: "Terminal",
                 value: applicationPreferences.resolvedTerminalName,
@@ -2156,28 +2406,78 @@ struct SetupView: View {
     }
 
     @ViewBuilder
-    private var workspaceBootstrapReviewStatus: some View {
-        switch Self.bootstrapVerification(
-            registrationOutstanding: registrationOutstanding,
-            completed: canFinishWithoutGitHub,
-            failure: registrationFailure
-        ) {
-        case .pending:
-            Label("Workspace bootstrap verification pending", systemImage: "clock.fill")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("setup.review.registration.pending")
-        case .succeeded:
-            Label("System and workspaces verified", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .accessibilityIdentifier("setup.review.registration.succeeded")
-        case .failed(let failure):
-            Label(
-                "Workspace bootstrap verification failed: \(failure)",
-                systemImage: "exclamationmark.triangle.fill"
-            )
-            .foregroundStyle(.red)
-            .accessibilityIdentifier("setup.review.registration.failure")
+    private var setupQueueReview: some View {
+        ForEach(setupQueue.items) { item in
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: queueSymbol(for: item.status))
+                    .foregroundStyle(queueColor(for: item.status))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.label).font(.headline)
+                    if let failure = item.failure {
+                        Text(failure).font(.caption).foregroundStyle(.red)
+                    } else if item.id == .identityVerify {
+                        Text(identityReviewMessage).font(.caption).foregroundStyle(.secondary)
+                    } else if item.id == .githubVerify {
+                        Text("Public repositories remain cloneable without a grant.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(item.label)
+            .accessibilityValue(queueAccessibilityValue(for: item))
+            .accessibilityIdentifier(queueAccessibilityIdentifier(for: item))
         }
+        if let failed = setupQueue.failedItem {
+            Button("Retry \(failed.label)", action: retrySetupQueue)
+                .controlSize(.small)
+                .accessibilityIdentifier("setup.review.verify.button")
+        } else if setupQueue.status(of: .workspaceRun) == .succeeded,
+                  setupQueue.status(of: .workspaceVerify) == .queued {
+            Button("Verify workspaces", action: startWorkspaceRegistration)
+                .controlSize(.small)
+                .accessibilityIdentifier("setup.review.verify.button")
+        }
+    }
+
+    private func queueSymbol(for status: SetupQueueItemStatus) -> String {
+        switch status {
+        case .queued: return "clock"
+        case .running: return "ellipsis.circle"
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func queueColor(for status: SetupQueueItemStatus) -> Color {
+        switch status {
+        case .queued, .running: return .secondary
+        case .succeeded: return .green
+        case .failed: return .red
+        }
+    }
+
+    private func queueAccessibilityIdentifier(for item: SetupQueueItem) -> String {
+        if item.id == .workspaceRun, item.status == .failed {
+            return "setup.review.registration.failure"
+        }
+        if item.id == .workspaceVerify {
+            switch item.status {
+            case .queued, .running: return "setup.review.registration.pending"
+            case .succeeded: return "setup.review.registration.succeeded"
+            case .failed: return "setup.review.registration.failure"
+            }
+        }
+        if item.id == .identityVerify { return "setup.final-review.identity" }
+        return "setup.review.queue.\(item.id.rawValue)"
+    }
+
+    private func queueAccessibilityValue(for item: SetupQueueItem) -> String {
+        if let failure = item.failure { return failure }
+        if item.id == .identityVerify { return identityReviewMessage }
+        return item.status.rawValue.capitalized
     }
 
     private var workspaceConfigurationReviewSummary: String {
@@ -2262,41 +2562,27 @@ struct SetupView: View {
 
     private var footerStatus: some View {
         Group {
-            if let registrationFailure, activeStep != .review {
+            if let failed = setupQueue.failedItem, activeStep != .review {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label(
-                        "Workspace registration failed",
-                        systemImage: "exclamationmark.circle.fill"
-                    )
+                    Label("\(failed.label) failed", systemImage: "exclamationmark.circle.fill")
                     .fontWeight(.semibold)
-                    .accessibilityLabel("Workspace registration failed")
+                    .accessibilityLabel("\(failed.label) failed")
                     .accessibilityIdentifier("setup.registration.failure.title")
-                    Text(registrationFailure)
+                    Text(failed.failure ?? "Setup stopped before this item completed.")
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel(registrationFailure)
+                        .accessibilityLabel(failed.failure ?? "Setup stopped before this item completed.")
                         .accessibilityIdentifier("setup.registration.failure.detail")
                 }
                 .foregroundStyle(.red)
+            } else if let running = setupQueue.runningItem {
+                Label(running.label, systemImage: "ellipsis.circle")
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
             } else if let error {
                 Label(error, systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
             } else if let notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            } else if isApplyingGitHub {
-                Label("Saving your GitHub choices…", systemImage: "ellipsis.circle")
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-            } else if isSavingIdentity {
-                Label("Saving your Git name and email…", systemImage: "ellipsis.circle")
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-            } else if registrationOutstanding {
-                Label(
-                    "\(Self.bootstrapPhaseProgress(for: state.phase)) in the background…",
-                    systemImage: "ellipsis.circle"
-                )
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
             } else if hostIntegrationNeedsPackagedBuild {
                 Label("Install a complete signed Silo build to continue.", systemImage: "lock.circle.fill")
                     .foregroundStyle(.orange)
@@ -2322,6 +2608,8 @@ struct SetupView: View {
                 Button("Skip") {
                     identitySkipped = true
                     identityStatus = ""
+                    setupQueue.submitIdentitySkip()
+                    setupQueue.deriveCompletion(requirementsSatisfied: reviewRequirementsSatisfied)
                     activeStep = .review
                 }
                 .buttonStyle(.bordered)
@@ -2378,7 +2666,7 @@ struct SetupView: View {
                         .keyboardShortcut(.defaultAction)
                         .accessibilityIdentifier("setup.github.continue.button")
                 } else {
-                    Button(action: commitPolicy) {
+                    Button(action: { commitPolicy() }) {
                         ZStack {
                             Text("Continue")
                                 .opacity(isApplyingGitHub ? 0 : 1)
@@ -2723,6 +3011,10 @@ struct SetupView: View {
         // operation to release the lock, reset access, then resume it.
         let interruptedRegistration = registrationTask
         interruptedRegistration?.cancel()
+        if let running = setupQueue.runningItem,
+           running.id == .workspaceRun || running.id == .workspaceVerify {
+            setupQueue.deferItem(running.id, revision: setupQueue.revision)
+        }
         githubRefreshGeneration &+= 1
         let interruptedRefresh = githubRefreshTask
         interruptedRefresh?.cancel()
@@ -2760,7 +3052,6 @@ struct SetupView: View {
                     repositoryPolicyApplied = false
                 }
 
-                registrationFailure = nil
                 isResettingGitHub = false
                 githubResetTask = nil
                 if interruptedRegistration != nil {
@@ -2994,15 +3285,16 @@ struct SetupView: View {
         )
     }
 
-    private func commitPolicy() {
+    private func commitPolicy(retained: [GitHubWorkspacePolicy]? = nil) {
         guard workspaceConfigurationAccepted, githubContextLoaded else { return }
-        let workspacePolicies = workspacePolicy
+        let workspacePolicies = retained ?? workspacePolicy
         guard !workspacePolicies.isEmpty else {
             githubStatus = "Choose at least one repository, or skip GitHub."
             return
         }
         let policy = workspacePolicies.flatMap { $0.repositories }
         let submittedWorkspaceConfigurations = workspaceConfigurations
+        setupQueue.submitGitHub(.github(workspacePolicies))
 
         githubApplyGeneration &+= 1
         let generation = githubApplyGeneration
@@ -3032,11 +3324,10 @@ struct SetupView: View {
                         guard githubApplyGeneration == generation else { return }
                         isApplyingGitHub = false
                         githubApplyTask = nil
-                        self.error = registrationFailure
-                            ?? "Workspace setup did not finish, so GitHub choices were not saved."
                     }
                     return
                 }
+                guard setupQueue.begin(.githubRun, revision: setupQueue.revision) else { return }
                 do {
                     let progress = try await provider.savePolicy(workspacePolicies)
                     try Task.checkCancellation()
@@ -3051,6 +3342,8 @@ struct SetupView: View {
                         repositoryPolicyApplied = true
                         authorizationSessionID = nil
                         githubApplyProgress = progress
+                        setupQueue.succeed(.githubRun, revision: setupQueue.revision)
+                        _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
                         captureGitHubDraftBaseline()
                         editedGitHubWorkspaces.removeAll()
                         githubStatus = ""
@@ -3064,7 +3357,7 @@ struct SetupView: View {
                         isApplyingGitHub = false
                         githubApplyTask = nil
                         authorizationIssue = issue(for: error)
-                        self.error = error.localizedDescription
+                        setupQueue.fail(.githubRun, message: error.localizedDescription)
                         githubStatus = ""
                     }
                 }
@@ -3076,6 +3369,7 @@ struct SetupView: View {
             githubApplyTask = Task {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard !Task.isCancelled else { return }
+                guard setupQueue.begin(.githubRun, revision: setupQueue.revision) else { return }
                 let partitions = Dictionary(grouping: policy, by: { "\($0.workspace).\($0.installationID)" })
                 let verifications = partitions.values.flatMap { scope -> [GitHubWorkspaceVerificationResult] in
                     guard let first = scope.first else { return [] }
@@ -3143,11 +3437,15 @@ struct SetupView: View {
                         githubAttentionWorkspace = nil
                     }
                     repositoryPolicyApplied = true
+                    setupQueue.succeed(.githubRun, revision: setupQueue.revision)
+                    _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
+                    setupQueue.succeed(.githubVerify, revision: setupQueue.revision)
                     authorizationSessionID = nil
                     captureGitHubDraftBaseline()
                     editedGitHubWorkspaces.removeAll()
                     githubStatus = ""
                     activeStep = .identity
+                    resumeQueuedSetupWork()
                 }
             }
             return
@@ -3173,11 +3471,10 @@ struct SetupView: View {
                     guard githubApplyGeneration == generation else { return }
                     isApplyingGitHub = false
                     githubApplyTask = nil
-                    self.error = registrationFailure
-                        ?? "Workspace setup did not finish, so GitHub choices were not saved."
                 }
                 return
             }
+            guard setupQueue.begin(.githubRun, revision: setupQueue.revision) else { return }
             do {
                 let result = try await authorizationCoordinator.commitPolicyWithVerification(
                     sessionID: sessionID,
@@ -3219,10 +3516,14 @@ struct SetupView: View {
                         githubAttentionWorkspace = nil
                     }
                     repositoryPolicyApplied = true
+                    setupQueue.succeed(.githubRun, revision: setupQueue.revision)
+                    _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
+                    setupQueue.succeed(.githubVerify, revision: setupQueue.revision)
                     authorizationSessionID = nil
                     captureGitHubDraftBaseline()
                     editedGitHubWorkspaces.removeAll()
                     githubStatus = ""
+                    resumeQueuedSetupWork()
                 }
             } catch {
                 let retained = await authorizationCoordinator.verificationResults()
@@ -3234,7 +3535,10 @@ struct SetupView: View {
                     isApplyingGitHub = false
                     githubApplyTask = nil
                     authorizationIssue = issue(for: error)
-                    self.error = error.localizedDescription
+                    let failedID = setupQueue.runningItem?.id == .githubVerify
+                        ? SetupQueueItemID.githubVerify
+                        : .githubRun
+                    setupQueue.fail(failedID, message: error.localizedDescription)
                     githubStatus = ""
                 }
             }
@@ -3289,9 +3593,15 @@ struct SetupView: View {
                     githubApplyProgress = progress
                     isApplyingGitHub = false
                     if progress.isTerminalSuccess {
+                        setupQueue.succeed(.githubVerify, revision: setupQueue.revision)
                         editedGitHubWorkspaces.removeAll()
                         githubStatus = ""
+                        resumeQueuedSetupWork()
                     } else if progress.phase == .failed {
+                        setupQueue.fail(
+                            .githubVerify,
+                            message: progress.failure?.message ?? "GitHub verification failed."
+                        )
                         githubStatus = "GitHub choices are saved, but synchronization needs attention."
                     }
                 }
@@ -3303,6 +3613,10 @@ struct SetupView: View {
 
     private func retryLocalPolicyApply() {
         guard accessMode == .local, let provider else { return }
+        if setupQueue.failedItem?.id == .githubVerify {
+            _ = setupQueue.retryFailedItem()
+        }
+        _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
         githubApplyGeneration &+= 1
         let generation = githubApplyGeneration
         githubStatus = "Retrying GitHub synchronization…"
@@ -3315,6 +3629,7 @@ struct SetupView: View {
                 }
             } catch {
                 await MainActor.run {
+                    setupQueue.fail(.githubVerify, message: error.localizedDescription)
                     githubStatus = "GitHub synchronization could not be retried: \(error.localizedDescription)"
                 }
             }
@@ -3324,6 +3639,7 @@ struct SetupView: View {
     private func cancelLocalPolicyApply() {
         guard accessMode == .local, let provider else { return }
         githubProgressTask?.cancel()
+        setupQueue.deferItem(.githubVerify, revision: setupQueue.revision)
         Task {
             await provider.cancelPolicySync()
             let progress = await provider.policySyncProgress()
@@ -3453,6 +3769,13 @@ struct SetupView: View {
             githubContextLoaded = false
             return true
         }
+        setupQueue.submitWorkspaces(workspaceConfigurations)
+        _ = setupQueue.begin(.workspaceRun, revision: setupQueue.revision)
+        setupQueue.succeed(.workspaceRun, revision: setupQueue.revision)
+        if state.phase == .complete {
+            _ = setupQueue.begin(.workspaceVerify, revision: setupQueue.revision)
+            setupQueue.succeed(.workspaceVerify, revision: setupQueue.revision)
+        }
         workspaceConfigurationAccepted = true
         rebuildWorkspaceScopedState()
         githubReconnectRequired = state.phase == .github
@@ -3463,7 +3786,35 @@ struct SetupView: View {
         if loaded, githubReconnectRequired {
             githubAttentionWorkspace = state.reconnectWorkspace ?? firstReconnectWorkspace
         }
+        if loaded { restoreCompletedQueueDecisions() }
         return loaded
+    }
+
+    private func restoreCompletedQueueDecisions() {
+        if githubSkipped {
+            setupQueue.submitGitHubSkip()
+        } else if githubDecisionMade && verificationAllowsCompletion {
+            setupQueue.submitGitHub(.github(retainedRepositoryPolicy))
+            if setupQueue.begin(.githubRun, revision: setupQueue.revision) {
+                setupQueue.succeed(.githubRun, revision: setupQueue.revision)
+                _ = setupQueue.begin(.githubVerify, revision: setupQueue.revision)
+                setupQueue.succeed(.githubVerify, revision: setupQueue.revision)
+            }
+        }
+        if identitySkipped {
+            setupQueue.submitIdentitySkip()
+        } else if identityDecisionMade {
+            setupQueue.submitIdentity(SetupIdentityQueueInput(
+                name: identityName,
+                email: identityEmail,
+                target: identityTarget == "all" ? nil : identityTarget
+            ))
+            if setupQueue.begin(.identityRun, revision: setupQueue.revision) {
+                setupQueue.succeed(.identityRun, revision: setupQueue.revision)
+                _ = setupQueue.begin(.identityVerify, revision: setupQueue.revision)
+                setupQueue.succeed(.identityVerify, revision: setupQueue.revision)
+            }
+        }
     }
 
     private func startGitHubContextLoad() {
@@ -3637,13 +3988,14 @@ struct SetupView: View {
         guard workspaceValidationMessage == nil else { return }
         let submittedWorkspaceConfigurations = workspaceConfigurations
         if registrationTask != nil {
-            queuedRegistrationConfiguration =
-                registrationConfiguration == submittedWorkspaceConfigurations
-                    ? nil
-                    : submittedWorkspaceConfigurations
             return
         }
         guard !canFinishWithoutGitHub else {
+            if setupQueue.item(.workspaceRun).input == nil {
+                setupQueue.submitWorkspaces(submittedWorkspaceConfigurations)
+            }
+            setupQueue.succeed(.workspaceRun, revision: setupQueue.revision)
+            setupQueue.succeed(.workspaceVerify, revision: setupQueue.revision)
             acceptRegisteredWorkspaceConfiguration(submittedWorkspaceConfigurations)
             return
         }
@@ -3657,29 +4009,34 @@ struct SetupView: View {
         _ submittedWorkspaceConfigurations: [SetupWorkspaceConfiguration],
         coordinator: any SiloBootstrapCoordinating
     ) {
-        isRunning = true
-        registrationConfiguration = submittedWorkspaceConfigurations
+        let candidateRevision = setupQueue.revision
+        let queueID: SetupQueueItemID = setupQueue.status(of: .workspaceRun) == .succeeded
+            ? .workspaceVerify
+            : .workspaceRun
+        guard setupQueue.begin(queueID, revision: candidateRevision) else { return }
+        let queue = setupQueue
         notice = nil
-        registrationFailure = nil
         registrationTask = Task {
-            let progressTask = Task {
-                while !Task.isCancelled {
-                    let latest = await coordinator.state()
-                    await MainActor.run { state = latest }
-                    try? await Task.sleep(for: .seconds(0.3))
-                }
-            }
-            defer { progressTask.cancel() }
             do {
                 let result = try await coordinator.run(
-                    workspaceConfigurations: submittedWorkspaceConfigurations
+                    workspaceConfigurations: submittedWorkspaceConfigurations,
+                    onProgress: { event in
+                        Task { @MainActor in
+                            queue.consume(event, candidateRevision: candidateRevision)
+                        }
+                    }
                 )
                 let savedState = await coordinator.state()
                 let refreshedChecks = await coordinator.preflight()
+                guard candidateRevision == setupQueue.revision else {
+                    finishWorkspaceRegistration(coordinator: coordinator)
+                    return
+                }
                 state = savedState
                 checks = refreshedChecks
                 lastPreflightAt = Date()
-                registrationFailure = nil
+                setupQueue.succeed(.workspaceRun, revision: candidateRevision)
+                _ = setupQueue.begin(.workspaceVerify, revision: candidateRevision)
                 // Approval blockers remain visible through Review. A completed,
                 // persisted workspace boundary refreshes later-step context below.
                 notice = result.requiresApproval
@@ -3689,12 +4046,23 @@ struct SetupView: View {
                     : nil
                 if !result.requiresApproval {
                     acceptRegisteredWorkspaceConfiguration(submittedWorkspaceConfigurations)
+                    setupQueue.succeed(.workspaceVerify, revision: candidateRevision)
+                } else {
+                    setupQueue.fail(
+                        .workspaceVerify,
+                        message: notice ?? result.message,
+                        revision: candidateRevision
+                    )
                 }
             } catch is CancellationError {
                 // Reset and teardown intentionally interrupt background registration.
+                registrationTask = nil
+                return
             } catch let clientError as SiloClientError where clientError == .cancelled {
                 // The command runner reports cooperative process cancellation
                 // through its typed error rather than Swift CancellationError.
+                registrationTask = nil
+                return
             } catch let setupError {
                 let savedState = await coordinator.state()
                 state = savedState
@@ -3702,12 +4070,21 @@ struct SetupView: View {
                    case .protocolFailure(let protocolError) = clientError,
                    protocolError.code == "SILO_GITHUB_RECONNECT_REQUIRED",
                    submittedWorkspaceConfigurations == workspaceConfigurations {
+                    setupQueue.succeed(.workspaceRun, revision: candidateRevision)
+                    setupQueue.deferItem(.workspaceVerify, revision: candidateRevision)
                     githubReconnectRequired = true
                     githubAttentionWorkspace = protocolError.workspace
                     githubSkipped = false
                     acceptRegisteredWorkspaceConfiguration(submittedWorkspaceConfigurations)
                 } else {
-                    registrationFailure = setupError.localizedDescription
+                    let failedID = setupQueue.runningItem?.id == .workspaceVerify
+                        ? SetupQueueItemID.workspaceVerify
+                        : .workspaceRun
+                    setupQueue.fail(
+                        failedID,
+                        message: setupError.localizedDescription,
+                        revision: candidateRevision
+                    )
                 }
             }
             finishWorkspaceRegistration(coordinator: coordinator)
@@ -3733,26 +4110,86 @@ struct SetupView: View {
     private func finishWorkspaceRegistration(
         coordinator: any SiloBootstrapCoordinating
     ) {
-        isRunning = false
         registrationTask = nil
-        registrationConfiguration = nil
-        guard let queued = queuedRegistrationConfiguration else { return }
-        queuedRegistrationConfiguration = nil
+        guard case .workspaces(let queued)? = setupQueue.item(.workspaceRun).input,
+              setupQueue.status(of: .workspaceRun) == .queued else {
+            resumeQueuedSetupWork()
+            return
+        }
         beginWorkspaceRegistration(queued, coordinator: coordinator)
+    }
+
+    private func retrySetupQueue() {
+        guard let failedID = setupQueue.retryFailedItem() else { return }
+        error = nil
+        switch failedID {
+        case .workspaceRun, .workspaceVerify:
+            startWorkspaceRegistration()
+        case .githubRun:
+            if setupQueue.item(.githubRun).input == .skipped {
+                skipGitHub()
+            } else if case .github(let policies)? = setupQueue.item(.githubRun).input {
+                commitPolicy(retained: policies)
+            } else {
+                commitPolicy()
+            }
+        case .githubVerify:
+            if accessMode == .local {
+                retryLocalPolicyApply()
+            } else if case .github(let policies)? = setupQueue.item(.githubRun).input {
+                commitPolicy(retained: policies)
+            } else {
+                commitPolicy()
+            }
+        case .identityRun, .identityVerify:
+            if case .identity(let input)? = setupQueue.item(.identityRun).input {
+                saveIdentity(retained: input)
+            } else {
+                saveIdentity()
+            }
+        case .completion:
+            setupQueue.deriveCompletion(requirementsSatisfied: reviewRequirementsSatisfied)
+        }
+    }
+
+    /// Advances only the next dependency-ready item. Inputs captured by later
+    /// setup screens stay in their original queue items across a failed retry.
+    private func resumeQueuedSetupWork() {
+        setupQueue.settleRetainedDecisions()
+        if setupQueue.status(of: .workspaceRun) == .succeeded,
+           setupQueue.status(of: .workspaceVerify) == .queued,
+           setupQueue.status(of: .githubVerify) == .succeeded,
+           registrationTask == nil {
+            startWorkspaceRegistration()
+            return
+        }
+        if setupQueue.status(of: .githubRun) == .queued,
+           case .some(.github(let policies)) = setupQueue.item(.githubRun).input {
+            commitPolicy(retained: policies)
+            return
+        }
+        if setupQueue.status(of: .identityRun) == .queued,
+           case .some(.identity(let input)) = setupQueue.item(.identityRun).input {
+            saveIdentity(retained: input)
+            return
+        }
+        setupQueue.deriveCompletion(requirementsSatisfied: reviewRequirementsSatisfied)
     }
 
     private func waitForWorkspaceRegistration(
         _ configurations: [SetupWorkspaceConfiguration]
     ) async -> Bool {
-        while !Self.workspaceConfigurationIsApplied(
+        if Self.workspaceConfigurationIsApplied(
             configurations,
             persisted: state.workspaceConfigurations
-        ) {
-            guard !Task.isCancelled else { return false }
-            guard registrationOutstanding else { return false }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return true
+        ) { return true }
+        guard let registrationTask else { return false }
+        await registrationTask.value
+        guard !Task.isCancelled else { return false }
+        return Self.workspaceConfigurationIsApplied(
+            configurations,
+            persisted: state.workspaceConfigurations
+        )
     }
 
     private func completeSetup() {
@@ -3785,18 +4222,29 @@ struct SetupView: View {
             !identityEmail.contains(where: \.isWhitespace)
     }
 
-    private func saveIdentity() {
-        guard canSaveIdentity else {
+    private func saveIdentity(retained: SetupIdentityQueueInput? = nil) {
+        guard retained != nil || canSaveIdentity else {
             identityStatus = "Enter a name and a valid email, then save."
             return
         }
         isSavingIdentity = true
         identitySkipped = false
         identityStatus = "Saving your name and email…"
-        let name = identityName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let email = identityEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = identityTarget == "all" ? nil : identityTarget
+        let input = retained ?? SetupIdentityQueueInput(
+            name: identityName.trimmingCharacters(in: .whitespacesAndNewlines),
+            email: identityEmail.trimmingCharacters(in: .whitespacesAndNewlines),
+            target: identityTarget == "all" ? nil : identityTarget
+        )
+        let name = input.name
+        let email = input.email
+        let target = input.target
+        setupQueue.submitIdentity(input)
         if uiTestMode {
+            guard setupQueue.begin(.identityRun, revision: setupQueue.revision) else {
+                isSavingIdentity = false
+                activeStep = .review
+                return
+            }
             Task {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
@@ -3807,8 +4255,12 @@ struct SetupView: View {
                         verifiedIdentityByWorkspace[workspace] = savedIdentity
                     }
                     identityConfiguredWorkspaces.formUnion(workspaces)
+                    setupQueue.succeed(.identityRun, revision: setupQueue.revision)
+                    _ = setupQueue.begin(.identityVerify, revision: setupQueue.revision)
+                    setupQueue.succeed(.identityVerify, revision: setupQueue.revision)
                     isSavingIdentity = false
                     identityStatus = "Saved \(name) <\(email)> for \(workspaces.joined(separator: ", "))."
+                    setupQueue.deriveCompletion(requirementsSatisfied: reviewRequirementsSatisfied)
                     activeStep = .review
                 }
             }
@@ -3820,16 +4272,20 @@ struct SetupView: View {
         activeStep = .review
         identitySaveTask?.cancel()
         identitySaveTask = Task {
-            while !canFinishWithoutGitHub {
-                guard !Task.isCancelled else { return }
-                guard registrationOutstanding else {
-                    isSavingIdentity = false
-                    identitySaveTask = nil
-                    identityStatus = "Workspace setup did not finish, so your name and email were not saved. Finish workspace setup, then save again."
-                    self.error = "Your Git name and email were not saved: workspace setup did not finish."
-                    return
-                }
-                try? await Task.sleep(for: .seconds(0.5))
+            if !canFinishWithoutGitHub, let registrationTask {
+                await registrationTask.value
+            }
+            guard !Task.isCancelled else { return }
+            guard canFinishWithoutGitHub else {
+                isSavingIdentity = false
+                identitySaveTask = nil
+                identityStatus = "Workspace setup did not finish, so your name and email were not saved. Finish workspace setup, then save again."
+                return
+            }
+            guard setupQueue.begin(.identityRun, revision: setupQueue.revision) else {
+                isSavingIdentity = false
+                identitySaveTask = nil
+                return
             }
             do {
                 let result: SiloIdentityResult
@@ -3849,9 +4305,13 @@ struct SetupView: View {
                         verifiedIdentityByWorkspace[workspace] = verified
                     }
                     identityConfiguredWorkspaces.formUnion(result.workspaces)
+                    setupQueue.succeed(.identityRun, revision: setupQueue.revision)
+                    _ = setupQueue.begin(.identityVerify, revision: setupQueue.revision)
+                    setupQueue.succeed(.identityVerify, revision: setupQueue.revision)
                     isSavingIdentity = false
                     identitySaveTask = nil
                     identityStatus = "Saved \(result.name) <\(result.email)> for \(result.workspaces.joined(separator: ", "))."
+                    setupQueue.deriveCompletion(requirementsSatisfied: reviewRequirementsSatisfied)
                 }
             } catch is CancellationError {
                 // Setup teardown owns cancellation; publish nothing after the
@@ -3861,7 +4321,10 @@ struct SetupView: View {
                     isSavingIdentity = false
                     identitySaveTask = nil
                     identityStatus = "Your name and email were not changed: \(error.localizedDescription) Try again after workspace setup is available."
-                    self.error = "Your Git name and email were not saved: \(error.localizedDescription)"
+                    let failedID = setupQueue.runningItem?.id == .identityVerify
+                        ? SetupQueueItemID.identityVerify
+                        : .identityRun
+                    setupQueue.fail(failedID, message: error.localizedDescription)
                 }
             }
         }
@@ -4184,9 +4647,16 @@ struct SetupView: View {
         runtimeSetupError = nil
         bootstrapInputReady = true
         if uiTestStartsInReview {
+            setupQueue.submitWorkspaces(workspaceConfigurations)
+            _ = setupQueue.begin(.workspaceRun, revision: setupQueue.revision)
+            setupQueue.succeed(.workspaceRun, revision: setupQueue.revision)
+            _ = setupQueue.begin(.workspaceVerify, revision: setupQueue.revision)
+            setupQueue.succeed(.workspaceVerify, revision: setupQueue.revision)
             workspaceConfigurationAccepted = true
             githubSkipped = true
+            setupQueue.submitGitHubSkip()
             identitySkipped = true
+            setupQueue.submitIdentitySkip()
             identityStatus = ""
             githubStatus = "GitHub credential grants skipped by choice. You can connect later from Settings."
             activeStep = .review

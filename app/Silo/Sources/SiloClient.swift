@@ -862,20 +862,69 @@ actor SiloClient {
     }
 
     func bootstrap(
-        workspaceConfigurations: [SetupWorkspaceConfiguration]
+        workspaceConfigurations: [SetupWorkspaceConfiguration],
+        onProgress: (@Sendable (SiloProgressEvent) -> Void)? = nil
     ) async throws -> SiloEnvelope<SiloBootstrapResult> {
         guard SetupWorkspaceConfiguration.validationMessage(for: workspaceConfigurations) == nil else {
             throw SiloClientError.invalidArguments
         }
         let input = try JSONEncoder().encode(SiloBootstrapConfiguration(workspaceConfigurations))
-        return try await execute(
-            arguments: ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--format", "json"],
-            as: SiloBootstrapResult.self,
-            command: "bootstrap",
-            includeGuestCredentials: true,
-            stdin: input,
-            timeout: .seconds(1800)
+        try await prepareCredentials(
+            for: nil,
+            includeGuest: true,
+            includeHost: false
         )
+        let eventsFileDescriptor = SiloCommandRunner.progressEventsFileDescriptor
+        let request = try await runner.makeSiloCommand(
+            arguments: [
+                "app", "bootstrap", "--resume", "--workspace-config-fd", "0",
+                "--events-fd", String(eventsFileDescriptor), "--format", "json"
+            ],
+            timeout: .seconds(1800),
+            stdin: input
+        )
+        let output = try await runner.run(
+            request,
+            eventsFileDescriptor: eventsFileDescriptor
+        ) { line in
+            let event: SiloProgressEvent
+            do {
+                event = try SiloProtocolDecoder.decoder().decode(SiloProgressEvent.self, from: line)
+            } catch {
+                throw SiloClientError.malformedJSON(command: "bootstrap events")
+            }
+            guard event.schemaVersion == 1,
+                  event.type == "progress",
+                  !event.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !event.phase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SiloClientError.malformedJSON(command: "bootstrap events")
+            }
+            onProgress?(event)
+        }
+        do {
+            let envelope = try SiloProtocolDecoder.decodeEnvelope(
+                output.stdout,
+                as: SiloBootstrapResult.self,
+                expectedCommand: "bootstrap"
+            )
+            guard output.status == 0 else {
+                throw SiloClientError.processFailed(
+                    command: "bootstrap",
+                    status: output.status,
+                    message: "Silo returned a success envelope with a failing exit status."
+                )
+            }
+            return envelope
+        } catch let error as SiloClientError {
+            if case .protocolFailure = error { throw error }
+            guard output.status != 0 else { throw error }
+            let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw SiloClientError.processFailed(
+                command: "bootstrap",
+                status: output.status,
+                message: message.isEmpty ? nil : message
+            )
+        }
     }
     func url(workspace: String, port: String = "3000", scheme: String = "http") async throws -> SiloEnvelope<SiloURLResult> {
         guard WorkspaceID.isValid(workspace),
