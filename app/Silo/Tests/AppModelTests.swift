@@ -3633,6 +3633,19 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(withoutRecovery.localizedDescription, "runtime unavailable (Silo error code: SILO_RUNTIME_UNAVAILABLE.)")
     }
 
+    func testProtocolMismatchDescriptionNamesCommandAndSafeDetail() {
+        let error = SiloClientError.protocolMismatch(
+            command: "bootstrap events",
+            detail: "revision has an incompatible type; expected String."
+        )
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Silo returned an incompatible protocol response for bootstrap events: " +
+                "revision has an incompatible type; expected String."
+        )
+    }
+
     func testRealBootstrapReconnectRoutesWithoutPublishingStagedConfiguration() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-reconnect-test-\(UUID().uuidString)", isDirectory: true)
@@ -3958,6 +3971,33 @@ final class AppModelTests: XCTestCase {
 
         XCTAssertEqual(result.stdoutString, "visible\nunset")
         XCTAssertFalse(result.stdoutString.contains("blocked"))
+    }
+
+    func testCommandRunnerPreservesTypedProgressProtocolFailure() async {
+        let runner = SiloCommandRunner()
+        let expected = SiloClientError.protocolMismatch(
+            command: "bootstrap events",
+            detail: "revision has an incompatible type; expected String."
+        )
+        let command = SiloCommand(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "printf '%s\\n' '{\"schemaVersion\":1}' >&3"],
+            timeout: .seconds(5)
+        )
+
+        do {
+            _ = try await runner.run(
+                command,
+                eventsFileDescriptor: SiloCommandRunner.progressEventsFileDescriptor
+            ) { _ in
+                throw expected
+            }
+            XCTFail("Expected the typed progress protocol failure.")
+        } catch let error as SiloClientError {
+            XCTAssertEqual(error, expected)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
     func testCommandRunnerAllowsHostRepairControlWithoutCredentialEnvironment() async throws {
         let runner = SiloCommandRunner()
@@ -4947,19 +4987,48 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(state.begin(.workspaceRun, revision: revision))
     }
 
-    func testSetupQueueConsumesCoordinatorProgressAtCandidateRevision() throws {
+    func testSetupQueueConsumesStringRevisionAtCapturedCandidateRevision() throws {
         let state = SetupState()
-        let revision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
-        XCTAssertTrue(state.begin(.workspaceRun, revision: revision))
+        let staleRevision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        let currentRevision = state.submitWorkspaces(SetupWorkspaceConfiguration.defaults)
+        XCTAssertTrue(state.begin(.workspaceRun, revision: currentRevision))
+        let protocolRevision = String(repeating: "a", count: 64)
         let event = try JSONDecoder().decode(
             SiloProgressEvent.self,
-            from: Data(#"{"schemaVersion":1,"type":"progress","requestId":"setup","phase":"running","step":"verification","workspace":"dev","revision":1,"fraction":0.5,"message":"Verifying","safeForDisplay":true}"#.utf8)
+            from: Data(
+                """
+                {"schemaVersion":1,"type":"progress","requestId":"setup","phase":"running",\
+                "step":"verification","workspace":"dev","revision":"\(protocolRevision)",\
+                "fraction":0.5,"message":"Verifying","safeForDisplay":true}
+                """.utf8
+            )
         )
-        state.consume(event, candidateRevision: revision)
+        XCTAssertEqual(event.revision, protocolRevision)
 
+        state.consume(event, candidateRevision: staleRevision)
+        XCTAssertEqual(state.item(.workspaceRun).status, .running)
+        XCTAssertEqual(state.item(.workspaceVerify).status, .queued)
+
+        state.consume(event, candidateRevision: currentRevision)
         XCTAssertEqual(state.item(.workspaceRun).status, .succeeded)
         XCTAssertEqual(state.item(.workspaceVerify).status, .running)
         XCTAssertEqual(state.currentLabel, "Verify workspaces")
+    }
+
+    func testProgressEventRejectsNumericRevision() {
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                SiloProgressEvent.self,
+                from: Data(
+                    #"{"schemaVersion":1,"type":"progress","requestId":"setup","phase":"running","revision":1,"fraction":0.5,"message":"Verifying","safeForDisplay":true}"#.utf8
+                )
+            )
+        ) { error in
+            guard case DecodingError.typeMismatch(_, let context) = error else {
+                return XCTFail("Expected revision type mismatch, got \(error)")
+            }
+            XCTAssertEqual(context.codingPath.map(\.stringValue), ["revision"])
+        }
     }
 
     func testSetupQueueRejectsStaleRevisionAndDerivesDoneFromFinalItem() {

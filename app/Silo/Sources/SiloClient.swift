@@ -891,13 +891,31 @@ actor SiloClient {
             do {
                 event = try SiloProtocolDecoder.decoder().decode(SiloProgressEvent.self, from: line)
             } catch {
-                throw SiloClientError.malformedJSON(command: "bootstrap events")
+                throw SiloClientError.protocolMismatch(
+                    command: "bootstrap events",
+                    detail: Self.progressProtocolDetail(for: error)
+                )
             }
-            guard event.schemaVersion == 1,
-                  event.type == "progress",
-                  !event.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !event.phase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw SiloClientError.malformedJSON(command: "bootstrap events")
+            guard event.schemaVersion == 1 else {
+                throw SiloClientError.unsupportedSchema(event.schemaVersion)
+            }
+            guard event.type == "progress" else {
+                throw SiloClientError.protocolMismatch(
+                    command: "bootstrap events",
+                    detail: "type must be progress."
+                )
+            }
+            guard !event.requestId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SiloClientError.protocolMismatch(
+                    command: "bootstrap events",
+                    detail: "requestId must not be empty."
+                )
+            }
+            guard !event.phase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw SiloClientError.protocolMismatch(
+                    command: "bootstrap events",
+                    detail: "phase must not be empty."
+                )
             }
             onProgress?(event)
         }
@@ -924,6 +942,26 @@ actor SiloClient {
                 status: output.status,
                 message: message.isEmpty ? nil : message
             )
+        }
+    }
+
+    private nonisolated static func progressProtocolDetail(for error: Error) -> String {
+        func field(_ codingPath: [any CodingKey]) -> String {
+            let path = codingPath.map(\.stringValue).joined(separator: ".")
+            return path.isEmpty ? "event" : path
+        }
+
+        switch error {
+        case DecodingError.typeMismatch(let type, let context):
+            return "\(field(context.codingPath)) has an incompatible type; expected \(type)."
+        case DecodingError.valueNotFound(let type, let context):
+            return "\(field(context.codingPath)) is null; expected \(type)."
+        case DecodingError.keyNotFound(let key, _):
+            return "required field \(key.stringValue) is missing."
+        case DecodingError.dataCorrupted(let context):
+            return "\(field(context.codingPath)) is invalid."
+        default:
+            return "event does not match the progress protocol."
         }
     }
     func url(workspace: String, port: String = "3000", scheme: String = "http") async throws -> SiloEnvelope<SiloURLResult> {

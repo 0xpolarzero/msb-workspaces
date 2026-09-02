@@ -748,6 +748,8 @@ actor SiloCommandRunner {
                 for line in try framer.append(chunk) {
                     try delivery.deliver(line, to: onEventLine)
                 }
+            } catch let error as SiloClientError {
+                failure = error
             } catch {
                 failure = .malformedJSON(command: "bootstrap events")
             }
@@ -759,6 +761,8 @@ actor SiloCommandRunner {
                 try delivery.deliver(line, to: onEventLine)
             }
             return nil
+        } catch let error as SiloClientError {
+            return error
         } catch {
             return .malformedJSON(command: "bootstrap events")
         }

@@ -1362,7 +1362,7 @@ struct SiloProgressEvent: Codable, Sendable {
     let phase: String
     let step: String?
     let workspace: String?
-    let revision: Int?
+    let revision: String?
     let fraction: Double?
     let message: String
     let safeForDisplay: Bool
@@ -1392,7 +1392,7 @@ struct SiloProgressEvent: Codable, Sendable {
         phase = try container.decode(String.self, forKey: .phase)
         step = try container.decodeIfPresent(String.self, forKey: .step)
         workspace = try container.decodeIfPresent(String.self, forKey: .workspace)
-        revision = try container.decodeIfPresent(Int.self, forKey: .revision)
+        revision = try container.decodeIfPresent(String.self, forKey: .revision)
         fraction = try container.decodeIfPresent(Double.self, forKey: .fraction)
         message = try container.decode(String.self, forKey: .message)
         safeForDisplay = try container.decode(Bool.self, forKey: .safeForDisplay)

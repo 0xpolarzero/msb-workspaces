@@ -433,17 +433,16 @@ final class SetupState {
     }
 
     func consume(_ event: SiloProgressEvent, candidateRevision: Int? = nil) {
-        let reportedRevision = event.revision ?? candidateRevision
-        guard reportedRevision == nil || reportedRevision == revision else { return }
+        guard candidateRevision == nil || candidateRevision == revision else { return }
         let normalized = (event.step ?? event.phase).lowercased()
         let id: SetupQueueItemID = normalized.contains("verif")
             ? .workspaceVerify
             : .workspaceRun
         if id == .workspaceVerify, status(of: .workspaceRun) == .running {
-            succeed(.workspaceRun, revision: reportedRevision)
+            succeed(.workspaceRun, revision: candidateRevision)
         }
         if status(of: id) == .queued {
-            _ = begin(id, revision: reportedRevision)
+            _ = begin(id, revision: candidateRevision)
         }
     }
 
@@ -2666,7 +2665,10 @@ struct SetupView: View {
                         .keyboardShortcut(.defaultAction)
                         .accessibilityIdentifier("setup.github.continue.button")
                 } else {
-                    Button(action: { commitPolicy() }) {
+                    Button(action: {
+                        commitPolicy()
+                        activeStep = .identity
+                    }) {
                         ZStack {
                             Text("Continue")
                                 .opacity(isApplyingGitHub ? 0 : 1)
@@ -3310,10 +3312,8 @@ struct SetupView: View {
                 isApplyingGitHub = false
                 return
             }
-            // Navigation never waits on the provider: the apply continues in
-            // the background and its progress is reported by the footer;
-            // Review stays gated on the outcome.
-            activeStep = .identity
+            // The apply continues in the background while Review remains
+            // gated on its outcome. Only the user's Continue action navigates.
             githubApplyTask = Task {
                 let registrationReady = await waitForWorkspaceRegistration(
                     submittedWorkspaceConfigurations
@@ -3444,7 +3444,6 @@ struct SetupView: View {
                     captureGitHubDraftBaseline()
                     editedGitHubWorkspaces.removeAll()
                     githubStatus = ""
-                    activeStep = .identity
                     resumeQueuedSetupWork()
                 }
             }
@@ -3457,10 +3456,8 @@ struct SetupView: View {
             isApplyingGitHub = false
             return
         }
-        // Navigation never waits on the commit: verification continues in the
-        // background while the footer reports progress; Review stays gated on
-        // the verified result.
-        activeStep = .identity
+        // Verification continues in the background while Review remains gated
+        // on the outcome. Background retries never own navigation.
         githubApplyTask = Task {
             let registrationReady = await waitForWorkspaceRegistration(
                 submittedWorkspaceConfigurations

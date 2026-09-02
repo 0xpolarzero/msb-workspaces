@@ -8,6 +8,7 @@ enum SiloClientError: Error, LocalizedError, Sendable, Equatable {
     case processFailed(command: String, status: Int32, message: String?)
     case invalidUTF8
     case malformedJSON(command: String)
+    case protocolMismatch(command: String, detail: String)
     case unsupportedSchema(Int)
     case missingResult(command: String)
     case protocolFailure(SiloProtocolError)
@@ -26,6 +27,8 @@ enum SiloClientError: Error, LocalizedError, Sendable, Equatable {
             return message ?? "Silo \(command) exited with status \(status) without returning error details."
         case .invalidUTF8: return "Silo returned invalid UTF-8 output."
         case .malformedJSON(let command): return "Silo returned malformed JSON for \(command)."
+        case .protocolMismatch(let command, let detail):
+            return "Silo returned an incompatible protocol response for \(command): \(detail)"
         case .unsupportedSchema(let version): return "Silo returned unsupported schema version \(version)."
         case .missingResult(let command): return "Silo returned no result for \(command)."
         case .protocolFailure(let error): return error.localizedDescription

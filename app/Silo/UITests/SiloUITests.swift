@@ -75,7 +75,16 @@ final class SiloUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForExistence(timeout: 2)
         )
-        app.buttons["setup.github.skip.button"].click()
+        let picker = app.buttons["github.workspace.dev.repository-picker.button"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 2))
+        picker.click()
+        let repository = app.checkBoxes["github.workspace.dev.repository.1001"]
+        XCTAssertTrue(repository.waitForExistence(timeout: 2))
+        repository.click()
+        app.typeKey(.escape, modifierFlags: [])
+        let apply = app.buttons["setup.github.apply.button"]
+        XCTAssertTrue(apply.waitForExistence(timeout: 2))
+        apply.click()
         let identitySkip = app.buttons["setup.identity.skip.button"]
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
         identitySkip.click()
