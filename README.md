@@ -25,6 +25,8 @@ exec zsh -l
 
 `setup.sh` installs the host tools, builds the common development image, creates every workspace in the validated schema-v1 `~/.config/silo/workspaces.json`, publishes the configured localhost ports, configures SSH/Zed integration, and finishes with a live deep check. Silo supplies that JSON through `silo app bootstrap --resume --workspace-config-fd FD --format json`; names and numeric limits are decoded as data rather than shell syntax.
 
+Native onboarding treats that bootstrap as background work. **Continue** on Workspaces validates and saves the selected configuration, enqueues one idempotent bootstrap operation, and advances immediately to GitHub; it never waits for VM creation or verification. Progress and failures remain visible through the later steps. Review is the only synchronization barrier, and **Done** stays unavailable until every required operation has completed and verified successfully.
+
 Then set your commit identity:
 
 ```bash

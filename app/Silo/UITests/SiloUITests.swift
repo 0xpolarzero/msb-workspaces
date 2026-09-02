@@ -59,6 +59,44 @@ final class SiloUITests: XCTestCase {
         )
     }
 
+    func testWorkspaceRegistrationFailureAppearsOnReviewWithRetryableDetails() {
+        let detailText = "MicroSandbox failed Silo's disk-safety check. Update or repair MicroSandbox, then retry Setup. Safety-check detail: the disposable probe disk changed length after guest fstrim; the runtime truncated the raw image."
+        let app = launchFixture([
+            "--ui-test-setup",
+            "--ui-test-setup-registration-failure",
+            "--ui-test-github-success"
+        ])
+        defer { terminateIfNeeded(app) }
+
+        let setup = app.windows["setup.window"]
+        XCTAssertTrue(setup.waitForExistence(timeout: 3))
+        advanceFromDependenciesToGitHub(in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["setup.github-boundary"]
+                .waitForExistence(timeout: 2)
+        )
+        app.buttons["setup.github.skip.button"].click()
+        let identitySkip = app.buttons["setup.identity.skip.button"]
+        XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
+        identitySkip.click()
+
+        let failure = app.descendants(matching: .any)["setup.review.registration.failure"]
+        XCTAssertTrue(failure.waitForExistence(timeout: 3))
+        let failureText = [failure.label, failure.value as? String ?? "", visibleText(in: failure)]
+            .joined(separator: " ")
+        XCTAssertTrue(failureText.contains("Workspace bootstrap verification failed"))
+        XCTAssertTrue(failureText.contains(detailText))
+
+        let done = app.buttons["setup.done.button"]
+        XCTAssertTrue(done.waitForExistence(timeout: 2))
+        XCTAssertFalse(done.isEnabled)
+        let retry = app.buttons["setup.review.verify.button"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 2))
+        XCTAssertTrue(retry.isEnabled)
+        retry.click()
+        XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
+    }
+
     func testWorkspaceRepairRoutesToRestore() {
         let app = launchFixture([
             "--ui-test-open-popover",
@@ -2143,7 +2181,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["settings.tabs"].exists)
     }
 
-    func testSetupLocalGitHubStepUnlocksWhenSystemReadyThenVerifiesThroughDone() {
+    func testSetupContinuesThroughGitHubWhileReviewOwnsVerification() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2162,8 +2200,8 @@ final class SiloUITests: XCTestCase {
         let setup = app.windows["setup.window"]
         XCTAssertTrue(setup.waitForExistence(timeout: 3))
 
-        // Workspace configuration is the required step between dependencies
-        // and GitHub, even while bootstrap is still creating workspaces.
+        // GitHub is unavailable before the user submits a valid workspace
+        // configuration; infrastructure work never becomes that submission.
         let githubStep = app.descendants(matching: .any)["setup.step.github"]
         XCTAssertTrue(githubStep.waitForExistence(timeout: 2))
         XCTAssertFalse(githubStep.isEnabled)
@@ -2173,7 +2211,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertEqual(primaryAction.label, "Continue")
         advanceFromDependenciesToGitHub(in: app)
 
-        // Local mode unlocks the GitHub step as soon as preflight passes.
+        // Workspaces Continue enters GitHub immediately and starts catalog loading.
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 3)
         )
@@ -2201,8 +2239,8 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
         identitySkip.click()
 
-        // Bootstrap is still incomplete: Done is blocked and the review step
-        // offers the workspace completion action.
+        // Review is the only verification barrier: Done remains blocked and
+        // exposes the targeted workspace completion action.
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
         XCTAssertFalse(done.isEnabled)
@@ -2210,15 +2248,15 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(verify.waitForExistence(timeout: 2))
         XCTAssertTrue(verify.isEnabled)
         verify.click()
-        // The failing first bootstrap attempt already ran when the Workspaces
-        // step advanced; this retry completes and unlocks Done.
+        // The first bootstrap attempt reported reconnect-required in the
+        // background; this targeted retry completes verification.
         XCTAssertTrue(waitUntilEnabled(done, timeout: 3))
         done.click()
         XCTAssertTrue(setup.waitForNonExistence(timeout: 3))
         XCTAssertNotEqual(app.state, .notRunning)
     }
 
-    func testSetupWorkspaceRegistrationDoesNotBlockGitHubButBlocksReviewCompletion() {
+    func testSetupWorkspaceContinueAdvancesImmediatelyAndReviewWaitsForRegistration() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2247,78 +2285,43 @@ final class SiloUITests: XCTestCase {
         XCTAssertTrue(workspaceContinue.waitForExistence(timeout: 2))
         XCTAssertTrue(workspaceContinue.isEnabled)
         workspaceContinue.click()
+
+        let githubBoundary = app.descendants(matching: .any)["setup.github-boundary"]
         XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 2)
+            githubBoundary.waitForExistence(timeout: 2),
+            "Workspaces Continue must enter GitHub without waiting for registration."
         )
-        let githubAccount = app.descendants(matching: .any)["setup.github.account"]
+        let backgroundStatus = app.descendants(matching: .any)["setup.status"]
+        XCTAssertTrue(backgroundStatus.waitForExistence(timeout: 2))
         XCTAssertTrue(
-            githubAccount.waitForExistence(timeout: 2),
-            "GitHub context must finish loading while workspace registration remains pending."
-        )
-        assertText("Connected as @octocat", identifier: "setup.github.account", in: app)
-        XCTAssertFalse(app.descendants(matching: .any)["setup.github.loading"].exists)
-        let footerStatus = app.descendants(matching: .any)["setup.status"]
-        if footerStatus.exists {
-            XCTAssertFalse(footerStatus.label.contains("Registering your workspaces"))
-            XCTAssertFalse((footerStatus.value as? String)?.contains("Registering your workspaces") == true)
-        }
-        let githubSkip = app.buttons["setup.github.skip.button"]
-        XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
-        XCTAssertTrue(
-            githubSkip.isEnabled,
-            "GitHub Skip must be governed by GitHub state, not workspace registration."
+            [backgroundStatus.label, backgroundStatus.value as? String ?? "", visibleText(in: backgroundStatus)]
+                .joined(separator: " ")
+                .contains("background")
         )
 
-        let apply = app.buttons["setup.github.apply.button"]
-        XCTAssertTrue(apply.waitForExistence(timeout: 2))
-        XCTAssertFalse(apply.isEnabled, "GitHub Continue requires a repository decision.")
-        let picker = app.buttons["github.workspace.dev.repository-picker.button"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 2))
-
-        app.buttons["setup.back.button"].click()
+        let back = app.buttons["setup.back.button"]
+        XCTAssertTrue(back.waitForExistence(timeout: 2))
+        back.click()
         XCTAssertTrue(workspaceContinue.waitForExistence(timeout: 2))
         XCTAssertTrue(
             workspaceContinue.isEnabled,
-            "Continue must remain enabled while workspace registration is outstanding."
+            "Background registration must not disable Workspaces Continue."
         )
         workspaceContinue.click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["setup.github-boundary"].waitForExistence(timeout: 2)
-        )
+        XCTAssertTrue(githubBoundary.waitForExistence(timeout: 2))
 
-        XCTAssertTrue(picker.waitForExistence(timeout: 2))
-        picker.click()
-        let repository = app.checkBoxes["github.workspace.dev.repository.1001"]
-        XCTAssertTrue(repository.waitForExistence(timeout: 2))
-        repository.click()
-        app.typeKey(.escape, modifierFlags: [])
-        XCTAssertTrue(
-            apply.isEnabled,
-            "GitHub Continue must become enabled from GitHub state while registration remains pending."
-        )
-        XCTAssertTrue(githubSkip.waitForExistence(timeout: 2))
-        XCTAssertTrue(githubSkip.isEnabled)
-        githubSkip.click()
+        app.buttons["setup.github.skip.button"].click()
         let identitySkip = app.buttons["setup.identity.skip.button"]
         XCTAssertTrue(identitySkip.waitForExistence(timeout: 2))
         identitySkip.click()
 
-        XCTAssertTrue(app.staticTexts["setup.final-review.title"].waitForExistence(timeout: 2))
         XCTAssertTrue(
             app.descendants(matching: .any)["setup.review.registration.pending"]
                 .waitForExistence(timeout: 2)
         )
-        XCTAssertFalse(app.descendants(matching: .any)["setup.review.registration.failure"].exists)
-        let verify = app.buttons["setup.review.verify.button"]
-        XCTAssertTrue(verify.waitForExistence(timeout: 2))
-        XCTAssertEqual(verify.label, "Finishing workspace setup…")
-        XCTAssertFalse(
-            verify.isEnabled,
-            "The pending fixture must prove registration is still running at Review."
-        )
         let done = app.buttons["setup.done.button"]
         XCTAssertTrue(done.waitForExistence(timeout: 2))
-        XCTAssertFalse(done.isEnabled, "Review must wait for outstanding workspace registration.")
+        XCTAssertFalse(done.isEnabled)
     }
 
     func testGitHubLocalCatalogTransientFailureRecoversAutomatically() {

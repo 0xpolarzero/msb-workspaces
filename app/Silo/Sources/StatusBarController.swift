@@ -201,7 +201,8 @@ final class StatusBarController {
                     uiTestGitHubScenario != nil,
                 uiTestStartsInReview: arguments.contains("--ui-test-setup-review"),
                 uiTestGitHubScenario: uiTestGitHubScenario,
-                uiTestBootstrapReconnect: arguments.contains("--ui-test-setup-reconnect"),
+                uiTestBootstrapReconnect: arguments.contains("--ui-test-setup-reconnect") ||
+                    arguments.contains("--ui-test-setup-registration-failure"),
                 startupRecoveryBlockedReason: startupRecoveryBlockedReason,
                 retryStartupRecovery: retryStartupRecovery
             )

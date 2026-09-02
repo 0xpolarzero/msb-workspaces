@@ -164,13 +164,14 @@
   <section class="section">
     <h2>North-star journey</h2>
     <p class="section-intro">The app should guide a developer from “What is this?” to “I know exactly what is safe to do next,” without forcing them to infer state from colors, hidden scope, or raw implementation terms.</p>
+    <p><strong>Onboarding contract:</strong> Workspaces Continue validates and saves the selection, queues provisioning exactly once, and advances immediately. Background status stays visible through Access and Identity. Review is the only operation barrier; Done waits for verified success and failures offer a targeted retry.</p>
     <div class="flow" aria-label="Recommended product journey">
       <div class="flow-step"><div class="num">01</div><h3>Welcome</h3><p>Explain the three isolated workspaces, resource model, and trust boundary.</p></div>
       <div class="flow-step"><div class="num">02</div><h3>Check</h3><p>Preflight the Mac; disclose admin, host-helper, VM, and time effects.</p></div>
-      <div class="flow-step"><div class="num">03</div><h3>Verify</h3><p>Install and verify Silo with live phase, elapsed time, and retry-from-phase guidance.</p></div>
-      <div class="flow-step"><div class="num">04</div><h3>Access</h3><p>Optionally connect GitHub with explicit per-workspace guest-read and host-write scopes.</p></div>
-      <div class="flow-step"><div class="num">05</div><h3>Identity</h3><p>Collect Git identity and show what will be configured where.</p></div>
-      <div class="flow-step"><div class="num">06</div><h3>Finish</h3><p>Show a final recap; only an explicit Done marks onboarding complete.</p></div>
+      <div class="flow-step"><div class="num">03</div><h3>Configure</h3><p>Save workspace choices, queue provisioning once, and continue immediately.</p></div>
+      <div class="flow-step"><div class="num">04</div><h3>Access</h3><p>Configure optional GitHub access while workspace setup continues in the background.</p></div>
+      <div class="flow-step"><div class="num">05</div><h3>Identity</h3><p>Collect Git identity while persistent status reports background progress.</p></div>
+      <div class="flow-step"><div class="num">06</div><h3>Review</h3><p>Wait here only; show every operation and enable Done after verified success.</p></div>
       <div class="flow-step"><div class="num">07</div><h3>Operate</h3><p>Show one health headline, one best next action, and persistent workspace scope.</p></div>
       <div class="flow-step"><div class="num">08</div><h3>Recover</h3><p>Preserve last-known state and pair every problem with a safe, specific recovery action.</p></div>
     </div>
@@ -194,10 +195,10 @@
         <p class="fix"><strong>Status:</strong> Shipped. The destructive boundary is now explicit before any revocation or local credential mutation.</p>
       </article>
       <article class="card finding p0-card span-6">
-        <div class="title"><h3>3. Do not mark onboarding or access complete without verification</h3><span class="priority p0">P0</span></div>
-        <p class="why">Fixed. Connect-to-Apply requires valid reviewed assignments and runs verification before returning committed metadata. Setup retains per-workspace verification and lifecycle-restoration results, blocks completion until the GitHub decision, identity decision, and verification gate are satisfied, and exposes a deliberate Done action.</p>
-        <div class="evidence"><strong>Implemented</strong><span class="ref">GitHubAuthorizationCoordinator.swift:315-595</span> journals grant creation, verifies scope/lifecycle, and rolls back or quarantines on failure. <span class="ref">SetupView.swift:932-965, 1786-1797</span> renders retained results and gates completion.</div>
-        <p class="fix"><strong>Status:</strong> Shipped for the reviewed assignment flow. Live service/browser issuance remains an environment prerequisite documented in Verification and limits.</p>
+        <div class="title"><h3>3. Let onboarding continue, then verify before completion</h3><span class="priority p0">P0</span></div>
+        <p class="why">Required contract. Workspaces Continue saves the validated selection, queues provisioning exactly once, and advances immediately. Access and Identity remain usable while provisioning runs. Review is the sole synchronization barrier and retains per-workspace verification, lifecycle-restoration, failure, and retry results.</p>
+        <div class="evidence"><strong>Boundary</strong> Earlier steps collect intent and show non-blocking progress; they never wait for VM creation or deep verification. Review blocks Done until the GitHub decision, identity decision, workspace registration, and every required verification have settled successfully.</div>
+        <p class="fix"><strong>Status:</strong> Mandatory. Any test or implementation that locks GitHub behind workspace registration contradicts this contract and must be replaced rather than preserved as a safety requirement.</p>
       </article>
       <article class="card finding p0-card span-6">
         <div class="title"><h3>4. Make workspace scope and capabilities impossible to miss</h3><span class="priority p0">P0</span></div>

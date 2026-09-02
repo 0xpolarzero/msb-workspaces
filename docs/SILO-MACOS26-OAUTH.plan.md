@@ -170,6 +170,19 @@ This makes token expiry visible instead of pretending that an eight-hour token i
 
 The first launch opens a normal setup window, not the compact popover. Setup is resumable and stateful; closing the window pauses the UI without abandoning the operation.
 
+#### Navigation and background-work contract
+
+Setup navigation and setup execution are separate:
+
+- **Continue** on Workspaces validates and saves the selected configuration, enqueues one idempotent provisioning operation, and advances immediately to GitHub.
+- Snapshot creation, workspace registration, guest configuration, and deep verification run in the background while the user completes GitHub and Identity.
+- A compact status remains visible on every later step. It reports queued, running, failed, or verified work without disabling navigation.
+- Returning to Workspaces or pressing Continue again never duplicates the same configuration. A changed valid configuration replaces the pending request or queues once behind the active request.
+- Review is the only synchronization barrier. It shows each required operation and blocks **Done** until all work has verified successfully.
+- A failed operation stays on Review with its actual stage, bounded details, and a targeted retry. Setup never reports completion from a process exit or an unverified partial result.
+
+This contract supersedes any sequential phase wording below: phases describe dependency order for background operations, not wizard-navigation locks.
+
 ### Phase A: welcome and trust explanation
 
 Show:
@@ -225,9 +238,9 @@ The app displays the macOS administrator approval UI through the supported Servi
 
 A pre-implementation spike must prove `SMAppService.daemon(plistName:)`, XPC code-signing requirements, idempotent `/etc/hosts` updates, and clean uninstall behavior on macOS 26. If the daemon registration path cannot perform the required authorization on a clean system, use a signed notarized installer package launched by the app as the fallback. Do not hide `sudo` behind a pseudo-terminal.
 
-### Phase E: base snapshot and workspace creation
+### Phase E: queued base snapshot and workspace provisioning
 
-Run the existing idempotent creation semantics through a structured bootstrap coordinator:
+When the user continues from Workspaces, enqueue the existing idempotent creation semantics through the structured bootstrap coordinator:
 
 1. Reuse or build the common Ubuntu ARM64 base snapshot.
 2. Create/update `dev`, `playgrounds`, and `personal` with the configured CPU, memory, root disk, ports, labels, and persistent volumes.
@@ -237,6 +250,8 @@ Run the existing idempotent creation semantics through a structured bootstrap co
 6. Restore the pre-operation running set, or leave all VMs stopped on first install as the current installer does.
 
 The setup UI explicitly says that deep verification temporarily starts VMs and may pull/run test containers. It never presents a newly created VM as “running” merely because creation succeeded.
+
+Phase E is not a prerequisite for entering Phase F or Phase G. Its dependent operations remain serialized internally, but the wizard continues while they run. GitHub or identity work that needs a verified workspace waits in the operation queue rather than locking the corresponding setup page.
 
 ### Phase F: GitHub connection wizard
 
@@ -258,11 +273,13 @@ The verification step visibly states:
 
 If verification fails, show the failed stage and the final safety result: previous credentials restored, new credentials removed, or workspace quarantined. Never tell the user “setup failed” without saying which of those states is true.
 
-### Phase G: identity and finish
+### Phase G: identity, Review, and finish
 
-Offer per-workspace Git identity fields, prefilled from the GitHub account only when available and clearly editable. Save only the chosen name/email through `silo identity`; never infer or store a GitHub token in preferences.
+Offer per-workspace Git identity fields, prefilled from the GitHub account only when available and clearly editable. Save only the chosen name/email through `silo identity`; never infer or store a GitHub token in preferences. Work that depends on workspace provisioning joins the same background queue.
 
-The finish screen confirms:
+Review is the sole synchronization point. It lists background operations and their queued, running, failed, or verified state. **Done** remains disabled until the queue is empty and every required result is verified. A failure exposes its stage, bounded details, and targeted retry without discarding completed work.
+
+After verification, the finish summary confirms:
 
 - All three workspaces exist.
 - Which workspaces are configured for GitHub and with which access mode.

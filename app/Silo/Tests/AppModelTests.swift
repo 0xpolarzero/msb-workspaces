@@ -65,6 +65,21 @@ private actor RecordingHostAgent: SiloHostAgentControlling {
 private struct AvailableUserIntegration: SiloUserIntegrationControlling {
     func configureUserIntegrationIfAvailable() async throws {}
 }
+private actor RecordingUserIntegration: SiloUserIntegrationControlling {
+    private let workspaceConfigurationURL: URL
+    private(set) var workspaceConfigurationAvailableAtInvocation = false
+
+    init(workspaceConfigurationURL: URL) {
+        self.workspaceConfigurationURL = workspaceConfigurationURL
+    }
+
+    func configureUserIntegrationIfAvailable() async throws {
+        workspaceConfigurationAvailableAtInvocation = FileManager.default.fileExists(
+            atPath: workspaceConfigurationURL.path
+        )
+    }
+}
+
 
 private actor CommandRecorder {
     private(set) var command: SiloCommand?
@@ -354,7 +369,8 @@ final class AppModelTests: XCTestCase {
         guard let handshake = try? await client.handshake().result,
               handshake.configurationAvailable,
               handshake.runtimeAvailable,
-              handshake.capabilities.isComplete else {
+              handshake.capabilities.isComplete,
+              handshake.capabilities.workspaceCount > 0 else {
             throw XCTSkip("No configured backup-preview-capable host Silo installation is currently resolved.")
         }
         let model = AppModel(diagnostics: SiloDiagnostics(client: client))
@@ -3240,7 +3256,8 @@ final class AppModelTests: XCTestCase {
     func testFailedNonHostPreflightDoesNotRegisterHostService() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-preflight-test-\(UUID().uuidString)", isDirectory: true)
-        let bin = temporary.appendingPathComponent("bin", isDirectory: true)
+        let bin = ToolchainLayout.managedRoot(homeDirectory: temporary)
+            .appendingPathComponent("current/bin", isDirectory: true)
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
@@ -3269,7 +3286,7 @@ final class AppModelTests: XCTestCase {
         if [ -e "\(marker.path)" ]; then count=$(/bin/cat "\(marker.path)"); fi
         count=$((count + 1))
         printf '%s\n' "$count" > "\(marker.path)"
-        if [ "$count" -ge 3 ]; then
+        if [ "$count" -ge 2 ]; then
             /bin/cat "\(failingURL.path)"
         else
             /bin/cat "\(passingURL.path)"
@@ -3306,7 +3323,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(finalState.lastError, BootstrapCoordinatorError.preflightBlocked.localizedDescription)
         XCTAssertNil(
             finalState.workspaceConfigurations,
-            "A failed setup must not publish an unapplied configuration or unlock GitHub."
+            "A failed setup must not publish an unapplied workspace configuration."
         )
         XCTAssertFalse(SetupView.workspaceConfigurationIsApplied(
             SetupWorkspaceConfiguration.defaults,
@@ -3318,7 +3335,8 @@ final class AppModelTests: XCTestCase {
     func testBootstrapRunCompletesWithInjectedSetupAndHostFakes() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-success-test-\(UUID().uuidString)", isDirectory: true)
-        let siloBin = temporary.appendingPathComponent("bin", isDirectory: true)
+        let managedToolchainRoot = ToolchainLayout.managedRoot(homeDirectory: temporary)
+        let siloBin = managedToolchainRoot.appendingPathComponent("current/bin", isDirectory: true)
         let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
         let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
         try FileManager.default.createDirectory(at: siloBin, withIntermediateDirectories: true)
@@ -3368,8 +3386,21 @@ final class AppModelTests: XCTestCase {
             homeDirectory: temporary,
             testSiloExecutable: executable
         ))
+        XCTAssertTrue(
+            DefaultSiloConfigurationInstaller.isValidConfiguration(
+                at: configDirectory.appendingPathComponent("config.sh")
+            )
+        )
+        let runtimeResolution = await runner.siloResolution(forceRefresh: true)
+        XCTAssertEqual(
+            runtimeResolution.selected?.standardizedFileURL,
+            executable.standardizedFileURL
+        )
         let hostService = EnabledHostService()
         let hostAgent = RecordingHostAgent()
+        let userIntegration = RecordingUserIntegration(
+            workspaceConfigurationURL: configDirectory.appendingPathComponent("workspaces.json")
+        )
         let coordinator = BootstrapCoordinator(
             client: SiloClient(runner: runner),
             runner: runner,
@@ -3378,7 +3409,7 @@ final class AppModelTests: XCTestCase {
             ),
             hostAgent: hostAgent,
             hostService: hostService,
-            userIntegration: AvailableUserIntegration(),
+            userIntegration: userIntegration,
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
 
@@ -3402,6 +3433,12 @@ final class AppModelTests: XCTestCase {
         ]
         let result = try await coordinator.run(workspaceConfigurations: configurations)
 
+        let workspaceConfigurationAvailableAtIntegration = await userIntegration
+            .workspaceConfigurationAvailableAtInvocation
+        XCTAssertTrue(
+            workspaceConfigurationAvailableAtIntegration,
+            "User integration must run after bootstrap atomically installs workspaces.json."
+        )
         XCTAssertEqual(result.phase, SiloBootstrapState.Phase.complete.rawValue)
         let ensureAliasCount = await hostAgent.ensureAliasInvocationCount
         let installRecordsCount = await hostAgent.installRecordsInvocationCount
@@ -3411,7 +3448,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(
             inspectRequests.last?.map(\.hostname),
             ["development.silo.test", "personal.silo.test", "lab.silo.test"],
-            "Post-repair verification must inspect the selected configuration before bootstrap can unlock GitHub."
+            "Post-repair verification must inspect the selected configuration before bootstrap reports verified completion."
         )
         let finalState = await coordinator.state()
         XCTAssertEqual(finalState.phase, .complete)
@@ -3455,7 +3492,8 @@ final class AppModelTests: XCTestCase {
     func testBootstrapInvalidRequestPreservesTypedCLIError() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-mismatch-test-\(UUID().uuidString)", isDirectory: true)
-        let siloBin = temporary.appendingPathComponent("bin", isDirectory: true)
+        let siloBin = ToolchainLayout.managedRoot(homeDirectory: temporary)
+            .appendingPathComponent("current/bin", isDirectory: true)
         let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
         let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
         try FileManager.default.createDirectory(at: siloBin, withIntermediateDirectories: true)
@@ -3557,10 +3595,11 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(withoutRecovery.localizedDescription, "runtime unavailable (Silo error code: SILO_RUNTIME_UNAVAILABLE.)")
     }
 
-    func testRealBootstrapReconnectReadbackPrecedesGitHubEntry() async throws {
+    func testRealBootstrapReconnectPublishesAppliedConfigurationBeforeReturning() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-bootstrap-reconnect-test-\(UUID().uuidString)", isDirectory: true)
-        let siloBin = temporary.appendingPathComponent("bin", isDirectory: true)
+        let siloBin = ToolchainLayout.managedRoot(homeDirectory: temporary)
+            .appendingPathComponent("current/bin", isDirectory: true)
         let toolBin = temporary.appendingPathComponent(".local/bin", isDirectory: true)
         let configDirectory = temporary.appendingPathComponent(".config/silo", isDirectory: true)
         try FileManager.default.createDirectory(at: siloBin, withIntermediateDirectories: true)
@@ -3603,6 +3642,9 @@ final class AppModelTests: XCTestCase {
             homeDirectory: temporary,
             testSiloExecutable: executable
         ))
+        let userIntegration = RecordingUserIntegration(
+            workspaceConfigurationURL: configDirectory.appendingPathComponent("workspaces.json")
+        )
         let coordinator = BootstrapCoordinator(
             client: SiloClient(runner: runner),
             runner: runner,
@@ -3611,7 +3653,7 @@ final class AppModelTests: XCTestCase {
             ),
             hostAgent: RecordingHostAgent(),
             hostService: EnabledHostService(),
-            userIntegration: AvailableUserIntegration(),
+            userIntegration: userIntegration,
             freeDiskBytes: { Int64(20 * 1_024 * 1_024 * 1_024) }
         )
         let selected = [
@@ -3637,6 +3679,12 @@ final class AppModelTests: XCTestCase {
             }
             XCTAssertEqual(protocolError.workspace, "development")
         }
+        let reconnectConfigurationAvailable = await userIntegration
+            .workspaceConfigurationAvailableAtInvocation
+        XCTAssertTrue(
+            reconnectConfigurationAvailable,
+            "Reconnect handling must configure user integration only after workspaces.json is readable."
+        )
 
         let state = await coordinator.state()
         XCTAssertEqual(state.phase, .github)
@@ -3649,7 +3697,7 @@ final class AppModelTests: XCTestCase {
     }
 
     @MainActor
-    func testReconnectPublishesAppliedConfigurationBeforeGitHubEntry() async throws {
+    func testReconnectPublishesAppliedConfigurationBeforeReturning() async throws {
         let coordinator = SiloBootstrapUITestStub(failureWorkspace: "dev")
         var configurations = SetupWorkspaceConfiguration.defaults
         configurations[0].name = "development"
@@ -5004,29 +5052,32 @@ final class AppModelTests: XCTestCase {
             systemReady: true,
             githubDecided: true,
             identityDecided: true,
+            verificationsAllowCompletion: false,
+            registrationOutstanding: false
+        ), "Review must block completion until security verification succeeds.")
+        XCTAssertFalse(SetupView.allowsReviewCompletion(
+            contextLoaded: true,
+            systemReady: true,
+            githubDecided: true,
+            identityDecided: true,
             verificationsAllowCompletion: true,
             registrationOutstanding: true
         ), "Review must block completion while workspace registration is queued or running.")
     }
 
-    func testWorkspaceAdvanceStartsGitHubContextIndependentlyFromRegistration() {
-        XCTAssertEqual(SetupView.workspaceAdvanceEffects(
+    func testWorkspaceContinueRequiresOnlyValidLoadedInput() {
+        XCTAssertTrue(SetupView.canSubmitWorkspaceConfiguration(
             validationMessage: nil,
             bootstrapInputReady: true
-        ), [
-            .publishConfiguration,
-            .startRegistration,
-            .loadGitHubContext,
-            .navigateToGitHub
-        ])
-        XCTAssertTrue(SetupView.workspaceAdvanceEffects(
+        ), "Background registration must not turn Workspaces Continue into an operation gate.")
+        XCTAssertFalse(SetupView.canSubmitWorkspaceConfiguration(
             validationMessage: "Workspace names must be unique.",
             bootstrapInputReady: true
-        ).isEmpty)
-        XCTAssertTrue(SetupView.workspaceAdvanceEffects(
+        ))
+        XCTAssertFalse(SetupView.canSubmitWorkspaceConfiguration(
             validationMessage: nil,
             bootstrapInputReady: false
-        ).isEmpty)
+        ))
     }
 
     func testBootstrapVerificationTreatsPendingAsPendingAndOnlyTerminalErrorAsFailure() {
@@ -5055,31 +5106,21 @@ final class AppModelTests: XCTestCase {
     func testIdentityContinueRequiresClientAvailabilityAndValidIdentity() {
         XCTAssertTrue(SetupView.allowsIdentitySave(
             clientAvailable: true,
-            systemReady: true,
             name: "Taylor Example",
             email: "taylor@example.com"
         ))
         XCTAssertFalse(SetupView.allowsIdentitySave(
             clientAvailable: false,
-            systemReady: true,
             name: "Taylor Example",
             email: "taylor@example.com"
         ), "A valid identity still requires the migrated Silo client dependency.")
         XCTAssertFalse(SetupView.allowsIdentitySave(
             clientAvailable: true,
-            systemReady: false,
-            name: "Taylor Example",
-            email: "taylor@example.com"
-        ), "Git identity must remain blocked until workspace setup is ready.")
-        XCTAssertFalse(SetupView.allowsIdentitySave(
-            clientAvailable: true,
-            systemReady: true,
             name: "   ",
             email: "taylor@example.com"
         ))
         XCTAssertFalse(SetupView.allowsIdentitySave(
             clientAvailable: true,
-            systemReady: true,
             name: "Taylor Example",
             email: "taylor @example.com"
         ))

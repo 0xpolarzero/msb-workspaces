@@ -15,6 +15,9 @@ case "${1:-}" in
   --startup-only)
     TEST_TARGETS=("SiloUITests/SiloUITests/testStartupInstallsDependenciesInsideFirstOnboardingStep")
     ;;
+  --registration-failure-only)
+    TEST_TARGETS=("SiloUITests/SiloUITests/testWorkspaceRegistrationFailureAppearsOnReviewWithRetryableDetails")
+    ;;
   --monitor-only)
     TEST_TARGETS=("SiloUITests/SiloUITests/testStatusItemMinimalPopoverAndQuit")
     ;;
@@ -69,7 +72,7 @@ case "${1:-}" in
     TEST_TARGETS=("SiloUITests/SiloUITests/testOperationFailureOpensDetailedLogs")
     ;;
   *)
-    print -u2 "usage: $0 [--startup-only|--monitor-only|--repair-only|--workspace-repair-only|--picker-only|--preferences-only|--navigation-only|--github-sync-only|--secrets-only|--lifecycle-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
+    print -u2 "usage: $0 [--startup-only|--registration-failure-only|--monitor-only|--repair-only|--workspace-repair-only|--picker-only|--preferences-only|--navigation-only|--github-sync-only|--secrets-only|--lifecycle-only|--backup-only|--backup-result-only|--backup-operations-only|--network-only|--files-cache-only|--failure-only]"
     exit 64
     ;;
 esac
