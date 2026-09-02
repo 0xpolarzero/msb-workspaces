@@ -11,12 +11,11 @@ SILO_BASE_SNAPSHOT="silo-base-v1"
 SILO_ROOT_DISK="48G"
 
 # Typed workspace configuration. Silo and setup.sh persist the validated
-# JSON document at this path. setup.sh creates the three legacy defaults below
-# only when no typed document exists yet.
+# JSON document at this path. setup.sh creates the three defaults below only
+# when no typed document exists yet.
 SILO_WORKSPACES_FILE="${SILO_WORKSPACES_FILE:-$HOME/.config/silo/workspaces.json}"
 
-# Legacy seed values used only when setup.sh creates workspaces.json for an
-# installation that does not have the typed document yet.
+# Default values used when setup.sh creates workspaces.json.
 SILO_DEV_CPUS="8"
 SILO_DEV_MAX_CPUS="12"
 SILO_DEV_MEMORY="32G"
@@ -44,16 +43,8 @@ SILO_PERSONAL_RUNTIME_SIZE="80G"
 # 24678 and 24679 are reserved for automated end-to-end health tests.
 SILO_PUBLISHED_PORTS="1234,1337,24678-24679,3000-3010,3100,3333,3306-3308,4000-4005,4173,4200,4321,5001-5005,5173-5180,5432-5435,5555,6006,6379-6382,7001-7005,8000-8010,8080-8090,8787,8888,9000-9005,9229-9230,27017-27019"
 
-# Connect mode only (legacy): the guest sees a placeholder named GH_TOKEN and
-# the real read token stays on the host, substituted only when traffic reaches
-# one of these GitHub endpoints. Local mode (the default) never puts any
-# GitHub credential in the guest at all (Path C §7).
-SILO_GITHUB_SECRET_HOSTS="github.com,api.github.com"
-
-# Path C §1: single source of truth for GitHub mode. local = repo-aware proxy
-# (default; no Connect grants, no keychain tokens, no guest secret). connect =
-# the legacy Connect-grant flow. Environment overrides this value.
-SILO_GITHUB_MODE="${SILO_GITHUB_MODE:-local}"
+# The current repo-aware proxy never puts a GitHub credential in a guest.
+SILO_GITHUB_MODE="local"
 
 # Host prerequisite: setup.sh installs the GitHub CLI (`gh`) via Homebrew;
 # local-mode sign-in on a clean Mac uses `gh`'s web OAuth flow and silo reuses

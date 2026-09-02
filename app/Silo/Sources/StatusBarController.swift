@@ -353,6 +353,7 @@ private struct RuntimeRepairView: View {
                         .accessibilityHidden(true)
                     Text(message)
                         .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                         .accessibilityIdentifier(RuntimeRepairAccessibilityIdentifier.repairResult)
                 }
                 .foregroundStyle(.primary)

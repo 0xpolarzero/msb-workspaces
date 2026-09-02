@@ -416,6 +416,7 @@ private struct SecretRow: View {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.red)
+                        .textSelection(.enabled)
                         .lineLimit(2)
                         .accessibilityIdentifier("secrets.entry.\(entry.name).error")
                 }
@@ -570,6 +571,7 @@ private struct SecretEditorSheet: View {
                     Text(domainError)
                         .font(.caption)
                         .foregroundStyle(.red)
+                        .textSelection(.enabled)
                         .accessibilityIdentifier("secrets.editor.domain.error")
                 }
             }
@@ -595,6 +597,7 @@ private struct SecretEditorSheet: View {
                 Text(formError)
                     .font(.callout)
                     .foregroundStyle(.red)
+                    .textSelection(.enabled)
                     .accessibilityIdentifier("secrets.editor.error")
             }
 

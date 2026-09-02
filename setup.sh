@@ -183,13 +183,10 @@ workspace_config_value() {
 }
 workspace_host() { printf '%s.silo.test\n' "$1"; }
 
-# Path C §1: mode defaults to local; validate before any workspace work.
+# The current Silo GitHub transport is repo-aware local mode.
 : "${SILO_GITHUB_MODE:=local}"
 : "${SILO_GITHUB_PROXY_PORT:=18446}"
-case "$SILO_GITHUB_MODE" in
-  local|connect) ;;
-  *) fatal "invalid SILO_GITHUB_MODE '$SILO_GITHUB_MODE' (expected local or connect)" ;;
-esac
+[[ "$SILO_GITHUB_MODE" == local ]] || fatal "invalid SILO_GITHUB_MODE '$SILO_GITHUB_MODE' (expected local)"
 
 verify_installed_proxy_hashes() {
   # Fail-closed: every installed proxy-stack file must match MANIFEST.txt.
@@ -265,24 +262,8 @@ cap_cpu() { local requested="$1"; (( requested > HOST_CPUS )) && printf '%s\n' "
 snapshot_exists() { "$MSB_BIN" snapshot inspect "$SILO_BASE_SNAPSHOT" >/dev/null 2>&1; }
 sandbox_exists() { workspace_msb "$1" inspect "$1" >/dev/null 2>&1; }
 workspace_msb() {
-  local box="$1" token="" status
+  local box="$1"
   shift
-  if token="$(keychain_read_token "$box" 2>/dev/null)"; then
-    if GH_TOKEN="$token" "$MSB_BIN" "$@"; then
-      status=0
-    else
-      status=$?
-    fi
-    unset token
-    return "$status"
-  fi
-  if [[ -f "$HOME/.config/silo/github/${box}.conf" || -f "$HOME/.config/silo/github/${box}.quarantine" ]]; then
-    if [[ "$SILO_GITHUB_MODE" == local ]]; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Run: silo github migrate $box, then silo github auth (or connect GitHub in Silo)"
-    else
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
-    fi
-  fi
   "$MSB_BIN" "$@"
 }
 volume_exists() { "$MSB_BIN" volume inspect "$1" >/dev/null 2>&1; }
@@ -507,13 +488,6 @@ ensure_ext4_volume() {
   fi
 }
 
-BASE_STAMP="$HOME/.config/silo/base-version"
-if [[ -f "$BASE_STAMP" && "$(cat "$BASE_STAMP")" != "$SILO_VERSION" ]]; then
-  warn "base version changed; rebuilding VM roots while preserving data volumes"
-  REBUILD_BASE=1
-  RECREATE_WORKSPACES=1
-fi
-
 validate_ports() {
   local token start end port seen=" "
   local old_ifs="$IFS"; IFS=','
@@ -561,10 +535,8 @@ if ! snapshot_exists; then
   "$MSB_BIN" snapshot verify "$SILO_BASE_SNAPSHOT"
   "$MSB_BIN" rm "$SILO_BASE_BUILDER"
   "$MSB_BIN" volume rm silo-base-runtime-temporary
-  printf '%s\n' "$SILO_VERSION" >"$BASE_STAMP"
 else
   echo "Using existing base snapshot: $SILO_BASE_SNAPSHOT"
-  [[ -f "$BASE_STAMP" ]] || printf '%s\n' "$SILO_VERSION" >"$BASE_STAMP"
 fi
 
 # setup.sh and native app bootstrap share the CLI-owned safety probe. Keeping
@@ -603,9 +575,9 @@ wait_for_guest_systemd() {
 configure_workspace_guest() {
   local box="$1" browser_host="$2"
   wait_for_guest_systemd "$box"
-  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" "$SILO_GITHUB_MODE" <<'GUEST'
+  workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$box" "$browser_host" <<'GUEST'
 set -Eeuo pipefail
-workspace="$1"; browser_host="$2"; github_mode="$3"
+workspace="$1"; browser_host="$2"
 mkdir -p /workspace /var/lib/silo-runtime/docker /var/lib/silo-runtime/containerd
 printf 'export SILO_WORKSPACE=%q\nexport SILO_BROWSER_HOST=%q\nexport HOST=%q\nexport BIND_ADDRESS=%q\nexport __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=%q\n' \
   "$workspace" "$browser_host" "0.0.0.0" "0.0.0.0" "$browser_host" \
@@ -615,12 +587,10 @@ hostnamectl set-hostname "silo-$workspace"
 printf '%s\n' "$workspace" >/workspace/.silo-workspace
 printf 'Silo workspace: %s\n\n  Code:       /workspace\n  Browser:    http://%s:<published-port>\n  Docker:     docker compose up --build\n  Runtimes:   mise use <tool>@<version>\n  Python:     uv sync / uv run ...\n' \
   "$workspace" "$browser_host" >/etc/motd
-if [ "$github_mode" = local ]; then
-  cat >>/etc/motd <<'MOTD'
+cat >>/etc/motd <<'MOTD'
   GitHub:     use git inside the workspace. GitHub API calls are not supported
               here; run API operations from the Mac.
 MOTD
-fi
 systemctl daemon-reload
 systemctl enable containerd.service docker.service
 systemctl restart containerd.service docker.service
@@ -635,20 +605,9 @@ sync
 GUEST
 }
 
-keychain_read_token() {
-  local box="$1"
-  if [[ -n "${SILO_TEST_KEYCHAIN_DIR:-}" ]]; then
-    local file="$SILO_TEST_KEYCHAIN_DIR/silo.github.read__${box}"
-    [[ -f "$file" ]] || return 1
-    cat "$file"
-  else
-    /usr/bin/security find-generic-password -w -s silo.github.read -a "$box" 2>/dev/null
-  fi
-}
-
 create_workspace() {
   local box="$1" browser_host="$2" cpus="$3" max_cpus="$4" memory="$5" max_memory="$6" workspace_size="$7" runtime_size="$8"
-  local effective_cpus effective_max token="" run_args=()
+  local effective_cpus effective_max run_args=()
   effective_cpus="$(cap_cpu "$cpus")"; effective_max="$(cap_cpu "$max_cpus")"
   (( effective_cpus > effective_max )) && effective_cpus="$effective_max"
 
@@ -686,12 +645,6 @@ create_workspace() {
     "$MSB_BIN" run --detach "${run_args[@]}"
     "$HOME/.local/bin/silo" __workspace-state-init "$box" || warn "could not record the workspace state for $box"
     configure_workspace_guest "$box" "$browser_host"
-    if [[ "$SILO_GITHUB_MODE" == connect ]]; then
-      if token="$(keychain_read_token "$box" 2>/dev/null)"; then
-        workspace_msb "$box" modify "$box" --secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}" --next-start >/dev/null
-        unset token
-      fi
-    fi
     workspace_msb "$box" stop -t 90 "$box"
   else
     echo "Workspace already exists: $box"

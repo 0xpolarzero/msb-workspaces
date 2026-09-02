@@ -1,5 +1,49 @@
 import Foundation
 
+private struct CredentialCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+private func requireExactCredentialKeys<Key: CodingKey & CaseIterable>(
+    in decoder: Decoder,
+    _: Key.Type
+) throws {
+    let container = try decoder.container(keyedBy: CredentialCodingKey.self)
+    let actual = Set(container.allKeys.map(\.stringValue))
+    let expected = Set(Key.allCases.map(\.stringValue))
+    guard actual == expected else {
+        throw DecodingError.dataCorrupted(
+            .init(codingPath: decoder.codingPath, debugDescription: "Credential object keys do not match the current Silo format.")
+        )
+    }
+}
+
+private func requireKnownCredentialKeys<Key: CodingKey & CaseIterable>(
+    in decoder: Decoder,
+    _: Key.Type,
+    required: Set<String>
+) throws {
+    let container = try decoder.container(keyedBy: CredentialCodingKey.self)
+    let actual = Set(container.allKeys.map(\.stringValue))
+    let allowed = Set(Key.allCases.map(\.stringValue))
+    guard required.isSubset(of: actual), actual.isSubset(of: allowed) else {
+        throw DecodingError.dataCorrupted(
+            .init(codingPath: decoder.codingPath, debugDescription: "Credential object keys do not match the current Silo format.")
+        )
+    }
+}
+
 enum CredentialRole: String, Codable, Sendable, CaseIterable {
     case guest
     case host
@@ -8,7 +52,6 @@ enum CredentialRole: String, Codable, Sendable, CaseIterable {
 enum CredentialRecoveryState: String, Codable, Sendable, Equatable {
     case ready
     case needsAuthorization
-    case migrationRequired
     case expired
     case revoked
     case installationRemoved
@@ -43,6 +86,23 @@ struct ScopedInstallationCredential: Codable, Sendable, Equatable {
         self.generation = generation
     }
 
+    init(from decoder: Decoder) throws {
+        try requireExactCredentialKeys(in: decoder, CodingKeys.self)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        grantID = try container.decode(UUID.self, forKey: .grantID)
+        accessToken = try container.decode(String.self, forKey: .accessToken)
+        accessExpiresAt = try container.decode(Date.self, forKey: .accessExpiresAt)
+        generation = try container.decode(Int.self, forKey: .generation)
+        guard schemaVersion == Self.currentSchemaVersion else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Expected the current Silo credential format."
+            )
+        }
+    }
+
     var isAccessExpired: Bool { accessExpiresAt <= Date() }
 
     var isStructurallyValid: Bool {
@@ -68,6 +128,10 @@ struct ScopedInstallationCredential: Codable, Sendable, Equatable {
         return !["ghp_", "gho_", "ghu_", "ghr_", "github_pat_"].contains {
             lowercased.hasPrefix($0)
         }
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion, grantID, accessToken, accessExpiresAt, generation
     }
 }
 
@@ -137,29 +201,54 @@ struct WorkspaceCredentialMetadata: Codable, Sendable, Equatable, Identifiable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireKnownCredentialKeys(
+            in: decoder,
+            CodingKeys.self,
+            required: [
+                CodingKeys.workspace.rawValue,
+                CodingKeys.schemaVersion.rawValue,
+                CodingKeys.role.rawValue,
+                CodingKeys.provider.rawValue,
+                CodingKeys.repositoryIDs.rawValue,
+                CodingKeys.repositoryNames.rawValue,
+                CodingKeys.accessMode.rawValue,
+                CodingKeys.needsRestart.rawValue,
+                CodingKeys.generation.rawValue,
+                CodingKeys.quarantined.rawValue,
+                CodingKeys.recoveryState.rawValue,
+                CodingKeys.updatedAt.rawValue
+            ]
+        )
         let container = try decoder.container(keyedBy: CodingKeys.self)
         workspace = try container.decode(String.self, forKey: .workspace)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
-        role = try container.decodeIfPresent(CredentialRole.self, forKey: .role) ?? .guest
-        provider = try container.decodeIfPresent(String.self, forKey: .provider) ?? "github-app-user"
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        role = try container.decode(CredentialRole.self, forKey: .role)
+        provider = try container.decode(String.self, forKey: .provider)
         grantID = try container.decodeIfPresent(UUID.self, forKey: .grantID)
         scopeDigest = try container.decodeIfPresent(String.self, forKey: .scopeDigest)
         accountLogin = try container.decodeIfPresent(String.self, forKey: .accountLogin)
         owner = try container.decodeIfPresent(String.self, forKey: .owner)
-        repositoryIDs = try container.decodeIfPresent([Int].self, forKey: .repositoryIDs) ?? []
-        repositoryNames = try container.decodeIfPresent([String].self, forKey: .repositoryNames) ?? []
-        accessMode = try container.decodeIfPresent(String.self, forKey: .accessMode) ?? "unknown"
+        repositoryIDs = try container.decode([Int].self, forKey: .repositoryIDs)
+        repositoryNames = try container.decode([String].self, forKey: .repositoryNames)
+        accessMode = try container.decode(String.self, forKey: .accessMode)
         verificationRepository = try container.decodeIfPresent(String.self, forKey: .verificationRepository)
         installationID = try container.decodeIfPresent(Int.self, forKey: .installationID)
         accessExpiresAt = try container.decodeIfPresent(Date.self, forKey: .accessExpiresAt)
-        needsRestart = try container.decodeIfPresent(Bool.self, forKey: .needsRestart) ?? false
-        generation = try container.decodeIfPresent(Int.self, forKey: .generation) ?? 0
-        quarantined = try container.decodeIfPresent(Bool.self, forKey: .quarantined) ?? false
-        recoveryState = try container.decodeIfPresent(CredentialRecoveryState.self, forKey: .recoveryState)
-            ?? (quarantined ? .quarantined : .needsAuthorization)
-        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        needsRestart = try container.decode(Bool.self, forKey: .needsRestart)
+        generation = try container.decode(Int.self, forKey: .generation)
+        quarantined = try container.decode(Bool.self, forKey: .quarantined)
+        recoveryState = try container.decode(CredentialRecoveryState.self, forKey: .recoveryState)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        guard schemaVersion == ScopedInstallationCredential.currentSchemaVersion,
+              provider == "github-app-installation" else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Expected the current Silo credential metadata format."
+            )
+        }
     }
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case workspace, schemaVersion, role, provider, grantID, scopeDigest, accountLogin, owner
         case repositoryIDs, repositoryNames, accessMode, verificationRepository, installationID
         case accessExpiresAt, needsRestart, generation, quarantined, recoveryState, updatedAt
@@ -177,9 +266,8 @@ enum CredentialBrokerError: Error, LocalizedError, Sendable, Equatable {
     case missingCredential
     case metadataWriteFailed
     case quarantineRequired
-    case migrationFailed
+    case invalidMetadata
     case grantUnavailable
-    case legacyCredentialRequiresAuthorization
 
     var errorDescription: String? {
         switch self {
@@ -188,9 +276,8 @@ enum CredentialBrokerError: Error, LocalizedError, Sendable, Equatable {
         case .missingCredential: return "No GitHub installation grant is configured for this workspace."
         case .metadataWriteFailed: return "Credential metadata could not be committed."
         case .quarantineRequired: return "The workspace is quarantined until its credentials are repaired."
-        case .migrationFailed: return "Credential metadata migration could not be completed safely."
+        case .invalidMetadata: return "The Silo credential metadata file is invalid. Reconnect GitHub to create a current record."
         case .grantUnavailable: return "The workspace grant is unavailable and must be renewed or reauthorized."
-        case .legacyCredentialRequiresAuthorization: return "This workspace has a legacy broad GitHub credential. Explicit reauthorization is required."
         }
     }
 }
@@ -287,38 +374,7 @@ actor CredentialBroker {
         self.audit = auditStore ?? SiloAuthorizationAuditStore(
             url: resolvedMetadataURL.deletingLastPathComponent().appendingPathComponent("authorization-events.json")
         )
-        let loaded = try Self.readMetadata(from: resolvedMetadataURL)
-        let normalized = try Self.normalize(loaded)
-        let didNormalize = normalized != loaded
-        if didNormalize {
-            do {
-                try Self.persistMetadata(normalized, to: self.metadataURL)
-            } catch {
-                throw CredentialBrokerError.migrationFailed
-            }
-        }
-        self.metadata = normalized
-        for entry in normalized.values where entry.provider == "legacy-broad-token" {
-            // Legacy schema versions could have stored separate broad guest
-            // and host records, while only one role was present in metadata.
-            // Clear both legacy slots for the workspace before requiring
-            // explicit reauthorization.
-            for role in CredentialRole.allCases {
-                try? self.keychain.delete(
-                    service: Self.legacyService(for: role),
-                    account: entry.workspace
-                )
-            }
-            if didNormalize {
-                audit.append(
-                    event: "legacyMigrated",
-                    workspace: entry.workspace,
-                    role: entry.role,
-                    grantID: nil,
-                    detail: "explicit-reauthorization-required"
-                )
-            }
-        }
+        self.metadata = try Self.readMetadata(from: resolvedMetadataURL)
     }
 
     func metadata(for workspace: String, role: CredentialRole = .guest) throws -> WorkspaceCredentialMetadata? {
@@ -353,9 +409,6 @@ actor CredentialBroker {
               Self.isValidScopedMetadata(entry),
               (allowQuarantined || (entry.recoveryState == .ready && !entry.quarantined)),
               let grantID = entry.grantID else {
-            if entry.provider == "legacy-broad-token" || entry.recoveryState == .migrationRequired {
-                throw CredentialBrokerError.legacyCredentialRequiresAuthorization
-            }
             throw entry.quarantined || entry.recoveryState == .quarantined
                 ? CredentialBrokerError.quarantineRequired
                 : CredentialBrokerError.grantUnavailable
@@ -426,9 +479,7 @@ actor CredentialBroker {
         }
         let service = service(for: workspace, role: role)
         let account = account(for: workspace, role: role)
-        let legacyService = Self.legacyService(for: role)
         let previousData = try? keychain.load(service: service, account: account)
-        let previousLegacyData = try? keychain.load(service: legacyService, account: workspace)
         let entry = WorkspaceCredentialMetadata(
             workspace: workspace,
             role: role,
@@ -451,9 +502,6 @@ actor CredentialBroker {
         )
         do {
             let data = try Self.jsonEncoder().encode(credential)
-            // A scoped replacement is the only operation allowed to remove a
-            // legacy broad token. Failure to delete it aborts the cutover.
-            try keychain.delete(service: legacyService, account: workspace)
             try keychain.save(KeychainItem(service: service, account: account, secret: data))
             metadata[key] = entry
             try persistMetadata()
@@ -472,15 +520,6 @@ actor CredentialBroker {
                     try keychain.save(KeychainItem(service: service, account: account, secret: previousData))
                 } else {
                     try keychain.delete(service: service, account: account)
-                }
-            } catch {
-                rollbackSucceeded = false
-            }
-            do {
-                if let previousLegacyData {
-                    try keychain.save(KeychainItem(service: legacyService, account: workspace, secret: previousLegacyData))
-                } else {
-                    try keychain.delete(service: legacyService, account: workspace)
                 }
             } catch {
                 rollbackSucceeded = false
@@ -610,7 +649,7 @@ actor CredentialBroker {
         guard var entry = metadata[key] else { throw CredentialBrokerError.missingCredential }
         let previous = entry
         entry.recoveryState = state
-        entry.quarantined = quarantined ?? (state == .quarantined || state == .migrationRequired)
+        entry.quarantined = quarantined ?? (state == .quarantined)
         entry.updatedAt = Date()
         metadata[key] = entry
         do {
@@ -672,7 +711,6 @@ actor CredentialBroker {
 
         do {
             try keychain.delete(service: service(for: workspace, role: role), account: account(for: workspace, role: role))
-            try keychain.delete(service: Self.legacyService(for: role), account: workspace)
             audit.append(
                 event: "grantRevoked",
                 workspace: workspace,
@@ -700,11 +738,7 @@ actor CredentialBroker {
     }
 
     func removeAllRoles(workspace: String) throws {
-        // Remove both roles unconditionally: `remove` also deletes the legacy
-        // Keychain records (silo.github.read/.write) for the workspace, so a
-        // workspace that only ever had legacy credentials must not short-circuit
-        // on missing schema-3 metadata and leave those records behind.
-        for role in CredentialRole.allCases {
+        for role in CredentialRole.allCases where metadata[metadataKey(workspace, role)] != nil {
             try remove(workspace: workspace, role: role)
         }
     }
@@ -742,31 +776,6 @@ actor CredentialBroker {
         } catch {
             metadata[key] = previous
             throw CredentialBrokerError.metadataWriteFailed
-        }
-    }
-
-    func migrateLegacyMetadata(from legacyURL: URL) throws {
-        guard !FileManager.default.fileExists(atPath: metadataURL.path),
-              FileManager.default.fileExists(atPath: legacyURL.path) else { return }
-        do {
-            let legacy = try Self.jsonDecoder().decode(LegacyMetadataFile.self, from: Data(contentsOf: legacyURL))
-            var migrated: [String: WorkspaceCredentialMetadata] = [:]
-            for (workspace, value) in legacy.entries {
-                guard WorkspaceID.isValid(workspace) else { throw CredentialBrokerError.migrationFailed }
-                migrated[metadataKey(workspace, .guest)] = Self.makeLegacyEntry(workspace: workspace, value: value)
-            }
-            metadata = try Self.normalize(migrated)
-            for entry in metadata.values {
-                for role in CredentialRole.allCases {
-                    try? keychain.delete(service: Self.legacyService(for: role), account: entry.workspace)
-                }
-            }
-            try persistMetadata()
-            try FileManager.default.moveItem(at: legacyURL, to: legacyURL.appendingPathExtension("migrated"))
-        } catch let error as CredentialBrokerError {
-            throw error
-        } catch {
-            throw CredentialBrokerError.migrationFailed
         }
     }
 
@@ -854,10 +863,6 @@ actor CredentialBroker {
 
 
 
-    private static func legacyService(for role: CredentialRole) -> String {
-        role == .guest ? "silo.github.read" : "silo.github.write"
-    }
-
     private func service(for workspace: String, role: CredentialRole) -> String {
         if let keychainServiceOverride { return keychainServiceOverride }
         return "silo.github.app.\(workspace).\(role.rawValue).tokens"
@@ -903,17 +908,7 @@ actor CredentialBroker {
 
     private static func jsonDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let container = try decoder.singleValueContainer()
-            if let value = try? container.decode(String.self),
-               let date = ISO8601DateFormatter().date(from: value) {
-                return date
-            }
-            if let value = try? container.decode(Double.self) {
-                return Date(timeIntervalSinceReferenceDate: value)
-            }
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Expected an ISO-8601 or reference-date value.")
-        }
+        decoder.dateDecodingStrategy = .iso8601
         return decoder
     }
 
@@ -921,124 +916,56 @@ actor CredentialBroker {
         guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
         do {
             let file = try jsonDecoder().decode(MetadataFile.self, from: Data(contentsOf: url))
-            guard (1...currentSchemaVersion).contains(file.schemaVersion) else {
-                throw CredentialBrokerError.migrationFailed
+            guard file.schemaVersion == currentSchemaVersion else {
+                throw CredentialBrokerError.invalidMetadata
             }
-            return file.entries
+            var result: [String: WorkspaceCredentialMetadata] = [:]
+            for (key, entry) in file.entries {
+                guard key == "\(entry.workspace).\(entry.role.rawValue)",
+                      WorkspaceID.isValid(entry.workspace),
+                      result[key] == nil,
+                      isValidPersistedMetadata(entry) else {
+                    throw CredentialBrokerError.invalidMetadata
+                }
+                result[key] = entry
+            }
+            return result
         } catch let error as CredentialBrokerError {
             throw error
         } catch {
-            do {
-                let legacy = try jsonDecoder().decode(LegacyMetadataFile.self, from: Data(contentsOf: url))
-                var result: [String: WorkspaceCredentialMetadata] = [:]
-                for (workspace, value) in legacy.entries {
-                    guard WorkspaceID.isValid(workspace) else { throw CredentialBrokerError.migrationFailed }
-                    result["\(workspace).guest"] = makeLegacyEntry(workspace: workspace, value: value)
-                }
-                return result
-            } catch let error as CredentialBrokerError {
-                throw error
-            } catch {
-                throw CredentialBrokerError.migrationFailed
-            }
+            throw CredentialBrokerError.invalidMetadata
         }
     }
 
-    private static func normalize(_ entries: [String: WorkspaceCredentialMetadata]) throws -> [String: WorkspaceCredentialMetadata] {
-        var result: [String: WorkspaceCredentialMetadata] = [:]
-        for (_, value) in entries {
-            guard WorkspaceID.isValid(value.workspace) else { throw CredentialBrokerError.migrationFailed }
-            let key = "\(value.workspace).\(value.role.rawValue)"
-            guard result[key] == nil else { throw CredentialBrokerError.migrationFailed }
-            var normalized = value
-            let isExplicitQuarantine = value.quarantined &&
-                value.recoveryState == .quarantined &&
-                value.grantID == nil
-            let isLegacy = !isExplicitQuarantine && (
-                value.schemaVersion < currentSchemaVersion ||
-                value.provider != "github-app-installation" ||
-                value.grantID == nil
-            )
-            normalized.schemaVersion = currentSchemaVersion
-            if isLegacy {
-                // Preserve the fact that the record was broad. Never attach a
-                // new grant ID or claim repositoryIDs were enforced.
-                normalized.provider = "legacy-broad-token"
-                normalized.grantID = nil
-                normalized.quarantined = true
-                normalized.recoveryState = .migrationRequired
-                normalized.needsRestart = true
-            } else if !isValidScopedMetadata(normalized) {
-                // A current-schema record that fails the scope invariant is
-                // unusable, even if its Keychain bytes look well formed.
-                normalized.quarantined = true
-                normalized.recoveryState = .quarantined
-                normalized.needsRestart = true
-            }
-            result[key] = normalized
+    private static func isValidPersistedMetadata(_ entry: WorkspaceCredentialMetadata) -> Bool {
+        if entry.quarantined,
+           entry.recoveryState == .quarantined,
+           entry.grantID == nil {
+            return entry.schemaVersion == currentSchemaVersion &&
+                entry.provider == "github-app-installation"
         }
-        return result
-    }
-
-    private static func makeLegacyEntry(workspace: String, value: LegacyMetadataFile.LegacyEntry) -> WorkspaceCredentialMetadata {
-        WorkspaceCredentialMetadata(
-            workspace: workspace,
-            schemaVersion: 1,
-            provider: "legacy-broad-token",
-            accountLogin: value.accountLogin,
-            owner: value.owner,
-            repositoryIDs: value.repositoryIDs,
-            repositoryNames: value.repositoryNames,
-            accessMode: value.accessMode ?? "unknown",
-            verificationRepository: value.verificationRepository,
-            installationID: value.installationID,
-            accessExpiresAt: value.accessExpiresAt,
-            needsRestart: true,
-            generation: value.generation ?? 0,
-            quarantined: true,
-            recoveryState: .migrationRequired,
-            updatedAt: value.updatedAt ?? Date()
-        )
+        return isValidScopedMetadata(entry)
     }
 
     private struct MetadataFile: Codable, Equatable {
         let schemaVersion: Int
         let entries: [String: WorkspaceCredentialMetadata]
-    }
 
-    private struct LegacyMetadataFile: Codable {
-        let entries: [String: LegacyEntry]
+        init(schemaVersion: Int, entries: [String: WorkspaceCredentialMetadata]) {
+            self.schemaVersion = schemaVersion
+            self.entries = entries
+        }
 
-        struct LegacyEntry: Codable {
-            let accountLogin: String?
-            let owner: String?
-            let repositoryIDs: [Int]
-            let repositoryNames: [String]
-            let accessMode: String?
-            let verificationRepository: String?
-            let installationID: Int?
-            let accessExpiresAt: Date?
-            let generation: Int?
-            let updatedAt: Date?
+        init(from decoder: Decoder) throws {
+            try requireExactCredentialKeys(in: decoder, CodingKeys.self)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+            entries = try container.decode([String: WorkspaceCredentialMetadata].self, forKey: .entries)
+        }
 
-            init(from decoder: Decoder) throws {
-                let container = try decoder.container(keyedBy: CodingKeys.self)
-                accountLogin = try container.decodeIfPresent(String.self, forKey: .accountLogin)
-                owner = try container.decodeIfPresent(String.self, forKey: .owner)
-                repositoryIDs = try container.decodeIfPresent([Int].self, forKey: .repositoryIDs) ?? []
-                repositoryNames = try container.decodeIfPresent([String].self, forKey: .repositoryNames) ?? []
-                accessMode = try container.decodeIfPresent(String.self, forKey: .accessMode)
-                verificationRepository = try container.decodeIfPresent(String.self, forKey: .verificationRepository)
-                installationID = try container.decodeIfPresent(Int.self, forKey: .installationID)
-                accessExpiresAt = try container.decodeIfPresent(Date.self, forKey: .accessExpiresAt)
-                generation = try container.decodeIfPresent(Int.self, forKey: .generation)
-                updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)
-            }
-
-            private enum CodingKeys: String, CodingKey {
-                case accountLogin, owner, repositoryIDs, repositoryNames, accessMode
-                case verificationRepository, installationID, accessExpiresAt, generation, updatedAt
-            }
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case schemaVersion, entries
         }
     }
+
 }

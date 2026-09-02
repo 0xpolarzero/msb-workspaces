@@ -33,8 +33,7 @@ struct SiloBootstrapState: Codable, Sendable, Equatable {
     var reconnectWorkspace: String? = nil
     /// Wall-clock seconds per phase for the most recent `run()`, keyed by
     /// `Phase.rawValue`; `preflight` accumulates both read-only passes.
-    /// Optional so state persisted by older builds still decodes.
-    var phaseDurations: [String: TimeInterval]? = nil
+    var phaseDurations: [String: TimeInterval] = [:]
 
     static var initial: Self {
         Self(phase: .welcome, startedAt: nil, updatedAt: Date(), lastError: nil, completedPhases: [])
@@ -42,9 +41,7 @@ struct SiloBootstrapState: Codable, Sendable, Equatable {
 
     /// Adds elapsed wall-clock time for one timed span into `phaseDurations`.
     mutating func recordPhaseDuration(_ key: String, from start: Date) {
-        var durations = phaseDurations ?? [:]
-        durations[key, default: 0] += max(0, Date().timeIntervalSince(start))
-        phaseDurations = durations
+        phaseDurations[key, default: 0] += max(0, Date().timeIntervalSince(start))
     }
 }
 enum BootstrapCoordinatorError: Error, LocalizedError, Sendable, Equatable {

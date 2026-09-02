@@ -11,8 +11,8 @@ ACCOUNT` command is a parent process that reads the `put` record from NORMAL
 stdin and spawns the SAME helper as `--worker OP SERVICE ACCOUNT`, passing the
 secret bytes over the child's stdin (never argv, env, or files). The parent
 captures stdout/stderr and enforces a hard timeout
-(SILO_KEYCHAIN_TIMEOUT_SECS, default 10): a hidden keychain ACL prompt (e.g. a
-legacy security(1)-created item) can never hang the CLI — the watchdog
+(SILO_KEYCHAIN_TIMEOUT_SECS, default 10): a hidden keychain ACL prompt can
+never hang the CLI — the watchdog
 terminates then kills the worker and reports a typed timeout. The WORKER mode
 alone loads Security.framework and performs the SecItem operation.
 `get`/`delete` carry no secret input.

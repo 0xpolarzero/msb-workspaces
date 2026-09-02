@@ -22,7 +22,7 @@ enum KeychainStoreError: Error, LocalizedError, Sendable, Equatable {
 }
 
 /// Stores only opaque credential material in Keychain. Workspace metadata is
-/// intentionally kept separately so it can be migrated without touching secrets.
+/// intentionally kept separately from secrets.
 final class KeychainStore: @unchecked Sendable {
     private let accessGroup: String?
 
@@ -91,30 +91,5 @@ protocol CredentialKeychainStoring: Sendable {
 }
 
 extension KeychainStore: CredentialKeychainStoring {}
-
-
-/// One-way startup cleanup for a credential that earlier builds issued
-/// directly. The secret is never read, decoded, or migrated: it is deleted
-/// before credential-backed UI becomes available.
-enum LegacyDirectGitHubCredentialRetirement {
-    static let service = "org.silo.Silo.github-device-session"
-    static let account = "session"
-
-    static func remove(using keychain: any CredentialKeychainStoring = KeychainStore()) throws {
-        do {
-            try keychain.delete(service: service, account: account)
-        } catch {
-            throw LegacyDirectGitHubCredentialRetirementError.removalUnconfirmed
-        }
-    }
-}
-
-enum LegacyDirectGitHubCredentialRetirementError: Error, LocalizedError, Sendable, Equatable {
-    case removalUnconfirmed
-
-    var errorDescription: String? {
-        "GitHub access could not be secured. Restart Silo and try again."
-    }
-}
 
 extension KeychainStore: SiloConnectKeychainStoring {}

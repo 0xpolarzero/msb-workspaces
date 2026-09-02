@@ -47,9 +47,8 @@ lib/proxy-upstream.py.
 
 HMAC stamp key: random 32 bytes per deployment, hex, persisted mode 0600 in
 <policy dir>/github-proxy-hmac.key (SILO_PROXY_HMAC_KEY_FILE seam), created
-atomically with O_EXCL. NOTE FOR PHASE 2 REVIEW: key-rotation/expiry policy
-for this file is owned by the phase-2 credential/migration work; the key is
-only ever used to stamp/verify LFS object URLs, never to sign anything else.
+atomically with O_EXCL. The key is used only to stamp and verify LFS object
+URLs, never to sign anything else.
 
 One structured, single-line, REDACTED JSON record per request goes to
 SILO_PROXY_LOG_FILE. Capability and token values are never logged; the LFS
@@ -839,7 +838,9 @@ class Classifier:
             data = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             raise ProxyError(403, "invalid LFS stamp payload", category="denied")
-        if not isinstance(data, dict):
+        if (not isinstance(data, dict)
+                or set(data) != {"v", "op", "repo", "exp", "href", "headers", "auth"}
+                or data["v"] != 1):
             raise ProxyError(403, "invalid LFS stamp payload", category="denied")
         # The blob is MAC'd as a unit; cross-check its fields against the
         # visible params so a URL/param substitution cannot reclassify it.
@@ -863,13 +864,9 @@ class Classifier:
                 raise ProxyError(403, "invalid LFS stamp headers", category="denied")
             if _HEADER_NAME_RE.fullmatch(name) and len(value) <= MAX_HEADER_VALUE_BYTES:
                 clean_headers[name] = value
-        # `auth` is set host-side only when the batch was forwarded WITH the
-        # host token; anonymous batches mint stamps with `auth: false`. A
-        # stamp WITHOUT the flag predates this change and was necessarily
-        # minted under a grant (the old proxy never forwarded a batch without
-        # the host token), so it is treated as authenticated -- fail-closed,
-        # so a legacy stamp cannot outlive a grant revocation.
-        return repo, op, href, clean_headers, bool(data.get("auth", True))
+        if not isinstance(data["auth"], bool):
+            raise ProxyError(403, "invalid LFS stamp auth state", category="denied")
+        return repo, op, href, clean_headers, data["auth"]
 
 
 # ---------------------------------------------------------------------------

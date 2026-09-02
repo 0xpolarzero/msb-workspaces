@@ -14,7 +14,7 @@
 <div class="eyebrow">Forensic report · causal proof</div>
 <h1>ext4 superblocks exceed four raw images by 132,112,384 bytes</h1>
 <p class="lede"><strong>Root cause:</strong> a guest ext4 FITRIM tail discard reaches MicroSandbox v0.6.8's raw virtio-blk backend, then <code>msb-imago 0.1.1</code> <code>File::try_discard_by_truncate</code> executes <code>file.set_len(offset)</code>. That operation shortens <code>disk.raw</code> at the first free block of the final ext4 group while the ext4 superblock and in-memory virtual capacity remain unchanged.</p>
-<div class="callout verdict"><strong>This is not a formatter-size bug and not a Silo copy, backup, restore, resize, or migration bug.</strong> The formatter creates the full requested length. Corruption happens after attach, on an EOF-reaching virtio discard. A clean 2 GiB disposable volume reproduced the exact 132,112,384-byte mismatch; an otherwise identical no-FITRIM control retained delta 0.</div>
+<div class="callout verdict"><strong>This is not a formatter-size bug and not a Silo copy, backup, restore, or resize bug.</strong> The formatter creates the full requested length. Corruption happens after attach, on an EOF-reaching virtio discard. A clean 2 GiB disposable volume reproduced the exact 132,112,384-byte mismatch; an otherwise identical no-FITRIM control retained delta 0.</div>
 <div class="grid">
 <div class="card"><strong class="bad">4</strong><span>Affected retained images</span></div>
 <div class="card"><strong>132,112,384 B</strong><span>Exact deficit in each</span></div>
@@ -124,7 +124,7 @@ msb exec --no-tty silo-trim-repro-b-sb -- fstrim -v /mnt/trimtest</pre>
 <tr><td>MicroSandbox ext4 grow path</td><td>Validates current file length equals declared geometry; grows with <code>set_len(new_size)</code>; refuses shrink.</td><td class="good">Ruled out.</td></tr>
 <tr><td>MicroSandbox sparse copy / snapshot import</td><td>Sets destination to source logical length before copying extents; archive import sets recorded real size.</td><td class="good">Ruled out.</td></tr>
 <tr><td>Silo backup / restore</td><td>GNU tar <code>--sparse</code> records logical real size; extraction restores it. Restore stages then moves files.</td><td class="good">Cannot invent this EOF boundary; can only preserve an already-short source.</td></tr>
-<tr><td>Silo capacity migration</td><td>Guest <code>cp -a /source/. /destination/</code> copies inner ext4 contents, not host <code>disk.raw</code>.</td><td class="good">Ruled out.</td></tr>
+<tr><td>Silo capacity copy</td><td>Guest <code>cp -a /source/. /destination/</code> copies inner ext4 contents, not host <code>disk.raw</code>.</td><td class="good">Ruled out.</td></tr>
 <tr><td>Silo resource resize</td><td>Changes memory/CPU through <code>msb modify</code>; no disk operation.</td><td class="good">Ruled out.</td></tr>
 <tr><td>Silo current fresh-volume finalizer</td><td>Fresh-only, upward-only <code>os.ftruncate(fd, declared_bytes)</code>; existing volumes are inspected, not changed.</td><td class="good">Cannot cause shortening.</td></tr>
 <tr><td>Sparse allocation itself</td><td><code>st_blocks</code> differs from logical EOF. Hole punching must preserve EOF. The observed failure is logical-length loss.</td><td class="good">Ruled out as an explanation without the faulty truncate.</td></tr>

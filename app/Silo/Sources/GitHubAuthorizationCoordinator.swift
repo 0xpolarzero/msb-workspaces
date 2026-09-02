@@ -172,8 +172,6 @@ struct GitHubWorkspaceAccessPresentation: Equatable {
         switch entry.recoveryState {
         case .needsAuthorization:
             return "The verified GitHub grant for \(workspace) is missing.\(quarantineSuffix)"
-        case .migrationRequired:
-            return "The legacy GitHub grant for \(workspace) cannot be verified as repository-scoped.\(quarantineSuffix)"
         case .revoked:
             return "GitHub revoked the verified grant for \(workspace).\(quarantineSuffix)"
         case .installationRemoved:
@@ -273,11 +271,8 @@ actor GitHubAuthorizationCoordinator {
         var newGrantIDs: [UUID]
         var oldGrantIDs: [UUID]
         /// Workspaces whose host-side GitHub binding was positively removed.
-        /// Optional so journals written by older builds decode as unproven.
-        var verifiedUnboundWorkspaces: [String]?
-        /// Optional so a legacy rollback journal is treated as an uncertain
-        /// previous-policy restore and cleaned up conservatively.
-        var previousPolicyRestoreState: PreviousPolicyRestoreState?
+        var verifiedUnboundWorkspaces: [String]
+        var previousPolicyRestoreState: PreviousPolicyRestoreState
         var phase: TransactionPhase
         var updatedAt: Date
     }
@@ -952,9 +947,7 @@ actor GitHubAuthorizationCoordinator {
     func removeWorkspace(_ workspace: String) async throws {
         try await recoverPendingAuthorization()
         let entries = await broker.allMetadata().filter { $0.workspace == workspace }
-        // With no recorded grant there is no proven binding or credential to
-        // remove. Preserve the existing no-op semantics without touching
-        // legacy broker records that cannot be paired with unbind proof.
+        // With no recorded grant there is no binding or credential to remove.
         guard !entries.isEmpty else { return }
         do {
             // Remove the VM-held secret before revoking its service grant. If
@@ -1446,7 +1439,7 @@ actor GitHubAuthorizationCoordinator {
             return false
         }
 
-        var verified = Set(journal.verifiedUnboundWorkspaces ?? [])
+        var verified = Set(journal.verifiedUnboundWorkspaces)
         guard verified.isSubset(of: workspaces) else {
             _ = await quarantineJournalRoles(journal)
             journal.updatedAt = now()
@@ -1760,8 +1753,8 @@ actor GitHubAuthorizationCoordinator {
                 try? removeJournal()
                 return
             }
-            // A legacy, partial, or interrupted prior-policy restore may have
-            // rebound a secret after the journal's earlier unbind proof. Clear
+            // An interrupted prior-policy restore may have rebound a secret
+            // after the journal's earlier unbind proof. Clear
             // that stale proof durably and require a fresh exact unbind even
             // when every replacement grant was already revoked.
             journal.verifiedUnboundWorkspaces = []

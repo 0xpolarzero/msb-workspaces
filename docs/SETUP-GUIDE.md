@@ -125,15 +125,10 @@ silo app github-policy-set --workspace WORKSPACE --repository OWNER/REPO --mode 
 Troubleshoot with `silo github status`, then `silo github verify`; repair the
 transport with `silo github proxy-configure`, and rotate a compromised
 credential with `silo github auth --force`. `silo check --deep` asserts that no
-guest holds a `GH_TOKEN` and probes proxy reachability from the guest. Legacy
-Connect-era state is retired automatically on first local-mode use as one
-journaled transaction (archiving `~/.config/silo/github/<box>.conf` and proving
-old guest secrets are removed); run `silo github migrate [WORKSPACE|all]` to do
-it explicitly.
+guest holds a `GH_TOKEN` and probes proxy reachability from the guest.
 
-Connect mode (`SILO_GITHUB_MODE=connect`) remains available as a rollback
-alternative; local mode is the default and never reads or writes Connect
-grants.
+Connect mode (`SILO_GITHUB_MODE=connect`) is enabled only by a trusted signed
+configuration. Local mode is the default and never reads or writes Connect grants.
 
 ### Host-held API secrets
 
@@ -384,7 +379,7 @@ silo check --deep
 silo start all
 ```
 
-For best compatibility, restore with the same Silo/MicroSandbox generation used to make the backup.
+Restore archives only with the current Silo and MicroSandbox release.
 
 ## 11. Updates and maintenance
 

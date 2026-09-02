@@ -34,7 +34,6 @@ struct Workspace: Identifiable, Equatable, Sendable {
 
     enum CredentialState: String, Equatable, Sendable {
         case unconfigured = "Unconfigured"
-        case legacy = "Legacy"
         case ready = "Ready"
         case expiring = "Expiring"
         case needsRestart = "Needs restart"
@@ -225,7 +224,7 @@ extension Workspace.CredentialState {
         switch self {
         case .ready, .readOnly, .unconfigured:
             return false
-        case .legacy, .expiring, .needsRestart, .needsAuthorization, .serviceUnavailable,
+        case .expiring, .needsRestart, .needsAuthorization, .serviceUnavailable,
              .removalPending, .quarantined:
             return true
         }
@@ -2182,7 +2181,6 @@ final class AppModel {
                 accountLogin: catalog.account?.login,
                 installationId: nil,
                 accessExpiresAt: nil,
-                refreshExpiresAt: nil,
                 needsRestart: false,
                 quarantined: false,
                 repos: repos.map { SiloGitHubPolicyRepo(canonical: $0.canonical, mode: $0.mode) },
@@ -3682,7 +3680,6 @@ final class AppModel {
                     accountLogin: nil,
                     installationId: nil,
                     accessExpiresAt: nil,
-                    refreshExpiresAt: nil,
                     needsRestart: false
                 ),
                 secrets: secretsSnapshot,
@@ -3701,7 +3698,9 @@ final class AppModel {
                     canOpenTerminal: running,
                     canPush: true
                 ),
-                statusObservedAt: observedAt
+                statusObservedAt: observedAt,
+                skippedPorts: [],
+                portWarning: ""
             )
         }
         return SiloStateResponse(schemaVersion: 1, siloVersion: "ui-test", workspaces: snapshots)
@@ -3952,7 +3951,6 @@ final class AppModel {
         case .needsRestart: return .needsRestart
         case .needsAuthorization: return .needsAuthorization
         case .serviceUnavailable: return .serviceUnavailable
-        case .legacy: return .legacy
         case .removalPending: return .removalPending
         case .readOnly: return .readOnly
         case .quarantined: return .quarantined
@@ -3960,8 +3958,7 @@ final class AppModel {
         }
     }
 
-    private func secretsState(_ snapshot: SiloSecretsSnapshot?) -> Workspace.SecretsState {
-        guard let snapshot else { return .active }
+    private func secretsState(_ snapshot: SiloSecretsSnapshot) -> Workspace.SecretsState {
         return Workspace.SecretsState(
             status: Workspace.SecretsState.Status(rawValue: snapshot.state.rawValue) ?? .error,
             pendingCount: max(0, snapshot.pendingCount),

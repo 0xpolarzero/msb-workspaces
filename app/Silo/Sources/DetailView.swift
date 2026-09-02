@@ -547,10 +547,12 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(failure.reason)
                     .font(.caption.weight(.semibold))
+                    .textSelection(.enabled)
                     .accessibilityIdentifier("lifecycle.failure.summary")
                 Text(failure.recovery)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 if let details = failure.diagnosticDetails {
                     Button(operationDetailsExpanded ? "Hide Details" : "Show Details") {
                         operationDetailsExpanded.toggle()
@@ -1988,11 +1990,12 @@ private extension DetailView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let recovery = check.remediation {
-                            Text(recovery)
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
+                        Text(recovery)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
                     }
+                }
                     .padding(10)
                     .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
                     .accessibilityElement(children: .combine)

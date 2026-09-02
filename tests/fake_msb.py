@@ -205,7 +205,7 @@ def git_env(state: dict[str, Any], box: str) -> dict[str, str]:
     })
     # Bound secrets substitute placeholders inside the guest, so a real value
     # can never reach the simulated VM environment even if the host-side CLI
-    # leaked it (GitHub's legacy GH_TOKEN keeps its historical placeholder).
+    # leaked it.
     for secret_name in sb.get("secrets", {}):
         if secret_name == "GH_TOKEN":
             env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
@@ -440,11 +440,11 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
                 print("Docker/containerd did not become ready within 30 seconds", file=sys.stderr)
                 return 1
             return 0
-        if "Silo named-volume migration" in text:
+        if "Copy a named volume" in text:
             source_name = sb.get("mounts", {}).get("/source")
             destination_name = sb.get("mounts", {}).get("/destination")
             if not source_name or not destination_name:
-                return fail("volume migration mounts missing")
+                return fail("volume copy mounts missing")
             source = volume_path(state, source_name)
             destination = volume_path(state, destination_name)
             for child in source.iterdir():

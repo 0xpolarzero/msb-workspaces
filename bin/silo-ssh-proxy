@@ -9,10 +9,8 @@ config="${SILO_CONFIG_FILE:-$HOME/.config/silo/config.sh}"
   echo "silo: silo configuration is missing; rerun setup.sh" >&2
   exit 1
 }
-# Path C §1 (blocker 7): resolve SILO_GITHUB_MODE FIRST — it is the single
-# source of truth. The SSH proxy is invoked by ssh (not through the silo CLI),
-# so source config.sh to pick up the configured mode; config.sh honors an
-# environment override and defaults to local.
+# The SSH proxy is invoked by ssh rather than through the silo CLI, so it reads
+# the installed Silo configuration directly.
 # shellcheck source=/dev/null
 . "$config"
 
@@ -64,6 +62,27 @@ keychain_read() {
 }
 
 app_credentials="${SILO_APP_CREDENTIALS_FILE:-$HOME/Library/Application Support/Silo/credentials.json}"
+
+app_credentials_valid() {
+  [ -f "$app_credentials" ] && [ ! -L "$app_credentials" ] || return 1
+  [ -n "$jq_bin" ] && [ -x "$jq_bin" ] || return 1
+  "$jq_bin" -e '
+    type == "object" and
+    (keys | sort) == ["entries", "schemaVersion"] and
+    .schemaVersion == 3 and
+    (.entries | type == "object") and
+    all(.entries[];
+      type == "object" and
+      ((keys - ["accessExpiresAt", "accessMode", "accountLogin", "generation", "grantID", "installationID", "needsRestart", "owner", "provider", "quarantined", "recoveryState", "repositoryIDs", "repositoryNames", "role", "schemaVersion", "scopeDigest", "updatedAt", "verificationRepository", "workspace"]) | length) == 0 and
+      ((["accessMode", "generation", "needsRestart", "provider", "quarantined", "recoveryState", "repositoryIDs", "repositoryNames", "role", "schemaVersion", "updatedAt", "workspace"] - keys) | length) == 0 and
+      .schemaVersion == 3 and
+      .provider == "github-app-installation" and
+      (.workspace | type == "string" and length > 0) and
+      (.role == "guest" or .role == "host") and
+      (.generation | type == "number" and . > 0)
+    )
+  ' "$app_credentials" >/dev/null 2>&1
+}
 
 metadata_value() {
   role="$1"
@@ -131,70 +150,34 @@ app_token() {
 mode="${SILO_GITHUB_MODE:-local}"
 case "$mode" in
   local)
-    # Path C §1/§7 (blocker 7): local mode NEVER inspects credentials.json
-    # (Connect grants stay dormant) and NEVER exports GH_TOKEN into
-    # `msb ssh serve`. Legacy Connect/read-token state fails with a migration
-    # remedy instead of a live token; quarantined workspaces fail closed.
     quarantine="$HOME/.config/silo/github/$box.quarantine"
     if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
       echo "silo: workspace '$box' is quarantined; repair GitHub access in Silo" >&2
       exit 1
     fi
-    if [ -f "$HOME/.config/silo/github/$box.conf" ] || [ -L "$HOME/.config/silo/github/$box.conf" ]; then
-      echo "silo: workspace '$box' still has legacy GitHub token metadata; run: silo github migrate $box (or complete Silo setup) to retire it" >&2
-      exit 1
-    fi
-    # token-free local path: no GH_TOKEN is exported.
+    # The local path never exports a credential into the guest.
     ;;
   connect)
-    app_mode=0
-    if [ -f "$app_credentials" ] && [ ! -L "$app_credentials" ]; then
-      app_mode=1
+    if ! app_credentials_valid; then
+      echo "silo: Silo's scoped GitHub credential file is missing or invalid" >&2
+      exit 1
     fi
-
-    if [ "$app_mode" -eq 1 ]; then
-      if [ -z "$jq_bin" ] || [ ! -x "$jq_bin" ]; then
-        echo "silo: jq is required to read Silo's scoped GitHub grant" >&2
-        exit 1
-      fi
-      if app_profile_present; then
-        recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
-        quarantined="$(metadata_value guest quarantined 2>/dev/null || true)"
-        if [ "$quarantined" = true ] || [ "$recovery_state" = quarantined ]; then
-          echo "silo: workspace '$box' is quarantined; repair GitHub access in Silo" >&2
-          exit 1
-        fi
-        if ! token="$(app_token 2>/dev/null)"; then
-          echo "silo: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in Silo" >&2
-          exit 1
-        fi
-        export GH_TOKEN="$token"
-        unset token
-      else
-        echo "silo: workspace '$box' has no scoped GitHub grant; connect GitHub in Silo" >&2
-        exit 1
-      fi
-    else
-      quarantine="$HOME/.config/silo/github/$box.quarantine"
-      if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+    if app_profile_present; then
+      recovery_state="$(metadata_value guest recoveryState 2>/dev/null || true)"
+      quarantined="$(metadata_value guest quarantined 2>/dev/null || true)"
+      if [ "$quarantined" = true ] || [ "$recovery_state" = quarantined ]; then
         echo "silo: workspace '$box' is quarantined; repair GitHub access in Silo" >&2
         exit 1
       fi
-      if [ "${SILO_TEST_MODE:-0}" = 1 ]; then
-        if token="$(keychain_read "silo.github.read" "$box" 2>/dev/null)"; then
-          export GH_TOKEN="$token"
-          unset token
-        elif [ -f "$HOME/.config/silo/github/$box.conf" ] ||
-          [ -L "$HOME/.config/silo/github/$box.conf" ]; then
-          echo "silo: GitHub is configured for '$box', but its read token is missing from Keychain" >&2
-          echo "run: silo github setup $box OWNER/REPO" >&2
-          exit 1
-        fi
-      elif [ -f "$HOME/.config/silo/github/$box.conf" ] ||
-        [ -L "$HOME/.config/silo/github/$box.conf" ]; then
-        echo "silo: legacy GitHub token metadata for '$box' requires migration in Silo" >&2
+      if ! token="$(app_token 2>/dev/null)"; then
+        echo "silo: scoped GitHub access for '$box' is missing, expired, or requires reauthorization; repair it in Silo" >&2
         exit 1
       fi
+      export GH_TOKEN="$token"
+      unset token
+    else
+      echo "silo: workspace '$box' has no scoped GitHub grant; connect GitHub in Silo" >&2
+      exit 1
     fi
     ;;
   *)

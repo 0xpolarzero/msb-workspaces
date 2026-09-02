@@ -53,7 +53,6 @@ silo github auth [--force] [--json]        # Provision/rotate the host credentia
 silo github auth --device [--json]         # Start OAuth Device Flow (prints code once)
 silo github auth --device-complete CODE    # One device-flow exchange attempt
 silo github repos [--owner O] [--json]     # Discover GitHub repositories (picker)
-silo github migrate [WORKSPACE|all]        # Retire legacy GitHub state (local mode)
 silo github proxy-configure [WORKSPACE]    # Install the repo-aware proxy transport
 silo github capability rotate WORKSPACE    # Rotate that workspace's capability
 silo github verify WORKSPACE [OWNER/REPO]

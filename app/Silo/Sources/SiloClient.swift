@@ -476,28 +476,22 @@ actor SiloClient {
         try await githubAuth(force: false)
     }
 
-    /// Retires every legacy local GitHub binding before revoking the global
-    /// host credential. Generic Silo secrets use a separate metadata and
-    /// Keychain domain and are intentionally untouched.
+    /// Revokes the current local host credential. Generic Silo secrets use a
+    /// separate metadata and Keychain domain and are intentionally untouched.
     func resetLocalGitHub(workspace: String) async throws {
         guard WorkspaceID.isValid(workspace) else { throw SiloClientError.invalidArguments }
-        for (arguments, command) in [
-            (["github", "migrate", "all"], "github migrate all"),
-            (["github", "remove", workspace], "github remove")
-        ] {
-            let request = try await runner.makeSiloCommand(
-                arguments: arguments,
-                timeout: .seconds(180)
+        let request = try await runner.makeSiloCommand(
+            arguments: ["github", "remove", workspace],
+            timeout: .seconds(180)
+        )
+        let output = try await runner.run(request)
+        guard output.status == 0 else {
+            let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw SiloClientError.processFailed(
+                command: "github remove",
+                status: output.status,
+                message: message.isEmpty ? nil : message
             )
-            let output = try await runner.run(request)
-            guard output.status == 0 else {
-                let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                throw SiloClientError.processFailed(
-                    command: command,
-                    status: output.status,
-                    message: message.isEmpty ? nil : message
-                )
-            }
         }
     }
 
@@ -1247,8 +1241,7 @@ actor SiloClient {
         let bundle: CredentialBundle
         do {
             bundle = try await credentialBroker.load(workspace: workspace, role: role)
-        } catch CredentialBrokerError.missingCredential,
-                CredentialBrokerError.legacyCredentialRequiresAuthorization {
+        } catch CredentialBrokerError.missingCredential {
             return nil
         } catch CredentialBrokerError.grantUnavailable {
             var canRetry = false
@@ -1353,10 +1346,10 @@ actor SiloClient {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             workspace = try container.decode(String.self, forKey: .workspace)
             available = try container.decode(Bool.self, forKey: .available)
-            lifecycle = try container.decodeIfPresent(SiloLifecycle.self, forKey: .lifecycle) ?? .unknown
-            freshness = try container.decodeIfPresent(SiloFreshness.self, forKey: .freshness) ?? .unavailable
+            lifecycle = try container.decode(SiloLifecycle.self, forKey: .lifecycle)
+            freshness = try container.decode(SiloFreshness.self, forKey: .freshness)
             reason = try container.decodeIfPresent(String.self, forKey: .reason)
-            lines = try container.decodeIfPresent([SiloLogEntry].self, forKey: .lines) ?? []
+            lines = try container.decode([SiloLogEntry].self, forKey: .lines)
         }
     }
 

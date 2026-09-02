@@ -56,8 +56,8 @@ def main() -> int:
     mode = os.environ.get("SILO_FAKE_SECURITY_MODE", "normal")
 
     if command == "add-generic-password":
-        # -w LAST => read the password from stdin (prompted mode); -w VALUE
-        # (legacy Connect path) reads the following argv element.
+        # -w LAST reads the password from stdin; -w VALUE reads the following
+        # argv element.
         w_idx = option_index(args, "-w")
         if w_idx == -1:
             return 2

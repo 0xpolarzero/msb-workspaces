@@ -77,7 +77,8 @@ final class SetupWindowController {
     /// Resolves the coordinator passed to SetupView. Local mode NEVER
     /// instantiates or passes a Connect broker/coordinator — even when a
     /// caller supplies one, local mode drops it (Path C §1 / reviewer
-    /// blocker 7). Connect mode keeps the pre-existing fallback behavior.
+    /// blocker 7). Connect mode uses the supplied coordinator or constructs
+    /// the current credential broker.
     static func resolvedAuthorization(
         accessMode: GitHubAccessMode,
         authorizationCoordinator: GitHubAuthorizationCoordinator?
@@ -1429,6 +1430,7 @@ struct SetupView: View {
                     .font(.callout)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             if runtimeSetupPhase == .ready {
                 preflight
@@ -2164,7 +2166,9 @@ struct SetupView: View {
                     Text(progress.summary).foregroundStyle(.secondary)
                 }
                 if let failure = progress.failure {
-                    Text(failure.presentationRecovery).foregroundStyle(.secondary)
+                    Text(failure.presentationRecovery)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
                 if progress.canRetry {
                     Button("Retry GitHub sync") { retryLocalPolicyApply() }
@@ -2414,7 +2418,11 @@ struct SetupView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.label).font(.headline)
                     if let failure = item.failure {
-                        Text(failure).font(.caption).foregroundStyle(.red)
+                        Text(failure)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("\(queueAccessibilityIdentifier(for: item)).detail")
                     } else if item.id == .identityVerify {
                         Text(identityReviewMessage).font(.caption).foregroundStyle(.secondary)
                     } else if item.id == .githubVerify {
@@ -2424,7 +2432,7 @@ struct SetupView: View {
                     }
                 }
             }
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: item.failure == nil ? .combine : .contain)
             .accessibilityLabel(item.label)
             .accessibilityValue(queueAccessibilityValue(for: item))
             .accessibilityIdentifier(queueAccessibilityIdentifier(for: item))

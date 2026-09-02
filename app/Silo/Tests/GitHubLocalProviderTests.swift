@@ -100,9 +100,6 @@ final class GitHubLocalProviderTests: XCTestCase {
         }
         if resetCommandsSucceed {
             lines += [
-                "  \"github migrate all\"*)",
-                "    echo \"reset-migrate $*\" >> \"$LOG\"",
-                "    ;;",
                 "  \"github remove\"*)",
                 "    echo \"reset-remove $*\" >> \"$LOG\"",
                 "    ;;",
@@ -1488,7 +1485,7 @@ final class GitHubLocalProviderTests: XCTestCase {
         }
     }
 
-    func testResetAccessWaitsForPolicyCleanupThenRetiresLegacyGitHubState() async throws {
+    func testResetAccessWaitsForPolicyCleanupThenRemovesCredential() async throws {
         let directory = makeTemporaryDirectory()
         let policyURL = directory.appendingPathComponent("github-policy.json")
         writePolicy(policyURL, json: """
@@ -1513,10 +1510,8 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(progress.phase, .applied)
         let calls = readLog(directory).split(separator: "\n").map(String.init)
         let applyEnd = try XCTUnwrap(calls.firstIndex { $0.contains("policy-end") })
-        let migration = try XCTUnwrap(calls.firstIndex { $0.contains("reset-migrate github migrate all") })
         let removal = try XCTUnwrap(calls.firstIndex { $0.contains("reset-remove github remove dev") })
-        XCTAssertLessThan(applyEnd, migration)
-        XCTAssertLessThan(migration, removal)
+        XCTAssertLessThan(applyEnd, removal)
         XCTAssertFalse(calls.contains { $0.contains("secret-plan") || $0.contains("secret-apply") })
     }
 
@@ -2106,8 +2101,8 @@ final class GitHubLocalProviderTests: XCTestCase {
     // MARK: - Port warning surface (PortWarnings contract)
 
     private func makeSnapshot(
-        skippedPorts: [Int]? = nil,
-        portWarning: String? = nil
+        skippedPorts: [Int] = [],
+        portWarning: String = ""
     ) -> SiloWorkspaceSnapshot {
         SiloWorkspaceSnapshot(
             id: "dev",
@@ -2122,9 +2117,9 @@ final class GitHubLocalProviderTests: XCTestCase {
                 accountLogin: nil,
                 installationId: nil,
                 accessExpiresAt: nil,
-                refreshExpiresAt: nil,
                 needsRestart: false
             ),
+            secrets: SiloSecretsSnapshot(state: .active, pendingCount: 0, reason: nil),
             resources: SiloResourceSnapshot(
                 cpus: "2",
                 maxCpus: "8",
@@ -2159,14 +2154,6 @@ final class GitHubLocalProviderTests: XCTestCase {
         XCTAssertEqual(decoded.id, "dev")
         XCTAssertEqual(decoded.skippedPorts, [3000])
         XCTAssertEqual(decoded.portWarning, "Port 3000 is already in use; it was not published.")
-    }
-
-    func testWorkspaceSnapshotDecodesWithoutPortFields() throws {
-        // Older CLI output has no port fields: decode must yield nil, not fail.
-        let data = try JSONEncoder().encode(makeSnapshot())
-        let decoded = try SiloProtocolDecoder.decoder().decode(SiloWorkspaceSnapshot.self, from: data)
-        XCTAssertNil(decoded.skippedPorts)
-        XCTAssertNil(decoded.portWarning)
     }
 
     // MARK: - Fixture provider (UI-test local flows)

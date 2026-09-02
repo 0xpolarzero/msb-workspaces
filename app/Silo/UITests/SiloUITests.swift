@@ -94,7 +94,11 @@ final class SiloUITests: XCTestCase {
         let failureText = [failure.label, failure.value as? String ?? "", visibleText(in: failure)]
             .joined(separator: " ")
         XCTAssertTrue(failureText.contains("Create workspaces"))
-        XCTAssertTrue(failureText.contains(detailText))
+        let selectableDetail = app.staticTexts["setup.review.registration.failure.detail"]
+        XCTAssertTrue(selectableDetail.waitForExistence(timeout: 2))
+        let selectableDetailText = [selectableDetail.label, selectableDetail.value as? String ?? ""]
+            .joined(separator: " ")
+        XCTAssertTrue(selectableDetailText.contains(detailText))
         XCTAssertFalse(failureText.contains("Workspace bootstrap verification failed:"))
 
         XCTAssertEqual(

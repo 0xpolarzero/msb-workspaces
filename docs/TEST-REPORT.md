@@ -1,8 +1,6 @@
-# Silo 3.1.0 verification report
+# Silo verification report
 
 Verification is split between the native Silo app and the portable `silo` release suite. Local mode (`SILO_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
-
-The token-prompt GitHub setup scenarios described in older release reports are historical. The legacy `silo github setup` surface is removed and must not be treated as a supported setup or rotation path.
 
 Run the app checks after source changes:
 
@@ -68,7 +66,6 @@ The native app values above are deterministic fixture values from the current sc
 - Fresh installation of all three workspaces, six persistent volumes, common snapshot, resources, labels, and fixed port maps.
 - Idempotent installer rerun.
 - VM-root recreation while preserving repository and Docker volumes.
-- Version migration while preserving both persistent data volumes.
 - Config reset and base-snapshot rebuild.
 - Published URLs, browser open, Zed URI, Ghostty/SSH shell, and temporary tunnel flows.
 - Tunnel-port rejection for invalid, zero, and out-of-range values.
@@ -111,12 +108,10 @@ Current acceptance — `GitHubProxyContractTests` (proxy direct) and
 - Quarantined workspace access fails closed until the recovery state is
   resolved.
 
-Historical (Connect-era, exercised by the app's Swift unit tests; Connect is
-dormant in this build): callback state/session/issuer/client/redirect
-validation, scoped assignment verification, distinct guest-read/host-write
-grants, transactional assignment writes, `Needs authorization`/`Needs
-restart`/`Revoked`/`Quarantined` recovery states, and the legacy CLI token
-prompt reporting the migration path without reading a pasted token.
+Connect coverage in the app's Swift unit tests includes callback
+state/session/issuer/client/redirect validation, scoped assignment
+verification, distinct guest-read/host-write grants, transactional assignment
+writes, and current recovery states.
 
 ### Backup and restore — 6 scenarios
 

@@ -224,6 +224,7 @@ struct LifecycleConfirmationView: View {
                 .accessibilityIdentifier("lifecycle.window-confirmation.title")
             Text(message)
                 .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
                 .accessibilityIdentifier("lifecycle.window-confirmation.message")
             HStack {
                 Spacer()

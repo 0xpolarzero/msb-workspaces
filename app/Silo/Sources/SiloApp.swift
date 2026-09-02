@@ -262,7 +262,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recoverAndInstall() async {
         let recoveryResult: Result<Void, Error>
         do {
-            try LegacyDirectGitHubCredentialRetirement.remove()
             if accessMode == .connect, let authorizationCoordinator {
                 if authorizationCoordinator.isAvailable {
                     try await authorizationCoordinator.recoverPendingAuthorization()

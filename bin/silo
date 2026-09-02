@@ -31,8 +31,6 @@ fi
 
 WORKSPACES=()
 WORKSPACE_COUNT=0
-readonly READ_KEYCHAIN_SERVICE="silo.github.read"
-readonly WRITE_KEYCHAIN_SERVICE="silo.github.write"
 readonly GITHUB_META_DIR="$HOME/.config/silo/github"
 readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/Silo/credentials.json"
 readonly SILO_SECRETS_FILE="${SILO_SECRETS_FILE:-$HOME/.config/silo/secrets.json}"
@@ -44,18 +42,15 @@ SILO_SECRET_BINDINGS=""
 SECRET_PREPARE_ERROR=""
 SETUP_TRANSACTION_ACTIVE=0
 SETUP_TRANSACTION_BOX=""
-MIGRATION_PREEXISTING_QUARANTINE=0
 GITHUB_LOCK_HELD=0
 
-# Path C §1: single source of truth for GitHub mode. config.sh provides the
-# default (local); these fallbacks cover older configs that predate the mode
-# switch. Invalid values fail closed before any credential or proxy work.
+# The current GitHub transport is the repo-aware local proxy.
 : "${SILO_GITHUB_MODE:=local}"
 : "${SILO_GITHUB_PROXY_PORT:=18446}"
-case "$SILO_GITHUB_MODE" in
-  local|connect) ;;
-  *) printf 'silo: invalid SILO_GITHUB_MODE %s (expected local or connect)\n' "$SILO_GITHUB_MODE" >&2; exit 1 ;;
-esac
+if [[ "$SILO_GITHUB_MODE" != local && "$SILO_GITHUB_MODE" != connect ]]; then
+  printf 'silo: invalid SILO_GITHUB_MODE %s (expected local or connect)\n' "$SILO_GITHUB_MODE" >&2
+  exit 1
+fi
 
 MSB_BIN="${SILO_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 SSH_BIN="${SILO_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
@@ -263,24 +258,6 @@ keychain_get() {
 
 keychain_has() {
   local service="$1" account="$2"
-  case "$service" in
-    "$READ_KEYCHAIN_SERVICE")
-      if app_metadata_profile_present "$account" guest; then
-        app_credential_available "$account" guest
-        return
-      fi
-      [[ "${SILO_TEST_MODE:-0}" == 1 ]] && keychain_get "$service" "$account" >/dev/null 2>&1
-      return
-      ;;
-    "$WRITE_KEYCHAIN_SERVICE")
-      if app_metadata_profile_present "$account" host; then
-        app_credential_available "$account" host
-        return
-      fi
-      [[ "${SILO_TEST_MODE:-0}" == 1 ]] && keychain_get "$service" "$account" >/dev/null 2>&1
-      return
-      ;;
-  esac
   keychain_get "$service" "$account" >/dev/null 2>&1
 }
 
@@ -335,11 +312,8 @@ keychain_delete() {
   fi
 }
 
-metadata_file() { printf '%s/%s.conf\n' "$GITHUB_META_DIR" "$1"; }
-
 metadata_access() {
-  local box="$1" file
-  file="$(metadata_file "$box")"
+  local box="$1"
   if app_metadata_profile_present "$box" guest; then
     # Native OAuth credentials are independent guest and host profiles. The
     # guest profile remains read-only after host authorization, so aggregate
@@ -350,20 +324,15 @@ metadata_access() {
     else
       app_metadata_value "$box" guest accessMode
     fi
-  elif [[ -f "$file" && ! -L "$file" ]]; then
-    sed -n 's/^access=//p' "$file" | head -n 1
   else
     return 1
   fi
 }
 
 metadata_repo() {
-  local box="$1" file
-  file="$(metadata_file "$box")"
+  local box="$1"
   if app_metadata_profile_present "$box" guest; then
     app_metadata_value "$box" guest verificationRepository
-  elif [[ -f "$file" && ! -L "$file" ]]; then
-    sed -n 's/^verification_repo=//p' "$file" | head -n 1
   else
     return 1
   fi
@@ -499,14 +468,6 @@ require_repository_access() {
     app_repository_allowed "$box" "$role" "$repository" ||
       fatal "repository '$repository' is not assigned to workspace '$box' for the $role grant"
   fi
-}
-
-write_metadata() {
-  local box="$1" repo="$2" access="${3:-host-write}"
-  mkdir -p "$GITHUB_META_DIR"
-  chmod 700 "$GITHUB_META_DIR"
-  umask 077
-  printf 'verification_repo=%s\naccess=%s\nconfigured_at=%s\n' "$repo" "$access" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$(metadata_file "$box")"
 }
 
 # ---------------------------------------------------------------------------
@@ -1706,8 +1667,6 @@ ensure_base_snapshot_for_app_bootstrap() {
     base_snapshot_preparation_fail "the verified base snapshot was created, but its temporary runtime volume could not be removed"
     return 1
   fi
-  printf '%s\n' "$SILO_VERSION" >"$HOME/.config/silo/base-version" \
-    || { base_snapshot_preparation_fail "the verified base snapshot version could not be recorded"; return 1; }
   return 0
 }
 
@@ -1853,22 +1812,6 @@ attest_runtime_discard_safety() {
 
 quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_file() { printf '%s/%s.lock\n' "$GITHUB_META_DIR" "$1"; }
-github_lock_reclaim_legacy() {
-  local lock="$1" owner="" moved_owner="" stale="${lock}.legacy.$$.$RANDOM"
-  if [[ -f "$lock/pid" ]]; then
-    owner="$(cat "$lock/pid" 2>/dev/null || true)"
-    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then return 1; fi
-  fi
-  [[ ! -e "$stale" ]] || return 1
-  if ! mv "$lock" "$stale" 2>/dev/null; then return 1; fi
-  moved_owner="$(cat "$stale/pid" 2>/dev/null || true)"
-  if [[ "$moved_owner" =~ ^[0-9]+$ ]] && kill -0 "$moved_owner" 2>/dev/null; then
-    if [[ ! -e "$lock" ]]; then mv "$stale" "$lock" 2>/dev/null || true; fi
-    return 1
-  fi
-  # The rename owns this directory; remove its stale pid before removing it.
-  if ! rm -f "$stale/pid" 2>/dev/null || ! rmdir "$stale" 2>/dev/null; then return 1; fi
-}
 github_lock_release() {
   if (( GITHUB_LOCK_HELD )); then
     exec 9>&-
@@ -1885,22 +1828,12 @@ github_lock_exit() {
 }
 
 github_lock_acquire() {
-  local box="$1" strict="${2:-0}" lock
+  local box="$1" lock
   require_command_path lockf "$LOCKF_BIN"
   mkdir -p "$GITHUB_META_DIR" || return 1
   chmod 700 "$GITHUB_META_DIR" || return 1
   lock="$(github_lock_file "$box")"
-  if [[ -d "$lock" ]]; then
-    if (( strict )); then
-      # §11.1: a stale/unacquirable legacy lock directory is surfaced for
-      # manual review — never unlinked directly.
-      return 2
-    fi
-    if ! github_lock_reclaim_legacy "$lock"; then
-      (( SILO_APP_MODE == 1 )) && return 1
-      fatal "GitHub operation already in progress for workspace '$box'"
-    fi
-  fi
+  [[ ! -d "$lock" ]] || return 1
   if ! exec 9>>"$lock"; then return 1; fi
   if ! "$LOCKF_BIN" -s -t 0 9; then
     exec 9>&-
@@ -1989,14 +1922,9 @@ clear_quarantine() {
     return 1
   fi
 }
-# §11 closure re-review: preexisting_quarantine ($2) is recorded in
-# MIGRATION_PREEXISTING_QUARANTINE BEFORE the EXIT/INT/TERM/HUP traps are
-# installed, so a signal arriving at the arm hook can never truncate a
-# pre-existing marker (the trap reads the flag that was already set).
 setup_transaction_arm() {
   SETUP_TRANSACTION_BOX="$1"
   SETUP_TRANSACTION_ACTIVE=1
-  MIGRATION_PREEXISTING_QUARANTINE="${2:-0}"
   trap 'setup_transaction_trap EXIT $?' EXIT
   trap 'setup_transaction_trap INT 130' INT
   trap 'setup_transaction_trap TERM 143' TERM
@@ -2016,14 +1944,7 @@ setup_transaction_trap() {
   trap '' INT TERM HUP
   if (( SETUP_TRANSACTION_ACTIVE )); then
     SETUP_TRANSACTION_ACTIVE=0
-    if (( MIGRATION_PREEXISTING_QUARANTINE )); then
-      # §11.5/blocker 6+4: an interrupted migration must NEVER truncate a
-      # pre-existing marker; record the interrupt in the durable journal only.
-      migration_journal "$SETUP_TRANSACTION_BOX" interrupted \
-        "setup interrupted by ${signal} (pre-existing quarantine marker preserved)" >/dev/null 2>&1 || true
-    else
-      quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
-    fi
+    quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
   fi
   github_lock_release
   trap - INT TERM HUP
@@ -2032,12 +1953,8 @@ setup_transaction_trap() {
 
 read_token_for_workspace() {
   local box="$1"
-  if app_metadata_profile_present "$box" guest; then
-    app_credential_value "$box" guest
-    return
-  fi
-  [[ "${SILO_TEST_MODE:-0}" == 1 ]] || return 1
-  keychain_get "$READ_KEYCHAIN_SERVICE" "$box"
+  app_metadata_profile_present "$box" guest || return 1
+  app_credential_value "$box" guest
 }
 
 
@@ -2148,15 +2065,8 @@ workspace_msb_with_read_token_for_cleanup() {
 start_sandbox() {
   local box="$1"
   require_runtime_discard_safety
-  # §11 trigger: any local-mode operation that starts a workspace first
-  # retires legacy GitHub state so the fail-closed checks below can pass.
-  migrate_local_if_needed "$box"
   assert_not_quarantined "$box"
   workspace_storage_require "$box"
-  if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
-    { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
-    fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
-  fi
   # Generic host-held secrets: reconcile pending add/edit/remove operations
   # and resolve every bound value ONLY inside the direct msb child's
   # environment — never in the CLI's own environment, argv, files, or logs.
@@ -2619,15 +2529,9 @@ cmd_restart() {
   local target="${1:-all}" box
   while IFS= read -r box; do
     sandbox_exists "$box" || fatal "workspace '$box' does not exist"
-    # §11 trigger: restart also retires legacy state before the fail-closed check.
-    migrate_local_if_needed "$box"
     assert_not_quarantined "$box"
     workspace_storage_require "$box"
     note "Restarting $box"
-    if ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
-      { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; }; then
-      fatal "GitHub is configured for '$box', but its read token is missing from Keychain. Reconnect GitHub in Silo"
-    fi
     # Generic host-held secrets: reconcile pending operations and resolve
     # bound values ONLY inside the direct msb child's environment.
     if ! secret_prepare_start "$box"; then
@@ -2787,11 +2691,20 @@ SSH
 
   touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
   include_line="Include $HOME/.ssh/config.d/silo.conf"
-  if ! grep -qxF "$include_line" "$HOME/.ssh/config"; then
-    ssh_tmp="$(mktemp "${TMPDIR:-/tmp}/silo-ssh.XXXXXX")"
-    { printf '%s\n\n' "$include_line"; cat "$HOME/.ssh/config"; } >"$ssh_tmp"
+  ssh_tmp="$(mktemp "${TMPDIR:-/tmp}/silo-ssh.XXXXXX")"
+  {
+    printf '%s\n\n' "$include_line"
+    awk -v include="$include_line" '
+      $0 == include { next }
+      !started && $0 == "" { next }
+      { started = 1; print }
+    ' "$HOME/.ssh/config"
+  } >"$ssh_tmp"
+  if ! cmp -s "$ssh_tmp" "$HOME/.ssh/config"; then
     mv "$ssh_tmp" "$HOME/.ssh/config"
     chmod 600 "$HOME/.ssh/config"
+  else
+    rm -f "$ssh_tmp"
   fi
 }
 
@@ -2915,10 +2828,8 @@ cmd_clone() {
   local box="$1" repo="${2:-}" destination="${3:-}" remote repo_name parent
   validate_workspace "$box"
   validate_github_repo "$repo"
-  # Local mode never gates read paths: public repositories clone anonymously
-  # and grants only control host-credential injection. Legacy Connect mode
-  # still places a guest token in the VM and cannot prove anonymous
-  # forwarding, so the clone must carry a metadata grant there.
+  # Local mode clones public repositories anonymously. Connect mode requires
+  # the repository to be present in the current scoped grant.
   if [[ "$SILO_GITHUB_MODE" != local ]]; then
     require_repository_access "$box" "$repo" guest
   fi
@@ -2966,10 +2877,8 @@ pull_one() {
   canonical_repo="$(normalize_github_remote "$remote_raw")"
   canonical_repo="${canonical_repo#https://github.com/}"
   canonical_repo="${canonical_repo%.git}"
-  # Local mode never gates read paths: public repositories pull anonymously
-  # and grants only control host-credential injection. Legacy Connect mode
-  # still places a guest token in the VM and cannot prove anonymous
-  # forwarding, so the origin must carry a metadata grant there.
+  # Local mode pulls public repositories anonymously. Connect mode requires
+  # the repository to be present in the current scoped grant.
   if [[ "$SILO_GITHUB_MODE" != local ]]; then
     require_repository_access "$box" "$canonical_repo" guest
   fi
@@ -3016,19 +2925,14 @@ cmd_clean() {
 
 bind_github_read_token() {
   local box="$1"
-  # Path C §1: local mode never binds a GitHub secret into a guest.
   [[ "$SILO_GITHUB_MODE" != local ]] || return 0
-  keychain_has "$READ_KEYCHAIN_SERVICE" "$box" || fatal "read token missing for $box"
-  workspace_msb_with_read_token "$box" modify "$box" --secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}" --restart >/dev/null
+  app_credential_available "$box" guest || fatal "current guest grant missing for $box"
+  workspace_msb_with_read_token "$box" modify "$box" --secret "GH_TOKEN@github.com" --restart >/dev/null
 }
 
 remove_github_secret() {
-  local box="$1" allow_local="${2:-0}" inspect_rc legacy_token="" status=0
-  # Path C §1: ordinary local-mode operations never touch guest secrets. The
-  # §11 migration passes allow_local=1 to retire a LEGACY binding.
-  if [[ "$SILO_GITHUB_MODE" == local && "$allow_local" != 1 ]]; then
-    return 0
-  fi
+  local box="$1" inspect_rc
+  [[ "$SILO_GITHUB_MODE" != local ]] || return 0
   if sandbox_inspect_state "$box"; then
     :
   else
@@ -3036,18 +2940,6 @@ remove_github_secret() {
     if (( inspect_rc == 1 )); then return 0; fi
     printf 'silo: could not inspect workspace %s before removing its GitHub secret\n' "$box" >&2
     return 1
-  fi
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    # §11.3: legacy sandboxes reference GH_TOKEN@... whose source value still
-    # lives in the legacy read keychain item; supply it in-process ONLY to
-    # satisfy msb config resolution — never persisted, logged, or exported.
-    if legacy_token="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then
-      GH_TOKEN="$legacy_token" workspace_msb_with_read_token_for_cleanup "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
-      status=$?
-      unset GH_TOKEN
-      unset legacy_token
-      return "$status"
-    fi
   fi
   workspace_msb_with_read_token_for_cleanup "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
 }
@@ -3079,14 +2971,11 @@ host_git_run() {
     GIT_ASKPASS="$ASKPASS_BIN" \
     GIT_ASKPASS_REQUIRE=force \
     SSH_ASKPASS="$ASKPASS_BIN" \
-    SILO_KEYCHAIN_SERVICE="$WRITE_KEYCHAIN_SERVICE" \
-    SILO_KEYCHAIN_ACCOUNT="$box" \
     SILO_KEYCHAIN_HOME="$keychain_home" \
     SILO_SECURITY_BIN="$SECURITY_BIN" \
     SILO_JQ_BIN="$JQ_BIN" \
     SILO_APP_KEYCHAIN_SERVICE="$app_service" \
     SILO_APP_KEYCHAIN_ACCOUNT=profile \
-    SILO_GITHUB_WRITE_TOKEN="${SILO_GITHUB_WRITE_TOKEN:-}" \
     SILO_GITHUB_MODE="$SILO_GITHUB_MODE" \
     SILO_HOST_KEYCHAIN_SERVICE="${SILO_HOST_KEYCHAIN_SERVICE:-}" \
     SILO_HOST_KEYCHAIN_ACCOUNT="${SILO_HOST_KEYCHAIN_ACCOUNT:-}" \
@@ -3168,12 +3057,6 @@ push_impl() {
   local box="$1" relative="$2" force_mode="$3" assume_yes="$4" quiet_mode="${5:-0}"
   validate_workspace "$box"
   validate_relative_path "$relative"
-  if [[ "${SILO_TEST_MODE:-0}" == 1 ]] && ! app_metadata_profile_present "$box" guest; then
-    case "$(metadata_access "$box" 2>/dev/null || true)" in
-      read-only) fatal "workspace is read-only; host write token missing for $box" ;;
-      host-write) keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "host write token missing for $box" ;;
-    esac
-  fi
   local repo_root branch local_sha remote_raw canonical_url remote_sha ff_status commits canonical_repo local_repo_mode
   repo_root="$(resolve_guest_repo "$box" "$relative")"
   remote_raw="$(guest_exec_w "$box" "$repo_root" git config --get remote.origin.url)"
@@ -3296,8 +3179,6 @@ SUMMARY
 cmd_push() {
   local box="$1" relative="$2"; shift 2
   local force_mode=0 assume_yes=0 arg
-  # §11 trigger: first local-mode push retires legacy state first.
-  migrate_local_if_needed "$box"
   for arg in "$@"; do
     case "$arg" in
       --force-with-lease) force_mode=1 ;;
@@ -3436,7 +3317,7 @@ cmd_github_verify() {
   validate_github_repo "$repo"
   read_token="$(read_token_for_workspace "$box")" || fatal "read token missing for $box"
   if (( host_write )); then
-    keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box" || fatal "write token missing for $box"
+    app_credential_available "$box" host || fatal "current host grant missing for $box"
   fi
 
   # MicroSandbox secret references require the source environment variable for
@@ -3510,129 +3391,6 @@ cmd_github_verify() {
   fi
 }
 
-cmd_github_setup() {
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    fatal "silo github setup is the legacy Connect flow; local mode uses the repo-aware proxy — run: silo github proxy-configure ${1:-WORKSPACE}"
-  fi
-
-  if [[ "${SILO_TEST_MODE:-0}" != 1 ]]; then
-    fatal "legacy GitHub token setup was removed; use Silo's Connect GitHub flow"
-  fi
-
-  local box="$1" repo="$2" mode="${3:-host-write}" read_token="" write_token="" host_write=1
-  validate_workspace "$box"
-  validate_github_repo "$repo"
-  sandbox_exists "$box" || fatal "workspace '$box' does not exist"
-  require_github_tls_interception "$box"
-  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
-  if [[ "$mode" == "--read-only" ]]; then mode="read-only"; host_write=0; fi
-  [[ "$mode" == host-write || "$mode" == read-only ]] || fatal "usage: silo github setup WORKSPACE OWNER/REPO [--read-only]"
-
-  if (( host_write )); then
-    cat <<INFO
-Create two fine-grained GitHub tokens restricted to the repositories this workspace may use:
-  1. Guest token: Contents = Read-only
-  2. Host token:  Contents = Read and write
-Add Workflows = Read and write to the host token only when you need to push .github/workflows files.
-Verification repository: $repo
-INFO
-  else
-    cat <<INFO
-Create one fine-grained GitHub token restricted to the repositories this workspace may read:
-  Guest token: Contents = Read-only
-Verification repository: $repo
-This workspace will not have a host-side push credential.
-INFO
-  fi
-  read_token="$(read_hidden_token 'Paste the READ-ONLY token: ' SILO_GITHUB_READ_TOKEN_INPUT)"
-  if (( host_write )); then
-    write_token="$(read_hidden_token 'Paste the HOST WRITE token: ' SILO_GITHUB_WRITE_TOKEN_INPUT)"
-    [[ "$read_token" != "$write_token" ]] || fatal "use two different tokens"
-  fi
-
-  local old_read="" old_write="" had_read=0 had_write=0 meta_file old_meta="" rollback_failed=0 preexisting_quarantine=0 quarantine_path
-  meta_file="$(metadata_file "$box")"
-  quarantine_path="$(quarantine_file "$box")"
-  if [[ -e "$quarantine_path" || -L "$quarantine_path" ]]; then preexisting_quarantine=1; fi
-  if (( preexisting_quarantine )); then
-    warn "workspace '$box' is already quarantined; existing GitHub credentials will not be used as rollback state"
-  else
-    if old_read="$(keychain_get "$READ_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_read=1; fi
-    if old_write="$(keychain_get "$WRITE_KEYCHAIN_SERVICE" "$box" 2>/dev/null)"; then had_write=1; fi
-    if [[ -f "$meta_file" ]]; then old_meta="$(cat "$meta_file")"; fi
-  fi
-  setup_transaction_arm "$box"
-  if ! quarantine_workspace "$box" "GitHub setup pending verification"; then
-    fatal "could not quarantine workspace before changing GitHub credentials"
-  fi
-  if ! rm -f "$meta_file"; then fatal "could not revoke existing GitHub metadata for $box"; fi
-
-  keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$read_token"
-  if (( host_write )); then keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$write_token"; else keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; fi
-  unset read_token write_token
-  write_metadata "$box" "$repo" "$mode"
-
-  if ! ( SILO_ALLOW_QUARANTINED=1 SILO_GITHUB_VERIFY_INHERITED=1 "${SILO_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" ); then
-    if (( preexisting_quarantine )); then
-      warn "verification failed; revoking untrusted repair credentials and keeping the workspace quarantined"
-    else
-      warn "verification failed; restoring the previous GitHub configuration"
-    fi
-    if ! rm -f "$meta_file"; then rollback_failed=1; fi
-    if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
-    if (( had_read )); then
-      if ! keychain_set "$READ_KEYCHAIN_SERVICE" "$box" "$old_read"; then rollback_failed=1; fi
-    else
-      if ! keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; then rollback_failed=1; fi
-    fi
-    if (( had_write )); then
-      if ! keychain_set "$WRITE_KEYCHAIN_SERVICE" "$box" "$old_write"; then rollback_failed=1; fi
-    else
-      if ! keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; then rollback_failed=1; fi
-    fi
-    if (( had_read )); then
-      if ! bind_github_read_token "$box" >/dev/null 2>&1; then rollback_failed=1; fi
-    else
-      if ! remove_github_secret "$box"; then rollback_failed=1; fi
-    fi
-    if (( rollback_failed == 0 )) && [[ -n "$old_meta" ]]; then
-      if ! printf '%s\n' "$old_meta" >"$meta_file"; then rollback_failed=1; fi
-    fi
-    if (( rollback_failed )); then
-      if ! rm -f "$meta_file"; then rollback_failed=1; fi
-      if [[ -e "$meta_file" ]]; then rollback_failed=1; fi
-      quarantine_workspace "$box" "GitHub setup rollback failed" >/dev/null 2>&1 || true
-      setup_transaction_disarm
-      if (( preexisting_quarantine )); then
-        warn "untrusted repair credentials could not be fully revoked; workspace remains quarantined"
-      else
-        warn "previous GitHub configuration could not be fully restored"
-      fi
-      github_lock_release
-      unset old_read old_write
-      return 1
-    fi
-    if (( preexisting_quarantine )); then
-      quarantine_workspace "$box" "GitHub repair verification failed" >/dev/null 2>&1 || true
-      setup_transaction_disarm
-      github_lock_release
-      warn "GitHub repair verification failed; workspace remains quarantined"
-      unset old_read old_write
-      return 1
-    fi
-    if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
-    setup_transaction_disarm
-    github_lock_release
-    unset old_read old_write
-    return 1
-  fi
-  if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
-  setup_transaction_disarm
-  github_lock_release
-  unset old_read old_write
-  ok "GitHub configured for $box ($mode)"
-}
-
 cmd_github_status() {
   local target="all" format="text" box repo read_state write_state cap_state repo_summary shuttle_state mode global_host_cred_state
   while (( $# > 0 )); do
@@ -3661,8 +3419,8 @@ cmd_github_status() {
         shuttle_state="$(shuttle_state "$box")"
         entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"shuttle\":$(app_json_string "$shuttle_state")}"
       else
-        if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
-        if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
+        if app_credential_available "$box" guest; then read_state=present; else read_state=missing; fi
+        if app_credential_available "$box" host; then write_state=present; else write_state=missing; fi
         repo="$(metadata_repo "$box" 2>/dev/null || true)"
         entry="{\"workspace\":$(app_json_string "$box"),\"guestRead\":$(app_json_string "$read_state"),\"hostWrite\":$(app_json_string "$write_state"),\"verificationRepo\":$(app_json_optional "$repo")}"
       fi
@@ -3683,8 +3441,8 @@ cmd_github_status() {
   else
     printf '%-13s %-10s %-10s %-18s %s\n' WORKSPACE GUEST_READ HOST_WRITE VERIFICATION_REPO MODE
     while IFS= read -r box; do
-      if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then read_state=present; else read_state=missing; fi
-      if keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then write_state=present; else write_state=missing; fi
+      if app_credential_available "$box" guest; then read_state=present; else read_state=missing; fi
+      if app_credential_available "$box" host; then write_state=present; else write_state=missing; fi
       repo="$(metadata_repo "$box" 2>/dev/null || printf '-')"
       printf '%-13s %-10s %-10s %-18s %s\n' "$box" "$read_state" "$write_state" "$repo" connect
     done < <(for_targets "$target")
@@ -3706,7 +3464,6 @@ cmd_github_remove() {
   #      can be proven, ABORT BEFORE mutation with a typed global safety error.
   #   2. proven Keychain deletion of the activation record.
   #   3. metadata tombstone (revoked; revocation-uncertain on step-2 failure).
-  # The legacy silo.github.read/write keychain items are NEVER touched.
   if [[ "$SILO_GITHUB_MODE" == local ]]; then
     if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
     if ! host_credential_lock_acquire; then github_lock_release; fatal "could not acquire the global host credential lock"; fi
@@ -3716,7 +3473,7 @@ cmd_github_remove() {
     if host_credential_deny_marker_write; then deny_proven=1; fi
     if host_credential_deny_item_set; then deny_proven=1; fi
     if (( deny_proven != 1 )); then
-      # Neither gate could be recorded. Fallback: an inactive metadata
+      # Neither gate could be recorded. An inactive metadata
       # tombstone (helpers require active metadata, so an inactive record is
       # itself a deny) AND/OR a PROVEN token deletion.
       if host_meta_tombstone revocation-uncertain >/dev/null 2>&1; then
@@ -3730,7 +3487,7 @@ cmd_github_remove() {
     if (( deny_proven != 1 )); then
       # The primary marker, Keychain deny item, metadata tombstone, and token
       # deletion were all unprovable. Establish a durable global quarantine in
-      # the migration state domain; every helper checks it before the token.
+      # the global state domain; every helper checks it before the token.
       if host_credential_global_quarantine_write; then
         deny_proven=1
         cleanup_failed=1
@@ -3774,42 +3531,13 @@ cmd_github_remove() {
   if app_metadata_profile_present "$box" guest || app_metadata_profile_present "$box" host; then
     fatal "schema-3 GitHub App grants must be revoked from Silo so the service grant is revoked; no local credentials were changed"
   fi
-  if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
-  meta_file="$(metadata_file "$box")"
-  rm -f "$meta_file"
-  [[ ! -e "$meta_file" ]] || fatal "could not revoke GitHub host-write metadata for $box"
-  if ! remove_github_secret "$box"; then cleanup_failed=1; fi
-  if ! keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
-  if ! keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
-  if (( cleanup_failed )); then
-    if ! quarantine_workspace "$box" "GitHub credential removal failed"; then
-      fatal "GitHub credential removal failed and workspace quarantine could not be recorded"
-    fi
-    fatal "GitHub credential removal failed; workspace quarantined"
-  fi
-  if ! clear_quarantine "$box"; then fatal "could not clear GitHub workspace quarantine for $box"; fi
-  github_lock_release
-  ok "removed GitHub credentials for $box"
+  fatal "no current GitHub App grant exists for $box"
 }
 
 cmd_github() {
-  local sub="${1:-status}" trigger_target="all"
+  local sub="${1:-status}"
   shift || true
-  # §11 trigger: the first local-mode GitHub operation retires legacy state
-  # per workspace as one journaled transaction (explicit 'migrate' excluded).
-  if [[ "$SILO_GITHUB_MODE" == local && "$sub" != migrate ]]; then
-    case "$sub" in
-      verify|remove) [[ -n "${1:-}" ]] && trigger_target="$1" ;;
-      capability) [[ "${1:-}" == rotate && -n "${2:-}" ]] && trigger_target="$2" ;;
-      proxy-configure) [[ -n "${1:-}" && "$1" != all ]] && trigger_target="$1" ;;
-    esac
-    migrate_local_if_needed "$trigger_target"
-  fi
   case "$sub" in
-    setup)
-      (( $# >= 2 && $# <= 3 )) || fatal "usage: silo github setup WORKSPACE OWNER/REPO [--read-only]"
-      cmd_github_setup "$@"
-      ;;
     verify)
       (( $# >= 1 && $# <= 2 )) || fatal "usage: silo github verify WORKSPACE [REPO]"
       cmd_github_verify "$1" "${2:-}"
@@ -3826,10 +3554,6 @@ cmd_github() {
       ;;
     repos)
       cmd_github_repos "$@"
-      ;;
-    migrate)
-      (( $# <= 1 )) || fatal "usage: silo github migrate [WORKSPACE|all]"
-      cmd_github_migrate "${1:-all}"
       ;;
     proxy-configure)
       (( $# <= 1 )) || fatal "usage: silo github proxy-configure [WORKSPACE]"
@@ -4686,340 +4410,6 @@ cmd_github_capability_rotate() {
 }
 
 # ---------------------------------------------------------------------------
-# Path C §11 local-mode entry migration (legacy state retirement). One
-# journaled transaction per workspace: lock-first (refuse if held, never steal,
-# never unlink), journal intent BEFORE any mutation, secret removal with proof,
-# conf archived (never blind-deleted), quarantine discipline (pre-existing
-# markers preserved untouched; own marker cleared only after every step is
-# proven), policy skeleton minted. The persistent lock stays in place;
-# github_lock_release only closes fd 9.
-# ---------------------------------------------------------------------------
-migration_journal_file() { printf '%s/migrated-local/journal.jsonl\n' "$GITHUB_META_DIR"; }
-
-JOURNAL_WRITE_COUNT=0
-
-# §11/blocker 6 durability: O_APPEND under a journal-wide flock (fcntl), one
-# full write, fsync(file) + fsync(parent dir) via Python
-# os.open/os.write/os.fsync. No /usr/bin/sync, no tmp+rename that could lose
-# concurrent cross-workspace lines. The dir is created 0700 and every line
-# lands in a 0600 file. Failures are NEVER silent: journal_intent aborts the
-# migration before any mutation, and post-mutation events
-# (migration_journal_checked) quarantine the workspace.
-journal_append_line() {
-  local line="$1" file dir
-  JOURNAL_WRITE_COUNT=$((JOURNAL_WRITE_COUNT + 1))
-  if [[ -n "${SILO_FAKE_JOURNAL_FAIL_ON:-}" ]]; then
-    case "$SILO_FAKE_JOURNAL_FAIL_ON" in
-      *[!0-9]*) ;;
-      *)
-        if (( JOURNAL_WRITE_COUNT >= SILO_FAKE_JOURNAL_FAIL_ON )); then
-          printf 'silo: migration journal write %s failed (injected)\n' "$JOURNAL_WRITE_COUNT" >&2
-          return 1
-        fi
-        ;;
-    esac
-  fi
-  file="$(migration_journal_file)"
-  dir="$(dirname "$file")"
-  if [[ ! -d "$dir" ]]; then
-    mkdir -p "$dir" || return 1
-    chmod 700 "$dir" || return 1
-  fi
-  umask 077
-  SILO_JOURNAL_FILE="$file" SILO_JOURNAL_LINE="$line" \
-  SILO_FAKE_JOURNAL_SHORT_WRITE="${SILO_FAKE_JOURNAL_SHORT_WRITE:-}" \
-  SILO_FAKE_JOURNAL_ZERO_WRITE="${SILO_FAKE_JOURNAL_ZERO_WRITE:-}" \
-  "$SILO_PYTHON_BIN" - <<'PY' || return 1
-import fcntl
-import os
-import sys
-
-path = os.environ["SILO_JOURNAL_FILE"]
-line = os.environ["SILO_JOURNAL_LINE"]
-
-
-def write_all(fd, data):
-    """Loop os.write until every byte lands; a zero/short write is failure."""
-    view = memoryview(data)
-    if os.environ.get("SILO_FAKE_JOURNAL_ZERO_WRITE"):
-        return False
-    first = True
-    while view:
-        try:
-            if os.environ.get("SILO_FAKE_JOURNAL_SHORT_WRITE") and first and len(view) > 1:
-                written = os.write(fd, view[: len(view) // 2])
-                first = False
-            else:
-                written = os.write(fd, view)
-        except OSError:
-            return False
-        if written <= 0:
-            return False
-        view = view[written:]
-    return True
-
-
-try:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-except OSError:
-    sys.exit(1)
-try:
-    os.fchmod(fd, 0o600)  # enforce 0600 even if the file pre-existed
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    if not write_all(fd, line.encode("utf-8") + b"\n"):
-        sys.exit(1)
-    os.fsync(fd)
-finally:
-    fcntl.flock(fd, fcntl.LOCK_UN)
-    os.close(fd)
-try:
-    dfd = os.open(os.path.dirname(path), os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-except OSError:
-    sys.exit(1)
-PY
-}
-
-migration_journal() {
-  local box="$1" event="$2" detail="${3:-}" line
-  line="$("$JQ_BIN" -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg b "$box" --arg e "$event" --arg d "$detail" \
-    '{schemaVersion:1,event:$e,workspace:$b,detail:$d,timestamp:$t}')" || return 1
-  journal_append_line "$line"
-}
-
-# §11.2: the intent journal is MANDATORY and must land BEFORE any mutation.
-# A failed intent write aborts the migration with the workspace untouched.
-journal_intent() {
-  local box="$1" intent="$2" line
-  line="$("$JQ_BIN" -nc --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg b "$box" --arg e intent --arg d "$intent" \
-    '{schemaVersion:1,event:$e,workspace:$b,detail:$d,timestamp:$t}')" || return 1
-  journal_append_line "$line"
-}
-
-# §11.5/blocker 6 failure discipline: when a quarantine marker PRE-EXISTED the
-# migration, NEVER call the truncating quarantine_workspace writer — the
-# original reason must survive byte-for-byte; instead record the new failure
-# in the durable journal/sidecar and leave the marker untouched. When no
-# marker pre-existed, quarantine_workspace writes the migration's own marker
-# as before.
-migration_quarantine_on_failure() {
-  local box="$1" reason="$2" preexisting="${3:-0}"
-  if (( preexisting )); then
-    migration_journal "$box" failed "$reason" >/dev/null 2>&1 || true
-    return 0
-  fi
-  quarantine_workspace "$box" "$reason" >/dev/null 2>&1 || true
-  migration_journal "$box" failed "$reason" >/dev/null 2>&1 || true
-}
-
-# Post-mutation journal events must never fail silently: a write failure here
-# quarantines the workspace (preserving a pre-existing marker byte-for-byte)
-# and stops the transaction.
-migration_journal_checked() {
-  local box="$1" event="$2" detail="${3:-}" step="$4" preexisting="${5:-0}"
-  if ! migration_journal "$box" "$event" "$detail"; then
-    migration_quarantine_on_failure "$box" "Migration journal write failed after ${step}" "$preexisting" || true
-    setup_transaction_disarm
-    github_lock_release
-    fatal "silo github migrate: migration journal write failed for '$box' after $step; workspace quarantined"
-  fi
-}
-
-migration_needed() {
-  local box="$1" conf quarantine_path
-  conf="$(metadata_file "$box")"; quarantine_path="$(quarantine_file "$box")"
-  [[ -f "$conf" && ! -L "$conf" ]] && return 0
-  [[ -e "$quarantine_path" || -L "$quarantine_path" ]] && return 0
-  if sandbox_inspect_state "$box" 2>/dev/null; then
-    workspace_msb "$box" inspect "$box" --format json 2>/dev/null | grep -q 'GH_TOKEN' && return 0
-  fi
-  return 1
-}
-
-migrate_workspace_local() {
-  local box="$1" conf quarantine_path reason="" preexisting_quarantine=0 set_quarantine=0 lock_rc=0 \
-        had_conf=0 conf_archive="" archive_dir="" stamp="" secret_was_bound=0 secret_spec="" \
-        step_failed=0 inspect_rc
-  validate_workspace "$box"
-  conf="$(metadata_file "$box")"
-  quarantine_path="$(quarantine_file "$box")"
-  [[ -f "$conf" && ! -L "$conf" ]] && had_conf=1
-  if [[ -e "$quarantine_path" || -L "$quarantine_path" ]]; then
-    preexisting_quarantine=1
-    if [[ -f "$quarantine_path" && ! -L "$quarantine_path" ]]; then
-      reason="$(sed -n '1p' "$quarantine_path" 2>/dev/null || true)"
-    fi
-  fi
-
-  # §11.1 lock-first: strict acquire — a held lock REFUSES (never delete or
-  # steal), and a stale legacy lock DIRECTORY is surfaced for manual review,
-  # never unlinked directly.
-  if github_lock_acquire "$box" 1; then
-    lock_rc=0
-  else
-    lock_rc=$?
-  fi
-  if (( lock_rc == 2 )); then
-    fatal "silo github migrate: workspace '$box' has a legacy lock directory at $(github_lock_file "$box") that needs manual review; migration never deletes locks"
-  fi
-  if (( lock_rc != 0 )); then
-    fatal "silo github migrate: workspace '$box' refused: another GitHub operation holds the workspace lock; retry after it finishes"
-  fi
-  setup_transaction_arm "$box" "$preexisting_quarantine"
-  # Test seam: park immediately after the arm hook (traps armed, preexisting
-  # flag already recorded) so a test can deliver a signal at the hook and
-  # prove the pre-existing marker survives byte-for-byte.
-  if [[ -n "${SILO_FAKE_MIGRATION_ARM_PAUSE_FILE:-}" ]]; then
-    if [[ -n "${SILO_FAKE_MIGRATION_ARM_PAUSE_REACHED:-}" ]]; then
-      : >"$SILO_FAKE_MIGRATION_ARM_PAUSE_REACHED"
-    fi
-    while [[ -e "$SILO_FAKE_MIGRATION_ARM_PAUSE_FILE" ]]; do sleep 0.1; done
-  fi
-
-  # §11.2 journal intent INCLUDING discovered state, before any mutation.
-  if sandbox_inspect_state "$box" 2>/dev/null; then
-    secret_spec="$(workspace_msb "$box" inspect "$box" --format json 2>/dev/null | grep -o 'GH_TOKEN[^,"}]*' | head -n 1 || true)"
-    [[ "$secret_spec" == GH_TOKEN* ]] && secret_was_bound=1
-  fi
-  migration_intent="$("$JQ_BIN" -nc \
-    --argjson conf "$([[ "$had_conf" == 1 ]] && printf true || printf false)" \
-    --argjson q "$([[ "$preexisting_quarantine" == 1 ]] && printf true || printf false)" \
-    --arg r "$reason" \
-    --argjson s "$([[ "$secret_was_bound" == 1 ]] && printf true || printf false)" \
-    '{confPresent:$conf,quarantinePreExisted:$q,quarantineReason:$r,secretBound:$s,lockState:"acquired"}')" || migration_intent="{}"
-  if ! journal_intent "$box" "$migration_intent"; then
-    setup_transaction_disarm
-    github_lock_release
-    fatal "silo github migrate: could not write the migration journal for '$box' ($(migration_journal_file)); no state was changed"
-  fi
-  # Test seam: park the transaction here (after the durable intent, while the
-  # signal/EXIT traps are armed) so a test can deliver SIGTERM/SIGINT at a
-  # deterministic point (SILO_FAKE_MIGRATION_PAUSE_REACHED marks the park).
-  if [[ -n "${SILO_FAKE_MIGRATION_PAUSE_FILE:-}" ]]; then
-    if [[ -n "${SILO_FAKE_MIGRATION_PAUSE_REACHED:-}" ]]; then
-      : >"$SILO_FAKE_MIGRATION_PAUSE_REACHED"
-    fi
-    while [[ -e "$SILO_FAKE_MIGRATION_PAUSE_FILE" ]]; do sleep 0.1; done
-  fi
-
-  # §11.5 quarantine discipline.
-  if (( preexisting_quarantine )); then
-    warn "workspace '$box' is already quarantined (${reason:-reason unknown}); migration preserves the pre-existing marker"
-  else
-    if ! printf '%s\n' "Legacy GitHub state migration in progress" >"$quarantine_path" 2>/dev/null; then
-      migration_journal "$box" failed "migration quarantine marker could not be set" >/dev/null 2>&1 || true
-      setup_transaction_disarm
-      github_lock_release
-      fatal "silo github migrate: could not set the migration quarantine marker for '$box'; refusing to proceed"
-    fi
-    set_quarantine=1
-    migration_journal_checked "$box" quarantine-set "migration-owned marker" "setting the migration quarantine" "$preexisting_quarantine"
-  fi
-
-  # §11.3 secret removal with proof via inspect. Failure => quarantine + stop
-  # (a pre-existing marker is preserved byte-for-byte, §11.5/blocker 6).
-  if (( secret_was_bound )); then
-    if ! remove_github_secret "$box" 1; then
-      migration_quarantine_on_failure "$box" "Legacy GitHub secret removal failed during migration" "$preexisting_quarantine"
-      setup_transaction_disarm
-      github_lock_release
-      fatal "silo github migrate: could not remove the legacy GitHub secret from '$box'; workspace quarantined"
-    fi
-    if sandbox_inspect_state "$box" 2>/dev/null &&
-      workspace_msb "$box" inspect "$box" --format json 2>/dev/null | grep -q 'GH_TOKEN'; then
-      migration_quarantine_on_failure "$box" "Legacy GitHub secret removal could not be proven during migration" "$preexisting_quarantine"
-      setup_transaction_disarm
-      github_lock_release
-      fatal "silo github migrate: legacy GitHub secret removal from '$box' could not be proven; workspace quarantined"
-    fi
-    migration_journal_checked "$box" secret-removed "removal proven by inspect" "removing the legacy secret" "$preexisting_quarantine"
-  fi
-
-  # §11.4 archive the legacy conf (preserve, never blind-delete).
-  if (( had_conf )); then
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    archive_dir="$GITHUB_META_DIR/migrated-local"
-    mkdir -p "$archive_dir" 2>/dev/null || true
-    chmod 700 "$archive_dir" 2>/dev/null || true
-    conf_archive="$archive_dir/$box.conf.$stamp"
-    if [[ -e "$conf_archive" ]]; then conf_archive="$archive_dir/$box.conf.$stamp.$$"; fi
-    if ! mv "$conf" "$conf_archive" 2>/dev/null; then
-      migration_quarantine_on_failure "$box" "Legacy GitHub metadata archiving failed during migration" "$preexisting_quarantine"
-      setup_transaction_disarm
-      github_lock_release
-      fatal "silo github migrate: could not archive legacy metadata for '$box'; workspace quarantined"
-    fi
-    if [[ -f "$conf_archive" && ! -e "$conf" && ! -L "$conf" ]]; then
-      migration_journal_checked "$box" archived "{\"archive\":$(app_json_string "${conf_archive#"$GITHUB_META_DIR"/}")}" "archiving legacy metadata" "$preexisting_quarantine"
-    else
-      migration_quarantine_on_failure "$box" "Legacy GitHub metadata archiving could not be proven during migration" "$preexisting_quarantine"
-      setup_transaction_disarm
-      github_lock_release
-      fatal "silo github migrate: legacy metadata archiving could not be proven for '$box'; workspace quarantined"
-    fi
-  fi
-
-  # §11.6 policy-file skeleton (mint capability; empty repo list = no access).
-  if ! proxy_policy_ensure_workspace "$box" >/dev/null; then
-    migration_quarantine_on_failure "$box" "GitHub policy skeleton failed during migration" "$preexisting_quarantine"
-    setup_transaction_disarm
-    github_lock_release
-    fatal "silo github migrate: could not write the GitHub policy skeleton for '$box'; workspace quarantined"
-  fi
-  migration_journal_checked "$box" policy-written "skeleton ensured" "writing the policy skeleton" "$preexisting_quarantine"
-
-  if (( set_quarantine )); then
-    if ! clear_quarantine "$box"; then
-      migration_quarantine_on_failure "$box" "Migration quarantine cleanup failed" "$preexisting_quarantine"
-      setup_transaction_disarm
-      github_lock_release
-      fatal "silo github migrate: migration quarantine could not be cleared for '$box'; workspace quarantined"
-    fi
-    migration_journal_checked "$box" quarantine-cleared "migration-owned marker removed" "clearing the migration quarantine" "$preexisting_quarantine"
-  fi
-  migration_journal_checked "$box" committed "all steps proven" "completing the migration" "$preexisting_quarantine"
-  setup_transaction_disarm
-  github_lock_release
-  ok "legacy GitHub state migrated for $box"
-  if (( preexisting_quarantine )); then
-    warn "workspace '$box' remains quarantined (pre-existing reason: ${reason:-unknown}); review it before use"
-  fi
-}
-
-cmd_github_migrate() {
-  local target="${1:-all}" box
-  [[ "$target" == all ]] || is_workspace "$target" || fatal "usage: silo github migrate [WORKSPACE|all]"
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    fatal "silo github migrate is a local-mode command; legacy state retirement only runs in local mode"
-  fi
-  require_command_path jq "$JQ_BIN"
-  require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
-  while IFS= read -r box; do
-    if migration_needed "$box"; then
-      migrate_workspace_local "$box"
-    else
-      printf '%-13s nothing to migrate\n' "$box"
-    fi
-  done < <(for_targets "$target")
-}
-
-# §11 trigger: the first local-mode GitHub operation per workspace retires
-# legacy state as one journaled transaction before the operation proceeds.
-# The transaction's progress goes to stderr so machine-readable stdout
-# (e.g. `silo github status --format json`) stays clean; the explicit
-# `silo github migrate` command reports on stdout.
-migrate_local_if_needed() {
-  local target="${1:-all}" box
-  [[ "$SILO_GITHUB_MODE" == local ]] || return 0
-  while IFS= read -r box; do
-    migration_needed "$box" || continue
-    migrate_workspace_local "$box" >&2
-  done < <(for_targets "$target")
-}
-
 host_network_check() {
   local failed=0 box ip host
   if [[ "${SILO_TEST_MODE:-0}" == 1 ]]; then
@@ -5155,9 +4545,9 @@ SCRIPT
   }
   guest_control_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
 
-  # Path C §7/§9: local mode asserts the guest carries NO GH_TOKEN at all and
-  # probes proxy reachability through the endpoint. Connect mode keeps the
-  # legacy placeholder assertion.
+  # Local mode asserts that the guest carries no credential and probes proxy
+  # reachability through the endpoint. Connect mode verifies its current
+  # secret binding.
   if [[ "$SILO_GITHUB_MODE" == local ]]; then
     guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in "") exit 0;; *) exit 1;; esac' || {
       deep_check_failure "$box" github "The workspace exposed an unexpected GitHub credential."
@@ -5186,7 +4576,7 @@ SCRIPT
     else
       note "$box: no GitHub policy; skipping proxy reachability"
     fi
-  elif keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
+  elif app_credential_available "$box" guest; then
     guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
       deep_check_failure "$box" github "The GitHub credential placeholder is invalid."
       failed=1
@@ -5242,58 +4632,10 @@ readonly BACKUP_SNAPSHOT_SESSION="$BACKUP_OPERATION_ROOT/.snapshot-session.json"
 readonly BACKUP_SNAPSHOT_LOCK="$BACKUP_OPERATION_ROOT/.snapshot-coordinator.lock"
 readonly BACKUP_SNAPSHOT_OWNER="$BACKUP_OPERATION_ROOT/.snapshot-coordinator-owner.json"
 readonly BACKUP_RECORD_SCHEMA_VERSION=2
-readonly BACKUP_SCHEMA_MARKER="$BACKUP_OPERATION_ROOT/.schema-v2-activated"
-readonly BACKUP_INCOMPATIBLE_ROOT="$BACKUP_OPERATION_ROOT/.incompatible-v2"
-
-backup_quarantine_incompatible_records() {
-  local lock="$BACKUP_OPERATION_ROOT/.schema-v2-lock" path base destination sidecar schema suffix candidate attempts=0 collision=0
-  until mkdir "$lock" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    (( attempts < 100 )) || return 1
-    sleep 0.02
-  done
-  mkdir -p "$BACKUP_INCOMPATIBLE_ROOT" || { rmdir "$lock"; return 1; }
-  chmod 700 "$BACKUP_INCOMPATIBLE_ROOT"
-  while IFS= read -r path; do
-    [[ -f "$path" && ! -L "$path" ]] || continue
-    # No compatibility adapter: quarantine only records that positively
-    # declare an older schema. Unknown, malformed, current, and future records
-    # remain visible so strict Backup validation reports them to the owner.
-    schema="$("$JQ_BIN" -er '.schemaVersion | select(type == "number" and floor == .)' "$path" 2>/dev/null || true)"
-    [[ "$schema" =~ ^[0-9]+$ ]] || continue
-    (( schema < BACKUP_RECORD_SCHEMA_VERSION )) || continue
-    base="$(basename "$path" .json)"
-    suffix=""
-    while :; do
-      candidate="$BACKUP_INCOMPATIBLE_ROOT/$base$suffix"
-      if [[ ! -e "$candidate.json" && ! -L "$candidate.json" &&
-            ! -e "$candidate.log" && ! -L "$candidate.log" &&
-            ! -e "$candidate.stdout" && ! -L "$candidate.stdout" ]]; then
-        break
-      fi
-      collision=$((collision + 1))
-      suffix=".quarantine-$collision-$$"
-    done
-    destination="$candidate.json"
-    mv "$path" "$destination" || { rmdir "$lock"; return 1; }
-    for sidecar in "$BACKUP_OPERATION_ROOT/$base.log" "$BACKUP_OPERATION_ROOT/$base.stdout"; do
-      [[ -f "$sidecar" && ! -L "$sidecar" ]] && mv "$sidecar" "$candidate.${sidecar##*.}"
-    done
-  done < <(/usr/bin/find "$BACKUP_OPERATION_ROOT" -maxdepth 1 -type f -name '[a-z0-9]*.json' -print)
-  if [[ ! -f "$BACKUP_SCHEMA_MARKER" || -L "$BACKUP_SCHEMA_MARKER" ]]; then
-    [[ ! -L "$BACKUP_SCHEMA_MARKER" ]] || { rmdir "$lock"; return 1; }
-    printf 'schemaVersion=%s\n' "$BACKUP_RECORD_SCHEMA_VERSION" >"$BACKUP_SCHEMA_MARKER.tmp"
-    chmod 600 "$BACKUP_SCHEMA_MARKER.tmp"
-    mv "$BACKUP_SCHEMA_MARKER.tmp" "$BACKUP_SCHEMA_MARKER"
-  fi
-  rmdir "$lock"
-}
-
 backup_state_prepare() {
   umask 077
   mkdir -p "$BACKUP_OPERATION_ROOT"
   chmod 700 "$HOME/.local/state" "$HOME/.local/state/silo" "$BACKUP_OPERATION_ROOT" 2>/dev/null || true
-  backup_quarantine_incompatible_records
 }
 
 backup_record_path() { printf '%s/%s.json\n' "$BACKUP_OPERATION_ROOT" "$1"; }
@@ -6409,7 +5751,6 @@ GitHub permissions
   silo github auth --device [--json]        Start OAuth Device Flow (prints code once)
   silo github auth --device-complete CODE   One device-flow exchange attempt
   silo github repos [--owner O] [--json]    Discover GitHub repositories (picker)
-  silo github migrate [WORKSPACE|all]       Retire legacy GitHub state (local mode)
   silo github proxy-configure [WORKSPACE]   Install the repo-aware proxy transport
   silo github capability rotate WORKSPACE   Rotate that workspace's capability
   silo github verify WORKSPACE [REPO]       Verify GitHub access
@@ -6690,7 +6031,7 @@ app_workspace_credential_state() {
     if [[ -n "$recovery_state" && "$recovery_state" != ready ]]; then
       case "$recovery_state" in
         serviceUnavailable) printf 'Service unavailable' ;;
-        revoked|expired|installationRemoved|migrationRequired|quarantined) printf 'Needs authorization' ;;
+        revoked|expired|installationRemoved|quarantined) printf 'Needs authorization' ;;
         *) printf 'Needs authorization' ;;
       esac
       return
@@ -6740,25 +6081,8 @@ app_workspace_credential_state() {
     else
       printf 'Needs authorization'
     fi
-  elif [[ ! -f "$(metadata_file "$box")" ]]; then
-    printf 'Unconfigured'
   else
-    access="$(metadata_access "$box" 2>/dev/null || true)"
-    if [[ "$access" == host-write ]]; then
-      if keychain_has "$READ_KEYCHAIN_SERVICE" "$box" && keychain_has "$WRITE_KEYCHAIN_SERVICE" "$box"; then
-        printf 'Ready'
-      else
-        printf 'Needs authorization'
-      fi
-    elif [[ "$access" == read-only ]]; then
-      if keychain_has "$READ_KEYCHAIN_SERVICE" "$box"; then
-        printf 'Read-only'
-      else
-        printf 'Needs authorization'
-      fi
-    else
-      printf 'Needs authorization'
-    fi
+    printf 'Unconfigured'
   fi
 }
 
@@ -6766,7 +6090,7 @@ app_workspace_json() {
   local box="$1" lifecycle="${2:-Unknown}" freshness="${3:-unavailable}" status_observed_at="${4:-}" quarantine="clear"
   local metrics_observed_at="" github_observed_at="" activity_observed_at=""
   local credential purpose host ip cpus max_cpus memory max_memory root_disk verification_repo access
-  local account_login installation_id access_expires refresh_expires needs_restart host_needs_restart quarantine_reason role
+  local account_login installation_id access_expires needs_restart host_needs_restart quarantine_reason role
   local skipped_ports_json port_warning secrets_snapshot storage_ready=true action_reason="" action_recovery=""
   if app_workspace_quarantined "$box"; then
     quarantine="quarantined"
@@ -6800,14 +6124,11 @@ app_workspace_json() {
     account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
     installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
     access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
-    refresh_expires="$(app_metadata_value "$box" guest refreshExpiresAt 2>/dev/null || true)"
     needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
     if app_metadata_profile_present "$box" host; then
-      local host_access_expires host_refresh_expires
+      local host_access_expires
       host_access_expires="$(app_metadata_value "$box" host accessExpiresAt 2>/dev/null || true)"
-      host_refresh_expires="$(app_metadata_value "$box" host refreshExpiresAt 2>/dev/null || true)"
       [[ -n "$host_access_expires" && ( -z "$access_expires" || "$host_access_expires" < "$access_expires" ) ]] && access_expires="$host_access_expires"
-      [[ -n "$host_refresh_expires" && ( -z "$refresh_expires" || "$host_refresh_expires" < "$refresh_expires" ) ]] && refresh_expires="$host_refresh_expires"
     fi
     host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
     [[ "$host_needs_restart" == true ]] && needs_restart=true
@@ -6817,7 +6138,6 @@ app_workspace_json() {
     account_login=""
     installation_id=""
     access_expires=""
-    refresh_expires=""
     needs_restart=false
   fi
   [[ -n "$needs_restart" ]] || needs_restart=false
@@ -6831,7 +6151,7 @@ app_workspace_json() {
     action_reason="Workspace storage must be repaired before starting or restarting $box."
     action_recovery="$WORKSPACE_STORAGE_ERROR"
   fi
-  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"refreshExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s,"reason":%s,"recovery":%s}}' \
+  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s,"reason":%s,"recovery":%s}}' \
     "$(app_json_string "$box")" \
     "$(app_json_string "$purpose")" \
     "$(app_json_string "$lifecycle")" \
@@ -6848,7 +6168,6 @@ app_workspace_json() {
     "$(app_json_optional "$account_login")" \
     "$(app_json_optional "$installation_id")" \
     "$(app_json_optional "$access_expires")" \
-    "$(app_json_optional "$refresh_expires")" \
     "$needs_restart" \
     "$(app_json_string "$cpus")" \
     "$(app_json_string "$max_cpus")" \
@@ -7787,37 +7106,26 @@ app_cmd_github_state() {
     if app_metadata_profile_present "$box" guest; then
       configured=true
       provider="$(app_metadata_value "$box" guest provider 2>/dev/null || true)"
-      if [[ "$provider" != github-app-installation ]]; then
-        provider="legacy-broad-token"
-        access="unconfigured"
-      else
-        repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
-        access="$(metadata_access "$box" 2>/dev/null || true)"
-      fi
+      [[ "$provider" == github-app-installation ]] ||
+        app_emit_error github-state "SILO_CREDENTIAL_METADATA_INVALID" "The GitHub credential metadata is invalid." "Reconnect GitHub in Silo to create a current credential record." "$box" false 78
+      repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
+      access="$(metadata_access "$box" 2>/dev/null || true)"
       account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
       installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
       access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
-      refresh_expires="$(app_metadata_value "$box" guest refreshExpiresAt 2>/dev/null || true)"
       needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
       if app_metadata_profile_present "$box" host; then
         host_access_expires="$(app_metadata_value "$box" host accessExpiresAt 2>/dev/null || true)"
-        host_refresh_expires="$(app_metadata_value "$box" host refreshExpiresAt 2>/dev/null || true)"
         host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
         [[ -n "$host_access_expires" && ( -z "$access_expires" || "$host_access_expires" < "$access_expires" ) ]] && access_expires="$host_access_expires"
-        [[ -n "$host_refresh_expires" && ( -z "$refresh_expires" || "$host_refresh_expires" < "$refresh_expires" ) ]] && refresh_expires="$host_refresh_expires"
         [[ "$host_needs_restart" == true ]] && needs_restart=true
       fi
-    elif [[ -f "$(metadata_file "$box")" ]]; then
-      configured=true
-      provider="legacy-pat"
-      repo="$(metadata_repo "$box" 2>/dev/null || true)"
-      access="$(metadata_access "$box" 2>/dev/null || true)"
     fi
     [[ "$needs_restart" == true ]] || needs_restart=false
     quarantine=false
     app_workspace_quarantined "$box" && quarantine=true
     [[ -n "$items" ]] && items+=","
-    items+="{\"workspace\":$(app_json_string "$box"),\"provider\":$(app_json_string "$provider"),\"configured\":$configured,\"accessMode\":$(app_json_string "${access:-unconfigured}"),\"verificationRepository\":$(app_json_optional "$repo"),\"accountLogin\":$(app_json_optional "$account_login"),\"installationId\":$(app_json_optional "$installation_id"),\"accessExpiresAt\":$(app_json_optional "$access_expires"),\"refreshExpiresAt\":$(app_json_optional "$refresh_expires"),\"needsRestart\":$needs_restart,\"quarantined\":$quarantine}"
+    items+="{\"workspace\":$(app_json_string "$box"),\"provider\":$(app_json_string "$provider"),\"configured\":$configured,\"accessMode\":$(app_json_string "${access:-unconfigured}"),\"verificationRepository\":$(app_json_optional "$repo"),\"accountLogin\":$(app_json_optional "$account_login"),\"installationId\":$(app_json_optional "$installation_id"),\"accessExpiresAt\":$(app_json_optional "$access_expires"),\"needsRestart\":$needs_restart,\"quarantined\":$quarantine}"
   done
   app_emit_success github-state "{\"workspaces\":[$items]}"
 }
@@ -7835,7 +7143,7 @@ app_cmd_github_policy_get() {
     is_workspace "$target" || app_usage_error github-policy-get "workspace must be one of the configured workspaces"
   fi
   if ! policy_validate; then
-    app_emit_error github-policy-get "SILO_POLICY_MISSING" "The GitHub policy file is missing or malformed." "Run 'silo github proxy-configure' or 'silo github migrate' to initialize it." "" false 78
+    app_emit_error github-policy-get "SILO_POLICY_MISSING" "The GitHub policy file is missing or malformed." "Run 'silo github proxy-configure' to initialize it." "" false 78
   fi
   for box in "${WORKSPACES[@]}"; do
     [[ "$target" == all || "$target" == "$box" ]] || continue
@@ -8019,10 +7327,8 @@ app_apply_lock_all() {
   for box in "${WORKSPACES[@]}"; do
     lock="$(github_lock_file "$box")"
     if [[ -d "$lock" ]]; then
-      if ! github_lock_reclaim_legacy "$lock"; then
-        app_apply_release_all
-        return 1
-      fi
+      app_apply_release_all
+      return 1
     fi
     if ! eval "exec ${fd}>>\"$lock\""; then app_apply_release_all; return 1; fi
     if ! "$LOCKF_BIN" -s -t 30 "$fd"; then
@@ -8600,7 +7906,7 @@ app_cmd_github_policy_apply() {
 }
 
 app_cmd_github_bind() {
-  local box="" repo="" mode="read-only" before="Unknown" after="Unknown" verify_output="" legacy_file=""
+  local box="" repo="" mode="read-only" before="Unknown" after="Unknown" verify_output=""
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --workspace"; box="$2"; shift 2 ;;
@@ -8662,13 +7968,6 @@ app_cmd_github_bind() {
     quarantine_workspace "$box" "GitHub verification outcome could not be reconciled" >/dev/null 2>&1 || true
     app_emit_error github-bind "SILO_GITHUB_BIND_RECONCILE_FAILED" "GitHub verification exited without restoring the previously observed lifecycle." "Repair the quarantined workspace before continuing." "$box" true 69
   fi
-  legacy_file="$(metadata_file "$box")"
-  if [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
-    if [[ -L "$legacy_file" ]] || ! rm -f "$legacy_file" || [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
-      quarantine_workspace "$box" "Legacy GitHub metadata cleanup failed" >/dev/null 2>&1 || true
-      app_emit_error github-bind "SILO_GITHUB_LEGACY_CLEANUP_FAILED" "GitHub verification succeeded but legacy capability metadata could not be removed." "Repair the quarantined credential configuration before continuing." "$box" false 77
-    fi
-  fi
   if ! clear_quarantine "$box"; then
     quarantine_workspace "$box" "GitHub verification quarantine cleanup failed" >/dev/null 2>&1 || true
     app_emit_error github-bind "SILO_GITHUB_QUARANTINE_FAILED" "GitHub verification succeeded but quarantine cleanup could not be proven." "Repair the quarantined workspace before continuing." "$box" false 77
@@ -8698,7 +7997,7 @@ app_cmd_github_quarantine() {
   app_emit_success github-quarantine "{\"workspace\":$(app_json_string "$box"),\"quarantined\":true,\"lifecycle\":\"Stopped\"}"
 }
 app_cmd_github_unbind() {
-  local box="" legacy_file="" cleanup_failed=0
+  local box=""
   while (( $# > 0 )); do
     case "$1" in
       --workspace) [[ $# -ge 2 ]] || app_usage_error github-unbind "missing value for --workspace"; box="$2"; shift 2 ;;
@@ -8723,24 +8022,6 @@ app_cmd_github_unbind() {
     quarantine_workspace "$box" "GitHub App credential unbinding failed" >/dev/null 2>&1 || true
     github_lock_release
     app_emit_error github-unbind "SILO_GITHUB_UNBIND_FAILED" "The VM GitHub secret could not be removed and the workspace remains quarantined." "Repair the workspace, then retry removing GitHub access." "$box" true 77
-  fi
-  # A workspace still looks GitHub-configured to bootstrap's reconnect check
-  # while its legacy capability file or legacy Keychain records survive, so
-  # disabling GitHub access removes all of them. Every step is fail-closed: an
-  # unproven deletion quarantines the workspace and reports a typed error so a
-  # retry can prove cleanup. Symlinks are rejected exactly like github-bind.
-  legacy_file="$(metadata_file "$box")"
-  if [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
-    if [[ -L "$legacy_file" ]] || ! rm -f "$legacy_file" || [[ -e "$legacy_file" || -L "$legacy_file" ]]; then
-      cleanup_failed=1
-    fi
-  fi
-  if ! keychain_delete "$READ_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
-  if ! keychain_delete "$WRITE_KEYCHAIN_SERVICE" "$box"; then cleanup_failed=1; fi
-  if (( cleanup_failed )); then
-    quarantine_workspace "$box" "Legacy GitHub configuration cleanup failed" >/dev/null 2>&1 || true
-    github_lock_release
-    app_emit_error github-unbind "SILO_GITHUB_LEGACY_CLEANUP_FAILED" "GitHub access was unbound but legacy capability metadata or Keychain credentials could not be removed." "Repair the legacy GitHub configuration, then retry removing GitHub access." "$box" true 77
   fi
   # A prior failed unbind quarantined the workspace; a successful retry must
   # clear that marker or bootstrap deep verification still fails.
@@ -9565,7 +8846,7 @@ app_copy_named_volume() {
   if ! "$MSB_BIN" exec --no-tty "$helper" -- bash -s <<'GUEST'
 printf '\x00\x00\x00\x00\x01H\n' >&2
 set -Eeuo pipefail
-# Silo named-volume migration: copy dotfiles, metadata, links, and empty trees.
+# Copy a named volume while preserving dotfiles, metadata, links, and empty trees.
 cp -a /source/. /destination/
 sync
 GUEST
@@ -10034,7 +9315,6 @@ app_cmd_bootstrap() {
       "Silo could not configure user SSH integration." \
       "Repair the reported SSH integration issue, then resume Setup." "" true 69
   fi
-
   BOOTSTRAP_NETWORK_REVISION="$(/usr/bin/shasum -a 256 "$WORKSPACE_CONFIGURATION_STAGED_FILE" | /usr/bin/awk '{print $1}')"
 
   for phase in preflight toolchain host-integration workspaces; do
@@ -10053,8 +9333,8 @@ app_cmd_bootstrap() {
         "Workspace '$box' is quarantined and cannot be verified." \
         "Clear the quarantine by repairing the GitHub configuration for '$box', then resume Setup." "$box" true 69
     fi
-    if { [[ -f "$(metadata_file "$box")" ]] || app_metadata_profile_present "$box" guest; } &&
-      ! keychain_has "$READ_KEYCHAIN_SERVICE" "$box" &&
+    if [[ "$SILO_GITHUB_MODE" == connect ]] && app_metadata_profile_present "$box" guest &&
+      ! app_credential_available "$box" guest &&
       ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
       app_bootstrap_discard_staged_configuration "GitHub reconnect required"
       app_emit_error bootstrap "SILO_GITHUB_RECONNECT_REQUIRED" \
@@ -10123,9 +9403,8 @@ app_cmd_bootstrap() {
   app_bootstrap_network_cleanup 0
   trap - INT TERM HUP
 
-  # Deep verification passed: record configured journals for every verified
-  # workspace (this also upgrades legacy workspaces that predate the journal)
-  # and only then atomically commit the staged configuration.
+  # Deep verification passed: record configured state for every verified
+  # workspace and only then atomically commit the staged configuration.
   for box in "${WORKSPACES[@]}"; do
     workspace_config_state_write "$box" configured || true
   done
@@ -10195,7 +9474,7 @@ secret_domain_valid() {
 # toolchain's own variables are reserved.
 secret_name_reserved() {
   local name="$1"
-  # Reserved: the Silo toolchain's own variables, the legacy GitHub binding,
+  # Reserved: the Silo toolchain's own variables, GitHub credential variables,
   # and environment names whose values would alter or hijack the direct msb
   # child (PATH, loaders, proxies, TLS roots, shell startup) rather than
   # merely serve as a secret source.
@@ -11402,7 +10681,7 @@ main() {
     start) cmd_start "${1:-all}" ;;
     stop) cmd_stop "${1:-all}" ;;
     restart) cmd_restart "${1:-all}" ;;
-    status|ps) cmd_status ;;
+    status) cmd_status ;;
     metrics) cmd_metrics "${1:-all}" ;;
     logs) (( $# >= 1 )) || fatal "usage: silo logs WORKSPACE [OPTIONS]"; local logs_box="$1"; shift; cmd_logs "$logs_box" "$@" ;;
     exec) (( $# >= 2 )) || fatal "usage: silo exec WORKSPACE COMMAND..."; local exec_box="$1"; shift; cmd_exec "$exec_box" "$@" ;;

@@ -431,17 +431,15 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
     let activityObservedAt: Date?
     let quarantine: SiloQuarantineSnapshot
     let credential: SiloCredentialSnapshot
-    /// Per-workspace host-secret configuration state. Absent in older CLI
-    /// output, which the app reads as "no pending secret configuration".
-    let secrets: SiloSecretsSnapshot?
+    let secrets: SiloSecretsSnapshot
     let resources: SiloResourceSnapshot
     let network: SiloNetworkSnapshot
     let actionCapabilities: SiloActionCapabilities
     /// Published ports skipped by the workspace proxy because they were
-    /// already in use ([] when none). Absent in older CLI output.
-    let skippedPorts: [Int]?
+    /// already in use ([] when none).
+    let skippedPorts: [Int]
     /// Human-readable warning about skipped published ports ("" when none).
-    let portWarning: String?
+    let portWarning: String
 
     init(
         id: String,
@@ -450,7 +448,7 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         freshness: SiloFreshness,
         quarantine: SiloQuarantineSnapshot,
         credential: SiloCredentialSnapshot,
-        secrets: SiloSecretsSnapshot? = nil,
+        secrets: SiloSecretsSnapshot,
         resources: SiloResourceSnapshot,
         network: SiloNetworkSnapshot,
         actionCapabilities: SiloActionCapabilities,
@@ -458,8 +456,8 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         metricsObservedAt: Date? = nil,
         githubObservedAt: Date? = nil,
         activityObservedAt: Date? = nil,
-        skippedPorts: [Int]? = nil,
-        portWarning: String? = nil
+        skippedPorts: [Int],
+        portWarning: String
     ) {
         self.id = id
         self.purpose = purpose
@@ -480,6 +478,7 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
     }
 
     init(from decoder: Decoder) throws {
+        try requireExactKeys(in: decoder, CodingKeys.self)
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         purpose = try container.decode(String.self, forKey: .purpose)
@@ -491,15 +490,35 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         activityObservedAt = try container.decodeIfPresent(Date.self, forKey: .activityObservedAt)
         quarantine = try container.decode(SiloQuarantineSnapshot.self, forKey: .quarantine)
         credential = try container.decode(SiloCredentialSnapshot.self, forKey: .credential)
-        secrets = try container.decodeIfPresent(SiloSecretsSnapshot.self, forKey: .secrets)
+        secrets = try container.decode(SiloSecretsSnapshot.self, forKey: .secrets)
         resources = try container.decode(SiloResourceSnapshot.self, forKey: .resources)
         network = try container.decode(SiloNetworkSnapshot.self, forKey: .network)
         actionCapabilities = try container.decode(SiloActionCapabilities.self, forKey: .actionCapabilities)
-        skippedPorts = try container.decodeIfPresent([Int].self, forKey: .skippedPorts)
-        portWarning = try container.decodeIfPresent(String.self, forKey: .portWarning)
+        skippedPorts = try container.decode([Int].self, forKey: .skippedPorts)
+        portWarning = try container.decode(String.self, forKey: .portWarning)
     }
 
-    private enum CodingKeys: String, CodingKey {
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(purpose, forKey: .purpose)
+        try container.encode(lifecycle, forKey: .lifecycle)
+        try container.encode(freshness, forKey: .freshness)
+        try container.encode(statusObservedAt, forKey: .statusObservedAt)
+        try container.encode(metricsObservedAt, forKey: .metricsObservedAt)
+        try container.encode(githubObservedAt, forKey: .githubObservedAt)
+        try container.encode(activityObservedAt, forKey: .activityObservedAt)
+        try container.encode(quarantine, forKey: .quarantine)
+        try container.encode(credential, forKey: .credential)
+        try container.encode(secrets, forKey: .secrets)
+        try container.encode(resources, forKey: .resources)
+        try container.encode(network, forKey: .network)
+        try container.encode(actionCapabilities, forKey: .actionCapabilities)
+        try container.encode(skippedPorts, forKey: .skippedPorts)
+        try container.encode(portWarning, forKey: .portWarning)
+    }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case id, purpose, lifecycle, freshness, statusObservedAt, metricsObservedAt
         case githubObservedAt, activityObservedAt, quarantine, credential, resources, network, actionCapabilities
         case secrets, skippedPorts, portWarning
@@ -549,12 +568,10 @@ struct SiloCredentialSnapshot: Codable, Sendable {
     let accountLogin: String?
     let installationId: String?
     let accessExpiresAt: Date?
-    let refreshExpiresAt: Date?
     let needsRestart: Bool
 
     enum State: String, Codable, Sendable {
         case unconfigured = "Unconfigured"
-        case legacy = "Legacy"
         case needsAuthorization = "Needs authorization"
         case serviceUnavailable = "Service unavailable"
         case ready = "Ready"
@@ -935,7 +952,6 @@ struct SiloGitHubWorkspaceState: Codable, Identifiable, Sendable {
     let accountLogin: String?
     let installationId: String?
     let accessExpiresAt: Date?
-    let refreshExpiresAt: Date?
     let needsRestart: Bool
     let quarantined: Bool
     /// Local-mode only: the ticked repositories for this workspace from the

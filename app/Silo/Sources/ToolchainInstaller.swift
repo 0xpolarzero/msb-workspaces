@@ -502,7 +502,6 @@ actor ToolchainInstaller {
                     throw ToolchainInstallerError.installFailed
                 }
             }
-            try removeNonCurrentEntries(except: current)
             let activated = try ToolchainValidator.validateActivated(root: current)
             try ToolchainValidator.verifyHandshake(activated)
             return ToolchainInstallResult(
@@ -519,15 +518,6 @@ actor ToolchainInstaller {
         }
     }
 
-    private func removeNonCurrentEntries(except current: URL) throws {
-        for entry in try FileManager.default.contentsOfDirectory(
-            at: installationRoot,
-            includingPropertiesForKeys: nil,
-            options: []
-        ) where entry.standardizedFileURL != current.standardizedFileURL {
-            try FileManager.default.removeItem(at: entry)
-        }
-    }
 }
 
 private extension SHA256.Digest {

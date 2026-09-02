@@ -27,8 +27,14 @@ if os.environ.get("SILO_FAKE_SSH_EXIT") == "1":
 
 listeners = []
 args = sys.argv[1:]
+transaction = os.environ.get("SILO_PORT_FORWARDER_TRANSACTION") == "1"
 for index, arg in enumerate(args):
     if arg != "-L" or index + 1 >= len(args):
+        continue
+    # Candidate-networking tests use names whose loopback aliases are owned by
+    # the native host coordinator. This fake proves ssh process liveness; the
+    # dedicated forwarding tests exercise real bind behavior separately.
+    if transaction:
         continue
     bind_ip, port, _remote_ip, _remote_port = args[index + 1].split(":", 3)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

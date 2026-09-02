@@ -105,9 +105,6 @@ silo app github-policy-get [--workspace W] --format json
 silo app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear]
 ```
 
-Advanced: `silo github proxy-configure [WORKSPACE]` installs/repairs the
-transport idempotently, `silo github capability rotate WORKSPACE` rotates a
-capability, and `silo github migrate [WORKSPACE|all]` retires legacy
-Connect-era state on first local-mode use (archives
-`~/.config/silo/github/<box>.conf` under `migrated-local/`, proves any old
-guest secret removed, and preserves pre-existing quarantine markers).
+Advanced: `silo github proxy-configure [WORKSPACE]` installs or repairs the
+transport idempotently, and `silo github capability rotate WORKSPACE` rotates
+a capability.

@@ -100,27 +100,25 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(dev.pendingCount, 1)
     }
 
-    func testSecretsWorkspaceSnapshotDecodesExactKeysAndDefaultsWhenAbsent() throws {
+    func testSecretsWorkspaceSnapshotRequiresExactCurrentKeys() throws {
         let withSecrets = """
-        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"refreshExpiresAt":null,"needsRestart":false},"secrets":{"state":"restart-required","pendingCount":2,"reason":"Host-held secret changes are pending."},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null},"skippedPorts":[],"portWarning":""}
+        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"needsRestart":false},"secrets":{"state":"restart-required","pendingCount":2,"reason":"Host-held secret changes are pending."},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null},"skippedPorts":[],"portWarning":""}
         """
         let snapshot = try SiloProtocolDecoder.decoder().decode(
             SiloWorkspaceSnapshot.self,
             from: Data(withSecrets.utf8)
         )
-        let secrets = try XCTUnwrap(snapshot.secrets)
-        XCTAssertEqual(secrets.state, .restartRequired)
-        XCTAssertEqual(secrets.pendingCount, 2)
-        XCTAssertEqual(secrets.reason, "Host-held secret changes are pending.")
+        XCTAssertEqual(snapshot.secrets.state, .restartRequired)
+        XCTAssertEqual(snapshot.secrets.pendingCount, 2)
+        XCTAssertEqual(snapshot.secrets.reason, "Host-held secret changes are pending.")
 
         let withoutSecrets = """
-        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"refreshExpiresAt":null,"needsRestart":false},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null}}
+        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"needsRestart":false},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null}}
         """
-        let legacy = try SiloProtocolDecoder.decoder().decode(
+        XCTAssertThrowsError(try SiloProtocolDecoder.decoder().decode(
             SiloWorkspaceSnapshot.self,
             from: Data(withoutSecrets.utf8)
-        )
-        XCTAssertNil(legacy.secrets)
+        ))
     }
 
     func testSecretPlanResultAndApplyResultDecodeExactContractKeys() throws {
@@ -493,7 +491,7 @@ final class SecretsTests: XCTestCase {
             id: String,
             lifecycle: SiloLifecycle,
             credentialNeedsRestart: Bool,
-            secrets: SiloSecretsSnapshot?,
+            secrets: SiloSecretsSnapshot,
             canRestart: Bool = true,
             capabilityReason: String? = nil,
             capabilityRecovery: String? = nil
@@ -511,7 +509,6 @@ final class SecretsTests: XCTestCase {
                     accountLogin: nil,
                     installationId: nil,
                     accessExpiresAt: nil,
-                    refreshExpiresAt: nil,
                     needsRestart: credentialNeedsRestart
                 ),
                 secrets: secrets,
@@ -524,7 +521,9 @@ final class SecretsTests: XCTestCase {
                     canOpenTerminal: true, canPush: true,
                     reason: capabilityReason,
                     recovery: capabilityRecovery
-                )
+                ),
+                skippedPorts: [],
+                portWarning: ""
             )
         }
         let state = SiloStateResponse(
@@ -554,7 +553,12 @@ final class SecretsTests: XCTestCase {
                         reason: nil
                     )
                 ),
-                snapshot(id: "personal", lifecycle: .stopped, credentialNeedsRestart: false, secrets: nil)
+                snapshot(
+                    id: "personal",
+                    lifecycle: .stopped,
+                    credentialNeedsRestart: false,
+                    secrets: SiloSecretsSnapshot(state: .active, pendingCount: 0, reason: nil)
+                )
             ]
         )
         let stateURL = try writeResponse(
@@ -1148,7 +1152,7 @@ final class SecretsTests: XCTestCase {
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }
 
-        func snapshot(lifecycle: SiloLifecycle, secrets: SiloSecretsSnapshot?) -> SiloWorkspaceSnapshot {
+        func snapshot(lifecycle: SiloLifecycle, secrets: SiloSecretsSnapshot) -> SiloWorkspaceSnapshot {
             SiloWorkspaceSnapshot(
                 id: "dev",
                 purpose: "Test workspace",
@@ -1162,7 +1166,6 @@ final class SecretsTests: XCTestCase {
                     accountLogin: nil,
                     installationId: nil,
                     accessExpiresAt: nil,
-                    refreshExpiresAt: nil,
                     needsRestart: false
                 ),
                 secrets: secrets,
@@ -1173,7 +1176,9 @@ final class SecretsTests: XCTestCase {
                 actionCapabilities: SiloActionCapabilities(
                     canStart: false, canStop: true, canRestart: true,
                     canOpenTerminal: true, canPush: true
-                )
+                ),
+                skippedPorts: [],
+                portWarning: ""
             )
         }
         let restartingState = SiloStateResponse(
@@ -1312,7 +1317,6 @@ final class SecretsTests: XCTestCase {
                         accountLogin: nil,
                         installationId: nil,
                         accessExpiresAt: nil,
-                        refreshExpiresAt: nil,
                         needsRestart: false
                     ),
                     secrets: SiloSecretsSnapshot(
@@ -1327,7 +1331,9 @@ final class SecretsTests: XCTestCase {
                     actionCapabilities: SiloActionCapabilities(
                         canStart: false, canStop: true, canRestart: true,
                         canOpenTerminal: true, canPush: true
-                    )
+                    ),
+                    skippedPorts: [],
+                    portWarning: ""
                 )
             ]
         )

@@ -113,10 +113,7 @@ class ReleaseBase:
             {
                 "HOME": str(home),
                 "SILO_TEST_MODE": "1",
-                # Phase 0 suite exercises the legacy Connect flow; Path C
-                # local-mode tests (GitHubProxyContractTests) set
-                # SILO_GITHUB_MODE=local explicitly.
-                "SILO_GITHUB_MODE": "connect",
+                "SILO_GITHUB_MODE": "local",
                 "SILO_TEST_HOST_CPUS": "12",
                 "SILO_FAKE_STATE": str(home / ".microsandbox"),
                 "SILO_MSB_BIN": str(FAKE_MSB),
@@ -304,27 +301,42 @@ class TestEnv:
         safe = lambda s: re.sub(r"[^A-Za-z0-9_.-]", "_", s)
         return self.root / "keychain" / f"{safe(service)}__{safe(box)}"
 
-    def configure_tokens(self, box: str, repo: str, *, read: str | None = None,
-                         write: str | None = None, extra_env: dict[str, str] | None = None,
+    def configure_tokens(self, box: str, repo: str,
                          check: bool = True) -> subprocess.CompletedProcess[str]:
-        read = read or f"github_pat_READ_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
-        write = write or f"github_pat_WRITE_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
-        env = {
-            "SILO_GITHUB_READ_TOKEN_INPUT": read,
-            "SILO_GITHUB_WRITE_TOKEN_INPUT": write,
+        capabilities = {"dev": "a" * 48, "playgrounds": "b" * 48, "personal": "c" * 48}
+        policy = {
+            "schemaVersion": 1,
+            "workspaces": {
+                name: {
+                    "capability": capability,
+                    "repos": ([{"canonical": repo, "mode": "read-write"}] if name == box else []),
+                }
+                for name, capability in capabilities.items()
+            },
         }
-        if extra_env:
-            env.update(extra_env)
-        return self.silo("github", "setup", box, repo, extra_env=env, check=check, timeout=90)
-    def configure_read_only(self, box: str, repo: str, *, read: str | None = None,
-                            extra_env: dict[str, str] | None = None,
-                            check: bool = True) -> subprocess.CompletedProcess[str]:
-        read = read or f"github_pat_READ_{box}_abcdefghijklmnopqrstuvwxyz0123456789"
-        env = {"SILO_GITHUB_READ_TOKEN_INPUT": read}
-        if extra_env:
-            env.update(extra_env)
-        return self.silo("github", "setup", box, repo, "--read-only",
-                        extra_env=env, check=check, timeout=90)
+        policy_path = self.home / "Library/Application Support/Silo/github-policy.json"
+        policy_path.parent.mkdir(parents=True, exist_ok=True)
+        policy_path.write_text(json.dumps(policy))
+        record = {
+            "schemaVersion": 1,
+            "provider": "gh-cli",
+            "tokenKind": "oauth",
+            "accessToken": "gho_test_token_abcdefghijklmnopqrstuvwxyz0123456789",
+            "accountLogin": "fake-user",
+            "verifiedAt": "2026-01-01T00:00:00Z",
+            "generation": 1,
+            "storedAt": "2026-01-01T00:00:00Z",
+        }
+        self.key_file("org.silo.Silo.github-host.v2", "user").write_text(json.dumps(record))
+        (policy_path.parent / "github-host.json").write_text(json.dumps({
+            **{key: record[key] for key in (
+                "schemaVersion", "provider", "tokenKind", "accountLogin",
+                "verifiedAt", "generation", "storedAt",
+            )},
+            "state": "active",
+            "repoChecks": [],
+        }))
+        return self.silo("github", "status", box, "--format", "json", check=check)
 
     def init_remote(self, owner: str = "acme", repo: str = "demo", *, files: dict[str, str] | None = None) -> Path:
         bare = self.root / "remotes" / owner / f"{repo}.git"
@@ -471,8 +483,7 @@ class SyntaxAndStaticTests(SiloTestCase):
         self.assertIn("24678-24679", config)
         self.assertIn("3000-3010", config)
         self.assertIn("5173-5180", config)
-        self.assertIn('SILO_GITHUB_SECRET_HOSTS="github.com,api.github.com"', config)
-        self.assertNotIn("githubusercontent", config)
+        self.assertIn('SILO_GITHUB_MODE="local"', config)
         self.assertNotRegex((PACKAGE / "bin/silo").read_text(), r"(?:declare|local) -A|mapfile|readarray")
         docs = "\n".join(
             (PACKAGE / name).read_text()
@@ -483,7 +494,7 @@ class SyntaxAndStaticTests(SiloTestCase):
                 "docs/Silo-CHEATSHEET.md",
             ]
         )
-        for stale in ("silo auth", "silo selftest", "--skip-update", "silo github setup dev"):
+        for stale in ("silo auth", "silo selftest", "--skip-update"):
             self.assertNotIn(stale, docs)
         self.assertIn("Connect GitHub", docs)
         self.assertIn("Silo", docs)
@@ -498,9 +509,7 @@ class SyntaxAndStaticTests(SiloTestCase):
         self.assertIn("-- sleep infinity", setup)
         self.assertIn("wait_for_guest_systemd", setup)
         self.assertIn("--tls-intercept", setup)
-        # Setup's completion text must describe the local-mode GitHub UX, not
-        # the retired connect-mode per-workspace command.
-        self.assertNotIn("silo github setup dev", setup)
+        # Setup's completion text must describe the current local-mode GitHub UX.
         # Recreated VMs regenerate host keys; only the dedicated Silo file is
         # ever touched, and only for the box being recreated.
         self.assertIn('ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/silo_known_hosts"', setup)
@@ -531,7 +540,7 @@ class SyntaxAndStaticTests(SiloTestCase):
         config_text = (PACKAGE / "config.sh").read_text()
         self.assertIn("gh", config_text)
         self.assertNotRegex(config_text, r"[Cc]lient.?[Ii]d\s*[=:]|[Ii]d\s*[=:]\s*[A-Za-z0-9]{8,}")
-        self.assertIn('--secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}" --restart', silo)
+        self.assertIn('--secret "GH_TOKEN@github.com" --restart', silo)
         self.assertIn("--secret-rm GH_TOKEN --restart", silo)
         self.assertIn("env -i", silo)
         self.assertIn("GIT_CONFIG_NOSYSTEM=1", silo)
@@ -541,46 +550,16 @@ class SyntaxAndStaticTests(SiloTestCase):
         self.assertIn('"$LOCKF_BIN" -s -t 0 9', silo)
         self.assertIn('"$MSB_BIN" "$@" 9>&-', silo)
         self.assertIn("SILO_GITHUB_VERIFY_INHERITED=1", silo)
-        self.assertNotIn("tar -x", silo[silo.index("copy_lfs_objects"):silo.index("cmd_github_setup")])
+        self.assertNotIn("tar -x", silo[silo.index("copy_lfs_objects"):silo.index("cmd_github_status")])
         self.assertNotIn("ForwardAgent", setup + proxy)
         self.assertNotIn("/var/run/docker.sock", setup)
-        self.assertIn('--secret "GH_TOKEN@${SILO_GITHUB_SECRET_HOSTS}"', silo + setup)
+        self.assertIn('--secret "GH_TOKEN@github.com"', silo)
         push_body = silo[silo.index("push_impl()") : silo.index("cmd_push()")]
         self.assertNotIn("write_token_for_workspace", push_body)
         bootstrap = (PACKAGE / "lib/bootstrap-base.sh").read_text()
         self.assertIn("url.https://github.com/.insteadOf", bootstrap)
         self.assertIn("gh config set git_protocol https", bootstrap)
         self.assertIn('"$MSB_BIN" self update', silo)
-    def test_askpass_uses_login_keychain_with_isolated_git_home(self) -> None:
-        state_path = self.env.root / "askpass-security.json"
-        service = "silo.github.write"
-        account = "dev"
-        value = "diagnostic-write-token"
-        security_env = self.env.env.copy()
-        security_env.update({
-            "SILO_FAKE_SECURITY_STATE": str(state_path),
-            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-        })
-        run_cmd(
-            [FAKE_SECURITY, "add-generic-password", "-s", service, "-a", account, "-w", value],
-            env=security_env,
-        )
-        isolated_home = self.env.root / "isolated-home"
-        isolated_home.mkdir()
-        askpass_env = security_env.copy()
-        askpass_env.update({
-            "HOME": str(isolated_home),
-            "SILO_TEST_KEYCHAIN_DIR": "",
-            "SILO_KEYCHAIN_SERVICE": service,
-            "SILO_KEYCHAIN_ACCOUNT": account,
-            "SILO_KEYCHAIN_HOME": str(self.env.home),
-            "SILO_FAKE_SECURITY_HOME": str(self.env.home),
-        })
-        proc = run_cmd(
-            [PACKAGE / "bin/silo-git-askpass", "Password for https://github.com:"],
-            env=askpass_env,
-        )
-        self.assertEqual(proc.stdout, value + "\n")
     def test_askpass_reads_schema3_installation_token(self) -> None:
         state_path = self.env.root / "askpass-app-security.json"
         service = "silo.github.app.dev.host.tokens"
@@ -602,6 +581,7 @@ class SyntaxAndStaticTests(SiloTestCase):
         )
         askpass_env = security_env.copy()
         askpass_env.update({
+            "SILO_GITHUB_MODE": "connect",
             "SILO_TEST_KEYCHAIN_DIR": "",
             "SILO_APP_KEYCHAIN_SERVICE": service,
             "SILO_APP_KEYCHAIN_ACCOUNT": "profile",
@@ -898,14 +878,6 @@ class InstallerAndDailyTests(SiloTestCase):
         self.assertFalse(any(name.startswith("silo-compat-probe-") for name in state["volumes"]))
         self.assertFalse(any(name.startswith("silo-compat-probe-") for name in state["sandboxes"]))
 
-    def test_recreate_github_workspace_rebinds_secret_from_keychain(self) -> None:
-        self.env.init_remote()
-        self.env.configure_tokens("dev", "acme/demo")
-        proc = self.env.setup("--recreate-workspaces", extra_env={"SILO_FAKE_REQUIRE_SECRET_SOURCE": "1"})
-        self.assertNotIn("host source GH_TOKEN missing", proc.stdout + proc.stderr)
-        state = self.env.state()
-        self.assertIn("GH_TOKEN", state["sandboxes"]["dev"]["secrets"])
-        self.assertFalse(state["sandboxes"]["dev"]["running"])
 
     def _seed_volume_sentinels(self) -> None:
         (self.env.workspace("dev") / "repo-sentinel").write_text("workspace")
@@ -923,12 +895,6 @@ class InstallerAndDailyTests(SiloTestCase):
         after_creates = sum(e["event"] == "create" for e in self.env.state()["events"])
         self.assertEqual(after_creates - before_creates, 3)
 
-    def test_version_migration_rebuilds_roots_and_preserves_both_data_volumes(self) -> None:
-        self._seed_volume_sentinels()
-        (self.env.home / ".config/silo/base-version").write_text("0.0.0\n")
-        self.env.setup()
-        self._assert_volume_sentinels()
-        self.assertEqual((self.env.home / ".config/silo/base-version").read_text().strip(), "3.2.2")
 
     def test_reset_config_and_rebuild_base(self) -> None:
         config = self.env.home / ".config/silo/config.sh"
@@ -1433,100 +1399,7 @@ class InstallerAndDailyTests(SiloTestCase):
         relaunched = self.env.silo("app", "handshake", "--format", "json")
         self.assertEqual(json.loads(relaunched.stdout)["result"]["capabilities"]["workspaceCount"], 3)
 
-    def test_app_bootstrap_typed_reconnect_error_when_github_credential_missing(self) -> None:
-        meta = self.env.home / ".config/silo/github/dev.conf"
-        meta.parent.mkdir(parents=True, exist_ok=True)
-        meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        proc = self.env.app_bootstrap(check=False)
-        self.assertNotEqual(proc.returncode, 0)
-        envelope = json.loads(proc.stdout)
-        self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "SILO_GITHUB_RECONNECT_REQUIRED")
-        self.assertEqual(envelope["error"]["workspace"], "dev")
-        self.assertIn("Connect GitHub for 'dev'", envelope["error"]["recovery"])
-        self.assertTrue(envelope["error"]["retryable"])
-        # An already-running workspace is verified without a false reconnect error.
-        meta.unlink()
-        self.env.silo("start", "dev")
-        meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        proc = self.env.app_bootstrap()
-        self.assertTrue(json.loads(proc.stdout)["ok"])
-        meta.unlink()
-        # Other verification failures carry the sanitized check output so the
-        # user can see why verification failed instead of a generic message.
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        quarantine.write_text("failed setup transaction\n")
-        proc = self.env.app_bootstrap(check=False)
-        self.assertNotEqual(proc.returncode, 0)
-        envelope = json.loads(proc.stdout)
-        self.assertFalse(envelope["ok"])
-        self.assertEqual(envelope["error"]["code"], "SILO_BOOTSTRAP_VERIFICATION_FAILED")
-        self.assertEqual(envelope["error"]["workspace"], "dev")
-        self.assertIn("quarantined", envelope["error"]["message"])
-        self.assertIn("quarantine", envelope["error"]["recovery"])
-        quarantine.unlink()
-
-    def test_app_github_unbind_clears_legacy_metadata_so_bootstrap_completes(self) -> None:
-        meta = self.env.home / ".config/silo/github/dev.conf"
-        meta.parent.mkdir(parents=True, exist_ok=True)
-        meta.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        read_record = self.env.key_file("silo.github.read", "dev")
-        write_record = self.env.key_file("silo.github.write", "dev")
-        read_record.write_text("legacy-read-token")
-        write_record.write_text("legacy-write-token")
-        # The reconnect scenario is a configured workspace whose read
-        # credential is unavailable (the orphan host-write record remains).
-        read_record.unlink()
-        proc = self.env.app_bootstrap(check=False)
-        self.assertNotEqual(proc.returncode, 0)
-        envelope = json.loads(proc.stdout)
-        self.assertEqual(envelope["error"]["code"], "SILO_GITHUB_RECONNECT_REQUIRED")
-        self.assertEqual(envelope["error"]["workspace"], "dev")
-
-        # A failing security backend proves the cleanup is fail-closed: the
-        # unbind quarantines and reports a typed error instead of claiming
-        # success while legacy records are still present.
-        state_path = self.env.root / "fake-security-unbind-state.json"
-        failed_env = {
-            "SILO_TEST_KEYCHAIN_DIR": "",
-            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-            "SILO_FAKE_SECURITY_STATE": str(state_path),
-            "SILO_FAKE_SECURITY_MODE": "delete-failure",
-        }
-        failed = json.loads(self.env.silo(
-            "app", "github-unbind", "--workspace", "dev", "--format", "json",
-            check=False, extra_env=failed_env,
-        ).stdout)
-        self.assertFalse(failed["ok"], failed)
-        self.assertEqual(failed["error"]["code"], "SILO_GITHUB_LEGACY_CLEANUP_FAILED")
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        self.assertTrue(quarantine.exists(), "a failed unbind must quarantine the workspace")
-        self.assertTrue(
-            write_record.exists(),
-            "an unproven deletion must not be reported as success",
-        )
-
-        # A successful retry removes the legacy capability file and BOTH legacy
-        # Keychain records, clears the quarantine marker (so bootstrap deep
-        # verification no longer dies at assert_not_quarantined), and lets the
-        # next bootstrap reach .complete — the app's "Continue without GitHub"
-        # can then unblock Done.
-        unbind = json.loads(self.env.silo(
-            "app", "github-unbind", "--workspace", "dev", "--format", "json"
-        ).stdout)
-        self.assertTrue(unbind["ok"], unbind)
-        self.assertTrue(unbind["result"]["unbound"])
-        self.assertFalse(meta.exists() or meta.is_symlink())
-        self.assertFalse(read_record.exists(), "the legacy read record must be removed")
-        self.assertFalse(write_record.exists(), "the legacy host-write record must be removed")
-        self.assertFalse(quarantine.exists(), "a successful unbind must clear the quarantine")
-        self.env.silo("start", "dev")
-        proc = self.env.app_bootstrap()
-        envelope = json.loads(proc.stdout)
-        self.assertTrue(envelope["ok"], envelope.get("error"))
-        self.assertEqual(envelope["result"]["phase"], "complete")
-
-    def test_lifecycle_resize_restart_token_guard_and_proxy(self) -> None:
+    def test_lifecycle_resize_restart_and_proxy(self) -> None:
         self.env.silo("start", "dev")
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
         self.env.silo("resize", "dev", "32G", "10")
@@ -1534,13 +1407,8 @@ class InstallerAndDailyTests(SiloTestCase):
         self.assertEqual(self.env.state()["sandboxes"]["dev"]["cpus"], "10")
         self.env.silo("stop", "dev")
         self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-        meta = self.env.home / ".config/silo/github/dev.conf"
-        meta.parent.mkdir(parents=True, exist_ok=True)
-        meta.write_text("verification_repo=acme/demo\n")
-        self.assertFailed(self.env.silo("restart", "dev", check=False), "read token is missing")
+        self.env.silo("restart", "dev")
         proxy = self.env.home / ".local/bin/silo-ssh-proxy"
-        self.assertFailed(self.env.run(proxy, "dev.msb", check=False), "read token is missing")
-        meta.unlink()
         self.env.run(proxy, "dev.msb")
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 
@@ -1582,76 +1450,6 @@ class InstallerAndDailyTests(SiloTestCase):
         (self.env.workspace("dev") / "link").symlink_to(outside)
         self.assertFailed(self.env.silo("push", "dev", "link", "--yes", check=False), "escapes /workspace")
 
-    def test_clone_and_pull_ignore_connect_repository_names_gate(self) -> None:
-        """Local-mode clone/pull ignore dormant Connect repositoryNames.
-
-        With the SAME Connect-style dev.guest metadata (credentials.json with
-        repositoryNames EXCLUDING acme/demo), default SILO_GITHUB_MODE=connect
-        still enforces the metadata gate: the clone must fail with "not
-        assigned", because Connect mode places a guest token in the VM and
-        cannot prove anonymous forwarding. Explicit SILO_GITHUB_MODE=local
-        reads NO Connect grants, so the dormant metadata must not gate the
-        anonymous clone or the subsequent fast-forward pull -- the old
-        repositoryNames gate fataled here.
-        """
-        self.env.init_remote()
-        self.env.configure_tokens("dev", "acme/demo")  # read token for guest exec
-        # Connect-style guest grant that does NOT include acme/demo.
-        credentials = self.env.home / "Library/Application Support/Silo/credentials.json"
-        credentials.parent.mkdir(parents=True, exist_ok=True)
-        credentials.write_text(json.dumps({
-            "schemaVersion": 2,
-            "entries": {
-                "dev.guest": {
-                    "workspace": "dev",
-                    "schemaVersion": 2,
-                    "role": "guest",
-                    "provider": "github-app-installation",
-                    "appClientID": "guest-public",
-                    "accountLogin": "alice",
-                    "owner": "acme",
-                    "repositoryNames": ["acme/other"],
-                    "repositoryIDs": [34],
-                    "accessMode": "read-only",
-                    "verificationRepository": "acme/other",
-                    "installationID": 123,
-                    "accessExpiresAt": "2030-01-01T00:00:00Z",
-                    "refreshExpiresAt": "2030-01-01T00:00:00Z",
-                    "needsRestart": False,
-                    "generation": 1,
-                    "quarantined": False,
-                    "updatedAt": "2026-08-08T00:00:00Z",
-                    "recoveryState": "ready",
-                }
-            },
-        }))
-        # Connect mode (default in this suite) still enforces the metadata
-        # gate: acme/demo is not in repositoryNames, so the clone fails.
-        self.assertFailed(
-            self.env.silo("clone", "dev", "acme/demo", "clients/acme/connect-blocked",
-                         check=False),
-            "not assigned")
-        # acme/demo is NOT in repositoryNames: the old require_repository_access
-        # gate fataled here; the read paths now clone anonymously.
-        self.env.silo("clone", "dev", "acme/demo", "clients/acme/backend",
-                     extra_env={"SILO_GITHUB_MODE": "local"})
-        repo = self.env.guest_repo("dev", "clients/acme/backend")
-        self.assertTrue((repo / ".git").is_dir())
-
-        # an upstream commit must pull through the same anonymous read path
-        updater = self.env.root / "updater"
-        run_cmd([SYSTEM_GIT, "clone", str(self.env.root / "remotes" / "acme" / "demo.git"), str(updater)],
-                env=self.env.env)
-        run_cmd([SYSTEM_GIT, "-C", updater, "config", "user.name", "Updater"], env=self.env.env)
-        run_cmd([SYSTEM_GIT, "-C", updater, "config", "user.email", "updater@example.invalid"], env=self.env.env)
-        (updater / "remote.txt").write_text("remote\n")
-        run_cmd([SYSTEM_GIT, "-C", updater, "add", "remote.txt"], env=self.env.env)
-        run_cmd([SYSTEM_GIT, "-C", updater, "commit", "-m", "Remote update"], env=self.env.env)
-        run_cmd([SYSTEM_GIT, "-C", updater, "push", "origin", "main"], env=self.env.env)
-
-        self.env.silo("pull", "dev", "clients/acme/backend",
-                     extra_env={"SILO_GITHUB_MODE": "local"})
-        self.assertEqual((repo / "remote.txt").read_text(), "remote\n")
 
 
 class PublishedPortWarningTests(SiloTestCase):
@@ -2517,543 +2315,28 @@ class GitHubAndPushTests(SiloTestCase):
         self.env.git(repo, "config", "user.email", "agent@example.invalid")
         return bare, repo
 
-    def test_github_setup_rejects_disabled_tls_before_token_prompt(self) -> None:
-        state = self.env.state()
-        state["sandboxes"]["dev"]["args"] = [
-            arg for arg in state["sandboxes"]["dev"]["args"] if arg != "--tls-intercept"
-        ]
-        self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
-        proc = self.env.configure_tokens("dev", "acme/demo", check=False)
-        output = proc.stdout + proc.stderr
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("TLS interception disabled", output)
-        self.assertIn("./setup.sh --recreate-workspaces", output)
-        self.assertNotIn("Paste the READ-ONLY token:", output)
-        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
-    def test_github_setup_rejects_empty_verification_repository(self) -> None:
-        bare = self.env.root / "remotes" / "acme" / "empty.git"
-        bare.parent.mkdir(parents=True, exist_ok=True)
-        run_cmd([SYSTEM_GIT, "init", "--bare", str(bare)], env=self.env.env)
-
-        proc = self.env.configure_tokens("dev", "acme/empty", check=False)
-        output = proc.stdout + proc.stderr
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("has no branches", output)
-        self.assertIn("initialize main", output)
-        self.assertNotIn("Verifying the host-only push path", output)
-        refs = run_cmd(
-            [SYSTEM_GIT, "--git-dir", str(bare), "for-each-ref", "--format=%(refname)", "refs/heads"],
-            env=self.env.env,
-        ).stdout
-        self.assertEqual(refs.strip(), "")
-        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
-
-    def test_github_setup_end_to_end_secret_hidden_and_remove(self) -> None:
-        bare = self.env.init_remote()
-        proc = self.env.configure_tokens("dev", "acme/demo")
-        self.assertIn("guest push rejected", proc.stdout)
-        self.assertIn("host push and cleanup succeeded", proc.stdout)
-        refs = run_cmd([SYSTEM_GIT, "--git-dir", bare, "for-each-ref", "--format=%(refname)", "refs/heads/silo-permission-test-*"], env=self.env.env).stdout
-        self.assertEqual(refs.strip(), "")
-        state_text = self.env.state_file.read_text()
-        self.assertNotIn("github_pat_READ", state_text)
-        self.assertNotIn("github_pat_WRITE", state_text)
-        self.assertEqual(self.env.state()["sandboxes"]["dev"]["secrets"]["GH_TOKEN"], "GH_TOKEN@github.com,api.github.com")
-        status_out = self.env.silo("github", "status", "dev").stdout
-        self.assertIn("present", status_out)
-        self.env.silo("github", "remove", "dev")
-        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
-        self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
-
-    def test_github_setup_preserves_secret_source_for_verifier_cli(self) -> None:
-        self.env.init_remote()
-        marker = self.env.root / "lock-fd.marker"
-        proc = self.env.configure_tokens(
-            "dev",
-            "acme/demo",
-            extra_env={
-                "SILO_FAKE_REQUIRE_SECRET_SOURCE": "1",
-                "SILO_FAKE_LOCK_FD_MARKER": str(marker),
-            },
-        )
-        self.assertIn("GitHub configured for dev", proc.stdout)
-        self.assertIn("guest push rejected", proc.stdout)
-        self.assertIn("host push and cleanup succeeded", proc.stdout)
-        self.assertEqual(marker.read_text().strip(), "closed")
-
-    def test_github_secret_source_survives_fresh_clone_exec_and_remove(self) -> None:
-        self.env.init_remote()
-        self.env.configure_tokens("dev", "acme/demo")
-        guard = {"SILO_FAKE_REQUIRE_SECRET_SOURCE": "1"}
-
-        self.env.silo("clone", "dev", "acme/demo", "fresh/repo", extra_env=guard)
-        self.assertTrue(self.env.guest_repo("dev", "fresh/repo").joinpath(".git").is_dir())
-        self.env.silo("exec", "dev", "true", extra_env=guard)
-        self.env.run(self.env.home / ".local/bin/silo-ssh-proxy", "dev.msb", extra_env=guard)
-        self.env.silo("github", "remove", "dev", extra_env=guard)
-
-        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
-        self.assertFalse(self.env.key_file("silo.github.write", "dev").exists())
-        self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
-
-    def test_stale_github_lock_is_reclaimed(self) -> None:
-        self.env.init_remote()
-        stale_lock = self.env.home / ".config/silo/github/dev.lock"
-        stale_lock.mkdir(parents=True)
-        (stale_lock / "pid").write_text("99999999\n")
-
-        configured = self.env.configure_tokens("dev", "acme/demo")
-        self.assertIn("GitHub configured for dev", configured.stdout)
-        self.assertTrue(stale_lock.is_file())
-
-        self.env.silo("github", "remove", "dev")
-        stale_lock.unlink()
-        stale_lock.mkdir()
-        configured = self.env.configure_tokens("dev", "acme/demo")
-        self.assertIn("GitHub configured for dev", configured.stdout)
-        self.assertTrue(stale_lock.is_file())
-
-    def test_verification_lock_blocks_remove_until_sigkill(self) -> None:
-        self.env.init_remote()
-        self.env.configure_tokens("dev", "acme/demo")
-        pause_file = self.env.root / "verify-lock.ready"
-        env = self.env.env.copy()
-        env["SILO_FAKE_VERIFY_PAUSE_FILE"] = str(pause_file)
-        proc = subprocess.Popen(
-            [str(self.env.silo_bin), "github", "verify", "dev"],
-            env=env,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        try:
-            for _ in range(100):
-                if pause_file.exists():
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("verification did not reach the injected pause")
-            blocked = self.env.silo("github", "remove", "dev", check=False)
-            self.assertFailed(blocked, "already in progress")
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=15)
-        finally:
-            pause_file.unlink(missing_ok=True)
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=5)
-        self.env.silo("github", "remove", "dev")
-
-    def test_orphaned_setup_verifier_keeps_remove_locked_after_parent_sigkill(self) -> None:
-        self.env.init_remote()
-        pause_file = self.env.root / "orphaned-verify.ready"
-        env = self.env.env.copy()
-        env.update(
-            {
-                "SILO_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_dev_abcdefghijklmnopqrstuvwxyz0123456789",
-                "SILO_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789",
-                "SILO_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
-            }
-        )
-        proc = subprocess.Popen(
-            [str(self.env.silo_bin), "github", "setup", "dev", "acme/demo"],
-            env=env,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        try:
-            for _ in range(100):
-                if pause_file.exists():
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("setup verification did not reach the injected pause")
-            os.kill(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=15)
-            blocked = self.env.silo("github", "remove", "dev", check=False)
-            self.assertFailed(blocked, "already in progress")
-            os.killpg(proc.pid, signal.SIGKILL)
-            pause_file.unlink(missing_ok=True)
-            for _ in range(100):
-                removed = self.env.silo("github", "remove", "dev", check=False)
-                if removed.returncode == 0:
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("orphaned verification lock was not released")
-        finally:
-            pause_file.unlink(missing_ok=True)
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            if proc.poll() is None:
-                proc.wait(timeout=5)
-
-    def test_read_only_setup_keeps_guest_access_without_host_token(self) -> None:
-        self.env.init_remote()
-        proc = self.env.configure_read_only("playgrounds", "acme/demo")
-        self.assertIn("guest push rejected", proc.stdout)
-        self.assertIn("Read-only GitHub access verified", proc.stdout)
-        self.assertNotIn("host-only push", proc.stdout)
-        self.assertTrue(self.env.key_file("silo.github.read", "playgrounds").exists())
-        self.assertFalse(self.env.key_file("silo.github.write", "playgrounds").exists())
-        metadata = (self.env.home / ".config/silo/github/playgrounds.conf").read_text()
-        self.assertIn("verification_repo=acme/demo", metadata)
-        self.assertIn("access=read-only", metadata)
-        self.assertEqual(
-            self.env.state()["sandboxes"]["playgrounds"]["secrets"]["GH_TOKEN"],
-            "GH_TOKEN@github.com,api.github.com",
-        )
-        self.assertIn("playgrounds   present    missing", self.env.silo("github", "status", "playgrounds").stdout)
-        verify = self.env.silo("github", "verify", "playgrounds")
-        self.assertIn("Read-only GitHub access verified", verify.stdout)
-        self.assertFailed(
-            self.env.silo("push", "playgrounds", "repo", "--yes", check=False),
-            "host write token missing",
-        )
-
-    def test_read_only_metadata_blocks_stale_write_token(self) -> None:
-        bare = self.env.init_remote()
-        self.env.configure_read_only("playgrounds", "acme/demo")
-        self.env.key_file("silo.github.write", "playgrounds").write_text("stale-write-token")
-        self.env.silo("clone", "playgrounds", "acme/demo", "repo")
-        before = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
-        proc = self.env.silo("push", "playgrounds", "repo", "--yes", check=False)
-        self.assertFailed(proc, "workspace is read-only")
-        after = run_cmd([SYSTEM_GIT, "--git-dir", bare, "rev-parse", "refs/heads/main"], env=self.env.env).stdout.strip()
-        self.assertEqual(after, before)
-
-    def test_keychain_delete_security_outcomes(self) -> None:
-        command = 'source "$1"; keychain_delete "silo.github.write" "dev"'
-        cases = (
-            ("delete-failure", True, "could not delete Keychain item"),
-            ("post-delete-lookup-failure", True, "could not verify Keychain item removal"),
-            ("still-present", True, "Keychain item still exists"),
-            ("missing-item", False, None),
-        )
-        state_path = self.env.root / "fake-security-state.json"
-        for mode, should_fail, message in cases:
-            with self.subTest(mode=mode):
-                items = {} if mode == "missing-item" else {"silo.github.write/dev": "write-token"}
-                state_path.write_text(json.dumps(items))
-                proc = self.env.run(
-                    "bash",
-                    "-c",
-                    command,
-                    "silo-keychain-test",
-                    str(PACKAGE / "bin/silo"),
-                    check=False,
-                    extra_env={
-                        "SILO_SOURCE_ONLY": "1",
-                        "SILO_TEST_KEYCHAIN_DIR": "",
-                        "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-                        "SILO_FAKE_SECURITY_STATE": str(state_path),
-                        "SILO_FAKE_SECURITY_MODE": mode,
-                    },
-                )
-                if should_fail:
-                    self.assertFailed(proc, message)
-                else:
-                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
 
-    def test_github_remove_failure_revokes_metadata_first(self) -> None:
-        self.env.init_remote()
-        state_path = self.env.root / "fake-security-remove-state.json"
-        fake_env = {
-            "SILO_TEST_KEYCHAIN_DIR": "",
-            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-            "SILO_FAKE_SECURITY_STATE": str(state_path),
-            "SILO_FAKE_SECURITY_MODE": "normal",
-        }
-        self.env.configure_tokens("dev", "acme/demo", extra_env=fake_env)
-        self.env.silo("clone", "dev", "acme/demo", "repo", extra_env=fake_env)
-        metadata = self.env.home / ".config/silo/github/dev.conf"
-        self.assertIn("access=host-write", metadata.read_text())
-
-        failed_env = {**fake_env, "SILO_FAKE_SECURITY_MODE": "delete-failure"}
-        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=failed_env)
-        self.assertFailed(proc, "could not delete Keychain item")
-        self.assertFalse(metadata.exists())
-        self.assertIn("silo.github.write/dev", json.loads(state_path.read_text()))
-
-        push = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
-        self.assertFailed(push, "quarantined")
-
-    def test_setup_rollback_failure_revokes_metadata_first(self) -> None:
-        self.env.init_remote()
-        state_path = self.env.root / "fake-security-rollback-state.json"
-        fake_env = {
-            "SILO_TEST_KEYCHAIN_DIR": "",
-            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-            "SILO_FAKE_SECURITY_STATE": str(state_path),
-            "SILO_FAKE_SECURITY_MODE": "delete-failure",
-            "SILO_FAKE_GUEST_PUSH_ALLOWED": "1",
-            "SILO_FAKE_SECRET_REMOVE_FAIL": "1",
-        }
-        proc = self.env.configure_tokens("dev", "acme/demo", extra_env=fake_env, check=False)
-        self.assertFailed(proc, "guest token can push")
-        metadata = self.env.home / ".config/silo/github/dev.conf"
-        self.assertFalse(metadata.exists())
-        self.assertIn("silo.github.write/dev", json.loads(state_path.read_text()))
-        state = self.env.state()
-        self.assertEqual(state["sandboxes"]["dev"]["secrets"]["GH_TOKEN"], "GH_TOKEN@github.com,api.github.com")
-        self.assertFalse(state["sandboxes"]["dev"]["running"])
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        self.assertTrue(quarantine.exists())
-        start = self.env.silo("start", "dev", check=False, extra_env=fake_env)
-        self.assertFailed(start, "quarantined")
-
-        guest_push = self.env.silo("exec", "dev", "git", "push", "origin", "main", check=False, extra_env=fake_env)
-        self.assertFailed(guest_push, "quarantined")
-        metadata.write_text("verification_repo=acme/demo\naccess=host-write\n")
-        host_push = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=fake_env)
-        self.assertFailed(host_push, "quarantined")
-        metadata.unlink()
 
 
-    def test_stop_remains_available_for_quarantined_running_workspace(self) -> None:
-        self.env.init_remote()
-        self.env.configure_tokens("dev", "acme/demo")
-        self.env.silo("start", "dev")
 
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        quarantine.write_text("credential cleanup failed\n")
 
-        document = json.loads(self.env.silo(
-            "app", "state", "--workspace", "dev", "--format", "json"
-        ).stdout)
-        workspace = document["result"]["workspaces"][0]
-        self.assertEqual(workspace["lifecycle"], "Running")
-        self.assertEqual(workspace["quarantine"]["state"], "quarantined")
-        self.assertTrue(workspace["actionCapabilities"]["canStop"])
-        self.assertFalse(workspace["actionCapabilities"]["canStart"])
-        self.assertFalse(workspace["actionCapabilities"]["canRestart"])
-        self.assertFalse(workspace["actionCapabilities"]["canOpenTerminal"])
-        self.assertFalse(workspace["actionCapabilities"]["canPush"])
 
-        self.env.silo("stop", "dev")
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-    def test_ssh_proxy_blocks_quarantined_workspace_without_starting(self) -> None:
-        self.env.init_remote()
-        self.env.configure_tokens("dev", "acme/demo")
-        self.env.silo("stop", "dev")
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        quarantine.write_text("credential cleanup failed\n")
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
-        proc = self.env.run(proxy, "dev.msb", check=False)
-        self.assertFailed(proc, "quarantined")
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-    def test_quarantine_requires_proven_stop(self) -> None:
-        command = 'source "$1"; quarantine_workspace "dev" "test quarantine"'
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        cases = (
-            ({"SILO_FAKE_PING_FAIL": "1"}, False, False, ""),
-            ({"SILO_FAKE_STOP_FAIL": "1"}, True, True, "could not stop"),
-            ({"SILO_FAKE_INSPECT_FAIL": "1"}, True, True, "could not inspect"),
-        )
-        for overrides, should_fail, should_still_run, expected in cases:
-            with self.subTest(overrides=overrides):
-                if quarantine.exists():
-                    quarantine.unlink()
-                self.env.silo("start", "dev")
-                proc = self.env.run(
-                    "bash",
-                    "-c",
-                    command,
-                    "silo-quarantine-test",
-                    str(PACKAGE / "bin/silo"),
-                    check=False,
-                    extra_env={"SILO_SOURCE_ONLY": "1", **overrides},
-                )
-                if should_fail:
-                    self.assertFailed(proc, expected)
-                else:
-                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-                self.assertEqual(self.env.state()["sandboxes"]["dev"]["running"], should_still_run)
-                self.assertTrue(quarantine.exists())
 
-    def test_clear_quarantine_fails_on_undeletable_dangling_symlink(self) -> None:
-        command = 'source "$1"; clear_quarantine "dev"'
-        quarantine_dir = self.env.home / ".config/silo/github"
-        quarantine_dir.mkdir(parents=True, exist_ok=True)
-        quarantine = quarantine_dir / "dev.quarantine"
-        quarantine.symlink_to(quarantine_dir / "missing-target")
-        os.chmod(quarantine_dir, 0o500)
-        try:
-            proc = self.env.run(
-                "bash", "-c", command, "silo-clear-quarantine-test",
-                str(PACKAGE / "bin/silo"), check=False,
-                extra_env={"SILO_SOURCE_ONLY": "1"},
-            )
-        finally:
-            os.chmod(quarantine_dir, 0o700)
-        self.assertNotEqual(
-            proc.returncode, 0,
-            "a quarantine marker that survives rm (dangling symlink in a "
-            "read-only directory) must count as not cleared: enforcement "
-            "treats -e OR -L as quarantined",
-        )
-        self.assertTrue(quarantine.is_symlink())
 
-    def test_interrupted_verification_failed_repair_keeps_quarantine(self) -> None:
-        self.env.init_remote()
-        state_path = self.env.root / "fake-security-interrupt-state.json"
-        pause_file = self.env.root / "fake-verification-interrupt.ready"
-        state_path.write_text("{}")
-        env = self.env.env.copy()
-        env.update(
-            {
-                "SILO_GITHUB_READ_TOKEN_INPUT": "github_pat_READ_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
-                "SILO_GITHUB_WRITE_TOKEN_INPUT": "github_pat_WRITE_interrupt_abcdefghijklmnopqrstuvwxyz0123456789",
-                "SILO_TEST_KEYCHAIN_DIR": "",
-                "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-                "SILO_FAKE_SECURITY_STATE": str(state_path),
-                "SILO_FAKE_SECURITY_MODE": "normal",
-                "SILO_FAKE_VERIFY_PAUSE_FILE": str(pause_file),
-                "SILO_FAKE_VERIFY_PAUSE_ONCE": "1",
-            }
-        )
-        proc = subprocess.Popen(
-            [str(self.env.silo_bin), "github", "setup", "dev", "acme/demo"],
-            env=env,
-            text=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        try:
-            for _ in range(100):
-                if pause_file.exists():
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("verification did not reach the injected pause")
-            verification_root = self.env.workspace("dev") / ".silo-verification"
-            verification_entries = list(verification_root.iterdir())
-            self.assertEqual(len(verification_entries), 1, f"{verification_root}: {verification_entries}")
-            overlap = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
-            self.assertFailed(overlap, "already in progress")
-            os.killpg(proc.pid, signal.SIGTERM)
-            pause_file.unlink(missing_ok=True)
-            proc.wait(timeout=15)
-        finally:
-            pause_file.unlink(missing_ok=True)
-            if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=5)
-        self.assertNotEqual(proc.returncode, 0)
-        for _ in range(100):
-            verification_entries = list(verification_root.iterdir()) if verification_root.exists() else []
-            if not verification_entries:
-                break
-            time.sleep(0.05)
-        self.assertEqual(verification_entries, [])
-        quarantine = self.env.home / ".config/silo/github/dev.quarantine"
-        self.assertTrue(quarantine.exists())
-        metadata = self.env.home / ".config/silo/github/dev.conf"
-        self.assertTrue(metadata.exists())
-        self.assertIn("access=host-write", metadata.read_text())
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-        self.assertIn("silo.github.read/dev", json.loads(state_path.read_text()))
-        for command in (
-            ("start", "dev"),
-            ("restart", "dev"),
-            ("exec", "dev", "true"),
-            ("push", "dev", "repo", "--yes"),
-        ):
-            with self.subTest(command=command):
-                blocked = self.env.silo(*command, check=False, extra_env=env)
-                self.assertFailed(blocked, "quarantined")
 
-        repair_env = env.copy()
-        repair_env.pop("SILO_GITHUB_READ_TOKEN_INPUT", None)
-        repair_env.pop("SILO_GITHUB_WRITE_TOKEN_INPUT", None)
-        repair_env.pop("SILO_FAKE_VERIFY_PAUSE_FILE", None)
-        failed_repair = self.env.configure_tokens(
-            "dev",
-            "acme/missing",
-            read="github_pat_READ_repair_abcdefghijklmnopqrstuvwxyz0123456789",
-            write="github_pat_WRITE_repair_abcdefghijklmnopqrstuvwxyz0123456789",
-            extra_env=repair_env,
-            check=False,
-        )
-        self.assertFailed(failed_repair, "workspace remains quarantined")
-        self.assertTrue(quarantine.exists())
-        self.assertFalse(metadata.exists())
-        security_state = json.loads(state_path.read_text())
-        self.assertNotIn("silo.github.read/dev", security_state)
-        self.assertNotIn("silo.github.write/dev", security_state)
-        self.assertNotIn("GH_TOKEN", self.env.state()["sandboxes"]["dev"]["secrets"])
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
-    def test_read_only_conversion_failure_revokes_metadata_first(self) -> None:
-        self.env.init_remote()
-        state_path = self.env.root / "fake-security-read-only-state.json"
-        normal_env = {
-            "SILO_TEST_KEYCHAIN_DIR": "",
-            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-            "SILO_FAKE_SECURITY_STATE": str(state_path),
-            "SILO_FAKE_SECURITY_MODE": "normal",
-        }
-        self.env.configure_tokens("dev", "acme/demo", extra_env=normal_env)
-        self.env.silo("clone", "dev", "acme/demo", "repo", extra_env=normal_env)
 
-        failed_env = {**normal_env, "SILO_FAKE_SECURITY_MODE": "delete-failure"}
-        proc = self.env.configure_read_only("dev", "acme/demo", extra_env=failed_env, check=False)
-        self.assertFailed(proc, "could not delete Keychain item")
-        metadata = self.env.home / ".config/silo/github/dev.conf"
-        self.assertFalse(metadata.exists())
-        self.assertIn("silo.github.write/dev", json.loads(state_path.read_text()))
 
-        push = self.env.silo("push", "dev", "repo", "--yes", check=False, extra_env=failed_env)
-        self.assertFailed(push, "quarantined")
 
-    def test_same_token_is_rejected_without_mutation(self) -> None:
-        self.env.init_remote()
-        token = "github_pat_IDENTICAL_abcdefghijklmnopqrstuvwxyz0123456789"
-        proc = self.env.configure_tokens("dev", "acme/demo", read=token, write=token, check=False)
-        self.assertFailed(proc, "two different tokens")
-        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
 
-    def test_failed_permission_verification_restores_old_tokens_and_metadata(self) -> None:
-        self.env.init_remote(repo="good")
-        self.env.configure_tokens("dev", "acme/good", read="github_pat_OLD_READ_abcdefghijklmnopqrstuvwxyz", write="github_pat_OLD_WRITE_abcdefghijklmnopqrstuvwxyz")
-        bad = self.env.init_remote(repo="bad")
-        (bad / "deny-host").write_text("1")
-        proc = self.env.configure_tokens(
-            "dev", "acme/bad",
-            read="github_pat_NEW_READ_abcdefghijklmnopqrstuvwxyz",
-            write="github_pat_NEW_WRITE_abcdefghijklmnopqrstuvwxyz",
-            check=False,
-        )
-        self.assertFailed(proc, "restoring the previous")
-        self.assertEqual(self.env.key_file("silo.github.read", "dev").read_text(), "github_pat_OLD_READ_abcdefghijklmnopqrstuvwxyz")
-        self.assertEqual(self.env.key_file("silo.github.write", "dev").read_text(), "github_pat_OLD_WRITE_abcdefghijklmnopqrstuvwxyz")
-        self.assertIn("verification_repo=acme/good", (self.env.home / ".config/silo/github/dev.conf").read_text())
 
-    def test_guest_token_with_write_permission_is_detected_and_rolled_back(self) -> None:
-        bare = self.env.init_remote()
-        proc = self.env.configure_tokens(
-            "dev", "acme/demo",
-            extra_env={"SILO_FAKE_GUEST_PUSH_ALLOWED": "1"},
-            check=False,
-        )
-        self.assertFailed(proc, "guest token can push")
-        refs = run_cmd([SYSTEM_GIT, "--git-dir", bare, "for-each-ref", "--format=%(refname)", "refs/heads/silo-permission-test-*"], env=self.env.env).stdout
-        self.assertEqual(refs.strip(), "")
-        self.assertFalse(self.env.key_file("silo.github.read", "dev").exists())
+
+
+
 
     def test_normal_new_branch_push_only_committed_current_branch(self) -> None:
         bare, repo = self.prepare()
@@ -3134,9 +2417,14 @@ class GitHubAndPushTests(SiloTestCase):
         self.env.git(repo, "remote", "set-url", "origin", "https://example.com/nope.git")
         self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False), "origin must point to github.com")
         self.env.git(repo, "remote", "set-url", "origin", "https://github.com/acme/demo.git")
-        self.env.key_file("silo.github.write", "dev").unlink()
-        self.assertFailed(self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False), "host write token missing")
-        self.env.key_file("silo.github.write", "dev").write_text("github_pat_WRITE_dev_abcdefghijklmnopqrstuvwxyz0123456789")
+        host_credential = self.env.key_file("org.silo.Silo.github-host.v2", "user")
+        saved_credential = host_credential.read_text()
+        host_credential.unlink()
+        self.assertFailed(
+            self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False),
+            "host GitHub credential is not provisioned",
+        )
+        host_credential.write_text(saved_credential)
         (repo / "cancel.txt").write_text("cancel\n")
         self.env.git(repo, "add", "cancel.txt")
         self.env.git(repo, "commit", "-m", "Cancel")
@@ -3235,112 +2523,10 @@ class BackupRestoreTests(SiloTestCase):
         self.assertEqual(len(archives), 1, proc.stdout)
         return archives[0]
 
-    def test_backup_schema_cutover_quarantines_stale_records_once_and_rejects_current_corruption(self) -> None:
-        operation_root = self.env.home / ".local/state/silo/backup-operations"
-        operation_root.mkdir(parents=True)
-        stale = operation_root / "stale-operation-0001.json"
-        stale.write_text(json.dumps({
-            "schemaVersion": 1, "kind": "backup", "operationId": "stale-operation-0001",
-            "state": "completed", "legacyResult": {"archive": "/tmp/old.tar.zst"},
-        }))
-        stale.chmod(0o600)
-        stale_log = operation_root / "stale-operation-0001.log"
-        stale_stdout = operation_root / "stale-operation-0001.stdout"
-        stale_log.write_text("first legacy log\n")
-        stale_stdout.write_text("first legacy stdout\n")
-
-        first = self.env.silo("app", "backup-list", "--format", "json")
-        self.assertEqual(json.loads(first.stdout)["result"], [])
-        quarantined = operation_root / ".incompatible-v2/stale-operation-0001.json"
-        self.assertTrue(quarantined.is_file())
-        self.assertEqual(
-            (operation_root / ".incompatible-v2/stale-operation-0001.log").read_text(),
-            "first legacy log\n",
-        )
-        self.assertEqual(
-            (operation_root / ".incompatible-v2/stale-operation-0001.stdout").read_text(),
-            "first legacy stdout\n",
-        )
-        self.assertFalse(stale.exists())
-        marker = operation_root / ".schema-v2-activated"
-        self.assertEqual(marker.read_text(), "schemaVersion=2\n")
-
-        second = self.env.silo("app", "backup-list", "--format", "json")
-        self.assertEqual(json.loads(second.stdout)["result"], [])
-        self.assertTrue(quarantined.is_file())
-
-        late_stale = operation_root / "late-stale-operation-0002.json"
-        late_stale.write_text(json.dumps({
-            "schemaVersion": 1, "kind": "backup",
-            "operationId": "late-stale-operation-0002", "state": "completed",
-        }))
-        late_stale.chmod(0o600)
-        after_activation = self.env.silo("app", "backup-list", "--format", "json")
-        self.assertEqual(json.loads(after_activation.stdout)["result"], [])
-        self.assertFalse(late_stale.exists())
-        self.assertTrue(
-            (operation_root / ".incompatible-v2/late-stale-operation-0002.json").is_file()
-        )
-
-        stale.write_text(json.dumps({
-            "schemaVersion": 1, "kind": "backup",
-            "operationId": "stale-operation-0001", "state": "completed",
-        }))
-        stale_log.write_text("second legacy log\n")
-        stale_stdout.write_text("second legacy stdout\n")
-        collision = self.env.silo("app", "backup-list", "--format", "json")
-        self.assertEqual(json.loads(collision.stdout)["result"], [])
-        collision_records = list(
-            (operation_root / ".incompatible-v2").glob(
-                "stale-operation-0001.quarantine-*.json"
-            )
-        )
-        self.assertEqual(len(collision_records), 1)
-        collision_stem = Path(str(collision_records[0])[:-len(".json")])
-        self.assertEqual(Path(f"{collision_stem}.log").read_text(), "second legacy log\n")
-        self.assertEqual(
-            Path(f"{collision_stem}.stdout").read_text(),
-            "second legacy stdout\n",
-        )
-        self.assertEqual(
-            (operation_root / ".incompatible-v2/stale-operation-0001.log").read_text(),
-            "first legacy log\n",
-        )
-
-        current_corrupt = operation_root / "current-corrupt-0002.json"
-        current_corrupt.write_text(json.dumps({
-            "schemaVersion": 2, "kind": "backup",
-            "operationId": "current-corrupt-0002", "state": "completed",
-        }))
-        current_corrupt.chmod(0o600)
-        rejected = self.env.silo(
-            "app", "backup-list", "--format", "json", check=False,
-        )
-        self.assertEqual(rejected.returncode, 78)
-        self.assertEqual(
-            json.loads(rejected.stdout)["error"]["code"],
-            "SILO_BACKUP_RECORD_INVALID",
-        )
-        self.assertTrue(current_corrupt.exists())
-
-        current_corrupt.unlink()
-        malformed_current = operation_root / "current-malformed-0003.json"
-        malformed_current.write_text('{"schemaVersion":2,"kind":"backup"')
-        malformed_current.chmod(0o600)
-        malformed_rejected = self.env.silo(
-            "app", "backup-list", "--format", "json", check=False,
-        )
-        self.assertEqual(malformed_rejected.returncode, 78)
-        self.assertEqual(
-            json.loads(malformed_rejected.stdout)["error"]["code"],
-            "SILO_BACKUP_RECORD_INVALID",
-        )
-        self.assertTrue(malformed_current.exists())
 
     def test_backup_restores_only_previous_running_set_and_excludes_keychain(self) -> None:
         self.env.silo("start", "dev")
         self.env.silo("start", "personal")
-        self.env.key_file("silo.github.read", "dev").write_text("super-secret-token")
         # §9: the §5 host credential record lives only in the keychain (or the
         # SILO_TEST_KEYCHAIN_DIR seam) and must never appear in a backup.
         self.env.key_file("org.silo.Silo.github-host.v2", "user").write_text(
@@ -3984,44 +3170,6 @@ class PackagedBehaviorTests(SiloTestCase):
         self.assertNotIn("24678", state["sandboxes"]["dev"].get("port_content", {}))
         self.assertNotIn("24679", state["sandboxes"]["dev"].get("port_content", {}))
 
-    def test_app_github_state_emits_guest_metadata_as_valid_json(self) -> None:
-        credentials = self.env.home / "Library/Application Support/Silo/credentials.json"
-        credentials.parent.mkdir(parents=True, exist_ok=True)
-        credentials.write_text(json.dumps({
-            "schemaVersion": 2,
-            "entries": {
-                "dev.guest": {
-                    "workspace": "dev",
-                    "schemaVersion": 2,
-                    "role": "guest",
-                    "provider": "github-app-user",
-                    "appClientID": "guest-public",
-                    "accountLogin": "alice",
-                    "owner": "acme",
-                    "repositoryIDs": [12, 34],
-                    "accessMode": "read-only",
-                    "verificationRepository": "acme/demo",
-                    "installationID": 123,
-                    "accessExpiresAt": "2026-08-08T08:00:00Z",
-                    "refreshExpiresAt": "2027-02-08T08:00:00Z",
-                    "needsRestart": False,
-                    "generation": 1,
-                    "quarantined": False,
-                    "updatedAt": "2026-08-08T00:00:00Z",
-                }
-            },
-        }))
-
-        document = json.loads(self.env.silo("app", "github-state", "--format", "json").stdout)
-        self.assertTrue(document["ok"])
-        workspaces = {item["workspace"]: item for item in document["result"]["workspaces"]}
-        self.assertEqual(workspaces["dev"]["provider"], "legacy-broad-token")
-        self.assertEqual(workspaces["dev"]["accessMode"], "unconfigured")
-        self.assertIsNone(workspaces["dev"]["verificationRepository"])
-        self.assertEqual(workspaces["dev"]["accountLogin"], "alice")
-        self.assertEqual(workspaces["dev"]["installationId"], "123")
-        self.assertFalse(workspaces["dev"]["needsRestart"])
-        self.assertFalse(workspaces["dev"]["quarantined"])
 
     def test_app_polling_contract_never_starts_or_forwards_guest_credentials(self) -> None:
         before = len(self.env.state().get("events", []))
@@ -4754,55 +3902,6 @@ class PackagedBehaviorTests(SiloTestCase):
         self.assertEqual(list(destination.glob("*")), [])
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 
-    def test_app_oauth_host_profile_enables_aggregate_host_write_capability(self) -> None:
-        credentials = self.env.home / "Library/Application Support/Silo/credentials.json"
-        credentials.parent.mkdir(parents=True, exist_ok=True)
-        common = {
-            "workspace": "dev",
-            "schemaVersion": 3,
-            "provider": "github-app-installation",
-            "grantID": "00000000-0000-0000-0000-000000000001",
-            "accountLogin": "alice",
-            "owner": "acme",
-            "repositoryIDs": [12],
-            "repositoryNames": ["acme/demo"],
-            "verificationRepository": "acme/demo",
-            "installationID": 123,
-            "accessExpiresAt": "2099-08-08T08:00:00Z",
-            "needsRestart": False,
-            "generation": 1,
-            "quarantined": False,
-            "recoveryState": "ready",
-            "updatedAt": "2026-08-08T00:00:00Z",
-        }
-        credentials.write_text(json.dumps({
-            "schemaVersion": 3,
-            "entries": {
-                "dev.guest": common | {
-                    "role": "guest", "accessMode": "read-only",
-                },
-                "dev.host": common | {
-                    "role": "host", "accessMode": "host-write",
-                },
-            },
-        }))
-        token_env = {
-            "SILO_GITHUB_READ_TOKEN_DEV": "ghs_read_fixture",
-            "SILO_GITHUB_WRITE_TOKEN_DEV": "ghs_write_fixture",
-        }
-
-        github = json.loads(self.env.silo(
-            "app", "github-state", "--workspace", "dev", "--format", "json",
-            extra_env=token_env,
-        ).stdout)
-        self.assertEqual(github["result"]["workspaces"][0]["accessMode"], "host-write")
-
-        state = json.loads(self.env.silo(
-            "app", "state", "--workspace", "dev", "--format", "json",
-            extra_env=token_env,
-        ).stdout)["result"]["workspaces"][0]
-        self.assertEqual(state["credential"]["state"], "Ready")
-        self.assertEqual(state["credential"]["accessMode"], "host-write")
     def test_app_logs_normalizes_and_redacts_jsonl(self) -> None:
         self.env.silo("start", "dev")
         payload = json.dumps({
@@ -7785,19 +6884,6 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertFalse(self.host_key_path.exists())
             self.assertFalse(self.host_meta_path.exists())
 
-    def test_remove_local_revokes_metadata_first_and_keeps_legacy_items(self) -> None:
-        self.seed_host_credential()
-        self.seed_host_meta()
-        legacy = self.env.key_file("silo.github.read", "dev")
-        legacy.write_text("github_pat_LEGACY_abcdefghijklmnopqrstuvwxyz0123456789")
-        proc = self.env.silo("github", "remove", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertFalse(self.host_meta_path.exists())
-        self.assertFalse(self.host_key_path.exists())
-        self.assertTrue(legacy.exists())  # §1: legacy items never deleted
-        # idempotent
-        proc = self.env.silo("github", "remove", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_remove_local_unproven_metadata_deletion_quarantines(self) -> None:
         self.seed_host_credential()
@@ -7988,13 +7074,6 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                             check=False)
         self.assertEqual(proc.returncode, 64)
         self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_INVALID_REQUEST")
-        # connect mode -> SILO_GITHUB_MODE_MISMATCH
-        proc = self.env.silo("app", "github-policy-set", "--workspace", "dev",
-                            "--repository", "acme/demo", "--mode", "read-only", "--format", "json",
-                            check=False, extra_env={"SILO_GITHUB_MODE": "connect"})
-        self.assertEqual(proc.returncode, 69)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_GITHUB_MODE_MISMATCH")
-
     def test_app_policy_set_refuses_when_lock_held(self) -> None:
         lock = self.github_meta_dir / "dev.lock"
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -8550,63 +7629,6 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             run_cmd(["/usr/bin/python3", bridge, "delete", svc, "user"], env=env, check=False)
 
     @unittest.skipUnless(sys.platform == "darwin", "real macOS Keychain only")
-    def test_auth_store_v2_never_touches_legacy_security_created_item(self) -> None:
-        """Real regression (re-review): a legacy keychain item created by
-        security(1) (old security-CLI ACL) must NEVER be SecItemUpdate'd /
-        CopyMatching'd by the bridge. The .v2 store path completes bounded,
-        the v2 record round-trips, and the legacy item stays byte-identical."""
-        old_svc = f"org.silo.legacy.{os.getpid()}.{int(time.time() * 1000)}"
-        new_svc = f"{old_svc}.v2"
-        env = self.env.env.copy()
-        env["HOME"] = os.environ["HOME"]
-        env["SILO_CONFIG_FILE"] = str(self.env.home / ".config/silo/config.sh")
-        env["SILO_WORKSPACES_FILE"] = str(self.env.home / ".config/silo/workspaces.json")
-        # legacy item created by security(1) with the security-CLI ACL
-        run_cmd(["/usr/bin/security", "add-generic-password", "-U",
-                 "-s", old_svc, "-a", "user", "-w", "x"],
-                env=env, check=False)
-        legacy = run_cmd(["/usr/bin/security", "find-generic-password", "-w", "-s", old_svc, "-a", "user"],
-                         env=env, check=False)
-        if legacy.returncode != 0:
-            run_cmd(["/usr/bin/security", "delete-generic-password", "-s", old_svc, "-a", "user"],
-                    env=env, check=False)
-            self.skipTest("real login keychain unavailable; skipping legacy-ACL regression")
-        meta_file = self.env.root / "legacy-meta.json"
-        script = (
-            "set -euo pipefail\n"
-            f'export SILO_SOURCE_ONLY=1\n'
-            f'source "{PACKAGE / "bin/silo"}"\n'
-            f'export SILO_HOST_KEYCHAIN_SERVICE="{new_svc}"\n'
-            f'export SILO_HOST_KEYCHAIN_ACCOUNT="user"\n'
-            f'export SILO_HOST_META_FILE="{meta_file}"\n'
-            f'export SILO_CREDENTIAL_DENY_MARKER="{self.env.root / "legacy-marker"}"\n'
-            "unset SILO_TEST_KEYCHAIN_DIR\n"
-            f"host_credential_store 'gh-cli' 'oauth' '{HOST_TOKEN}' 'fake-user' 1 '[]'\n"
-        )
-        try:
-            proc = run_cmd(["bash", "-c", script], env=env, check=False, timeout=45)
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            # the v2 record round-trips through the bridge
-            bridge = PACKAGE / "bin/silo-keychain-bridge"
-            got = run_cmd(["/usr/bin/python3", bridge, "get", new_svc, "user"], env=env, check=False)
-            self.assertEqual(got.returncode, 0, got.stdout + got.stderr)
-            self.assertEqual(json.loads(got.stdout)["accessToken"], HOST_TOKEN)
-            # the legacy item is byte-identical (never read/updated by the bridge)
-            legacy2 = run_cmd(["/usr/bin/security", "find-generic-password", "-w", "-s", old_svc, "-a", "user"],
-                              env=env, check=False)
-            self.assertEqual(legacy2.returncode, 0, legacy2.stdout + legacy2.stderr)
-            self.assertEqual(legacy2.stdout.strip(), "x")
-            # active activation metadata written (seam path), no deny marker
-            meta = json.loads(meta_file.read_text())
-            self.assertEqual(meta["state"], "active")
-            self.assertFalse((self.env.root / "legacy-marker").exists())
-        finally:
-            run_cmd(["/usr/bin/security", "delete-generic-password", "-s", old_svc, "-a", "user"],
-                    env=env, check=False)
-            run_cmd(["/usr/bin/python3", PACKAGE / "bin/silo-keychain-bridge", "delete", new_svc, "user"],
-                    env=env, check=False)
-
-    # ---- blocker 4: revocation deletion failure denies globally ---------
 
     def test_remove_local_keychain_deletion_failure_denies_globally(self) -> None:
         """Blocker 4 + re-review: if the Keychain deletion fails, the global
@@ -8869,408 +7891,8 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertFalse(dev["quarantined"])
 
 
-class MigrationTests(_LocalModeGitHubBase):
-    """Path C §11 local-mode entry migration matrix (fixture state only)."""
-
-    def seed_legacy_state(self, box: str = "dev", *, conf: bool = True,
-                          quarantine: bool = False, secret: bool = True,
-                          keychain: bool = True) -> None:
-        meta_dir = self.github_meta_dir
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        if conf:
-            (meta_dir / f"{box}.conf").write_text(
-                "verification_repo=acme/demo\naccess=host-write\nconfigured_at=2026-08-07T00:00:00Z\n")
-        if quarantine:
-            (meta_dir / f"{box}.quarantine").write_text("pre-existing credential failure\n")
-        if secret:
-            state = self.env.state()
-            state["sandboxes"][box].setdefault("secrets", {})["GH_TOKEN"] = "GH_TOKEN@github.com,api.github.com"
-            self.env.state_file.write_text(json.dumps(state, indent=2, sort_keys=True))
-        if keychain:
-            self.env.key_file("silo.github.read", box).write_text(
-                "github_pat_LEGACY_READ_abcdefghijklmnopqrstuvwxyz0123456789")
-            self.env.key_file("silo.github.write", box).write_text(
-                "github_pat_LEGACY_WRITE_abcdefghijklmnopqrstuvwxyz0123456789")
-
-    def test_migration_full_transaction_and_lock_reacquisition(self) -> None:
-        self.seed_legacy_state()
-        meta_dir = self.github_meta_dir
-        proc = self.env.silo("github", "migrate", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("legacy GitHub state migrated for dev", proc.stdout)
-        # conf archived (never blind-deleted), original gone
-        self.assertFalse((meta_dir / "dev.conf").exists())
-        archived = list((meta_dir / "migrated-local").glob("dev.conf.*"))
-        self.assertEqual(len(archived), 1, [p.name for p in archived])
-        self.assertIn("verification_repo=acme/demo", archived[0].read_text())
-        # secret removed and PROVEN via inspect
-        state = self.env.state()
-        self.assertNotIn("GH_TOKEN", state["sandboxes"]["dev"].get("secrets", {}))
-        # migration-owned quarantine marker cleared
-        self.assertFalse((meta_dir / "dev.quarantine").exists())
-        # policy skeleton with minted capability, empty repos
-        policy = json.loads(self.policy_path.read_text())
-        self.assertEqual(policy["schemaVersion"], 1)
-        self.assertRegex(policy["workspaces"]["dev"]["capability"], r"^[0-9a-f]{48}$")
-        self.assertEqual(policy["workspaces"]["dev"]["repos"], [])
-        # journal: intent (with discovered state) then committed
-        journal_dir = meta_dir / "migrated-local"
-        journal = (journal_dir / "journal.jsonl").read_text()
-        self.assertIn('"event":"intent"', journal)
-        self.assertIn('\\"confPresent\\":true', journal)
-        self.assertIn('\\"quarantinePreExisted\\":false', journal)
-        self.assertIn('\\"secretBound\\":true', journal)
-        self.assertIn('"event":"committed"', journal)
-        # journal durability: dir 0700, file 0600, tmp+rename path exercised
-        self.assertEqual(stat.S_IMODE(journal_dir.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE((journal_dir / "journal.jsonl").stat().st_mode), 0o600)
-        # legacy keychain items preserved (§1)
-        self.assertTrue(self.env.key_file("silo.github.read", "dev").exists())
-        self.assertTrue(self.env.key_file("silo.github.write", "dev").exists())
-        # lock re-acquisition: a second migration is a no-op success, and a
-        # normal GitHub operation can re-acquire the same lock
-        proc = self.env.silo("github", "migrate", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("nothing to migrate", proc.stdout)
-        self.env.silo("github", "status", "dev")
-
-    def test_migration_refuses_when_lock_held(self) -> None:
-        self.seed_legacy_state(secret=False, keychain=False)
-        lock = self.github_meta_dir / "dev.lock"
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        holder = subprocess.Popen(
-            ["bash", "-c", f'exec 9>>"{lock}"; /usr/bin/lockf -s -t 0 9 && echo READY; sleep 30'],
-            stdout=subprocess.PIPE, text=True)
-        try:
-            self.assertEqual(holder.stdout.readline().strip(), "READY")
-            proc = self.env.silo("github", "migrate", "dev", check=False)
-            self.assertFailed(proc, "already in progress")
-            # nothing changed: conf untouched, no policy skeleton, no journal
-            self.assertTrue((self.github_meta_dir / "dev.conf").exists())
-            self.assertFalse(self.policy_path.exists())
-        finally:
-            holder.kill()
-            holder.wait()
-
-    def test_migration_surfaces_stale_legacy_lock_directory(self) -> None:
-        self.seed_legacy_state(secret=False, keychain=False)
-        lock = self.github_meta_dir / "dev.lock"
-        lock.mkdir()
-        (lock / "pid").write_text("99999999\n")
-        proc = self.env.silo("github", "migrate", "dev", check=False)
-        self.assertFailed(proc, "manual review")
-        self.assertTrue(lock.is_dir())  # never unlinked directly
-        self.assertTrue((self.github_meta_dir / "dev.conf").exists())
-
-    def test_migration_preserves_preexisting_quarantine(self) -> None:
-        self.seed_legacy_state(quarantine=True, secret=False, keychain=False)
-        proc = self.env.silo("github", "migrate", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("remains quarantined", proc.stdout + proc.stderr)
-        quarantine = self.github_meta_dir / "dev.quarantine"
-        self.assertTrue(quarantine.exists())
-        self.assertEqual(quarantine.read_text(), "pre-existing credential failure\n")
-        # the rest of the transaction still ran
-        self.assertFalse((self.github_meta_dir / "dev.conf").exists())
-        policy = json.loads(self.policy_path.read_text())
-        self.assertRegex(policy["workspaces"]["dev"]["capability"], r"^[0-9a-f]{48}$")
-        journal = (self.github_meta_dir / "migrated-local" / "journal.jsonl").read_text()
-        self.assertIn('\\"quarantinePreExisted\\":true', journal)
-        self.assertIn('"event":"committed"', journal)
-
-    def test_migration_quarantines_when_secret_removal_fails(self) -> None:
-        self.seed_legacy_state(keychain=False)
-        proc = self.env.silo("github", "migrate", "dev", check=False,
-                            extra_env={"SILO_FAKE_SECRET_REMOVE_FAIL": "1"})
-        self.assertFailed(proc, "quarantined")
-        quarantine = self.github_meta_dir / "dev.quarantine"
-        self.assertTrue(quarantine.exists())
-        self.assertIn("secret removal failed", quarantine.read_text())
-        # the transaction stopped before archiving the conf
-        self.assertTrue((self.github_meta_dir / "dev.conf").exists())
-        # the secret is still bound
-        state = self.env.state()
-        self.assertIn("GH_TOKEN", state["sandboxes"]["dev"].get("secrets", {}))
-
-    def test_migration_refuses_when_journal_unwritable(self) -> None:
-        self.seed_legacy_state()
-        journal_dir = self.github_meta_dir / "migrated-local"
-        journal_dir.mkdir(parents=True, exist_ok=True)
-        journal_dir.chmod(0o500)
-        try:
-            proc = self.env.silo("github", "migrate", "dev", check=False)
-            self.assertFailed(proc, "journal")
-            self.assertIn("no state was changed", proc.stdout + proc.stderr)
-            # untouched: conf present, secret still bound, no marker, no policy
-            self.assertTrue((self.github_meta_dir / "dev.conf").exists())
-            state = self.env.state()
-            self.assertIn("GH_TOKEN", state["sandboxes"]["dev"].get("secrets", {}))
-            self.assertFalse((self.github_meta_dir / "dev.quarantine").exists())
-            self.assertFalse(self.policy_path.exists())
-        finally:
-            journal_dir.chmod(0o700)
-
-    def test_migration_quarantines_when_journal_write_fails_mid_transaction(self) -> None:
-        self.seed_legacy_state(secret=True, keychain=False)
-        # write #1 = mandatory intent (succeeds); write #2 = quarantine-set
-        # event, which lands AFTER the migration-owned marker (a mutation).
-        proc = self.env.silo("github", "migrate", "dev", check=False,
-                            extra_env={"SILO_FAKE_JOURNAL_FAIL_ON": "2"})
-        self.assertFailed(proc, "journal")
-        quarantine = self.github_meta_dir / "dev.quarantine"
-        self.assertTrue(quarantine.exists())
-        self.assertIn("journal write failed", quarantine.read_text())
-        # stopped before archiving the conf or removing the secret
-        self.assertTrue((self.github_meta_dir / "dev.conf").exists())
-        state = self.env.state()
-        self.assertIn("GH_TOKEN", state["sandboxes"]["dev"].get("secrets", {}))
-
-    def test_migration_trigger_on_first_local_operation(self) -> None:
-        self.seed_legacy_state(secret=False, keychain=False)
-        proc = self.env.silo("github", "status", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("legacy GitHub state migrated for dev", proc.stdout + proc.stderr)
-        self.assertFalse((self.github_meta_dir / "dev.conf").exists())
-        self.assertRegex(json.loads(self.policy_path.read_text())["workspaces"]["dev"]["capability"],
-                         r"^[0-9a-f]{48}$")
-        # the operation that triggered the migration proceeded normally
-        self.assertIn("HOST_CRED", proc.stdout)
-
-    def test_migration_trigger_keeps_status_json_clean(self) -> None:
-        self.seed_legacy_state(secret=False, keychain=False)
-        proc = self.env.silo("github", "status", "--format", "json", "dev")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        result = json.loads(proc.stdout)  # stdout stays pure JSON despite the trigger
-        self.assertEqual(result["hostCredential"], "missing")
-        dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
-        self.assertEqual(dev["capability"], "minted")
-        self.assertFalse((self.github_meta_dir / "dev.conf").exists())
-
-    def test_migration_trigger_on_first_push(self) -> None:
-        self.set_policy({"schemaVersion": 1, "workspaces": {
-            "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
-            "playgrounds": {"capability": PLAY_CAP, "repos": []},
-            "personal": {"capability": PERSONAL_CAP, "repos": []},
-        }})
-        self.seed_host_credential()
-        self.seed_host_meta()
-        self.seed_legacy_state(secret=False, keychain=False)
-        # The first local-mode operation that starts the workspace (the clone)
-        # retires the legacy state; the push then proceeds on the migrated state.
-        self.prepare_guest_repo()
-        self.assertFalse((self.github_meta_dir / "dev.conf").exists())
-        self.assertRegex(json.loads(self.policy_path.read_text())["workspaces"]["dev"]["capability"],
-                         r"^[0-9a-f]{48}$")
-        proc = self.env.silo("push", "dev", "repo", "--yes")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("pushed main from dev:repo", proc.stdout)
-
-    # ---- blocker 6: journal durability + quarantine preservation ---------
-
-    def test_migration_journal_concurrent_cross_workspace(self) -> None:
-        """Blocker 6: concurrent migrations of different workspaces share one
-        journal; O_APPEND under the journal-wide flock must not lose or
-        corrupt a single line from either workspace. (Legacy state is conf-only
-        so the two processes never race on the shared fake state file.)"""
-        self.seed_legacy_state(box="dev", secret=False, keychain=False)
-        self.seed_legacy_state(box="playgrounds", secret=False, keychain=False)
-        env = self.env.env.copy()
-        procs = [
-            subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
-                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True),
-            subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "playgrounds"],
-                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True),
-        ]
-        for p in procs:
-            out, err = p.communicate(timeout=120)
-            self.assertEqual(p.returncode, 0, out + err)
-        journal = (self.github_meta_dir / "migrated-local" / "journal.jsonl").read_text()
-        # every line is complete, valid JSON (no torn/interleaved lines)
-        lines = [json.loads(l) for l in journal.splitlines() if l.strip()]
-        intents = [l for l in lines if l["event"] == "intent"]
-        committed = [l for l in lines if l["event"] == "committed"]
-        self.assertEqual(len(intents), 2, journal)
-        self.assertEqual(len(committed), 2, journal)
-        self.assertEqual({l["workspace"] for l in intents}, {"dev", "playgrounds"})
-        self.assertEqual({l["workspace"] for l in committed}, {"dev", "playgrounds"})
-        # both confs archived, neither migration lost its events
-        self.assertFalse((self.github_meta_dir / "dev.conf").exists())
-        self.assertFalse((self.github_meta_dir / "playgrounds.conf").exists())
-        archived = list((self.github_meta_dir / "migrated-local").glob("*.conf.*"))
-        self.assertEqual(len(archived), 2, [p.name for p in archived])
-        self.assertFalse((self.github_meta_dir / "dev.quarantine").exists())
-        self.assertFalse((self.github_meta_dir / "playgrounds.quarantine").exists())
-
-    def test_migration_crash_mid_transaction_leaves_recoverable_journal(self) -> None:
-        """Blocker 6 crash seam: SIGKILL the migration right after the
-        quarantine-set event. The durable journal + migration-owned marker
-        survive; a re-run completes the transaction and preserves the marker
-        (fail-closed) with the original reason byte-for-byte."""
-        self.seed_legacy_state(secret=True, keychain=False)
-        journal_file = self.github_meta_dir / "migrated-local" / "journal.jsonl"
-        env = self.env.env.copy()
-        proc = subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    break
-                if journal_file.exists() and '"event":"quarantine-set"' in journal_file.read_text():
-                    break
-                time.sleep(0.05)
-            self.assertIsNone(proc.poll(), "migration finished before the kill point")
-            proc.kill()
-            proc.wait(timeout=30)
-            journal = journal_file.read_text()
-            self.assertIn('"event":"intent"', journal)
-            self.assertIn('"event":"quarantine-set"', journal)
-            self.assertNotIn('"event":"committed"', journal)
-            # the migration-owned marker exists (written before quarantine-set)
-            marker = self.github_meta_dir / "dev.quarantine"
-            self.assertTrue(marker.exists())
-            self.assertEqual(marker.read_text(), "Legacy GitHub state migration in progress\n")
-            # re-run: completes, keeps the marker, archives the conf, journal
-            # records a second intent + committed
-            proc2 = self.env.silo("github", "migrate", "dev")
-            self.assertEqual(proc2.returncode, 0, proc2.stdout + proc2.stderr)
-            self.assertIn("remains quarantined", proc2.stdout + proc2.stderr)
-            self.assertEqual(marker.read_text(), "Legacy GitHub state migration in progress\n")
-            self.assertFalse((self.github_meta_dir / "dev.conf").exists())
-            journal2 = journal_file.read_text()
-            self.assertGreaterEqual(journal2.count('"event":"intent"'), 2, journal2)
-            self.assertIn('"event":"committed"', journal2)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=30)
-
-    def test_migration_preexisting_quarantine_preserved_byte_for_byte_on_failure(self) -> None:
-        """Blocker 6: a failure after a PRE-EXISTING quarantine marker must
-        never truncate/overwrite it — the marker stays byte-for-byte and the
-        new failure lands in the durable journal."""
-        self.seed_legacy_state(quarantine=True, keychain=False)
-        marker = self.github_meta_dir / "dev.quarantine"
-        marker.write_text("original reason line one\nline two\n")
-        before = marker.read_bytes()
-        proc = self.env.silo("github", "migrate", "dev", check=False,
-                            extra_env={"SILO_FAKE_SECRET_REMOVE_FAIL": "1"})
-        self.assertFailed(proc, "quarantined")
-        self.assertEqual(marker.read_bytes(), before, "pre-existing marker must be byte-identical")
-        journal = (self.github_meta_dir / "migrated-local" / "journal.jsonl").read_text()
-        self.assertIn("secret removal failed", journal)
-        self.assertIn('"event":"failed"', journal)
-
-
-    def test_migration_sigterm_preserves_preexisting_marker(self) -> None:
-        """Re-review item 4: SIGTERM mid-transaction with a PRE-EXISTING
-        quarantine marker must never truncate it — the marker stays
-        byte-for-byte and the interrupt is recorded only in the durable
-        journal (never the truncating quarantine writer)."""
-        self.seed_legacy_state(quarantine=True, secret=False, keychain=False)
-        marker = self.github_meta_dir / "dev.quarantine"
-        marker.write_text("original reason line one\nline two\n")
-        before = marker.read_bytes()
-        pause = self.env.root / "migrate-pause"
-        reached = self.env.root / "migrate-pause-reached"
-        pause.touch()
-        env = self.env.env.copy()
-        env["SILO_FAKE_MIGRATION_PAUSE_FILE"] = str(pause)
-        env["SILO_FAKE_MIGRATION_PAUSE_REACHED"] = str(reached)
-        proc = subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            journal = self.github_meta_dir / "migrated-local" / "journal.jsonl"
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline and not reached.exists():
-                time.sleep(0.05)
-            self.assertTrue(reached.exists(), "migration never reached the pause point")
-            self.assertIn('"event":"intent"', journal.read_text() if journal.exists() else "")
-            proc.send_signal(signal.SIGTERM)
-            out, err = proc.communicate(timeout=60)
-            self.assertNotEqual(proc.returncode, 0, out + err)
-            # the pre-existing marker is byte-for-byte untouched
-            self.assertEqual(marker.read_bytes(), before)
-            # the interrupt was recorded in the durable journal (the trap
-            # names the signal it received: TERM)
-            journal_text = journal.read_text()
-            self.assertIn('"event":"interrupted"', journal_text)
-            self.assertIn("TERM", journal_text)
-            self.assertIn("pre-existing quarantine marker preserved", journal_text)
-        finally:
-            pause.unlink(missing_ok=True)
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=30)
-
-    def test_migration_signal_at_arm_hook_preserves_preexisting_marker(self) -> None:
-        """Closure re-review: MIGRATION_PREEXISTING_QUARANTINE is recorded by
-        setup_transaction_arm BEFORE the traps are installed, so a signal
-        delivered at the arm hook (no mutation yet) still preserves the
-        original marker byte-for-byte and journals the interrupt."""
-        self.seed_legacy_state(quarantine=True, secret=False, keychain=False)
-        marker = self.github_meta_dir / "dev.quarantine"
-        marker.write_text("original reason line one\nline two\n")
-        before = marker.read_bytes()
-        pause = self.env.root / "migrate-arm-pause"
-        reached = self.env.root / "migrate-arm-reached"
-        pause.touch()
-        env = self.env.env.copy()
-        env["SILO_FAKE_MIGRATION_ARM_PAUSE_FILE"] = str(pause)
-        env["SILO_FAKE_MIGRATION_ARM_PAUSE_REACHED"] = str(reached)
-        proc = subprocess.Popen([str(self.env.silo_bin), "github", "migrate", "dev"],
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline and not reached.exists():
-                time.sleep(0.05)
-            self.assertTrue(reached.exists(), "migration never reached the arm hook")
-            proc.send_signal(signal.SIGTERM)
-            out, err = proc.communicate(timeout=60)
-            self.assertNotEqual(proc.returncode, 0, out + err)
-            self.assertEqual(marker.read_bytes(), before)
-            journal = self.github_meta_dir / "migrated-local" / "journal.jsonl"
-            journal_text = journal.read_text() if journal.exists() else ""
-            self.assertIn('"event":"interrupted"', journal_text)
-        finally:
-            pause.unlink(missing_ok=True)
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=30)
-
-    def test_migration_journal_zero_write_fails_closed(self) -> None:
-        """Re-review item 4: the journal writer treats a zero write as a
-        failure — the mandatory intent never lands, so the migration aborts
-        before any mutation."""
-        self.seed_legacy_state()
-        proc = self.env.silo("github", "migrate", "dev", check=False,
-                            extra_env={"SILO_FAKE_JOURNAL_ZERO_WRITE": "1"})
-        self.assertFailed(proc, "journal")
-        self.assertIn("no state was changed", proc.stdout + proc.stderr)
-        self.assertTrue((self.github_meta_dir / "dev.conf").exists())
-        state = self.env.state()
-        self.assertIn("GH_TOKEN", state["sandboxes"]["dev"].get("secrets", {}))
-        self.assertFalse((self.github_meta_dir / "dev.quarantine").exists())
-        self.assertFalse(self.policy_path.exists())
-
-    def test_migration_journal_short_write_completes(self) -> None:
-        """Re-review item 4: the journal writer loops os.write until every
-        byte lands — a simulated short write must not lose or corrupt the
-        line."""
-        self.seed_legacy_state()
-        proc = self.env.silo("github", "migrate", "dev",
-                            extra_env={"SILO_FAKE_JOURNAL_SHORT_WRITE": "1"})
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        journal = (self.github_meta_dir / "migrated-local" / "journal.jsonl").read_text()
-        lines = [json.loads(l) for l in journal.splitlines() if l.strip()]
-        self.assertIn("committed", [l["event"] for l in lines])
-        self.assertIn("intent", [l["event"] for l in lines])
-
-
 class LocalModeSSHTests(_LocalModeGitHubBase):
-    """Blocker 7: local-mode SSH resolves SILO_GITHUB_MODE FIRST, never reads
-    Connect credentials.json, and never exports GH_TOKEN; legacy/Connect state
-    yields a migration remedy / token-free SSH."""
+    """Local-mode SSH ignores Connect credentials and never exports GH_TOKEN."""
 
     def _guest_secret_state(self) -> dict:
         state = self.env.state()
@@ -9278,7 +7900,7 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
 
     def test_ssh_proxy_local_never_reads_connect_credentials_or_exports_token(self) -> None:
         # Plant dormant Connect state (credentials.json + schema-3 keychain
-        # record) exactly like an upgraded machine.
+        # record) to prove that local mode does not inspect it.
         cred = self.env.home / "Library/Application Support/Silo"
         cred.mkdir(parents=True, exist_ok=True)
         (cred / "credentials.json").write_text(json.dumps({
@@ -9312,18 +7934,6 @@ class LocalModeSSHTests(_LocalModeGitHubBase):
         # the workspace came up (token-free path)
         self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
 
-    def test_ssh_proxy_local_legacy_conf_fails_with_migration_remedy(self) -> None:
-        meta_dir = self.github_meta_dir
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        (meta_dir / "dev.conf").write_text("verification_repo=acme/demo\naccess=host-write\n")
-        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
-        proc = self.env.run(proxy, "dev.msb", check=False)
-        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        joined = proc.stdout + proc.stderr
-        self.assertIn("migrate", joined)
-        self.assertIn("legacy", joined)
-        # the workspace was NOT started (fail-closed, no token, no side effect)
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
 
     def test_ssh_proxy_local_quarantine_fails_closed(self) -> None:
         meta_dir = self.github_meta_dir
@@ -10081,13 +8691,6 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
                 proc.stdout.close()
             if proc.stderr is not None:
                 proc.stderr.close()
-
-    def test_policy_apply_connect_mode_mismatch(self) -> None:
-        desired = {"schemaVersion": 1, "workspaces": {"dev": {"repos": []}}}
-        proc = self._apply(desired, check=False, extra_env={"SILO_GITHUB_MODE": "connect"})
-        self.assertEqual(proc.returncode, 69)
-        self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_GITHUB_MODE_MISMATCH")
-        self.assertFalse(self.policy_path.exists())
 
     def test_policy_apply_invalid_request_typed_error(self) -> None:
         for bad in (

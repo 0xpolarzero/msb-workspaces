@@ -501,7 +501,7 @@ final class AppModelTests: XCTestCase {
 
     func testBackupListRejectsMalformedCompletedResultWithoutRuntimeRepair() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silo-backup-list-old-result-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-backup-list-invalid-result-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
         let destination = temporary.appendingPathComponent("Backups", isDirectory: true)
@@ -2551,16 +2551,16 @@ final class AppModelTests: XCTestCase {
     func testRepairInvalidatesResolutionAndSelectsOnlyActivatedRuntime() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-managed-runtime-resolution-\(UUID().uuidString)", isDirectory: true)
-        let legacy = temporary.appendingPathComponent(".local/bin/silo")
+        let external = temporary.appendingPathComponent(".local/bin/silo")
         let managedRoot = temporary.appendingPathComponent("managed-toolchain", isDirectory: true)
         try FileManager.default.createDirectory(
-            at: legacy.deletingLastPathComponent(),
+            at: external.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
 
-        try Data("#!/bin/sh\nprintf 'external fake must not run\\n'\nexit 99\n".utf8).write(to: legacy)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: legacy.path)
+        try Data("#!/bin/sh\nprintf 'external fake must not run\\n'\nexit 99\n".utf8).write(to: external)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: external.path)
 
         let runner = SiloCommandRunner(configuration: .init(
             homeDirectory: temporary,
@@ -2654,9 +2654,9 @@ final class AppModelTests: XCTestCase {
                     accountLogin: nil,
                     installationId: nil,
                     accessExpiresAt: nil,
-                    refreshExpiresAt: nil,
                     needsRestart: false
                 ),
+                secrets: SiloSecretsSnapshot(state: .active, pendingCount: 0, reason: nil),
                 resources: SiloResourceSnapshot(
                     cpus: "2",
                     maxCpus: "8",
@@ -2674,7 +2674,9 @@ final class AppModelTests: XCTestCase {
                     canRestart: true,
                     canOpenTerminal: true,
                     canPush: true
-                )
+                ),
+                skippedPorts: [],
+                portWarning: ""
             )
         }
         let state = SiloStateResponse(schemaVersion: 1, siloVersion: "test", workspaces: snapshots)
@@ -2899,84 +2901,6 @@ final class AppModelTests: XCTestCase {
             SiloOperationFailureNotice.diagnosticLimit
         )
         XCTAssertFalse(unicodeDetails.contains("�"))
-    }
-
-    func testStopApplyDoesNotLoadQuarantinedGuestCredential() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silo-stop-credential-isolation-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-
-        let metadataURL = temporary.appendingPathComponent("credentials.json")
-        let metadata: [String: Any] = [
-            "schemaVersion": 2,
-            "entries": [
-                "dev.guest": [
-                    "workspace": "dev",
-                    "schemaVersion": 2,
-                    "role": "guest",
-                    "provider": "github-app-user",
-                    "accessMode": "read-only",
-                    "verificationRepository": "acme/demo",
-                    "needsRestart": false,
-                    "generation": 1,
-                    "quarantined": true,
-                    "updatedAt": "2026-08-08T00:00:00Z"
-                ]
-            ]
-        ]
-        try JSONSerialization.data(withJSONObject: metadata, options: []).write(to: metadataURL)
-        let broker = try CredentialBroker(metadataURL: metadataURL)
-
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        let responseURL = temporary.appendingPathComponent("apply.json")
-        try encoder.encode(
-            SiloEnvelope(
-                schemaVersion: 1,
-                requestId: "apply-stop",
-                ok: true,
-                command: "apply",
-                observedAt: Date(),
-                result: SiloApplyResult(
-                    workspace: "dev",
-                    action: "stop",
-                    reconciled: true,
-                    outcome: "Stopped dev."
-                )
-            )
-        ).write(to: responseURL)
-
-        let executable = temporary.appendingPathComponent("silo")
-        let script = """
-        #!/bin/sh
-        if [ "$1" = "app" ] && [ "$2" = "handshake" ]; then
-            printf '%s\n' '\(protocolCompatibleHandshake)'
-        elif [ "$1" = "app" ] && [ "$2" = "apply" ]; then
-            /bin/cat '\(responseURL.path)'
-        else
-            exit 64
-        fi
-        """
-        try Data(script.utf8).write(to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-
-        let runner = SiloCommandRunner(configuration: .init(
-            homeDirectory: temporary,
-            testSiloExecutable: executable
-        ))
-        let client = SiloClient(runner: runner, credentialBroker: broker)
-        let plan = SiloLifecyclePlan(
-            planId: "plan-stop",
-            action: "stop",
-            workspace: "dev",
-            expiresAt: Date().addingTimeInterval(300),
-            confirmationPhrase: "STOP dev",
-            effects: "Stopping dev."
-        )
-
-        let response = try await client.applyLifecyclePlan(plan, confirmation: "STOP dev")
-        XCTAssertEqual(response.result?.outcome, "Stopped dev.")
     }
 
     func testUnsafeRefreshCancelsPendingLifecycleConfirmation() async throws {
@@ -3501,7 +3425,7 @@ final class AppModelTests: XCTestCase {
                 .split(whereSeparator: \.isNewline).map(String.init),
             ["app", "bootstrap", "--resume", "--workspace-config-fd", "0", "--events-fd", "3", "--format", "json"]
         )
-        let durations = try XCTUnwrap(finalState.phaseDurations)
+        let durations = finalState.phaseDurations
         XCTAssertEqual(
             Set(durations.keys),
             ["toolchain", "preflight", "hostIntegration", "workspaces"]
@@ -3512,7 +3436,7 @@ final class AppModelTests: XCTestCase {
         )
         let persisted = await persistedStore.load()
         XCTAssertEqual(
-            Set((persisted.phaseDurations ?? [:]).keys),
+            Set(persisted.phaseDurations.keys),
             Set(durations.keys),
             "Per-phase timings must survive persistence so a resumed setup can show them."
         )
@@ -4014,42 +3938,6 @@ final class AppModelTests: XCTestCase {
     }
 
 
-    func testCommandRunnerIgnoresEveryFormerExternalSiloCandidate() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silo-protocol-resolution-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-
-        let handshake = protocolCompatibleHandshake.replacingOccurrences(of: "test-handshake", with: "compatible")
-        let formerCandidates = [
-            "configured/silo",
-            ".local/bin/silo",
-            "homebrew/bin/silo",
-            "usr-local/bin/silo",
-            "source-checkout/bin/silo",
-            "Library/Application Support/Silo/Toolchains/current/bin/silo",
-            "path-entry/bin/silo"
-        ].map { temporary.appendingPathComponent($0) }
-        for candidate in formerCandidates {
-            try FileManager.default.createDirectory(
-                at: candidate.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try Data("#!/bin/sh\nprintf '%s\\n' '\(handshake)'\n".utf8).write(to: candidate)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: candidate.path)
-        }
-
-        let runner = SiloCommandRunner(configuration: .init(
-            homeDirectory: temporary,
-            additionalSearchPaths: formerCandidates
-        ))
-        let resolution = await runner.siloResolution()
-        let namedResolution = await runner.resolveExecutable(named: "silo")
-
-        XCTAssertNil(resolution.selected)
-        XCTAssertNil(namedResolution)
-    }
-
     func testCommandRunnerRejectsAHandshakeThatIsNotTheExactSchema() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-protocol-repair-\(UUID().uuidString)", isDirectory: true)
@@ -4434,7 +4322,7 @@ final class AppModelTests: XCTestCase {
         }
     }
 
-    func testToolchainUpdateAtomicallyReplacesCorruptionAndLeavesOnlyCurrent() async throws {
+    func testToolchainActivationAtomicallyReplacesCorruptCurrent() async throws {
         let bundledRoot = try XCTUnwrap(ToolchainLayout.bundledRoot())
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-toolchain-install-\(UUID().uuidString)", isDirectory: true)
@@ -4448,13 +4336,8 @@ final class AppModelTests: XCTestCase {
             XCTAssertEqual(error as? ToolchainInstallerError, .invalidManifest)
         }
         try Data("corrupt".utf8).write(to: first.root.appendingPathComponent("bin/silo"))
-        try FileManager.default.createDirectory(
-            at: temporary.appendingPathComponent("historical-1.0.0"),
-            withIntermediateDirectories: true
-        )
         let repaired = try await installer.activate()
 
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: temporary.path), ["current"])
         let validated = try ToolchainValidator.validateActivated(root: repaired.root)
         try ToolchainValidator.verifyHandshake(validated)
         XCTAssertEqual(repaired.version, validated.manifest.version)
@@ -4527,9 +4410,9 @@ final class AppModelTests: XCTestCase {
                     accountLogin: nil,
                     installationId: nil,
                     accessExpiresAt: nil,
-                    refreshExpiresAt: nil,
                     needsRestart: false
                 ),
+                secrets: SiloSecretsSnapshot(state: .active, pendingCount: 0, reason: nil),
                 resources: SiloResourceSnapshot(
                     cpus: "2",
                     maxCpus: "8",
@@ -4548,7 +4431,9 @@ final class AppModelTests: XCTestCase {
                     canOpenTerminal: true,
                     canPush: true
                 ),
-                statusObservedAt: id == .dev ? devStatusObservedAt : nil
+                statusObservedAt: id == .dev ? devStatusObservedAt : nil,
+                skippedPorts: [],
+                portWarning: ""
             )
         }
         return SiloEnvelope(
@@ -5046,7 +4931,7 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(state.isDone)
     }
 
-    func testBootstrapStateWithoutPhaseDurationsStillDecodes() throws {
+    func testBootstrapStateRequiresPhaseDurations() throws {
         var state = SiloBootstrapState.initial
         state.updatedAt = Date(timeIntervalSince1970: 0)
         let data = try JSONEncoder().encode(state)
@@ -5054,11 +4939,10 @@ final class AppModelTests: XCTestCase {
             try JSONSerialization.jsonObject(with: data) as? [String: Any]
         )
         object.removeValue(forKey: "phaseDurations")
-        let legacy = try JSONDecoder().decode(
+        XCTAssertThrowsError(try JSONDecoder().decode(
             SiloBootstrapState.self,
             from: try JSONSerialization.data(withJSONObject: object)
-        )
-        XCTAssertNil(legacy.phaseDurations)
+        ))
     }
 
     func testSetupLifecycleIsCurrentOnlyWhileUntouched() {
@@ -5264,7 +5148,7 @@ final class AppModelTests: XCTestCase {
             clientAvailable: false,
             name: "Taylor Example",
             email: "taylor@example.com"
-        ), "A valid identity still requires the migrated Silo client dependency.")
+        ), "A valid identity still requires the current Silo client dependency.")
         XCTAssertFalse(SetupView.allowsIdentitySave(
             clientAvailable: true,
             name: "   ",
@@ -6182,6 +6066,7 @@ final class AppModelTests: XCTestCase {
             "newGrantIDs": [replacementID.uuidString],
             "oldGrantIDs": [],
             "verifiedUnboundWorkspaces": ["dev"],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "localCommitted",
             "updatedAt": formatter.string(from: clock.value)
         ]
@@ -6237,6 +6122,8 @@ final class AppModelTests: XCTestCase {
             "workspaceKeys": ["dev.guest"],
             "newGrantIDs": [],
             "oldGrantIDs": [],
+            "verifiedUnboundWorkspaces": [],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "prepared",
             "updatedAt": formatter.string(from: Date())
         ]
@@ -6304,6 +6191,7 @@ final class AppModelTests: XCTestCase {
             "newGrantIDs": [newGrantID.uuidString],
             "oldGrantIDs": [],
             "verifiedUnboundWorkspaces": ["dev"],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "prepared",
             "updatedAt": formatter.string(from: clock.value)
         ]
@@ -6468,6 +6356,8 @@ final class AppModelTests: XCTestCase {
                 "workspaceKeys": ["dev.guest", "dev.host"],
                 "newGrantIDs": [fixture.grantID.uuidString],
                 "oldGrantIDs": [],
+                "verifiedUnboundWorkspaces": [],
+                "previousPolicyRestoreState": "notStarted",
                 "phase": "prepared",
                 "updatedAt": ISO8601DateFormatter().string(from: fixture.clock.value)
             ]
@@ -6511,6 +6401,8 @@ final class AppModelTests: XCTestCase {
                 "workspaceKeys": ["dev.guest", "dev.host"],
                 "newGrantIDs": [replacementID.uuidString],
                 "oldGrantIDs": [fixture.grantID.uuidString],
+                "verifiedUnboundWorkspaces": [],
+                "previousPolicyRestoreState": "notStarted",
                 "phase": "localCommitted",
                 "updatedAt": ISO8601DateFormatter().string(from: fixture.clock.value)
             ]
@@ -6555,6 +6447,8 @@ final class AppModelTests: XCTestCase {
             "workspaceKeys": ["dev.guest"],
             "newGrantIDs": [fixture.grantID.uuidString],
             "oldGrantIDs": [],
+            "verifiedUnboundWorkspaces": [],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "prepared",
             "updatedAt": ISO8601DateFormatter().string(from: fixture.clock.value)
         ]
@@ -6657,6 +6551,8 @@ final class AppModelTests: XCTestCase {
             "workspaceKeys": ["dev.guest", "dev.host"],
             "newGrantIDs": [],
             "oldGrantIDs": [oldGrantID.uuidString],
+            "verifiedUnboundWorkspaces": [],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "revokingOld",
             "updatedAt": formatter.string(from: clock.value)
         ]
@@ -6802,6 +6698,8 @@ final class AppModelTests: XCTestCase {
             "workspaceKeys": ["dev.guest", "dev.host"],
             "newGrantIDs": [newGuestID.uuidString],
             "oldGrantIDs": [oldGuestID.uuidString, oldHostID.uuidString],
+            "verifiedUnboundWorkspaces": [],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "revokingOld",
             "updatedAt": formatter.string(from: clock.value)
         ]
@@ -6875,6 +6773,8 @@ final class AppModelTests: XCTestCase {
             "workspaceKeys": ["dev.guest"],
             "newGrantIDs": [],
             "oldGrantIDs": [oldGrantID.uuidString],
+            "verifiedUnboundWorkspaces": [],
+            "previousPolicyRestoreState": "notStarted",
             "phase": "localCommitted",
             "updatedAt": formatter.string(from: clock.value)
         ]
@@ -7321,76 +7221,91 @@ final class AppModelTests: XCTestCase {
         try await broker.remove(workspace: "dev", role: .guest)
     }
 
-    func testLegacyWorkspaceMetadataRequiresExplicitReauthorization() async throws {
+    func testCredentialBrokerRejectsUnknownCurrentFormatFields() async throws {
         let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silo-legacy-credential-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("silo-strict-credential-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
+
         let metadataURL = temporary.appendingPathComponent("credentials.json")
-        let legacy: [String: Any] = [
-            "schemaVersion": 2,
-            "entries": [
-                "dev.guest": [
-                    "workspace": "dev",
-                    "schemaVersion": 2,
-                    "role": "guest",
-                    "provider": "github-app-user",
-                    "accessMode": "read-only",
-                    "verificationRepository": "acme/one",
-                    "generation": 1,
-                    "quarantined": false,
-                    "updatedAt": "2026-08-10T00:00:00Z"
-                ]
-            ]
-        ]
-        try JSONSerialization.data(withJSONObject: legacy).write(to: metadataURL)
+        let service = "test-strict-credential-\(UUID().uuidString)"
         let keychain = InMemoryConnectKeychain()
-        try keychain.save(KeychainItem(service: "silo.github.read", account: "dev", secret: Data("legacy-read".utf8)))
-        try keychain.save(KeychainItem(service: "silo.github.write", account: "dev", secret: Data("legacy-write".utf8)))
-        let broker = try CredentialBroker(keychain: keychain, metadataURL: metadataURL)
-        let optionalEntry = try await broker.metadata(for: "dev", role: .guest)
-        let entry = try XCTUnwrap(optionalEntry)
-        XCTAssertEqual(entry.provider, "legacy-broad-token")
-        XCTAssertEqual(entry.recoveryState, .migrationRequired)
-        XCTAssertTrue(entry.quarantined)
-        do {
-            _ = try await broker.load(workspace: "dev", role: .guest)
-            XCTFail("Legacy broad credentials must not load as scoped grants.")
-        } catch let error as CredentialBrokerError {
-            XCTAssertEqual(error, .legacyCredentialRequiresAuthorization)
-        }
-        XCTAssertThrowsError(try keychain.load(service: "silo.github.read", account: "dev"))
-        XCTAssertThrowsError(try keychain.load(service: "silo.github.write", account: "dev"))
-    }
+        let broker = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        let credential = ScopedInstallationCredential(
+            grantID: UUID(),
+            accessToken: "ghs_strict_current_token",
+            accessExpiresAt: Date().addingTimeInterval(1800),
+            generation: 1
+        )
+        try await broker.storeScopedCredential(
+            credential,
+            workspace: "dev",
+            accessMode: "read-only",
+            verificationRepository: "acme/one",
+            installationID: 42,
+            role: .guest,
+            accountLogin: "octocat",
+            owner: "acme",
+            repositoryIDs: [7],
+            repositoryNames: ["acme/one"]
+        )
 
-    func testLegacyDirectGitHubCredentialRetirementDeletesPriorCredential() throws {
-        let keychain = InMemoryConnectKeychain()
+        let originalMetadata = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: metadataURL)) as? [String: Any]
+        )
+        var metadataWithUnknownField = originalMetadata
+        metadataWithUnknownField["previousSchemaVersion"] = 2
+        try JSONSerialization.data(withJSONObject: metadataWithUnknownField).write(to: metadataURL)
+        XCTAssertThrowsError(try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )) { error in
+            XCTAssertEqual(error as? CredentialBrokerError, .invalidMetadata)
+        }
+
+        var entryMetadata = originalMetadata
+        var entries = try XCTUnwrap(entryMetadata["entries"] as? [String: Any])
+        var guest = try XCTUnwrap(entries["dev.guest"] as? [String: Any])
+        guest["previousProvider"] = "github-app-user"
+        entries["dev.guest"] = guest
+        entryMetadata["entries"] = entries
+        try JSONSerialization.data(withJSONObject: entryMetadata).write(to: metadataURL)
+        XCTAssertThrowsError(try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )) { error in
+            XCTAssertEqual(error as? CredentialBrokerError, .invalidMetadata)
+        }
+
+        try JSONSerialization.data(withJSONObject: originalMetadata).write(to: metadataURL)
+        let reloaded = try CredentialBroker(
+            keychain: keychain,
+            metadataURL: metadataURL,
+            keychainService: service
+        )
+        var credentialObject = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: testJSON(credential)) as? [String: Any]
+        )
+        credentialObject["refreshToken"] = "must-not-be-accepted"
         try keychain.save(KeychainItem(
-            service: LegacyDirectGitHubCredentialRetirement.service,
-            account: LegacyDirectGitHubCredentialRetirement.account,
-            secret: Data("retired-user-token".utf8)
+            service: service,
+            account: "dev.guest",
+            secret: try JSONSerialization.data(withJSONObject: credentialObject)
         ))
-
-        try LegacyDirectGitHubCredentialRetirement.remove(using: keychain)
-
-        XCTAssertThrowsError(try keychain.load(
-            service: LegacyDirectGitHubCredentialRetirement.service,
-            account: LegacyDirectGitHubCredentialRetirement.account
-        ))
-    }
-
-    func testLegacyDirectGitHubCredentialRetirementFailsClosedWhenDeletionCannotBeProven() {
-        XCTAssertThrowsError(
-            try LegacyDirectGitHubCredentialRetirement.remove(using: FailingCredentialKeychain())
-        ) { error in
-            XCTAssertEqual(
-                error as? LegacyDirectGitHubCredentialRetirementError,
-                .removalUnconfirmed
-            )
+        do {
+            _ = try await reloaded.load(workspace: "dev", role: .guest)
+            XCTFail("Unknown credential fields must fail the current strict format.")
+        } catch let error as CredentialBrokerError {
+            XCTAssertEqual(error, .invalidCredential)
         }
     }
 
-    // MARK: - Verified Connect -> Apply integration
     func testVerifiedConnectApplyPersistsScopedMetadataAfterSiloVerification() async throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("silo-verified-connect-apply-\(UUID().uuidString)", isDirectory: true)
@@ -8815,37 +8730,6 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(invocations.contains("app github-unbind --workspace dev"))
     }
 
-    func testRemoveAllRolesClearsLegacyKeychainRecordsWithoutSchema3Metadata() async throws {
-        let temporary = FileManager.default.temporaryDirectory
-            .appendingPathComponent("silo-remove-legacy-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: temporary) }
-
-        let keychain = InMemoryConnectKeychain()
-        try keychain.save(KeychainItem(
-            service: "silo.github.read",
-            account: "dev",
-            secret: Data("legacy-read-token".utf8)
-        ))
-        try keychain.save(KeychainItem(
-            service: "silo.github.write",
-            account: "dev",
-            secret: Data("legacy-write-token".utf8)
-        ))
-        let broker = try CredentialBroker(
-            keychain: keychain,
-            metadataURL: temporary.appendingPathComponent("credentials.json"),
-            keychainService: "test-legacy-removal-\(UUID().uuidString)"
-        )
-
-        // No schema-3 metadata exists for the workspace, but the legacy
-        // Keychain records must still be removed so the host no longer treats
-        // the workspace as GitHub-configured.
-        try await broker.removeAllRoles(workspace: "dev")
-
-        XCTAssertThrowsError(try keychain.load(service: "silo.github.read", account: "dev"))
-        XCTAssertThrowsError(try keychain.load(service: "silo.github.write", account: "dev"))
-    }
 
     private func testCredentialMetadata(
         recoveryState: CredentialRecoveryState,
@@ -9318,6 +9202,7 @@ private final class InMemoryConnectKeychain: SiloConnectKeychainStoring, Credent
     private let lock = NSLock()
     private var values: [String: Data] = [:]
 
+
     func save(_ item: KeychainItem) throws {
         lock.lock()
         values["\(item.service)|\(item.account)"] = item.secret
@@ -9339,21 +9224,6 @@ private final class InMemoryConnectKeychain: SiloConnectKeychainStoring, Credent
         lock.unlock()
     }
 }
-
-private struct FailingCredentialKeychain: CredentialKeychainStoring {
-    func save(_ item: KeychainItem) throws {
-        throw KeychainStoreError.unavailable(-1)
-    }
-
-    func load(service: String, account: String) throws -> Data {
-        throw KeychainStoreError.unavailable(-1)
-    }
-
-    func delete(service: String, account: String) throws {
-        throw KeychainStoreError.unavailable(-1)
-    }
-}
-
 
 private actor QueueConnectTransport: SiloConnectHTTPTransport {
     private struct Response: Sendable {

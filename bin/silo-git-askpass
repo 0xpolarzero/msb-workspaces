@@ -7,13 +7,9 @@
 # emitted). Any non-github.com prompt exits 1 so the token can never be
 # handed to another host.
 #
-# Connect mode (legacy): answers with the host write token from
-# SILO_GITHUB_WRITE_TOKEN, a schema-3 app installation record, or the
-# SILO_KEYCHAIN_SERVICE/SILO_KEYCHAIN_ACCOUNT record (test mode).
+# Connect mode answers from the current schema-3 app installation record.
 set -eu
 
-service="${SILO_KEYCHAIN_SERVICE:-silo.github.write}"
-account="${SILO_KEYCHAIN_ACCOUNT:-}"
 security_bin="${SILO_SECURITY_BIN:-/usr/bin/security}"
 keychain_home="${SILO_KEYCHAIN_HOME:-$HOME}"
 test_keychain_dir="${SILO_TEST_KEYCHAIN_DIR:-}"
@@ -62,18 +58,6 @@ host_token() {
   printf '%s\n' "$token"
 }
 
-valid_installation_token() {
-  value="$1"
-  case "$value" in
-    ghs_*) ;;
-    *) return 1 ;;
-  esac
-  [ "${#value}" -le 4096 ] || return 1
-  case "$value" in
-    *[![:graph:]]*) return 1 ;;
-  esac
-}
-
 valid_scoped_record() {
   raw="$1"
   jq_bin="${SILO_JQ_BIN:-}"
@@ -99,14 +83,10 @@ EOF
 
 case "$prompt" in
   *sername*|*Username*)
-    if [ "${SILO_GITHUB_MODE:-}" = local ]; then
-      case "$prompt" in
-        *github.com*) printf '%s\n' 'x-access-token' ;;
-        *) exit 1 ;;
-      esac
-    else
-      printf '%s\n' 'x-access-token'
-    fi
+    case "$prompt" in
+      *github.com*) printf '%s\n' 'x-access-token' ;;
+      *) exit 1 ;;
+    esac
     ;;
   *assword*)
     if [ "${SILO_GITHUB_MODE:-}" = local ]; then
@@ -115,8 +95,6 @@ case "$prompt" in
         *) exit 1 ;;
       esac
       host_token || exit 1
-    elif valid_installation_token "${SILO_GITHUB_WRITE_TOKEN:-}"; then
-      printf '%s\n' "$SILO_GITHUB_WRITE_TOKEN"
     elif [ -n "${SILO_APP_KEYCHAIN_SERVICE:-}" ]; then
       raw="$(keychain_read "$SILO_APP_KEYCHAIN_SERVICE" "${SILO_APP_KEYCHAIN_ACCOUNT:-profile}")" || exit 1
       valid_scoped_record "$raw" || exit 1
@@ -124,10 +102,6 @@ case "$prompt" in
       "$jq_bin" -r '.accessToken' <<EOF
 $raw
 EOF
-    elif [ "${SILO_TEST_MODE:-0}" = 1 ] &&
-      [ -n "${SILO_KEYCHAIN_SERVICE:-}" ] &&
-      [ -n "${SILO_KEYCHAIN_ACCOUNT:-}" ]; then
-      keychain_read "$SILO_KEYCHAIN_SERVICE" "$SILO_KEYCHAIN_ACCOUNT" || exit 1
     else
       exit 1
     fi

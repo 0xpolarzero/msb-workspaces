@@ -1248,9 +1248,9 @@ actor SiloConnectClient {
             sessionToken = try container.decode(String.self, forKey: .sessionToken)
             account = try container.decode(GitHubAccount.self, forKey: .account)
             expiresAt = try container.decode(Date.self, forKey: .expiresAt)
-            issuer = try container.decodeIfPresent(String.self, forKey: .issuer) ?? ""
-            clientID = try container.decodeIfPresent(String.self, forKey: .clientID) ?? ""
-            redirectURI = try container.decodeIfPresent(String.self, forKey: .redirectURI) ?? ""
+            issuer = try container.decode(String.self, forKey: .issuer)
+            clientID = try container.decode(String.self, forKey: .clientID)
+            redirectURI = try container.decode(String.self, forKey: .redirectURI)
         }
 
         enum CodingKeys: String, CodingKey {
