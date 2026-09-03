@@ -29,7 +29,7 @@ async function renderMachineScenario() {
       finishSetup: vi.fn(),
     }}
   />)
-  await user.click(screen.getByRole("tab", { name: /Machines/ }))
+  await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
   return { user, saveMachineConfiguration }
 }
 
@@ -60,7 +60,7 @@ describe("onboarding", () => {
 
     expectHiddenPanelHeading("Dependencies")
     await user.click(screen.getByRole("button", { name: "Continue" }))
-    expectHiddenPanelHeading("Creating your machines")
+    expectHiddenPanelHeading("Creating your sandboxes")
     await user.click(screen.getByRole("button", { name: "Continue" }))
     expectHiddenPanelHeading("GitHub")
     expect(screen.queryByRole("tab", { name: "Git" })).not.toBeInTheDocument()
@@ -89,8 +89,8 @@ describe("onboarding", () => {
     dependencies.focus()
     await user.keyboard("{ArrowRight}")
 
-    expect(screen.getByRole("tab", { name: /Machines/ })).toHaveAttribute("aria-selected", "true")
-    expectHiddenPanelHeading("Creating your machines")
+    expect(screen.getByRole("tab", { name: /Sandboxes/ })).toHaveAttribute("aria-selected", "true")
+    expectHiddenPanelHeading("Creating your sandboxes")
   })
 
   it("shows running workspace feedback only in the sidebar outside Workspaces", async () => {
@@ -99,9 +99,9 @@ describe("onboarding", () => {
 
     for (const step of ["GitHub", "Review"]) {
       await user.click(screen.getByRole("tab", { name: new RegExp(step) }))
-      expect(screen.queryByLabelText("Machine progress")).not.toBeInTheDocument()
-      expect(screen.queryByText(/Creating machines ·/)).not.toBeInTheDocument()
-      expect(within(screen.getByRole("tab", { name: /Machines/ })).getByLabelText("In progress")).toBeVisible()
+      expect(screen.queryByLabelText("Sandbox progress")).not.toBeInTheDocument()
+      expect(screen.queryByText(/Creating sandboxes ·/)).not.toBeInTheDocument()
+      expect(within(screen.getByRole("tab", { name: /Sandboxes/ })).getByLabelText("In progress")).toBeVisible()
     }
   })
 
@@ -121,7 +121,7 @@ describe("onboarding", () => {
     await user.click(within(githubFooter).getByRole("button", { name: "Continue" }))
     expectHiddenPanelHeading("Review setup")
     expect(screen.getByText("GitHub not connected")).toBeVisible()
-    expect(screen.getByText("Taylor Example <taylor@example.com> → all 3 machines")).toBeVisible()
+    expect(screen.getByText("Taylor Example <taylor@example.com> → all 3 sandboxes")).toBeVisible()
   })
 
   it("continues while GitHub is connecting and marks it in progress", async () => {
@@ -155,7 +155,7 @@ describe("onboarding", () => {
     await user.click(continueButton)
 
     expectHiddenPanelHeading("Review setup")
-    expect(screen.getByText("0 repositories across 0 of 3 machines · 0 push-enabled repositories")).toBeVisible()
+    expect(screen.getByText("0 repositories across 0 of 3 sandboxes · 0 push-enabled repositories")).toBeVisible()
   })
 
   it("renders stable disconnected, connecting, and connected GitHub states", async () => {
@@ -227,8 +227,8 @@ describe("onboarding", () => {
     renderScenario("running", "connected")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    expect(screen.getByRole("region", { name: "Machine Git identity and repository access" })).toBeVisible()
-    expect(screen.queryByRole("heading", { name: "Machine Git identity and repository access" })).not.toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Sandbox Git identity and repository access" })).toBeVisible()
+    expect(screen.queryByRole("heading", { name: "Sandbox Git identity and repository access" })).not.toBeInTheDocument()
     expect(screen.queryByText("Selected repositories always allow local writes and commits.")).not.toBeInTheDocument()
     expect(screen.getAllByRole("combobox")).toHaveLength(3)
     expect(screen.queryByText(/read only|read-write/i)).not.toBeInTheDocument()
@@ -261,7 +261,7 @@ describe("onboarding", () => {
     expect(within(retained).getByRole("checkbox", { name: "Allow pushes for acme/platform-tools" })).toBeChecked()
 
     await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByText("3 repositories across 2 of 3 machines · 1 push-enabled repository")).toBeVisible()
+    expect(screen.getByText("3 repositories across 2 of 3 sandboxes · 1 push-enabled repository")).toBeVisible()
     expect(screen.getByText("Taylor Example <taylor@example.com> → dev, personal; Morgan Example <taylor@example.com> → playgrounds")).toBeVisible()
   })
 
@@ -295,7 +295,7 @@ describe("onboarding", () => {
     expect(screen.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
     await user.click(screen.getByRole("tab", { name: /Review/ }))
 
-    expect(screen.getByText("0 repositories across 0 of 3 machines · 0 push-enabled repositories")).toBeVisible()
+    expect(screen.getByText("0 repositories across 0 of 3 sandboxes · 0 push-enabled repositories")).toBeVisible()
   })
 
   it("exposes the Allow pushes explanation to keyboard users", async () => {
@@ -457,9 +457,9 @@ describe("onboarding", () => {
   it("filters unsafe activity and renders a bounded many-workspace list", async () => {
     const user = userEvent.setup()
     renderScenario()
-    await user.click(screen.getByRole("tab", { name: /Machines/ }))
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
 
-    expect(screen.getByLabelText("Machine activity")).toHaveTextContent("Verifying 'docs-build'.")
+    expect(screen.getByLabelText("Sandbox activity")).toHaveTextContent("Verifying 'docs-build'.")
     const elapsedTime = screen.getByLabelText("Elapsed time")
     expect(elapsedTime.parentElement).toHaveTextContent("docs-build02:18")
     expect(elapsedTime).toHaveTextContent("02:18")
@@ -502,7 +502,7 @@ describe("onboarding", () => {
     const disclosure = screen.getByRole("button", { name: "Collapse activity" })
     expectDisclosureIndicator(disclosure)
     await user.click(disclosure)
-    expect(screen.queryByLabelText("Machine activity")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
     expect(disclosure).toHaveAttribute("aria-expanded", "false")
     expect(activityCard).toHaveAttribute("data-state", "closed")
     expect(activityContent).toHaveAttribute("data-state", "closed")
@@ -514,7 +514,7 @@ describe("onboarding", () => {
     const expand = screen.getByRole("button", { name: "Expand activity" })
     await user.click(expand)
     expect(expand).toHaveAttribute("aria-expanded", "true")
-    expect(screen.getByLabelText("Machine activity")).toBeVisible()
+    expect(screen.getByLabelText("Sandbox activity")).toBeVisible()
     expect(activityContent).not.toHaveAttribute("hidden")
     expect(activityContent?.children).toHaveLength(1)
   })
@@ -523,7 +523,7 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new DOMException("Denied", "NotAllowedError"))
     renderScenario()
-    await user.click(screen.getByRole("tab", { name: /Machines/ }))
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
 
     await user.click(screen.getByRole("button", { name: "Copy activity" }))
 
@@ -598,7 +598,7 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     await user.click(screen.getByRole("button", { name: "Remove acme/silo from dev" }))
     await user.click(screen.getByRole("button", { name: "Continue" }))
-    expect(screen.getByText("0 repositories across 0 of 3 machines · 0 push-enabled repositories")).toBeVisible()
+    expect(screen.getByText("0 repositories across 0 of 3 sandboxes · 0 push-enabled repositories")).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Finish" }))
 
     expect(finishSetup).toHaveBeenCalledOnce()
@@ -633,7 +633,7 @@ describe("onboarding", () => {
     renderScenario("bootstrap-failure")
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByRole("alert")).toHaveTextContent("Candidate networking could not become ready for 'client-alpha-integration'.")
-    expect(screen.getByRole("alert")).toHaveTextContent("Repair machine startup or SSH forwarding for 'client-alpha-integration', then resume Setup.")
+    expect(screen.getByRole("alert")).toHaveTextContent("Repair sandbox startup or SSH forwarding for 'client-alpha-integration', then resume Setup.")
     expect(screen.getByRole("button", { name: "Finish" })).toBeDisabled()
   })
 
@@ -641,8 +641,8 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     renderScenario("dependency-failure")
 
-    await user.click(screen.getByRole("tab", { name: /Machines/ }))
-    expectHiddenPanelHeading("Machines are waiting")
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
+    expectHiddenPanelHeading("Sandboxes are waiting")
     expect(screen.queryByText("Complete the dependency checks before workspace creation starts.")).not.toBeInTheDocument()
   })
 
@@ -658,14 +658,14 @@ describe("onboarding", () => {
     dependency.unmount()
 
     render(<OnboardingApp source={onboardingScenarios["bootstrap-failure"]} actions={actions} />)
-    await user.click(screen.getByRole("tab", { name: /Machines/ }))
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
     await user.click(screen.getByRole("button", { name: "Retry" }))
     expect(retryWorkspaceSetup).toHaveBeenCalledOnce()
   })
 
   it("starts from the exact three production machine defaults instead of the activity stress fixture", async () => {
     await renderMachineScenario()
-    const list = screen.getByRole("list", { name: "Configured machines" })
+    const list = screen.getByRole("list", { name: "Configured sandboxes" })
     const rows = within(list).getAllByRole("listitem")
 
     expect(rows).toHaveLength(3)
@@ -680,7 +680,7 @@ describe("onboarding", () => {
     const { user, saveMachineConfiguration } = await renderMachineScenario()
 
     await user.click(screen.getByRole("button", { name: "Add" }))
-    await user.click(screen.getByRole("menuitem", { name: "New virtual machine" }))
+    await user.click(screen.getByRole("menuitem", { name: "New sandbox" }))
     const draftName = screen.getByRole("textbox", { name: "Machine name" })
     expect(draftName).toHaveValue("workspace-4")
     expect(draftName).toHaveFocus()
@@ -690,7 +690,7 @@ describe("onboarding", () => {
     expect(saveMachineConfiguration).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole("button", { name: "Add" }))
-    await user.click(screen.getByRole("menuitem", { name: "New virtual machine" }))
+    await user.click(screen.getByRole("menuitem", { name: "New sandbox" }))
     await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
     await user.type(screen.getByRole("textbox", { name: "Machine name" }), "build")
     await user.selectOptions(screen.getByRole("combobox", { name: "CPU limit" }), "4")
@@ -706,14 +706,14 @@ describe("onboarding", () => {
         { kind: "vm", name: "build", cpus: 4, maxCPUs: 12, memoryGiB: 32, maxMemoryGiB: 48, workspaceStorageGiB: 120, runtimeStorageGiB: 100 },
       ],
     })
-    expect(screen.getByRole("list", { name: "Configured machines" })).toHaveTextContent("build")
+    expect(screen.getByRole("list", { name: "Configured sandboxes" })).toHaveTextContent("build")
   })
 
   it("adds, validates, cancels, and saves an SSH machine without claiming a connection", async () => {
     const { user, saveMachineConfiguration } = await renderMachineScenario()
 
     await user.click(screen.getByRole("button", { name: "Add" }))
-    await user.click(screen.getByRole("menuitem", { name: "Add via SSH" }))
+    await user.click(screen.getByRole("menuitem", { name: "Connect a machine via SSH" }))
     expect(screen.getByRole("textbox", { name: "Machine name" })).toHaveValue("remote-1")
     expect(screen.getByRole("spinbutton", { name: "SSH port" })).toHaveValue(22)
     await user.click(screen.getByRole("button", { name: "Save" }))
@@ -724,7 +724,7 @@ describe("onboarding", () => {
     expect(screen.queryByDisplayValue("remote-1")).not.toBeInTheDocument()
 
     await user.click(screen.getByRole("button", { name: "Add" }))
-    await user.click(screen.getByRole("menuitem", { name: "Add via SSH" }))
+    await user.click(screen.getByRole("menuitem", { name: "Connect a machine via SSH" }))
     await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
     await user.type(screen.getByRole("textbox", { name: "Machine name" }), "staging")
     await user.type(screen.getByRole("textbox", { name: "SSH host" }), "staging.example.com")
@@ -819,7 +819,7 @@ describe("onboarding", () => {
     await user.type(screen.getByLabelText("Git name for dev"), "Renamed Author")
     expect(within(screen.getByRole("table", { name: "Selected repositories for dev" })).getByText("acme/silo")).toBeVisible()
 
-    await user.click(screen.getByRole("tab", { name: /Machines/ }))
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
     await user.click(screen.getByRole("button", { name: "Edit dev" }))
     await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
     await user.type(screen.getByRole("textbox", { name: "Machine name" }), "development")
@@ -872,7 +872,7 @@ describe("onboarding", () => {
     expect(screen.getByRole("button", { name: "Delete dev" })).toBeVisible()
 
     await user.click(screen.getByRole("button", { name: "Delete dev" }))
-    fireEvent.pointerDown(screen.getByRole("heading", { name: "Creating your machines" }))
+    fireEvent.pointerDown(screen.getByRole("heading", { name: "Creating your sandboxes" }))
     expect(screen.queryByRole("button", { name: "Confirm deletion of dev" })).not.toBeInTheDocument()
     expect(saveMachineConfiguration).not.toHaveBeenCalled()
 
@@ -914,7 +914,7 @@ describe("onboarding", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "CPU ceiling" }), "4")
     await user.click(screen.getByRole("button", { name: "Save" }))
 
-    expect(screen.getByText("Machine names must be unique.")).toBeVisible()
+    expect(screen.getByText("Sandbox names must be unique.")).toBeVisible()
     expect(screen.getByText("CPU limit cannot exceed its ceiling.")).toBeVisible()
     expect(saveMachineConfiguration).not.toHaveBeenCalled()
   })
@@ -936,19 +936,19 @@ describe("onboarding", () => {
       retryWorkspaceSetup: vi.fn(),
       finishSetup: vi.fn(),
     }} />)
-    await user.click(screen.getByRole("tab", { name: /Machines/ }))
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
     await user.click(screen.getByRole("button", { name: "Add" }))
-    await user.click(screen.getByRole("menuitem", { name: "New virtual machine" }))
+    await user.click(screen.getByRole("menuitem", { name: "New sandbox" }))
     await user.click(screen.getByRole("button", { name: "Save" }))
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Configure no more than 64 machines.")
+    expect(screen.getByRole("alert")).toHaveTextContent("Configure no more than 64 sandboxes.")
     expect(saveMachineConfiguration).not.toHaveBeenCalled()
   })
 
   it("mirrors final machine order and kind in Review while preserving activity collapse", async () => {
     const { user } = await renderMachineScenario()
     await user.click(screen.getByRole("button", { name: "Add" }))
-    await user.click(screen.getByRole("menuitem", { name: "Add via SSH" }))
+    await user.click(screen.getByRole("menuitem", { name: "Connect a machine via SSH" }))
     await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
     await user.type(screen.getByRole("textbox", { name: "Machine name" }), "remote")
     await user.type(screen.getByRole("textbox", { name: "SSH host" }), "remote.example.com")
@@ -959,11 +959,11 @@ describe("onboarding", () => {
 
     const activity = screen.getByRole("button", { name: "Collapse activity" })
     await user.click(activity)
-    expect(screen.queryByLabelText("Machine activity")).not.toBeInTheDocument()
+    expect(screen.queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
     expect(screen.getByTestId("machine-list")).toBeVisible()
 
     await user.click(screen.getByRole("tab", { name: /Review/ }))
-    const review = screen.getByRole("list", { name: "Machines in setup order" })
+    const review = screen.getByRole("list", { name: "Sandboxes in setup order" })
     expect(within(review).getAllByRole("listitem").map((row) => row.textContent)).toEqual([
       expect.stringContaining("remotesshops@remote.example.com:22"),
       expect.stringContaining("devvm8 CPU · 32 GB RAM"),

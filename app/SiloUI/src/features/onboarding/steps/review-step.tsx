@@ -17,12 +17,12 @@ interface ReviewStepProps {
 }
 
 const detailById: Record<ReviewQueueItemView["id"], string> = {
-  workspaceRun: "Applies the submitted machine boundary",
+  workspaceRun: "Applies the submitted sandbox boundary",
   workspaceVerify: "Runs complete deep verification and restores lifecycle state",
   githubRun: "Saves the retained repository policy",
   githubVerify: "Verifies scoped access and restored lifecycle state",
-  identityRun: "Saves each applied machine author name and email",
-  identityVerify: "Reads each applied machine identity back independently",
+  identityRun: "Saves each applied sandbox author name and email",
+  identityVerify: "Reads each applied sandbox identity back independently",
   completion: "Closes setup after every required verification succeeds",
 }
 
@@ -44,8 +44,8 @@ export function ReviewStep({ workspaceRetryable, queueItems, machines, identityS
       )}
 
       <section aria-labelledby="review-machines-heading" className="mb-3 rounded-lg border border-border bg-card p-3">
-        <h3 id="review-machines-heading" className="text-xs font-medium">Machines in setup order</h3>
-        <ol className="mt-2 grid gap-1" aria-label="Machines in setup order">
+        <h3 id="review-machines-heading" className="text-xs font-medium">Sandboxes in setup order</h3>
+        <ol className="mt-2 grid gap-1" aria-label="Sandboxes in setup order">
           {machines.map((machine, index) => (
             <li key={machine.id} className="flex min-w-0 items-center gap-2 text-xs">
               <span className="w-5 shrink-0 text-right font-mono text-[10px] text-muted-foreground">{index + 1}</span>

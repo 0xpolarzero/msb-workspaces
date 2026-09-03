@@ -76,8 +76,8 @@ function progress(
 }
 
 const configuredWorkspaceEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
-  progress(`Configuring machine '${name}'.`, "workspace-configuration", name, 0),
-  progress(`Machine '${name}' is configured.`, "workspace-configuration", name, 1),
+  progress(`Configuring sandbox '${name}'.`, "workspace-configuration", name, 0),
+  progress(`Sandbox '${name}' is configured.`, "workspace-configuration", name, 1),
 ])
 
 const networkedWorkspaceEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
@@ -99,7 +99,7 @@ const runningEvents = [
 ] satisfies SiloProgressEvent[]
 
 const completeEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
-  progress(`Workspace '${name}' is configured.`, "workspace-configuration", name, 1),
+  progress(`Sandbox '${name}' is configured.`, "workspace-configuration", name, 1),
   progress(`Candidate networking is ready for '${name}'.`, "workspace-networking", name, 1),
   progress(`Verification passed for '${name}'.`, "workspace-verification", name, 1),
 ]) satisfies SiloProgressEvent[]
@@ -162,7 +162,7 @@ const completeSource = {
     phase: "complete",
     requiresApproval: false,
     vmsStarted: true,
-    message: "Machine bootstrap and deep verification completed; the previous running set was restored.",
+    message: "Sandbox bootstrap and deep verification completed; the previous running set was restored.",
   },
   error: null,
 } satisfies OnboardingSource
@@ -206,7 +206,7 @@ const bootstrapFailureSource = {
   error: {
     code: "SILO_CANDIDATE_NETWORKING_FAILED",
     message: bootstrapFailureMessage,
-    recovery: "Repair machine startup or SSH forwarding for 'client-alpha-integration', then resume Setup.",
+    recovery: "Repair sandbox startup or SSH forwarding for 'client-alpha-integration', then resume Setup.",
     workspace: "client-alpha-integration",
     retryable: true,
   },

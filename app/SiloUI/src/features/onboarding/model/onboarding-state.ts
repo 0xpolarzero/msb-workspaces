@@ -69,8 +69,8 @@ const inventory = [
     id: "silo-tools",
     title: "Silo tools",
     items: [
-      ["silo", "Manage and verify machines", "silo-runtime"],
-      ["silo-ssh-proxy", "Route machine SSH"],
+      ["silo", "Manage and verify sandboxes", "silo-runtime"],
+      ["silo-ssh-proxy", "Route sandbox SSH"],
       ["silo-github-proxy", "Scope GitHub HTTPS and LFS"],
       ["silo-git-askpass", "Authenticate host Git"],
       ["silo-keychain-bridge", "Read host-held credentials"],
@@ -95,7 +95,7 @@ const inventory = [
       ["macOS 26+", "Supported system", "macos-version"],
       ["Apple Silicon", "arm64 architecture", "architecture"],
       ["20 GiB free", "Minimum disk space", "disk-space"],
-      ["16 GiB memory", "Machine recommendation", "memory"],
+      ["16 GiB memory", "Sandbox recommendation", "memory"],
       ["Silo protocol 1", "Current app handshake"],
       ["MicroSandbox runtime", "VM runtime available"],
     ],
@@ -105,8 +105,8 @@ const inventory = [
     title: "Host integration",
     items: [
       ["Host helper", "Signed, registered, reachable", "host-integration"],
-      ["Loopback aliases", "Fixed machine addresses"],
-      ["Host records", "Managed machine names"],
+      ["Loopback aliases", "Fixed sandbox addresses"],
+      ["Host records", "Managed sandbox names"],
     ],
   },
 ] as const
@@ -135,8 +135,8 @@ function workspaceDetail(event: SiloProgressEvent): string {
 }
 
 const queueLabels: Record<SetupQueueItemID, string> = {
-  workspaceRun: "Create machines",
-  workspaceVerify: "Verify machines",
+  workspaceRun: "Create sandboxes",
+  workspaceVerify: "Verify sandboxes",
   githubRun: "Save GitHub",
   githubVerify: "Verify GitHub",
   identityRun: "Save Git identities",

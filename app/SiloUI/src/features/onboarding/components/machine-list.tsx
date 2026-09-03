@@ -120,7 +120,7 @@ function MachineEditor({ editor, machines, onCancel, onSave }: {
   function save() {
     const nextErrors = validateMachine(draft, machines, editor.originalID)
     if (!editor.originalID && machines.length >= maximumMachineCount) {
-      nextErrors.form = `Configure no more than ${maximumMachineCount} machines.`
+      nextErrors.form = `Configure no more than ${maximumMachineCount} sandboxes.`
     }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length === 0) onSave(draft)
@@ -273,7 +273,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
     }
     if (machines.length === 1) {
       setPendingDelete(null)
-      setOperationError("Setup requires at least one machine.")
+      setOperationError("Setup requires at least one sandbox.")
       return
     }
     onMachinesChange(configurationRequest(machines.filter(({ id }) => id !== machine.id)).machines)
@@ -310,7 +310,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
       <section aria-labelledby="machine-list-heading" className="flex h-full min-h-0 flex-col">
         <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs">
           <div className="min-w-0">
-            <h3 id="machine-list-heading" className="font-medium">Machines</h3>
+            <h3 id="machine-list-heading" className="font-medium">Sandboxes</h3>
             <p className="text-[11px] text-muted-foreground">{machines.length} configured · {machines.filter(({ kind }) => kind === "vm").length} VM · {machines.filter(({ kind }) => kind === "ssh").length} SSH</p>
           </div>
           <Popover open={addOpen} onOpenChange={setAddOpen}>
@@ -319,15 +319,15 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                 <Plus aria-hidden="true" data-icon="inline-start" /> Add
               </Button>
             </PopoverTrigger>
-            <PopoverContent role="menu" aria-label="Add machine" align="end" className="grid w-48 gap-1 p-1">
-              <button type="button" role="menuitem" className="rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => startAdd("vm")}>New virtual machine</button>
-              <button type="button" role="menuitem" className="rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => startAdd("ssh")}>Add via SSH</button>
+            <PopoverContent role="menu" aria-label="Add sandbox" align="end" className="grid w-48 gap-1 p-1">
+              <button type="button" role="menuitem" className="rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => startAdd("vm")}>New sandbox</button>
+              <button type="button" role="menuitem" className="rounded-sm px-2 py-1.5 text-left text-xs hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => startAdd("ssh")}>Connect a machine via SSH</button>
             </PopoverContent>
           </Popover>
         </div>
 
         <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" data-testid="machine-list">
-          <ol className="divide-y divide-border p-0" aria-label="Configured machines">
+          <ol className="divide-y divide-border p-0" aria-label="Configured sandboxes">
             {displayMachines.map((machine, index) => {
               const isEditing = editor?.draft.id === machine.id
               const status = progress.workspaces.find(({ name }) => name === machine.name)

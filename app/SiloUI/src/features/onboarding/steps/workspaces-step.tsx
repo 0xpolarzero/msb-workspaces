@@ -22,7 +22,7 @@ export function WorkspacesStep({ machines, progress, onMachinesChange, onRetry }
   return (
     <section aria-labelledby="workspaces-title" className="mx-auto flex h-full min-h-0 max-w-4xl flex-col">
       <h2 id="workspaces-title" className="sr-only" data-visual-heading="hidden">
-        {progress.status === "failed" ? "Machine setup needs action" : progress.status === "succeeded" ? "Machines are ready" : progress.status === "running" ? "Creating your machines" : "Machines are waiting"}
+        {progress.status === "failed" ? "Sandbox setup needs action" : progress.status === "succeeded" ? "Sandboxes are ready" : progress.status === "running" ? "Creating your sandboxes" : "Sandboxes are waiting"}
       </h2>
 
       <div className="shrink-0 space-y-4">
@@ -33,7 +33,7 @@ export function WorkspacesStep({ machines, progress, onMachinesChange, onRetry }
                 : <Clock3 className="mt-0.5 size-5 text-muted-foreground" aria-hidden="true" />}
           <div className="min-w-0">
             <div className="flex min-w-0 items-baseline gap-2">
-              <div className="truncate font-medium">{progress.currentWorkspace ?? "Machine setup"}</div>
+              <div className="truncate font-medium">{progress.currentWorkspace ?? "Sandbox setup"}</div>
               <span aria-label="Elapsed time" className="shrink-0 font-mono text-[11px] text-muted-foreground">{formatElapsed(progress.elapsedSeconds)}</span>
             </div>
             <div className="select-text text-xs text-muted-foreground">{progress.currentMessage}</div>
@@ -56,7 +56,7 @@ export function WorkspacesStep({ machines, progress, onMachinesChange, onRetry }
 
       {progress.status === "failed" && (
         <div className="mt-3 flex shrink-0 items-start justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/8 p-3 text-xs text-destructive" role="alert">
-          <span className="select-text">{progress.recovery ?? "Resolve the reported machine issue, then resume Setup."}</span>
+          <span className="select-text">{progress.recovery ?? "Resolve the reported sandbox issue, then resume Setup."}</span>
           {progress.retryable && (
             <Button type="button" variant="outline" size="xs" className="shrink-0 text-foreground" onClick={onRetry}>
               Retry

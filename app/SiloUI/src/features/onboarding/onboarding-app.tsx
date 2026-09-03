@@ -93,7 +93,7 @@ function workspaceIdentitySummary(
 
   const summaries = [...appliedGroups.values()].map(({ identity, workspaces }) => {
     const target = workspaces.length === workspaceNames.length
-      ? `all ${workspaceNames.length} machines`
+      ? `all ${workspaceNames.length} sandboxes`
       : workspaces.join(", ")
     return `${gitIdentityLabel(identity)} → ${target}`
   })
@@ -205,7 +205,7 @@ export function OnboardingApp({
   const repositoryLabel = repositoryCount === 1 ? "repository" : "repositories"
   const pushRepositoryLabel = pushEnabledRepositoryCount === 1 ? "repository" : "repositories"
   const githubSummary = githubConnectionState === "connected"
-    ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${machines.length} machines · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
+    ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${machines.length} sandboxes · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
     : "GitHub not connected"
   const identitySummary = workspaceIdentitySummary(
     workspaceIdentities,

@@ -117,7 +117,7 @@ export function validateMachine(
     }
   }
   if (machines.some(({ id, name }) => id !== originalID && name.toLowerCase() === machine.name.toLowerCase())) {
-    errors.name = "Machine names must be unique."
+    errors.name = "Sandbox names must be unique."
   }
   if (!/^[a-z][a-z0-9-]{0,31}$/.test(machine.name)) {
     errors.name = "Use a lowercase name that starts with a letter and contains only letters, numbers, or hyphens."
