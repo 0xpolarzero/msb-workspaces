@@ -1,58 +1,10 @@
-import { Activity, Check, Code2, Copy, ExternalLink, File, Folder, GitBranch, Play, RotateCw, Search, Square, Terminal, TriangleAlert } from "lucide-react"
+import { Activity, Check, Copy, ExternalLink, File, Folder, GitBranch, Search, TriangleAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DetailCard, PageHeader, WorkspaceStatus } from "@/features/application/components/application-ui"
-import type { ApplicationActions, ApplicationWorkspace, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ApplicationWorkspace, WorkspaceDetailSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
-
-const sections: { id: WorkspaceSection; label: string }[] = [
-  { id: "summary", label: "Summary" },
-  { id: "files", label: "Files" },
-  { id: "logs", label: "Logs" },
-  { id: "network", label: "Network" },
-  { id: "activity", label: "Activity" },
-]
-
-function Summary({ workspace, actions }: { workspace: ApplicationWorkspace; actions: ApplicationActions }) {
-  return (
-    <div className="grid gap-3 lg:grid-cols-2">
-      <DetailCard title="Status" description={workspace.stateDetail}>
-        <div className="flex flex-wrap items-center gap-2">
-          <WorkspaceStatus state={workspace.state} />
-          {workspace.state === "running" ? (
-            <>
-              <Button variant="outline" size="sm" onClick={() => actions.openTerminal(workspace.id)}><Terminal data-icon="inline-start" />Terminal</Button>
-              <Button variant="outline" size="sm" onClick={() => actions.openEditor(workspace.id)}><Code2 data-icon="inline-start" />Editor</Button>
-              <Button variant="ghost" size="sm" onClick={() => actions.restartWorkspace(workspace.id)}><RotateCw data-icon="inline-start" />Restart</Button>
-              <Button variant="ghost" size="sm" onClick={() => actions.stopWorkspace(workspace.id)}><Square data-icon="inline-start" />Stop</Button>
-            </>
-          ) : (
-            <Button variant="outline" size="sm" onClick={() => actions.startWorkspace(workspace.id)}><Play data-icon="inline-start" />Start</Button>
-          )}
-        </div>
-      </DetailCard>
-      <DetailCard title="Resources" description="Current allocation">
-        <dl className="grid grid-cols-3 gap-3 text-sm">
-          <div><dt className="text-xs text-muted-foreground">CPU</dt><dd className="mt-1 font-medium">{workspace.cpus} cores</dd></div>
-          <div><dt className="text-xs text-muted-foreground">Memory</dt><dd className="mt-1 font-medium">{workspace.memoryGiB} GiB</dd></div>
-          <div><dt className="text-xs text-muted-foreground">Storage</dt><dd className="mt-1 font-medium">{workspace.storageGiB} GiB</dd></div>
-        </dl>
-      </DetailCard>
-      <DetailCard title="Connections" description="Managed host access">
-        <dl className="grid gap-2 text-sm">
-          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Host</dt><dd className="font-mono text-xs">{workspace.host}</dd></div>
-          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">GitHub</dt><dd>{workspace.githubRepositories.length} repositories</dd></div>
-          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">Secrets</dt><dd>{workspace.secretNames.length} available</dd></div>
-        </dl>
-      </DetailCard>
-      <DetailCard title="Freshness" description={workspace.freshness === "fresh" ? "Current snapshot" : "Showing last known state"}>
-        <p className="text-sm text-muted-foreground">Silo last verified this sandbox {workspace.freshness === "fresh" ? "just now" : "3 minutes ago"}.</p>
-      </DetailCard>
-    </div>
-  )
-}
 
 function Files({ workspace }: { workspace: ApplicationWorkspace }) {
   return (
@@ -148,18 +100,14 @@ export function WorkspacesPage({
   selectedWorkspace,
   section,
   logQuery,
-  actions,
   onWorkspaceChange,
-  onSectionChange,
   onLogQueryChange,
 }: {
   workspaces: ApplicationWorkspace[]
   selectedWorkspace: string
-  section: WorkspaceSection
+  section: WorkspaceDetailSection
   logQuery: string
-  actions: ApplicationActions
   onWorkspaceChange: (workspace: string) => void
-  onSectionChange: (section: WorkspaceSection) => void
   onLogQueryChange: (query: string) => void
 }) {
   const workspace = workspaces.find((item) => item.id === selectedWorkspace) ?? workspaces[0]
@@ -191,16 +139,12 @@ export function WorkspacesPage({
           </div>
           <WorkspaceStatus state={workspace.state} detail={workspace.stateDetail} />
         </div>
-        <Tabs value={section} onValueChange={(value) => onSectionChange(value as WorkspaceSection)} className="mt-4 gap-4">
-          <TabsList variant="line" className="w-full justify-start overflow-x-auto" aria-label={`${workspace.id} sections`}>
-            {sections.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
-          </TabsList>
-          {section === "summary" && <Summary workspace={workspace} actions={actions} />}
+        <div className="mt-4">
           {section === "files" && <Files workspace={workspace} />}
           {section === "logs" && <Logs workspace={workspace} query={logQuery} onQueryChange={onLogQueryChange} />}
           {section === "network" && <Network workspace={workspace} />}
           {section === "activity" && <ActivityLog workspace={workspace} />}
-        </Tabs>
+        </div>
       </div>
     </div>
   )

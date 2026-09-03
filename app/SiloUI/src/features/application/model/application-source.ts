@@ -1,6 +1,7 @@
-export type ApplicationTab = "overview" | "workspaces" | "github" | "secrets" | "backup" | "settings"
+export type ApplicationTab = "workspaces" | "github" | "secrets" | "backup" | "settings"
 export type SettingsSection = "general" | "notifications"
-export type WorkspaceSection = "summary" | "files" | "logs" | "network" | "activity"
+export type WorkspaceSection = "overview" | "files" | "logs" | "network" | "activity"
+export type WorkspaceDetailSection = Exclude<WorkspaceSection, "overview">
 export type WorkspaceState = "running" | "starting" | "stopped" | "failed"
 
 export interface ApplicationRepository {

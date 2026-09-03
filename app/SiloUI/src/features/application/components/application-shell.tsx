@@ -1,19 +1,23 @@
-import type { ReactNode } from "react"
-import { Bell, Boxes, ChevronRight, GitFork, HardDrive, KeyRound, LayoutDashboard, Settings2, SlidersHorizontal } from "lucide-react"
+import { useState, type ReactNode } from "react"
+import { Activity, Bell, Boxes, ChevronRight, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import type { ApplicationTab, SettingsSection } from "@/features/application/model/application-source"
-import { useMediaQuery } from "@/hooks/use-media-query"
+import type { ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 const primaryItems = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "workspaces", label: "Sandboxes", icon: Boxes },
   { id: "github", label: "GitHub", icon: GitFork },
   { id: "secrets", label: "Secrets", icon: KeyRound },
   { id: "backup", label: "Backup", icon: HardDrive },
+] as const
+
+const workspaceItems = [
+  { id: "overview", label: "Overview", icon: LayoutDashboard },
+  { id: "files", label: "Files", icon: File },
+  { id: "logs", label: "Logs", icon: Terminal },
+  { id: "network", label: "Network", icon: Network },
+  { id: "activity", label: "Activity", icon: Activity },
 ] as const
 
 const settingsItems = [
@@ -21,36 +25,107 @@ const settingsItems = [
   { id: "notifications", label: "Notifications", icon: Bell },
 ] as const
 
-function NavigationItems({ items }: { items: ReadonlyArray<{ id: ApplicationTab; label: string; icon: typeof LayoutDashboard }> }) {
-  return items.map(({ id, label, icon: Icon }) => (
-    <TabsTrigger
-      key={id}
-      value={id}
-      data-appearance="borderless"
-      className="h-10 min-w-fit flex-none justify-center gap-2 rounded-md border-0 bg-transparent px-3 py-2 text-xs text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]"
+function NavigationButton({
+  id,
+  label,
+  icon: Icon,
+  active,
+  onClick,
+}: {
+  id: ApplicationTab
+  label: string
+  icon: typeof Boxes
+  active: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      id={`application-nav-${id}`}
+      type="button"
+      data-navigation-level="primary"
+      aria-current={active ? "page" : undefined}
+      aria-controls={`application-panel-${id}`}
+      onClick={onClick}
+      className={cn(
+        "flex h-10 min-w-fit flex-none items-center justify-center gap-2 rounded-md px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]",
+        active && "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
+      )}
     >
       <Icon className="size-4" />
-      {label}
-    </TabsTrigger>
-  ))
+      <span className="md:flex-1 md:text-left">{label}</span>
+    </button>
+  )
 }
 
-function SettingsNavigation({ section, onSectionChange }: { section: SettingsSection; onSectionChange: (section: SettingsSection) => void }) {
+function DisclosureNavigationItem({
+  id,
+  label,
+  icon,
+  active,
+  expanded,
+  onSelect,
+  onToggle,
+  children,
+}: {
+  id: "workspaces" | "settings"
+  label: string
+  icon: typeof Boxes
+  active: boolean
+  expanded: boolean
+  onSelect: () => void
+  onToggle: () => void
+  children: ReactNode
+}) {
+  const menuID = `${id}-sections`
+
   return (
-    <div id="settings-sections" role="group" aria-label="Settings sections" className="mt-1 flex gap-1 border-t border-border pt-2 md:ml-6 md:grid md:border-t-0 md:border-l md:pt-0 md:pl-2">
-      {settingsItems.map(({ id, label, icon: Icon }) => (
+    <div className="flex gap-1 md:grid">
+      <div className="relative">
+        <NavigationButton id={id} label={label} icon={icon} active={active} onClick={onSelect} />
+        <button
+          type="button"
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${label} menu`}
+          aria-expanded={expanded}
+          aria-controls={menuID}
+          onClick={onToggle}
+          className="absolute top-1 right-1 grid size-8 place-items-center rounded-md text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70"
+        >
+          <ChevronRight className={cn("size-3.5 transition-transform", expanded && "rotate-90")} />
+        </button>
+      </div>
+      {expanded && <div id={menuID}>{children}</div>}
+    </div>
+  )
+}
+
+function SubNavigation<Section extends string>({
+  label,
+  items,
+  section,
+  active,
+  onSelect,
+}: {
+  label: string
+  items: ReadonlyArray<{ id: Section; label: string; icon: typeof Boxes }>
+  section: Section
+  active: boolean
+  onSelect: (section: Section) => void
+}) {
+  return (
+    <div role="group" aria-label={label} className="flex gap-1 md:grid md:pl-3">
+      {items.map(({ id, label: itemLabel, icon: Icon }) => (
         <button
           key={id}
           type="button"
-          aria-current={section === id ? "page" : undefined}
-          onClick={() => onSectionChange(id)}
+          aria-current={active && section === id ? "page" : undefined}
+          onClick={() => onSelect(id)}
           className={cn(
-            "flex h-8 min-w-fit items-center justify-center gap-2 rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start",
-            section === id && "bg-muted font-medium text-foreground",
+            "flex h-8 min-w-fit items-center justify-center gap-2 rounded-md px-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start",
+            active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
           <Icon className="size-3.5" />
-          {label}
+          {itemLabel}
         </button>
       ))}
     </div>
@@ -59,52 +134,91 @@ function SettingsNavigation({ section, onSectionChange }: { section: SettingsSec
 
 export function ApplicationShell({
   activeTab,
+  workspaceSection,
   settingsSection,
   onTabChange,
+  onWorkspaceSectionChange,
   onSettingsSectionChange,
   children,
 }: {
   activeTab: ApplicationTab
+  workspaceSection: WorkspaceSection
   settingsSection: SettingsSection
   onTabChange: (tab: ApplicationTab) => void
+  onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
   children: ReactNode
 }) {
-  const usesSidebar = useMediaQuery("(min-width: 48rem)")
-  const settingsOpen = activeTab === "settings"
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(activeTab === "workspaces")
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(activeTab === "settings")
+
+  function selectTab(tab: ApplicationTab) {
+    if (tab === "workspaces") setWorkspaceMenuOpen(true)
+    if (tab === "settings") setSettingsMenuOpen(true)
+    onTabChange(tab)
+  }
 
   return (
     <SiloWindow title="Silo" label="Silo">
-      <Tabs
-        orientation={usesSidebar ? "vertical" : "horizontal"}
-        value={activeTab}
-        onValueChange={(value) => onTabChange(value as ApplicationTab)}
-        className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[13.5rem_minmax(0,1fr)] md:grid-rows-1"
-      >
+      <div className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[13.5rem_minmax(0,1fr)] md:grid-rows-1">
         <nav aria-label="Silo navigation" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:flex md:flex-col md:border-r md:border-b-0 md:py-5">
           <div className="mb-5 hidden items-center gap-3 border-b border-border px-3 pb-5 md:flex">
             <SiloMark className="size-8" />
             <span className="text-base font-semibold tracking-tight">Silo</span>
           </div>
-          <TabsList className="flex h-auto w-max min-w-full items-stretch gap-1 bg-transparent p-0 md:w-full md:flex-1 md:flex-col" aria-label="App sections">
-            <NavigationItems items={primaryItems} />
-            <div className="mx-3 my-2 hidden border-t border-border md:mt-auto md:block" aria-hidden="true" />
-            <TabsTrigger
-              value="settings"
-              data-appearance="borderless"
-              aria-expanded={settingsOpen}
-              aria-controls={settingsOpen ? "settings-sections" : undefined}
-              className="h-10 min-w-fit flex-none justify-center gap-2 rounded-md border-0 bg-transparent px-3 py-2 text-xs text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]"
-            >
-              <Settings2 className="size-4" />
-              <span className="md:flex-1 md:text-left">Settings</span>
-              <ChevronRight className={cn("size-3.5 transition-transform", settingsOpen && "rotate-90")} />
-            </TabsTrigger>
-          </TabsList>
-          {settingsOpen && <SettingsNavigation section={settingsSection} onSectionChange={onSettingsSectionChange} />}
+          <div className="flex w-max min-w-full items-start gap-1 md:min-h-0 md:w-full md:flex-1 md:flex-col">
+            <div className="flex gap-1 md:grid">
+              <DisclosureNavigationItem
+                id="workspaces"
+                label="Sandboxes"
+                icon={Boxes}
+                active={activeTab === "workspaces"}
+                expanded={workspaceMenuOpen}
+                onSelect={() => selectTab("workspaces")}
+                onToggle={() => setWorkspaceMenuOpen((open) => !open)}
+              >
+                <SubNavigation
+                  label="Sandbox sections"
+                  items={workspaceItems}
+                  section={workspaceSection}
+                  active={activeTab === "workspaces"}
+                  onSelect={(section) => {
+                    onWorkspaceSectionChange(section)
+                    selectTab("workspaces")
+                  }}
+                />
+              </DisclosureNavigationItem>
+              {primaryItems.map(({ id, label, icon }) => (
+                <NavigationButton key={id} id={id} label={label} icon={icon} active={activeTab === id} onClick={() => selectTab(id)} />
+              ))}
+            </div>
+            <div className="flex gap-1 md:mt-auto md:grid">
+              <div className="mx-3 my-2 hidden border-t border-border md:block" aria-hidden="true" />
+              <DisclosureNavigationItem
+                id="settings"
+                label="Settings"
+                icon={Settings2}
+                active={activeTab === "settings"}
+                expanded={settingsMenuOpen}
+                onSelect={() => selectTab("settings")}
+                onToggle={() => setSettingsMenuOpen((open) => !open)}
+              >
+                <SubNavigation
+                  label="Settings sections"
+                  items={settingsItems}
+                  section={settingsSection}
+                  active={activeTab === "settings"}
+                  onSelect={(section) => {
+                    onSettingsSectionChange(section)
+                    selectTab("settings")
+                  }}
+                />
+              </DisclosureNavigationItem>
+            </div>
+          </div>
         </nav>
         <div className="min-h-0 min-w-0 overflow-y-auto">{children}</div>
-      </Tabs>
+      </div>
     </SiloWindow>
   )
 }
