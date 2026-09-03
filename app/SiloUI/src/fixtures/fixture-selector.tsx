@@ -1,6 +1,8 @@
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
 
+import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
+
 export function FixtureSelector({ scenario, githubState }: { scenario: ScenarioName; githubState?: GitHubFixtureState }) {
   function selectFixture(parameter: string, value: string) {
     const url = new URL(window.location.href)
@@ -34,6 +36,7 @@ export function FixtureSelector({ scenario, githubState }: { scenario: ScenarioN
           {githubFixtureStates.map((state) => <option key={state} value={state}>{state}</option>)}
         </select>
       </label>
+      <ThemeToggle />
     </aside>
   )
 }

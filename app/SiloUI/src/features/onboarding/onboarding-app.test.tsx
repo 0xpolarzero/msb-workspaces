@@ -7,7 +7,10 @@ import type { GitHubConnectionState } from "@/features/onboarding/model/onboardi
 import { projectOnboarding } from "@/features/onboarding/model/onboarding-state"
 import { githubStateFromSearch, onboardingScenarios, repositoryFixtures } from "@/fixtures/scenarios"
 
+import { FixtureSelector } from "@/fixtures/fixture-selector"
+
 function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
+  render(<FixtureSelector scenario="running" />)
   return render(<OnboardingApp source={onboardingScenarios[name]} initialGitHubConnectionState={githubState} repositoryOptions={repositoryFixtures} actions={{
     saveMachineConfiguration: vi.fn(),
     repairRuntime: vi.fn(),
@@ -972,7 +975,7 @@ describe("onboarding", () => {
     ])
   })
 
-  it("switches the theme from the footer and persists the choice", async () => {
+  it("switches the theme from the fixture controls and persists the choice", async () => {
     const user = userEvent.setup()
     localStorage.removeItem("silo-theme")
     renderScenario()

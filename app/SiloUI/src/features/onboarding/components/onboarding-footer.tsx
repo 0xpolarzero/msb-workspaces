@@ -2,7 +2,6 @@ import { AlertCircle, Check, Clock3, LoaderCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import type { OnboardingStep, OnboardingViewModel } from "@/features/onboarding/model/onboarding-state"
-import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
 interface OnboardingFooterProps {
   activeStep: OnboardingStep
@@ -32,8 +31,7 @@ export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue }: 
               : <Clock3 className="size-3.5 shrink-0" />}
         <span className="truncate">{statusText}</span>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <ThemeToggle />
+      <div className="flex shrink-0 gap-2">
         <Button variant="outline" onClick={onBack} disabled={activeStep === "dependencies"}>Back</Button>
         <Button onClick={onContinue} disabled={isReview ? !viewModel.finishEnabled : dependenciesBlocked}>
           {isReview ? "Finish" : "Continue"}
