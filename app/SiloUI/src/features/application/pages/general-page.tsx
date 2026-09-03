@@ -21,17 +21,20 @@ function SettingRow({ icon: Icon, title, description, control }: { icon: typeof 
 export function GeneralPage({ source }: { source: ApplicationSource }) {
   const [launchAtLogin, setLaunchAtLogin] = useState(source.preferences.launchAtLogin)
   const [startAtLaunch, setStartAtLaunch] = useState(source.preferences.startWorkspacesAtLaunch)
-  const [startupWorkspaces, setStartupWorkspaces] = useState<Set<string>>(() => new Set(["dev"]))
+  const [startupWorkspaces, setStartupWorkspaces] = useState<Set<string>>(() => {
+    const initial = source.workspaces.find(({ machine }) => machine.name === "dev") ?? source.workspaces[0]
+    return new Set(initial ? [initial.machine.id] : [])
+  })
   const [pollingCadence, setPollingCadence] = useState(source.preferences.pollingCadence)
   const [terminal, setTerminal] = useState(source.preferences.terminal)
   const [editor, setEditor] = useState(source.preferences.editor)
   const [reduceMotion, setReduceMotion] = useState(source.preferences.reduceMotion)
 
-  function toggleStartupWorkspace(workspace: string, checked: boolean) {
+  function toggleStartupWorkspace(workspaceID: string, checked: boolean) {
     setStartupWorkspaces((current) => {
       const next = new Set(current)
-      if (checked) next.add(workspace)
-      else next.delete(workspace)
+      if (checked) next.add(workspaceID)
+      else next.delete(workspaceID)
       return next
     })
   }
@@ -48,7 +51,7 @@ export function GeneralPage({ source }: { source: ApplicationSource }) {
             {startAtLaunch && (
               <div className="grid gap-2 py-3 pl-7">
                 {source.workspaces.map((workspace) => (
-                  <label key={workspace.id} className="flex items-center gap-2 text-sm"><Checkbox checked={startupWorkspaces.has(workspace.id)} onCheckedChange={(checked) => toggleStartupWorkspace(workspace.id, checked === true)} />{workspace.id}</label>
+                  <label key={workspace.machine.id} className="flex items-center gap-2 text-sm"><Checkbox checked={startupWorkspaces.has(workspace.machine.id)} onCheckedChange={(checked) => toggleStartupWorkspace(workspace.machine.id, checked === true)} />{workspace.machine.name}</label>
                 ))}
               </div>
             )}

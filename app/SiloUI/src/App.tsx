@@ -20,6 +20,7 @@ export default function App() {
           source={applicationSourceForScenario(scenario, githubState)}
           actions={{
             repairRuntime: () => undefined,
+            saveMachineConfiguration: (_request) => undefined,
             startWorkspace: (_workspace) => undefined,
             pauseWorkspace: (_workspace) => undefined,
             stopWorkspace: (_workspace) => undefined,

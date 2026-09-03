@@ -1,18 +1,17 @@
 import type { ApplicationSource, ApplicationWorkspace } from "@/features/application/model/application-source"
+import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
+
+const [devMachine, playgroundsMachine, personalMachine] = productionMachineDefaults
 
 const baseWorkspaces: ApplicationWorkspace[] = [
   {
-    id: "dev",
-    kind: "vm",
+    machine: { ...devMachine },
     purpose: "Primary software development workspace",
     state: "running",
     stateDetail: "Running for 2h 18m",
     freshness: "fresh",
     host: "dev.silo.test",
-    cpus: 8,
-    memoryGiB: 32,
-    storageGiB: 120,
     repositories: [
       { path: "acme/silo", branch: "main", ahead: 2, behind: 0, dirty: true },
       { path: "acme/design-system", branch: "next", ahead: 0, behind: 1, dirty: false },
@@ -35,16 +34,12 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     secretNames: ["PACKAGE_TOKEN", "DATABASE_URL"],
   },
   {
-    id: "playgrounds",
-    kind: "vm",
+    machine: { ...playgroundsMachine },
     purpose: "Experiments and disposable prototypes",
     state: "stopped",
     stateDetail: "Stopped yesterday",
     freshness: "fresh",
     host: "playgrounds.silo.test",
-    cpus: 4,
-    memoryGiB: 16,
-    storageGiB: 60,
     repositories: [{ path: "acme/platform-tools", branch: "main", ahead: 0, behind: 0, dirty: false }],
     ports: [],
     logs: ["17:02:11  silo  Workspace stopped cleanly"],
@@ -53,16 +48,12 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     secretNames: ["PACKAGE_TOKEN"],
   },
   {
-    id: "personal",
-    kind: "vm",
+    machine: { ...personalMachine },
     purpose: "Personal projects and services",
     state: "stopped",
     stateDetail: "Stopped 4 days ago",
     freshness: "fresh",
     host: "personal.silo.test",
-    cpus: 6,
-    memoryGiB: 16,
-    storageGiB: 100,
     repositories: [{ path: "taylor/docs-site", branch: "main", ahead: 0, behind: 0, dirty: false }],
     ports: [],
     logs: ["09:41:02  silo  Workspace stopped cleanly"],
@@ -82,7 +73,7 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
     }))
   }
   if (scenario === "bootstrap-failure") {
-    return baseWorkspaces.map((workspace) => workspace.id === "dev" ? {
+    return baseWorkspaces.map((workspace) => workspace.machine.name === "dev" ? {
       ...workspace,
       state: "failed",
       stateDetail: "Start failed 3m ago",

@@ -3,7 +3,8 @@ import { AlertCircle, Check, Clock3, LoaderCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { ActivityOutput } from "@/features/onboarding/components/activity-output"
-import { MachineList } from "@/features/onboarding/components/machine-list"
+import { MachineList } from "@/features/sandboxes/components/machine-list"
+import { machineSummary } from "@/features/sandboxes/model/machine-summary"
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import type { WorkspaceProgressView } from "@/features/onboarding/model/onboarding-state"
 
@@ -51,7 +52,15 @@ export function WorkspacesStep({ machines, progress, onMachinesChange, onRetry }
       </div>
 
       <div className="mt-4 min-h-0 flex-1 border-t border-border pt-4">
-        <MachineList machines={machines} progress={progress} onMachinesChange={onMachinesChange} />
+        <MachineList
+          machines={machines}
+          onMachinesChange={onMachinesChange}
+          getRowPresentation={(machine) => {
+            const status = progress.workspaces.find(({ name }) => name === machine.name)
+            const summary = machineSummary(machine)
+            return { detail: <span title={summary}>{summary}{status ? ` · ${status.detail}` : ""}</span> }
+          }}
+        />
       </div>
 
       {progress.status === "failed" && (

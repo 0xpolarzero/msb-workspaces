@@ -10,7 +10,7 @@ import type { ApplicationSource } from "@/features/application/model/application
 export function GitHubPage({ source }: { source: ApplicationSource }) {
   const [editing, setEditing] = useState(false)
   const [disabled, setDisabled] = useState(false)
-  const [selected, setSelected] = useState(() => new Set(source.workspaces.flatMap((workspace) => workspace.githubRepositories.map((repository) => `${workspace.id}:${repository}`))))
+  const [selected, setSelected] = useState(() => new Set(source.workspaces.flatMap((workspace) => workspace.githubRepositories.map((repository) => `${workspace.machine.id}:${repository}`))))
 
   function toggleRepository(key: string, checked: boolean) {
     setSelected((current) => {
@@ -58,14 +58,14 @@ export function GitHubPage({ source }: { source: ApplicationSource }) {
         />
         <div className="grid gap-2">
           {source.workspaces.map((workspace) => (
-            <Card key={workspace.id} size="sm" className={disabled ? "opacity-60" : undefined}>
+            <Card key={workspace.machine.id} size="sm" className={disabled ? "opacity-60" : undefined}>
               <CardHeader>
-                <CardTitle>{workspace.id}</CardTitle>
+                <CardTitle>{workspace.machine.name}</CardTitle>
                 <CardDescription>{workspace.githubRepositories.length} repositories configured</CardDescription>
               </CardHeader>
               <CardContent className="grid gap-2">
                 {workspace.githubRepositories.map((repository) => {
-                  const key = `${workspace.id}:${repository}`
+                  const key = `${workspace.machine.id}:${repository}`
                   return (
                     <label key={repository} className="flex items-center gap-2 text-sm">
                       {editing && <Checkbox checked={selected.has(key)} onCheckedChange={(checked) => toggleRepository(key, checked === true)} />}

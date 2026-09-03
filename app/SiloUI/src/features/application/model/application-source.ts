@@ -1,3 +1,5 @@
+import type { SetupMachineConfiguration, SetupMachineConfigurationRequest } from "@/contracts/silo"
+
 export type ApplicationTab = "workspaces" | "github" | "secrets" | "backup" | "settings"
 export type SettingsSection = "general" | "notifications"
 export type WorkspaceSection = "overview" | "files" | "logs" | "network" | "activity"
@@ -28,8 +30,7 @@ export interface ApplicationActivity {
 }
 
 export interface ApplicationWorkspace {
-  id: string
-  kind: "vm" | "ssh"
+  machine: SetupMachineConfiguration
   purpose: string
   state: WorkspaceState
   stateDetail: string
@@ -39,9 +40,6 @@ export interface ApplicationWorkspace {
   }
   freshness: "fresh" | "stale"
   host: string
-  cpus: number
-  memoryGiB: number
-  storageGiB: number
   repositories: ApplicationRepository[]
   ports: ApplicationPort[]
   logs: string[]
@@ -84,6 +82,7 @@ export interface ApplicationSource {
 
 export interface ApplicationActions {
   repairRuntime: () => void
+  saveMachineConfiguration: (request: SetupMachineConfigurationRequest) => void
   startWorkspace: (workspace: string) => void
   pauseWorkspace: (workspace: string) => void
   stopWorkspace: (workspace: string) => void

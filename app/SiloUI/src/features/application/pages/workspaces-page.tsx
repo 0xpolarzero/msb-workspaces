@@ -110,7 +110,7 @@ export function WorkspacesPage({
   onWorkspaceChange: (workspace: string) => void
   onLogQueryChange: (query: string) => void
 }) {
-  const workspace = workspaces.find((item) => item.id === selectedWorkspace) ?? workspaces[0]
+  const workspace = workspaces.find((item) => item.machine.id === selectedWorkspace) ?? workspaces[0]
 
   return (
     <div className="mx-auto grid w-full max-w-4xl gap-5 px-4 py-5 sm:px-6 sm:py-6">
@@ -118,15 +118,15 @@ export function WorkspacesPage({
       <div className="flex min-w-0 gap-2 overflow-x-auto pb-1" aria-label="Choose sandbox">
         {workspaces.map((item) => (
           <button
-            key={item.id}
+            key={item.machine.id}
             type="button"
-            onClick={() => onWorkspaceChange(item.id)}
+            onClick={() => onWorkspaceChange(item.machine.id)}
             className={cn(
               "flex min-w-36 items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              item.id === workspace.id ? "border-foreground/20 bg-muted font-medium" : "border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              item.machine.id === workspace.machine.id ? "border-foreground/20 bg-muted font-medium" : "border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground",
             )}
           >
-            {item.id}
+            {item.machine.name}
             <WorkspaceStatus state={item.state} />
           </button>
         ))}
@@ -134,7 +134,7 @@ export function WorkspacesPage({
       <div>
         <div className="flex items-end justify-between gap-3">
           <div>
-            <h3 className="text-base font-semibold">{workspace.id}</h3>
+            <h3 className="text-base font-semibold">{workspace.machine.name}</h3>
             <p className="mt-1 text-xs text-muted-foreground">{workspace.purpose}</p>
           </div>
           <WorkspaceStatus state={workspace.state} detail={workspace.stateDetail} />

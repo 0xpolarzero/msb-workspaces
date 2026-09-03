@@ -144,6 +144,19 @@ html.dark {
   color: var(--sidebar-accent-foreground);
 }
 
+@media (hover: hover) and (pointer: fine) {
+  .sandbox-hover-actions {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .sandbox-row:hover .sandbox-hover-actions,
+  .sandbox-row:focus-within .sandbox-hover-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 @media (min-width: 48rem) {
   [data-appearance="borderless"] {
     min-height: 2.75rem;

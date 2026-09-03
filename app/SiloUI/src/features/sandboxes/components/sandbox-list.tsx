@@ -59,6 +59,7 @@ export function SandboxListRow({
   detail,
   leading,
   actions,
+  hoverActions,
 }: {
   name: string
   kind: "vm" | "ssh"
@@ -66,9 +67,10 @@ export function SandboxListRow({
   detail: ReactNode
   leading?: ReactNode
   actions?: ReactNode
+  hoverActions?: ReactNode
 }) {
   return (
-    <div className="flex min-w-0 items-center gap-1.5 px-2 py-2">
+    <div className="sandbox-row flex min-w-0 items-center gap-1.5 px-2 py-2 transition-colors hover:bg-muted/35 focus-within:bg-muted/35">
       {leading}
       <SandboxIcon kind={kind} state={iconState} />
       <div className="min-w-0 flex-1">
@@ -82,7 +84,16 @@ export function SandboxListRow({
           iconState === "error" && "text-destructive",
         )}>{detail}</div>
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-0.5" aria-label={`Actions for ${name}`}>{actions}</div>}
+      {hoverActions && (
+        <div
+          className="sandbox-hover-actions flex shrink-0 items-center gap-0.5 transition-opacity"
+          aria-label={`Manage ${name}`}
+          data-sandbox-hover-actions=""
+        >
+          {hoverActions}
+        </div>
+      )}
+      {actions && <div className="flex shrink-0 items-center gap-0.5" aria-label={`Controls for ${name}`}>{actions}</div>}
     </div>
   )
 }

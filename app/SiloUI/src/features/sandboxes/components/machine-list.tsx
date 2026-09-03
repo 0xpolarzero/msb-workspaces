@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react"
+import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react"
 import { Check, Copy, GripVertical, Monitor, Pencil, Plus, Server, Trash2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -17,19 +17,28 @@ import {
   validateMachine,
   type MachineValidationErrors,
 } from "@/features/onboarding/model/machine-configuration"
-import type { WorkspaceProgressView } from "@/features/onboarding/model/onboarding-state"
-import { SandboxAction, SandboxList, SandboxListItem, SandboxListRow } from "@/features/sandboxes/components/sandbox-list"
+import { SandboxAction, SandboxList, SandboxListItem, SandboxListRow, type SandboxIconState } from "@/features/sandboxes/components/sandbox-list"
+import { machineSummary } from "@/features/sandboxes/model/machine-summary"
 
 interface MachineEditorState {
   draft: SetupMachineConfiguration
   originalID?: string
   insertAt: number
+  displayAfterID?: string
+}
+
+export interface MachineRowPresentation {
+  detail?: ReactNode
+  iconState?: SandboxIconState
+  actions?: ReactNode
 }
 
 interface MachineListProps {
   machines: readonly SetupMachineConfiguration[]
-  progress: WorkspaceProgressView
   onMachinesChange: (machines: SetupMachineConfiguration[]) => void
+  getRowPresentation?: (machine: SetupMachineConfiguration) => MachineRowPresentation
+  sortPriority?: (machine: SetupMachineConfiguration) => number
+  footer?: ReactNode
 }
 
 function SelectField({ label, value, values, suffix, error, onChange }: {
@@ -160,12 +169,7 @@ function MachineEditor({ editor, machines, onCancel, onSave }: {
   )
 }
 
-function machineSummary(machine: SetupMachineConfiguration): string {
-  if (machine.kind === "ssh") return `${machine.user}@${machine.host}:${machine.port}`
-  return `${machine.cpus} CPU · ${machine.memoryGiB} GB RAM · ${machine.workspaceStorageGiB} GB workspace`
-}
-
-export function MachineList({ machines, progress, onMachinesChange }: MachineListProps) {
+export function MachineList({ machines, onMachinesChange, getRowPresentation, sortPriority, footer }: MachineListProps) {
   const [addOpen, setAddOpen] = useState(false)
   const [editor, setEditor] = useState<MachineEditorState | null>(null)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -174,11 +178,22 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
   const [operationError, setOperationError] = useState("")
 
   const displayMachines = useMemo(() => {
-    if (!editor || editor.originalID) return machines
+    if (!sortPriority) {
+      const next = [...machines]
+      if (editor && !editor.originalID) next.splice(editor.insertAt, 0, editor.draft)
+      return next
+    }
+
     const next = [...machines]
-    next.splice(editor.insertAt, 0, editor.draft)
+      .map((machine, index) => ({ machine, index }))
+      .sort((a, b) => sortPriority(a.machine) - sortPriority(b.machine) || a.index - b.index)
+      .map(({ machine }) => machine)
+    if (editor && !editor.originalID) {
+      const sourceIndex = editor.displayAfterID ? next.findIndex(({ id }) => id === editor.displayAfterID) : -1
+      next.splice(sourceIndex >= 0 ? sourceIndex + 1 : next.length, 0, editor.draft)
+    }
     return next
-  }, [editor, machines])
+  }, [editor, machines, sortPriority])
 
   useEffect(() => {
     function dismiss(event: PointerEvent) {
@@ -225,7 +240,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
   function startDuplicate(machine: SetupMachineConfiguration) {
     beginOperation()
     const sourceIndex = machines.findIndex(({ id }) => id === machine.id)
-    setEditor({ draft: duplicateMachine(machine, machines), insertAt: sourceIndex + 1 })
+    setEditor({ draft: duplicateMachine(machine, machines), insertAt: sourceIndex + 1, displayAfterID: machine.id })
   }
 
   function save(machine: SetupMachineConfiguration) {
@@ -249,7 +264,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
     }
     if (machines.length === 1) {
       setPendingDelete(null)
-      setOperationError("Setup requires at least one sandbox.")
+      setOperationError("At least one sandbox is required.")
       return
     }
     onMachinesChange(configurationRequest(machines.filter(({ id }) => id !== machine.id)).machines)
@@ -257,15 +272,39 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
   }
 
   function reorder(id: string, targetIndex: number) {
-    const from = machines.findIndex((machine) => machine.id === id)
-    const boundedTarget = Math.max(0, Math.min(targetIndex, machines.length - 1))
+    const displayed = displayMachines.filter((machine) => machines.some(({ id: configuredID }) => configuredID === machine.id))
+    const from = displayed.findIndex((machine) => machine.id === id)
+    const boundedTarget = Math.max(0, Math.min(targetIndex, displayed.length - 1))
     if (from < 0 || from === boundedTarget) return
     beginOperation()
+    const moved = displayed[from]
+
+    if (sortPriority) {
+      const target = displayed[boundedTarget]
+      const priority = sortPriority(moved)
+      if (sortPriority(target) !== priority) {
+        setAnnouncement(`${moved.name} can only be reordered within its status group.`)
+        return
+      }
+
+      const bucket = machines.filter((machine) => sortPriority(machine) === priority)
+      const bucketFrom = bucket.findIndex((machine) => machine.id === moved.id)
+      const bucketTarget = bucket.findIndex((machine) => machine.id === target.id)
+      const [bucketMoved] = bucket.splice(bucketFrom, 1)
+      bucket.splice(bucketTarget, 0, bucketMoved)
+      let bucketIndex = 0
+      const updated = machines.map((machine) => sortPriority(machine) === priority ? bucket[bucketIndex++] : machine)
+      onMachinesChange(configurationRequest(updated).machines)
+      setAnnouncement(`${moved.name} moved to position ${boundedTarget + 1} of ${displayed.length}.`)
+      return
+    }
+
     const updated = [...machines]
-    const [moved] = updated.splice(from, 1)
-    updated.splice(boundedTarget, 0, moved)
+    const configuredFrom = updated.findIndex((machine) => machine.id === id)
+    const [configuredMoved] = updated.splice(configuredFrom, 1)
+    updated.splice(boundedTarget, 0, configuredMoved)
     onMachinesChange(configurationRequest(updated).machines)
-    setAnnouncement(`${moved.name} moved to position ${boundedTarget + 1} of ${updated.length}.`)
+    setAnnouncement(`${moved.name} moved to position ${boundedTarget + 1} of ${displayed.length}.`)
   }
 
   function handleReorderKey(event: KeyboardEvent<HTMLElement>, machine: SetupMachineConfiguration, index: number) {
@@ -283,7 +322,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
 
   return (
     <>
-      <section aria-labelledby="machine-list-heading" className="flex h-full min-h-0 flex-col">
+      <div aria-labelledby="machine-list-heading" className="flex h-full min-h-0 flex-col">
         <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs">
           <div className="min-w-0">
             <h3 id="machine-list-heading" className="font-medium">Sandboxes</h3>
@@ -305,12 +344,13 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
         <SandboxList label="Configured sandboxes" className="min-h-0 flex-1" data-testid="machine-list">
             {displayMachines.map((machine, index) => {
               const isEditing = editor?.draft.id === machine.id
-              const status = progress.workspaces.find(({ name }) => name === machine.name)
+              const presentation = getRowPresentation?.(machine)
               const deleteArmed = pendingDelete === machine.id
               return (
                 <SandboxListItem
                   key={machine.id}
                   data-machine-id={machine.id}
+                  data-sandbox-name={machine.name}
                   data-pending-delete-row={deleteArmed ? machine.id : undefined}
                   className="min-w-0 bg-background"
                   onDragOver={(event) => event.preventDefault()}
@@ -322,7 +362,8 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                     <SandboxListRow
                       name={machine.name}
                       kind={machine.kind}
-                      detail={<span title={machineSummary(machine)}>{machineSummary(machine)}{status ? ` · ${status.detail}` : ""}</span>}
+                      iconState={presentation?.iconState}
+                      detail={presentation?.detail ?? machineSummary(machine)}
                       leading={<span
                         role="button"
                         tabIndex={0}
@@ -340,7 +381,8 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                       >
                         <GripVertical className="size-4" aria-hidden="true" />
                       </span>}
-                      actions={<>
+                      actions={presentation?.actions}
+                      hoverActions={<>
                         <SandboxAction label={`Edit ${machine.name}`} onClick={() => startEdit(machine)}><Pencil /></SandboxAction>
                         <SandboxAction label={`Duplicate ${machine.name}`} onClick={() => startDuplicate(machine)}><Copy /></SandboxAction>
                         <SandboxAction
@@ -357,9 +399,10 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
               )
             })}
         </SandboxList>
+        {footer && <div className="mt-3 shrink-0">{footer}</div>}
         {operationError && <p className="mt-2 text-xs text-destructive" role="alert">{operationError}</p>}
         <p className="sr-only" aria-live="polite">{announcement}</p>
-      </section>
+      </div>
     </>
   )
 }
