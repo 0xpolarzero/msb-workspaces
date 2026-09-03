@@ -10,7 +10,7 @@ import { githubStateFromSearch, onboardingScenarios, repositoryFixtures } from "
 import { FixtureSelector } from "@/fixtures/fixture-selector"
 
 function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
-  render(<FixtureSelector scenario="running" />)
+  render(<FixtureSelector surface="onboarding" scenario="running" />)
   return render(<OnboardingApp source={onboardingScenarios[name]} initialGitHubConnectionState={githubState} repositoryOptions={repositoryFixtures} actions={{
     saveMachineConfiguration: vi.fn(),
     repairRuntime: vi.fn(),
