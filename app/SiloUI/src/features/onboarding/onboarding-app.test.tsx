@@ -622,6 +622,25 @@ describe("onboarding", () => {
     expect(screen.getByRole("button", { name: "Edit development" })).toBeVisible()
   })
 
+  it("preserves GitHub policy and identity settings when a stable machine is renamed", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    await user.clear(screen.getByLabelText("Git name for dev"))
+    await user.type(screen.getByLabelText("Git name for dev"), "Renamed Author")
+    expect(within(screen.getByRole("table", { name: "Selected repositories for dev" })).getByText("acme/silo")).toBeVisible()
+
+    await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
+    await user.click(screen.getByRole("button", { name: "Edit dev" }))
+    await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
+    await user.type(screen.getByRole("textbox", { name: "Machine name" }), "development")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    expect(screen.getByLabelText("Git name for development")).toHaveValue("Renamed Author")
+    expect(within(screen.getByRole("table", { name: "Selected repositories for development" })).getByText("acme/silo")).toBeVisible()
+  })
+
   it("duplicates after the source, cancels drafts, and generates collision-free copy names", async () => {
     const { user, saveMachineConfiguration } = await renderMachineScenario()
 
@@ -638,6 +657,19 @@ describe("onboarding", () => {
     expect(screen.getByRole("textbox", { name: "Machine name" })).toHaveValue("dev-copy-2")
     await user.click(screen.getByRole("button", { name: "Save" }))
     expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual(["dev", "dev-copy-2", "dev-copy", "playgrounds", "personal"])
+  })
+
+  it("places a replacement duplicate after its source when another draft is open", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+
+    await user.click(screen.getByRole("button", { name: "Duplicate dev" }))
+    await user.click(screen.getByRole("button", { name: "Duplicate playgrounds" }))
+    expect(screen.getByRole("textbox", { name: "Machine name" })).toHaveValue("playgrounds-copy")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual([
+      "dev", "playgrounds", "playgrounds-copy", "personal",
+    ])
   })
 
   it("arms inline deletion, cancels with Escape or outside input, and deletes only after confirmation", async () => {
@@ -695,6 +727,32 @@ describe("onboarding", () => {
 
     expect(screen.getByText("Machine names must be unique.")).toBeVisible()
     expect(screen.getByText("CPU limit cannot exceed its ceiling.")).toBeVisible()
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+  })
+
+  it("reports the machine capacity in the draft instead of throwing across the action boundary", async () => {
+    const source = {
+      ...onboardingScenarios.running,
+      machineConfigurations: Array.from({ length: 64 }, (_, index) => ({
+        ...onboardingScenarios.running.machineConfigurations[0],
+        id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+        name: `machine-${index + 1}`,
+      })),
+    }
+    const saveMachineConfiguration = vi.fn()
+    const user = userEvent.setup()
+    render(<OnboardingApp source={source} actions={{
+      saveMachineConfiguration,
+      repairRuntime: vi.fn(),
+      retryWorkspaceSetup: vi.fn(),
+      finishSetup: vi.fn(),
+    }} />)
+    await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
+    await user.click(screen.getByRole("button", { name: "Add" }))
+    await user.click(screen.getByRole("menuitem", { name: "New virtual machine" }))
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Configure no more than 64 machines.")
     expect(saveMachineConfiguration).not.toHaveBeenCalled()
   })
 

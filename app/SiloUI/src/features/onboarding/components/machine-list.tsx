@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react"
-import { Copy, GripVertical, Monitor, Pencil, Plus, Server, Trash2, TriangleAlert } from "lucide-react"
+import { Check, Copy, GripVertical, Monitor, Pencil, Plus, Server, Trash2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,6 +10,7 @@ import type { SetupMachineConfiguration, SetupVirtualMachineConfiguration } from
 import {
   configurationRequest,
   duplicateMachine,
+  maximumMachineCount,
   newSSHMachine,
   newVirtualMachine,
   supportedCPUs,
@@ -119,6 +120,9 @@ function MachineEditor({ editor, machines, onCancel, onSave }: {
 
   function save() {
     const nextErrors = validateMachine(draft, machines, editor.originalID)
+    if (!editor.originalID && machines.length >= maximumMachineCount) {
+      nextErrors.form = `Configure no more than ${maximumMachineCount} machines.`
+    }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length === 0) onSave(draft)
   }
@@ -176,6 +180,7 @@ function MachineEditor({ editor, machines, onCancel, onSave }: {
         <Button type="button" variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
         <Button type="button" size="sm" onClick={save}>Save</Button>
       </div>
+      {errors.form && <p className="text-xs text-destructive" role="alert">{errors.form}</p>}
     </div>
   )
 }
@@ -224,9 +229,13 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
     setEditor(null)
   }
 
-  function startEdit(machine: SetupMachineConfiguration, index: number) {
+  function startEdit(machine: SetupMachineConfiguration) {
     beginOperation()
-    setEditor({ draft: structuredClone(machine), originalID: machine.id, insertAt: index })
+    setEditor({
+      draft: structuredClone(machine),
+      originalID: machine.id,
+      insertAt: machines.findIndex(({ id }) => id === machine.id),
+    })
   }
 
   function startAdd(kind: SetupMachineConfiguration["kind"]) {
@@ -238,9 +247,10 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
     })
   }
 
-  function startDuplicate(machine: SetupMachineConfiguration, index: number) {
+  function startDuplicate(machine: SetupMachineConfiguration) {
     beginOperation()
-    setEditor({ draft: duplicateMachine(machine, machines), insertAt: index + 1 })
+    const sourceIndex = machines.findIndex(({ id }) => id === machine.id)
+    setEditor({ draft: duplicateMachine(machine, machines), insertAt: sourceIndex + 1 })
   }
 
   function save(machine: SetupMachineConfiguration) {
@@ -301,7 +311,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
       <section aria-labelledby="machine-list-heading" className="flex h-full min-h-0 flex-col">
         <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs">
           <div className="min-w-0">
-            <h3 id="machine-list-heading" className="font-medium">Virtual machines</h3>
+            <h3 id="machine-list-heading" className="font-medium">Machines</h3>
             <p className="text-[11px] text-muted-foreground">{machines.length} configured · {machines.filter(({ kind }) => kind === "vm").length} VM · {machines.filter(({ kind }) => kind === "ssh").length} SSH</p>
           </div>
           <Popover open={addOpen} onOpenChange={setAddOpen}>
@@ -370,14 +380,14 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                         <div className="truncate text-[10px] text-muted-foreground" title={machineSummary(machine)}>{machineSummary(machine)}{status ? ` · ${status.detail}` : ""}</div>
                       </div>
                       <div className="flex shrink-0 items-center gap-0.5" aria-label={`Actions for ${machine.name}`}>
-                        <IconAction label={`Edit ${machine.name}`} onClick={() => startEdit(machine, index)}><Pencil /></IconAction>
-                        <IconAction label={`Duplicate ${machine.name}`} onClick={() => startDuplicate(machine, index)}><Copy /></IconAction>
+                        <IconAction label={`Edit ${machine.name}`} onClick={() => startEdit(machine)}><Pencil /></IconAction>
+                        <IconAction label={`Duplicate ${machine.name}`} onClick={() => startDuplicate(machine)}><Copy /></IconAction>
                         <IconAction
                           label={deleteArmed ? `Confirm deletion of ${machine.name}` : `Delete ${machine.name}`}
                           destructive={deleteArmed}
                           onClick={() => remove(machine)}
                         >
-                          {deleteArmed ? <TriangleAlert /> : <Trash2 />}
+                          {deleteArmed ? <Check /> : <Trash2 />}
                         </IconAction>
                       </div>
                     </div>

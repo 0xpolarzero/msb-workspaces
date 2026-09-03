@@ -71,7 +71,10 @@ export const setupMachineConfigurationRequestSchema = z.object({
 }).strict().refine((configuration) => {
   const names = configuration.machines.map(({ name }) => name.toLowerCase())
   return new Set(names).size === names.length
-}, { message: "machine names must be unique" })
+}, { message: "machine names must be unique" }).refine((configuration) => {
+  const ids = configuration.machines.map(({ id }) => id)
+  return new Set(ids).size === ids.length
+}, { message: "machine IDs must be unique" })
 
 export const siloBootstrapPhaseSchema = z.enum([
   "welcome",

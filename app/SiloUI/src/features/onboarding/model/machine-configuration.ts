@@ -11,6 +11,7 @@ import {
 export const supportedCPUs = [4, 6, 8, 12] as const
 export const supportedMemoryGiB = [16, 32, 48] as const
 export const supportedStorageGiB = [60, 80, 100, 120] as const
+export const maximumMachineCount = 64
 
 // Exact values from the production native source of truth:
 // app/Silo/Sources/SiloModels.swift, SetupWorkspaceConfiguration.defaults.
@@ -100,7 +101,7 @@ export function duplicateMachine(
   }
 }
 
-export type MachineValidationErrors = Partial<Record<"name" | "cpus" | "maxCPUs" | "memoryGiB" | "maxMemoryGiB" | "workspaceStorageGiB" | "runtimeStorageGiB" | "host" | "user" | "port", string>>
+export type MachineValidationErrors = Partial<Record<"form" | "name" | "cpus" | "maxCPUs" | "memoryGiB" | "maxMemoryGiB" | "workspaceStorageGiB" | "runtimeStorageGiB" | "host" | "user" | "port", string>>
 
 export function validateMachine(
   machine: SetupMachineConfiguration,

@@ -97,5 +97,9 @@ describe("Silo contract fixtures", () => {
       ...request,
       machines: [request.machines[0], { ...request.machines[1], name: "PLAYGROUNDS" }],
     })).toThrow()
+    expect(() => setupMachineConfigurationRequestSchema.parse({
+      ...request,
+      machines: [request.machines[0], { ...request.machines[1], id: request.machines[0].id }],
+    })).toThrow("machine IDs must be unique")
   })
 })

@@ -138,11 +138,16 @@ export function OnboardingApp({
 
   function saveMachines(updated: SetupMachineConfiguration[]) {
     const request = configurationRequest(updated)
-    setWorkspaceSelections((current) => Object.fromEntries(request.machines.map(({ name }) => [name, current[name] ?? []])))
-    setWorkspaceIdentities((current) => Object.fromEntries(request.machines.map(({ name }) => [
-      name,
-      current[name] ?? { ...(source.currentHostGitIdentity ?? { name: "", email: "" }), apply: true },
-    ])))
+    const previousNameByID = new Map(machines.map(({ id, name }) => [id, name]))
+    setWorkspaceSelections((current) => Object.fromEntries(request.machines.map(({ id, name }) => {
+      const previousName = previousNameByID.get(id)
+      return [name, current[name] ?? (previousName ? current[previousName] : undefined) ?? []]
+    })))
+    setWorkspaceIdentities((current) => Object.fromEntries(request.machines.map(({ id, name }) => {
+      const previousName = previousNameByID.get(id)
+      return [name, current[name] ?? (previousName ? current[previousName] : undefined)
+        ?? { ...(source.currentHostGitIdentity ?? { name: "", email: "" }), apply: true }]
+    })))
     setMachines(request.machines)
     actions.saveMachineConfiguration(request)
   }

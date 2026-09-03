@@ -8,7 +8,7 @@ import {
   siloPreflightCheckSchema,
   siloProgressEventSchema,
   siloProtocolErrorSchema,
-  setupMachineConfigurationSchema,
+  setupMachineConfigurationRequestSchema,
 } from "@/contracts/silo"
 import type { SetupMachineConfigurationRequest } from "@/contracts/silo"
 
@@ -16,7 +16,7 @@ import type { SetupMachineConfigurationRequest } from "@/contracts/silo"
 // remains an unmodified current protocol or app-state shape so a future bridge
 // only has to replace the provider.
 export const onboardingSourceSchema = z.object({
-  machineConfigurations: z.array(setupMachineConfigurationSchema).min(1).max(64),
+  machineConfigurations: setupMachineConfigurationRequestSchema.shape.machines,
   bootstrapConfiguration: siloBootstrapConfigurationSchema,
   bootstrapState: siloBootstrapStateSchema,
   preflightChecks: z.array(siloPreflightCheckSchema),
@@ -28,7 +28,17 @@ export const onboardingSourceSchema = z.object({
   }).strict().nullable(),
   bootstrapResult: siloBootstrapResultSchema.nullable(),
   error: siloProtocolErrorSchema.nullable(),
-}).strict()
+}).strict().superRefine((source, context) => {
+  const result = setupMachineConfigurationRequestSchema.safeParse({
+    schemaVersion: 1,
+    machines: source.machineConfigurations,
+  })
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      context.addIssue({ ...issue, path: ["machineConfigurations", ...issue.path.slice(1)] })
+    }
+  }
+})
 
 export type OnboardingSource = z.infer<typeof onboardingSourceSchema>
 
