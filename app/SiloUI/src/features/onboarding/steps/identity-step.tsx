@@ -24,7 +24,7 @@ export function IdentityStep({ progress, identity, defaultTarget, onIdentityChan
       <div className="mb-5">
         <h2 id="identity-title" className="text-xl font-semibold tracking-tight">Git</h2>
       </div>
-      <div className="space-y-4 rounded-lg border border-border bg-card p-4">
+      <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="grid gap-1.5 text-xs font-medium" htmlFor="identity-name">
             Name
@@ -35,7 +35,7 @@ export function IdentityStep({ progress, identity, defaultTarget, onIdentityChan
             <Input id="identity-email" type="email" value={identity.email} onChange={(event) => onIdentityChange({ ...identity, email: event.target.value })} autoComplete="email" />
           </label>
         </div>
-        <label className="flex items-start gap-2.5 rounded-md border border-border p-3 text-xs">
+        <label className="flex items-start gap-2.5 border-t border-border pt-4 text-xs">
           <Checkbox
             checked={identity.target === null}
             disabled={defaultTarget === null}

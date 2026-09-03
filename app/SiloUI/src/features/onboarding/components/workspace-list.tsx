@@ -20,7 +20,7 @@ export function WorkspaceList({ progress }: { progress: WorkspaceProgressView })
           {progress.failedCount > 0 && ` · ${progress.failedCount} failed`}
         </span>
       </div>
-      <ScrollArea className="h-[11rem] rounded-lg border border-border" data-testid="workspace-list">
+      <ScrollArea className="h-[11rem]" data-testid="workspace-list">
         <div className="grid grid-cols-1 gap-1.5 p-2 sm:grid-cols-2 lg:grid-cols-3">
           {progress.workspaces.map((workspace) => (
             <div key={workspace.name} className="min-w-0 rounded-md border border-border bg-background px-2.5 py-2 text-xs">
