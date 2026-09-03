@@ -1,11 +1,9 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react"
 import { Check, Copy, GripVertical, Monitor, Pencil, Plus, Server, Trash2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { SetupMachineConfiguration, SetupVirtualMachineConfiguration } from "@/contracts/silo"
 import {
   configurationRequest,
@@ -20,6 +18,7 @@ import {
   type MachineValidationErrors,
 } from "@/features/onboarding/model/machine-configuration"
 import type { WorkspaceProgressView } from "@/features/onboarding/model/onboarding-state"
+import { SandboxAction, SandboxList, SandboxListItem, SandboxListRow } from "@/features/sandboxes/components/sandbox-list"
 
 interface MachineEditorState {
   draft: SetupMachineConfiguration
@@ -31,29 +30,6 @@ interface MachineListProps {
   machines: readonly SetupMachineConfiguration[]
   progress: WorkspaceProgressView
   onMachinesChange: (machines: SetupMachineConfiguration[]) => void
-}
-
-function IconAction({ label, destructive = false, children, ...props }: {
-  label: string
-  destructive?: boolean
-  children: ReactNode
-} & Omit<React.ComponentProps<typeof Button>, "children" | "aria-label">) {
-  return (
-    <Tooltip key={label}>
-      <TooltipTrigger asChild>
-        <Button
-          type="button"
-          variant={destructive ? "destructive" : "ghost"}
-          size="icon-xs"
-          aria-label={label}
-          {...props}
-        >
-          {children}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  )
 }
 
 function SelectField({ label, value, values, suffix, error, onChange }: {
@@ -306,7 +282,7 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
   }
 
   return (
-    <TooltipProvider delayDuration={150}>
+    <>
       <section aria-labelledby="machine-list-heading" className="flex h-full min-h-0 flex-col">
         <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs">
           <div className="min-w-0">
@@ -326,14 +302,13 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
           </Popover>
         </div>
 
-        <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" data-testid="machine-list">
-          <ol className="divide-y divide-border p-0" aria-label="Configured sandboxes">
+        <SandboxList label="Configured sandboxes" className="min-h-0 flex-1" data-testid="machine-list">
             {displayMachines.map((machine, index) => {
               const isEditing = editor?.draft.id === machine.id
               const status = progress.workspaces.find(({ name }) => name === machine.name)
               const deleteArmed = pendingDelete === machine.id
               return (
-                <li
+                <SandboxListItem
                   key={machine.id}
                   data-machine-id={machine.id}
                   data-pending-delete-row={deleteArmed ? machine.id : undefined}
@@ -344,8 +319,11 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                   {isEditing && editor ? (
                     <MachineEditor editor={editor} machines={machines} onCancel={() => setEditor(null)} onSave={save} />
                   ) : (
-                    <div className="flex min-w-0 items-center gap-1.5 px-2 py-2">
-                      <span
+                    <SandboxListRow
+                      name={machine.name}
+                      kind={machine.kind}
+                      detail={<span title={machineSummary(machine)}>{machineSummary(machine)}{status ? ` · ${status.detail}` : ""}</span>}
+                      leading={<span
                         role="button"
                         tabIndex={0}
                         draggable={!editor}
@@ -361,38 +339,27 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                         onDragEnd={() => setDraggedID(null)}
                       >
                         <GripVertical className="size-4" aria-hidden="true" />
-                      </span>
-                      <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
-                        {machine.kind === "vm" ? <Monitor className="size-3.5" aria-hidden="true" /> : <Server className="size-3.5" aria-hidden="true" />}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate text-xs font-medium" title={machine.name}>{machine.name}</span>
-                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase text-muted-foreground">{machine.kind}</span>
-                        </div>
-                        <div className="truncate text-[10px] text-muted-foreground" title={machineSummary(machine)}>{machineSummary(machine)}{status ? ` · ${status.detail}` : ""}</div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-0.5" aria-label={`Actions for ${machine.name}`}>
-                        <IconAction label={`Edit ${machine.name}`} onClick={() => startEdit(machine)}><Pencil /></IconAction>
-                        <IconAction label={`Duplicate ${machine.name}`} onClick={() => startDuplicate(machine)}><Copy /></IconAction>
-                        <IconAction
+                      </span>}
+                      actions={<>
+                        <SandboxAction label={`Edit ${machine.name}`} onClick={() => startEdit(machine)}><Pencil /></SandboxAction>
+                        <SandboxAction label={`Duplicate ${machine.name}`} onClick={() => startDuplicate(machine)}><Copy /></SandboxAction>
+                        <SandboxAction
                           label={deleteArmed ? `Confirm deletion of ${machine.name}` : `Delete ${machine.name}`}
                           destructive={deleteArmed}
                           onClick={() => remove(machine)}
                         >
                           {deleteArmed ? <Check /> : <Trash2 />}
-                        </IconAction>
-                      </div>
-                    </div>
+                        </SandboxAction>
+                      </>}
+                    />
                   )}
-                </li>
+                </SandboxListItem>
               )
             })}
-          </ol>
-        </ScrollArea>
+        </SandboxList>
         {operationError && <p className="mt-2 text-xs text-destructive" role="alert">{operationError}</p>}
         <p className="sr-only" aria-live="polite">{announcement}</p>
       </section>
-    </TooltipProvider>
+    </>
   )
 }

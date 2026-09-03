@@ -17,12 +17,6 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
 
-  function openWorkspace(workspace: string) {
-    setSelectedWorkspace(workspace)
-    setWorkspaceSection("files")
-    setActiveTab("workspaces")
-  }
-
   return (
     <ApplicationShell
       activeTab={activeTab}
@@ -34,7 +28,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     >
       <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={activeTab !== "workspaces"}>
         {workspaceSection === "overview" ? (
-          <OverviewPage source={source} actions={actions} onOpenWorkspace={openWorkspace} />
+          <OverviewPage source={source} actions={actions} />
         ) : (
           <WorkspacesPage
             workspaces={source.workspaces}

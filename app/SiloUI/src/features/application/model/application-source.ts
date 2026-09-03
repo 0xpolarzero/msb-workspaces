@@ -29,9 +29,14 @@ export interface ApplicationActivity {
 
 export interface ApplicationWorkspace {
   id: string
+  kind: "vm" | "ssh"
   purpose: string
   state: WorkspaceState
   stateDetail: string
+  attention?: {
+    level: "warning" | "error"
+    message: string
+  }
   freshness: "fresh" | "stale"
   host: string
   cpus: number
@@ -45,13 +50,6 @@ export interface ApplicationWorkspace {
   secretNames: string[]
 }
 
-export interface ApplicationHealthCheck {
-  id: string
-  label: string
-  detail: string
-  status: "pass" | "warning" | "fail"
-}
-
 export interface ApplicationSecret {
   id: string
   name: string
@@ -61,10 +59,8 @@ export interface ApplicationSecret {
 }
 
 export interface ApplicationSource {
-  updatedLabel: string
   runtimeRepairRequired: boolean
   workspaces: ApplicationWorkspace[]
-  healthChecks: ApplicationHealthCheck[]
   github: {
     state: "disconnected" | "connecting" | "connected"
     account?: string
@@ -87,10 +83,9 @@ export interface ApplicationSource {
 }
 
 export interface ApplicationActions {
-  refresh: () => void
-  runChecks: () => void
   repairRuntime: () => void
   startWorkspace: (workspace: string) => void
+  pauseWorkspace: (workspace: string) => void
   stopWorkspace: (workspace: string) => void
   restartWorkspace: (workspace: string) => void
   openTerminal: (workspace: string) => void

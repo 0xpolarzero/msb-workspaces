@@ -1,7 +1,6 @@
 import type { ReactNode } from "react"
-import { AlertTriangle, Check, RefreshCw } from "lucide-react"
+import { AlertTriangle } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import type { WorkspaceState } from "@/features/application/model/application-source"
@@ -18,10 +17,10 @@ export function PageHeader({ title, description, action }: { title: string; desc
   )
 }
 
-export function SectionHeader({ title, action }: { title: string; action?: ReactNode }) {
+export function SectionHeader({ id, title, action }: { id?: string; title: string; action?: ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-3">
-      <h3 className="text-sm font-semibold">{title}</h3>
+      <h3 id={id} className="text-sm font-semibold">{title}</h3>
       {action}
     </div>
   )
@@ -66,30 +65,6 @@ export function InlineNotice({
       </div>
       {action && <div className="shrink-0">{action}</div>}
     </div>
-  )
-}
-
-export function HealthSummary({ issueCount, onRefresh }: { issueCount: number; onRefresh: () => void }) {
-  const ready = issueCount === 0
-  return (
-    <Card size="sm" className={cn(!ready && "ring-amber-500/30")}>
-      <CardHeader className="grid-cols-[auto_1fr_auto] items-center gap-x-3">
-        <span className={cn(
-          "grid size-8 place-items-center rounded-full",
-          ready ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-        )}>
-          {ready ? <Check className="size-4" /> : <AlertTriangle className="size-4" />}
-        </span>
-        <div>
-          <CardTitle>{ready ? "Silo is ready" : `${issueCount} item${issueCount === 1 ? "" : "s"} need attention`}</CardTitle>
-          <CardDescription>{ready ? "Workspace state is current and actions are available." : "Review the affected system checks before retrying workspace actions."}</CardDescription>
-        </div>
-        <Button variant="ghost" size="sm" onClick={onRefresh}>
-          <RefreshCw data-icon="inline-start" />
-          Refresh
-        </Button>
-      </CardHeader>
-    </Card>
   )
 }
 

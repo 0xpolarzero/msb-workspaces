@@ -4,6 +4,7 @@ import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 const baseWorkspaces: ApplicationWorkspace[] = [
   {
     id: "dev",
+    kind: "vm",
     purpose: "Primary software development workspace",
     state: "running",
     stateDetail: "Running for 2h 18m",
@@ -35,6 +36,7 @@ const baseWorkspaces: ApplicationWorkspace[] = [
   },
   {
     id: "playgrounds",
+    kind: "vm",
     purpose: "Experiments and disposable prototypes",
     state: "stopped",
     stateDetail: "Stopped yesterday",
@@ -52,6 +54,7 @@ const baseWorkspaces: ApplicationWorkspace[] = [
   },
   {
     id: "personal",
+    kind: "vm",
     purpose: "Personal projects and services",
     state: "stopped",
     stateDetail: "Stopped 4 days ago",
@@ -83,6 +86,7 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
       ...workspace,
       state: "failed",
       stateDetail: "Start failed 3m ago",
+      attention: { level: "error", message: "Candidate networking did not become ready." },
       freshness: "stale",
       activities: [{ id: "dev-failure", title: "Start failed", detail: "Candidate networking did not become ready.", time: "3m ago", tone: "danger" }, ...workspace.activities],
     } : workspace)
@@ -92,15 +96,8 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
 
 export function applicationSourceForScenario(scenario: ScenarioName, githubState?: GitHubFixtureState): ApplicationSource {
   return {
-    updatedLabel: scenario === "bootstrap-failure" ? "Last known state · 3m ago" : "Updated just now",
     runtimeRepairRequired: scenario === "dependency-failure",
     workspaces: workspacesForScenario(scenario),
-    healthChecks: [
-      { id: "runtime", label: "Silo runtime", detail: "Bundled runtime 1.8.0", status: scenario === "dependency-failure" ? "fail" : "pass" },
-      { id: "host", label: "Host integration", detail: "Loopback and SSH routing ready", status: "pass" },
-      { id: "disk", label: "Available disk space", detail: "128 GiB available", status: "pass" },
-      { id: "network", label: "Workspace network", detail: scenario === "bootstrap-failure" ? "dev needs attention" : "Routes verified", status: scenario === "bootstrap-failure" ? "warning" : "pass" },
-    ],
     github: {
       state: githubState ?? "connected",
       account: githubState === "disconnected" ? undefined : "taylor",

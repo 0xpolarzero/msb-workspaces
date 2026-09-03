@@ -3,15 +3,14 @@ import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
 import { ApplicationApp } from "@/features/application/application-app"
-import type { ApplicationActions } from "@/features/application/model/application-source"
+import type { ApplicationActions, ApplicationSource } from "@/features/application/model/application-source"
 import { applicationSourceForScenario } from "@/fixtures/application-scenarios"
 
-function renderApplication(scenario: Parameters<typeof applicationSourceForScenario>[0] = "running") {
+function renderApplication(scenario: Parameters<typeof applicationSourceForScenario>[0] = "running", source?: ApplicationSource) {
   const actions: ApplicationActions = {
-    refresh: vi.fn(),
-    runChecks: vi.fn(),
     repairRuntime: vi.fn(),
     startWorkspace: vi.fn(),
+    pauseWorkspace: vi.fn(),
     stopWorkspace: vi.fn(),
     restartWorkspace: vi.fn(),
     openTerminal: vi.fn(),
@@ -21,7 +20,7 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
   return {
     actions,
     user: userEvent.setup(),
-    ...render(<ApplicationApp source={applicationSourceForScenario(scenario)} actions={actions} />),
+    ...render(<ApplicationApp source={source ?? applicationSourceForScenario(scenario)} actions={actions} />),
   }
 }
 
@@ -48,7 +47,11 @@ describe("application", () => {
     expect(within(sandboxSections).getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page")
     expect(sandboxSections).toHaveClass("md:ml-3", "md:w-[calc(100%-0.75rem)]", "md:border-l", "md:pl-2")
 
-    expect(within(appPanel("Sandboxes")).getByRole("heading", { name: "Overview", level: 2 })).toBeVisible()
+    const overview = within(appPanel("Sandboxes"))
+    expect(overview.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument()
+    expect(overview.queryByText(/3 sandboxes/)).not.toBeInTheDocument()
+    expect(overview.queryByText(/Updated just now/)).not.toBeInTheDocument()
+    expect(overview.getByRole("list", { name: "Sandboxes" })).toBeVisible()
     expect(screen.queryByRole("group", { name: "Settings sections" })).not.toBeInTheDocument()
   })
 
@@ -60,7 +63,7 @@ describe("application", () => {
     await user.click(navigation.getByRole("button", { name: "Collapse Sandboxes menu" }))
     expect(navigation.queryByRole("group", { name: "Sandbox sections" })).not.toBeInTheDocument()
     expect(sandboxes).toHaveAttribute("aria-current", "page")
-    expect(within(appPanel("Sandboxes")).getByRole("heading", { name: "Overview", level: 2 })).toBeVisible()
+    expect(within(appPanel("Sandboxes")).getByRole("list", { name: "Sandboxes" })).toBeVisible()
     const sandboxCaret = navigation.getByRole("button", { name: "Expand Sandboxes menu" })
     expect(sandboxCaret).toBeVisible()
     expect(sandboxCaret.querySelector("svg")).toBeVisible()
@@ -97,19 +100,59 @@ describe("application", () => {
     expect(within(appPanel("Sandboxes")).getByText("acme/platform-tools")).toBeVisible()
   })
 
-  it("routes workspace and repair actions with the exact sandbox", async () => {
+  it("sorts attention first and uses the shared compact sandbox rows", () => {
+    const source = applicationSourceForScenario("running")
+    const [dev, playgrounds, personal] = source.workspaces
+    source.workspaces = [
+      { ...dev, id: "normal", state: "running", stateDetail: "Running for 2h 18m", attention: undefined },
+      { ...playgrounds, id: "warning", kind: "ssh", state: "stopped", stateDetail: "Waiting for verification", attention: { level: "warning", message: "Storage is almost full." } },
+      { ...personal, id: "error", state: "failed", stateDetail: "Start failed 3m ago", attention: { level: "warning", message: "Candidate networking did not become ready." } },
+    ]
+    renderApplication("running", source)
+
+    const overview = within(appPanel("Sandboxes"))
+    const list = overview.getByRole("list", { name: "Sandboxes" })
+    const rows = within(list).getAllByRole("listitem")
+    expect(rows.map((row) => row.getAttribute("data-sandbox-name"))).toEqual(["error", "warning", "normal"])
+    expect(rows[0].querySelector("[data-sandbox-icon-state='error']")).toBeVisible()
+    expect(rows[1].querySelector("[data-sandbox-icon-state='warning']")).toBeVisible()
+    expect(rows[2].querySelector("[data-sandbox-icon-state='normal']")).toBeVisible()
+    expect(within(rows[0]).getByRole("img", { name: "error status" })).toBeVisible()
+    expect(within(rows[1]).getByRole("img", { name: "warning status" })).toBeVisible()
+    expect(rows[1]).toHaveTextContent("ssh")
+    expect(rows[0]).toHaveTextContent("Failed")
+    expect(rows[1]).toHaveTextContent("Stopped")
+    expect(rows[2]).toHaveTextContent("Running")
+    expect(overview.queryByText("Running for 2h 18m")).not.toBeInTheDocument()
+    expect(overview.queryByText("Waiting for verification")).not.toBeInTheDocument()
+
+    const attention = overview.getByText("Candidate networking did not become ready.").closest("[role='alert']")
+    expect(attention).not.toBeNull()
+    expect(list.compareDocumentPosition(attention as HTMLElement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it("routes compact lifecycle and repair actions with the exact sandbox", async () => {
     const running = renderApplication()
     const overview = within(appPanel("Sandboxes"))
 
-    await running.user.click(overview.getAllByRole("button", { name: "Start" })[0])
+    expect(overview.queryByText("Silo is ready")).not.toBeInTheDocument()
+    expect(overview.queryByText(/items? need attention/)).not.toBeInTheDocument()
+    await running.user.click(overview.getByRole("button", { name: "Pause dev" }))
+    expect(running.actions.pauseWorkspace).toHaveBeenCalledWith("dev")
+    await running.user.click(overview.getByRole("button", { name: "Stop dev" }))
+    expect(running.actions.stopWorkspace).toHaveBeenCalledWith("dev")
+    await running.user.click(overview.getByRole("button", { name: "Restart dev" }))
+    expect(running.actions.restartWorkspace).toHaveBeenCalledWith("dev")
+    await running.user.click(overview.getByRole("button", { name: "Start playgrounds" }))
     expect(running.actions.startWorkspace).toHaveBeenCalledWith("playgrounds")
-    await running.user.click(overview.getByRole("button", { name: "Refresh" }))
-    expect(running.actions.refresh).toHaveBeenCalledOnce()
     running.unmount()
 
     const failed = renderApplication("dependency-failure")
     const failedOverview = within(appPanel("Sandboxes"))
-    expect(failedOverview.getByRole("alert")).toHaveTextContent("Silo installation needs repair")
+    const list = failedOverview.getByRole("list", { name: "Sandboxes" })
+    const repair = failedOverview.getByRole("alert")
+    expect(repair).toHaveTextContent("Silo installation needs repair")
+    expect(list.compareDocumentPosition(repair) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     await failed.user.click(failedOverview.getByRole("button", { name: "Repair…" }))
     expect(failed.actions.repairRuntime).toHaveBeenCalledOnce()
   })

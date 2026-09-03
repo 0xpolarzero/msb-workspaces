@@ -19,10 +19,9 @@ export default function App() {
           key={`${scenario}:${githubState ?? "source"}`}
           source={applicationSourceForScenario(scenario, githubState)}
           actions={{
-            refresh: () => undefined,
-            runChecks: () => undefined,
             repairRuntime: () => undefined,
             startWorkspace: (_workspace) => undefined,
+            pauseWorkspace: (_workspace) => undefined,
             stopWorkspace: (_workspace) => undefined,
             restartWorkspace: (_workspace) => undefined,
             openTerminal: (_workspace) => undefined,
