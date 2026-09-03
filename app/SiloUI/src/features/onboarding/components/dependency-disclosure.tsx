@@ -8,7 +8,7 @@ import type { DependencyGroupView } from "@/features/onboarding/model/onboarding
 export function DependencyDisclosure({ group, onRepairRuntime }: { group: DependencyGroupView; onRepairRuntime: () => void }) {
   return (
     <Collapsible defaultOpen={group.status === "failed"} className="group rounded-lg border border-border bg-card">
-      <CollapsibleTrigger className={`${disclosureTriggerStateClass} grid w-full grid-cols-[1.25rem_1fr_1.25rem] items-center px-3 py-3 text-left text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}>
+      <CollapsibleTrigger className={`${disclosureTriggerStateClass} grid w-full grid-cols-[1rem_1fr_1.25rem] items-center gap-x-2 px-3 py-3 text-left text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}>
         {group.status === "succeeded" ? (
           <Check className="size-4 text-emerald-600 dark:text-emerald-400" aria-label="All checks passed" />
         ) : (
