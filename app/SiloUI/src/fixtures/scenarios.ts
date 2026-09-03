@@ -4,6 +4,7 @@ import {
   type SiloProgressEvent,
 } from "@/contracts/silo"
 import { parseOnboardingSource, type OnboardingSource } from "@/features/onboarding/model/onboarding-source"
+import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 
 export const scenarioNames = ["running", "complete", "dependency-failure", "bootstrap-failure"] as const
 export type ScenarioName = (typeof scenarioNames)[number]
@@ -104,6 +105,7 @@ const completeEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
 ]) satisfies SiloProgressEvent[]
 
 const runningSource = {
+  machineConfigurations: productionMachineDefaults.map((machine) => ({ ...machine })),
   bootstrapConfiguration,
   bootstrapState: {
     phase: "workspaces",

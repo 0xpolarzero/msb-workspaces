@@ -2,11 +2,13 @@ import { AlertCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { StatusIcon } from "@/features/onboarding/components/status-icon"
+import type { SetupMachineConfiguration } from "@/contracts/silo"
 import type { ReviewQueueItemView } from "@/features/onboarding/model/onboarding-state"
 
 interface ReviewStepProps {
   workspaceRetryable: boolean
   queueItems: ReviewQueueItemView[]
+  machines: readonly SetupMachineConfiguration[]
   identitySummary: string
   githubSummary: string
   errorMessage?: string
@@ -24,7 +26,7 @@ const detailById: Record<ReviewQueueItemView["id"], string> = {
   completion: "Closes setup after every required verification succeeds",
 }
 
-export function ReviewStep({ workspaceRetryable, queueItems, identitySummary, githubSummary, errorMessage, errorRecovery, onRetryWorkspaceSetup }: ReviewStepProps) {
+export function ReviewStep({ workspaceRetryable, queueItems, machines, identitySummary, githubSummary, errorMessage, errorRecovery, onRetryWorkspaceSetup }: ReviewStepProps) {
   return (
     <section aria-labelledby="review-title" className="mx-auto max-w-3xl">
       <h2 id="review-title" className="sr-only" data-visual-heading="hidden">Review setup</h2>
@@ -41,7 +43,25 @@ export function ReviewStep({ workspaceRetryable, queueItems, identitySummary, gi
         </div>
       )}
 
-      <ol className="grid gap-2">
+      <section aria-labelledby="review-machines-heading" className="mb-3 rounded-lg border border-border bg-card p-3">
+        <h3 id="review-machines-heading" className="text-xs font-medium">Machines in setup order</h3>
+        <ol className="mt-2 grid gap-1" aria-label="Machines in setup order">
+          {machines.map((machine, index) => (
+            <li key={machine.id} className="flex min-w-0 items-center gap-2 text-xs">
+              <span className="w-5 shrink-0 text-right font-mono text-[10px] text-muted-foreground">{index + 1}</span>
+              <span className="min-w-0 flex-1 truncate font-medium">{machine.name}</span>
+              <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] uppercase text-muted-foreground">{machine.kind}</span>
+              <span className="hidden min-w-0 max-w-64 truncate text-[10px] text-muted-foreground sm:block">
+                {machine.kind === "vm"
+                  ? `${machine.cpus} CPU · ${machine.memoryGiB} GB RAM`
+                  : `${machine.user}@${machine.host}:${machine.port}`}
+              </span>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      <ol className="grid gap-2" aria-label="Setup operations">
         {queueItems.map((item, index) => {
           const status = item.status === "queued" ? "waiting" : item.status
           const choiceDetail = item.id === "githubRun" ? githubSummary : item.id === "identityRun" ? identitySummary : detailById[item.id]

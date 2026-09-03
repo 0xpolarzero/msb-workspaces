@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest"
 
 import {
   githubWorkspacePolicySchema,
+  setupMachineConfigurationRequestSchema,
   setupWorkspaceConfigurationSchema,
   siloProgressEventSchema,
 } from "@/contracts/silo"
 import { onboardingSourceSchema } from "@/features/onboarding/model/onboarding-source"
+import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 import { onboardingScenarios, scenarioNames } from "@/fixtures/scenarios"
 
 describe("Silo contract fixtures", () => {
@@ -68,5 +70,32 @@ describe("Silo contract fixtures", () => {
         workspace: "personal",
       }],
     })).toThrow("repository workspaces must match the policy workspace")
+  })
+
+  it("keeps the machine host-boundary request discriminated, ordered, and strict", () => {
+    const request = setupMachineConfigurationRequestSchema.parse({
+      schemaVersion: 1,
+      machines: [
+        productionMachineDefaults[1],
+        {
+          id: "00000000-0000-4000-8000-000000000100",
+          kind: "ssh",
+          name: "remote",
+          host: "remote.example.com",
+          user: "developer",
+          port: 22,
+        },
+      ],
+    })
+    expect(request.machines.map(({ name }) => name)).toEqual(["playgrounds", "remote"])
+    expect(request.machines.map(({ kind }) => kind)).toEqual(["vm", "ssh"])
+    expect(() => setupMachineConfigurationRequestSchema.parse({
+      ...request,
+      machines: [{ ...request.machines[1], ignoredCredential: "secret" }],
+    })).toThrow()
+    expect(() => setupMachineConfigurationRequestSchema.parse({
+      ...request,
+      machines: [request.machines[0], { ...request.machines[1], name: "PLAYGROUNDS" }],
+    })).toThrow()
   })
 })

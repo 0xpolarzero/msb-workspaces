@@ -47,6 +47,32 @@ export const setupWorkspaceConfigurationSchema = z.object({
   message: "memoryGiB must not exceed maxMemoryGiB",
 })
 
+export const setupVirtualMachineConfigurationSchema = setupWorkspaceConfigurationSchema.extend({
+  kind: z.literal("vm"),
+}).strict()
+
+export const setupSSHMachineConfigurationSchema = z.object({
+  id: z.uuid(),
+  kind: z.literal("ssh"),
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/),
+  host: z.string().trim().min(1).max(253).regex(/^\S+$/),
+  user: z.string().trim().min(1).max(64).regex(/^[a-zA-Z_][a-zA-Z0-9._-]*$/),
+  port: z.number().int().min(1).max(65_535),
+}).strict()
+
+export const setupMachineConfigurationSchema = z.discriminatedUnion("kind", [
+  setupVirtualMachineConfigurationSchema,
+  setupSSHMachineConfigurationSchema,
+])
+
+export const setupMachineConfigurationRequestSchema = z.object({
+  schemaVersion: z.literal(1),
+  machines: z.array(setupMachineConfigurationSchema).min(1).max(64),
+}).strict().refine((configuration) => {
+  const names = configuration.machines.map(({ name }) => name.toLowerCase())
+  return new Set(names).size === names.length
+}, { message: "machine names must be unique" })
+
 export const siloBootstrapPhaseSchema = z.enum([
   "welcome",
   "preflight",
@@ -131,6 +157,10 @@ export const setupQueueItemStatusSchema = z.enum(["queued", "running", "succeede
 export type SiloPreflightCheck = z.infer<typeof siloPreflightCheckSchema>
 export type SiloBootstrapConfiguration = z.infer<typeof siloBootstrapConfigurationSchema>
 export type SiloBootstrapState = z.infer<typeof siloBootstrapStateSchema>
+export type SetupMachineConfiguration = z.infer<typeof setupMachineConfigurationSchema>
+export type SetupMachineConfigurationRequest = z.infer<typeof setupMachineConfigurationRequestSchema>
+export type SetupSSHMachineConfiguration = z.infer<typeof setupSSHMachineConfigurationSchema>
+export type SetupVirtualMachineConfiguration = z.infer<typeof setupVirtualMachineConfigurationSchema>
 export type SiloProgressEvent = z.infer<typeof siloProgressEventSchema>
 export type SiloProtocolError = z.infer<typeof siloProtocolErrorSchema>
 export type GitHubWorkspacePolicy = z.infer<typeof githubWorkspacePolicySchema>

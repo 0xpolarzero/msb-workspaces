@@ -3,7 +3,8 @@ import { AlertCircle, Check, Clock3, LoaderCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { ActivityOutput } from "@/features/onboarding/components/activity-output"
-import { WorkspaceList } from "@/features/onboarding/components/workspace-list"
+import { MachineList } from "@/features/onboarding/components/machine-list"
+import type { SetupMachineConfiguration } from "@/contracts/silo"
 import type { WorkspaceProgressView } from "@/features/onboarding/model/onboarding-state"
 
 function formatElapsed(seconds: number): string {
@@ -12,7 +13,12 @@ function formatElapsed(seconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
 }
 
-export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgressView; onRetry: () => void }) {
+export function WorkspacesStep({ machines, progress, onMachinesChange, onRetry }: {
+  machines: readonly SetupMachineConfiguration[]
+  progress: WorkspaceProgressView
+  onMachinesChange: (machines: SetupMachineConfiguration[]) => void
+  onRetry: () => void
+}) {
   return (
     <section aria-labelledby="workspaces-title" className="mx-auto flex h-full min-h-0 max-w-4xl flex-col">
       <h2 id="workspaces-title" className="sr-only" data-visual-heading="hidden">
@@ -45,7 +51,7 @@ export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgr
       </div>
 
       <div className="mt-4 min-h-0 flex-1 border-t border-border pt-4">
-        <WorkspaceList progress={progress} />
+        <MachineList machines={machines} progress={progress} onMachinesChange={onMachinesChange} />
       </div>
 
       {progress.status === "failed" && (

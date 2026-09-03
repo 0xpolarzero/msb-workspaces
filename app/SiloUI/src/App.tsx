@@ -16,9 +16,10 @@ export default function App() {
         initialGitHubConnectionState={githubState}
         repositoryOptions={repositoryFixtures}
         actions={{
+          saveMachineConfiguration: (request) => setSource((current) => ({ ...current, machineConfigurations: request.machines })),
           repairRuntime: () => setSource(onboardingScenarios.running),
           retryWorkspaceSetup: () => setSource(onboardingScenarios.running),
-          finishSetup: () => undefined,
+          finishSetup: (_request) => undefined,
         }}
       />
       {import.meta.env.DEV && <FixtureSelector scenario={scenario} githubState={githubState} />}

@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
@@ -9,10 +9,28 @@ import { githubStateFromSearch, onboardingScenarios, repositoryFixtures } from "
 
 function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
   return render(<OnboardingApp source={onboardingScenarios[name]} initialGitHubConnectionState={githubState} repositoryOptions={repositoryFixtures} actions={{
+    saveMachineConfiguration: vi.fn(),
     repairRuntime: vi.fn(),
     retryWorkspaceSetup: vi.fn(),
     finishSetup: vi.fn(),
   }} />)
+}
+
+async function renderMachineScenario() {
+  const saveMachineConfiguration = vi.fn()
+  const user = userEvent.setup()
+  render(<OnboardingApp
+    source={onboardingScenarios.running}
+    repositoryOptions={repositoryFixtures}
+    actions={{
+      saveMachineConfiguration,
+      repairRuntime: vi.fn(),
+      retryWorkspaceSetup: vi.fn(),
+      finishSetup: vi.fn(),
+    }}
+  />)
+  await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
+  return { user, saveMachineConfiguration }
 }
 
 function expectHiddenPanelHeading(name: string) {
@@ -99,7 +117,7 @@ describe("onboarding", () => {
     await user.click(within(githubFooter).getByRole("button", { name: "Skip repository access" }))
     expectHiddenPanelHeading("Review setup")
     expect(screen.getByText("Repository access skipped")).toBeVisible()
-    expect(screen.getByText("Taylor Example <taylor@example.com> → all 12 workspaces")).toBeVisible()
+    expect(screen.getByText("Taylor Example <taylor@example.com> → all 3 workspaces")).toBeVisible()
   })
 
   it("renders stable disconnected, connecting, and connected GitHub states", async () => {
@@ -148,6 +166,7 @@ describe("onboarding", () => {
       }],
     }
     render(<OnboardingApp source={source} actions={{
+      saveMachineConfiguration: vi.fn(),
       repairRuntime: vi.fn(),
       retryWorkspaceSetup: vi.fn(),
       finishSetup: vi.fn(),
@@ -173,7 +192,7 @@ describe("onboarding", () => {
     expect(screen.getByRole("region", { name: "Workspace Git identity and repository access" })).toBeVisible()
     expect(screen.queryByRole("heading", { name: "Workspace Git identity and repository access" })).not.toBeInTheDocument()
     expect(screen.queryByText("Selected repositories always allow local writes and commits.")).not.toBeInTheDocument()
-    expect(screen.getAllByRole("combobox")).toHaveLength(12)
+    expect(screen.getAllByRole("combobox")).toHaveLength(3)
     expect(screen.queryByText(/read only|read-write/i)).not.toBeInTheDocument()
 
     const picker = screen.getByLabelText("Add repository to playgrounds")
@@ -204,8 +223,8 @@ describe("onboarding", () => {
     expect(within(retained).getByRole("checkbox", { name: "Allow pushes for acme/platform-tools" })).toBeChecked()
 
     await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByText("3 repositories across 2 of 12 workspaces · 1 push-enabled repository")).toBeVisible()
-    expect(screen.getByText("Taylor Example <taylor@example.com> → dev, personal, docs-build, client-alpha-integration, qa-macos, qa-linux, release, data-lab, api-benchmarks, customer-demo, security-review; Morgan Example <taylor@example.com> → playgrounds")).toBeVisible()
+    expect(screen.getByText("3 repositories across 2 of 3 workspaces · 1 push-enabled repository")).toBeVisible()
+    expect(screen.getByText("Taylor Example <taylor@example.com> → dev, personal; Morgan Example <taylor@example.com> → playgrounds")).toBeVisible()
   })
 
   it("treats repository names as case-insensitive when preventing duplicates", async () => {
@@ -214,7 +233,7 @@ describe("onboarding", () => {
       source={onboardingScenarios.running}
       initialGitHubConnectionState="connected"
       repositoryOptions={["ACME/SILO", "acme/silo", "acme/design-system"]}
-      actions={{ repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
+      actions={{ saveMachineConfiguration: vi.fn(), repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
     />)
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
@@ -238,7 +257,7 @@ describe("onboarding", () => {
     expect(screen.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
     await user.click(screen.getByRole("tab", { name: /Review/ }))
 
-    expect(screen.getByText("0 repositories across 0 of 12 workspaces · 0 push-enabled repositories")).toBeVisible()
+    expect(screen.getByText("0 repositories across 0 of 3 workspaces · 0 push-enabled repositories")).toBeVisible()
   })
 
   it("exposes the Allow pushes explanation to keyboard users", async () => {
@@ -259,12 +278,12 @@ describe("onboarding", () => {
     renderScenario("running", "disconnected")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    expect(screen.getAllByRole("checkbox", { name: /^Apply Git identity to / })).toHaveLength(12)
+    expect(screen.getAllByRole("checkbox", { name: /^Apply Git identity to / })).toHaveLength(3)
     for (const checkbox of screen.getAllByRole("checkbox", { name: /^Apply Git identity to / })) {
       expect(checkbox).toBeChecked()
     }
     const identityRows = screen.getAllByRole("group", { name: /^Git identity for / })
-    expect(identityRows).toHaveLength(12)
+    expect(identityRows).toHaveLength(3)
     for (const row of identityRows) expect(row).toHaveAttribute("data-layout", "compact-row")
     const devIdentity = screen.getByRole("group", { name: "Git identity for dev" })
     expect(within(devIdentity).getByPlaceholderText("Name")).toHaveAccessibleName("Git name for dev")
@@ -277,9 +296,9 @@ describe("onboarding", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Name and email used for Git commits in this VM.")
     expect(screen.queryByText("Git name")).not.toBeInTheDocument()
     expect(screen.queryByText("Git email")).not.toBeInTheDocument()
-    expect(screen.getByLabelText("Git name for security-review")).toHaveValue("Taylor Example")
-    expect(screen.getByLabelText("Git email for security-review")).toHaveValue("taylor@example.com")
-    expect(screen.getByRole("button", { name: "Reset Git identity for security-review" })).toBeEnabled()
+    expect(screen.getByLabelText("Git name for personal")).toHaveValue("Taylor Example")
+    expect(screen.getByLabelText("Git email for personal")).toHaveValue("taylor@example.com")
+    expect(screen.getByRole("button", { name: "Reset Git identity for personal" })).toBeEnabled()
   })
 
   it("keeps workspace identity edits and apply choices independent and resets one workspace", async () => {
@@ -307,7 +326,7 @@ describe("onboarding", () => {
     await user.clear(playgroundsName)
     await user.type(playgroundsName, "Morgan Example")
     await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByText("Taylor Example <taylor@example.com> → dev, docs-build, client-alpha-integration, qa-macos, qa-linux, release, data-lab, api-benchmarks, customer-demo, security-review; Morgan Example <taylor@example.com> → playgrounds; not applied → personal")).toBeVisible()
+    expect(screen.getByText("Taylor Example <taylor@example.com> → dev; Morgan Example <taylor@example.com> → playgrounds; not applied → personal")).toBeVisible()
   })
 
   it("starts blank and leaves Reset safely unavailable without a host identity", async () => {
@@ -315,7 +334,7 @@ describe("onboarding", () => {
     render(<OnboardingApp
       source={{ ...onboardingScenarios.running, currentHostGitIdentity: null }}
       initialGitHubConnectionState="disconnected"
-      actions={{ repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
+      actions={{ saveMachineConfiguration: vi.fn(), repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
     />)
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
@@ -357,11 +376,12 @@ describe("onboarding", () => {
     expect(elapsedTime).toHaveTextContent("02:18")
     expect(screen.queryByText(/elapsed/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Internal verification path/)).not.toBeInTheDocument()
-    const list = screen.getByTestId("workspace-list")
-    expect(within(list).getByText("client-alpha-integration")).toBeVisible()
-    expect(within(list).getByText("security-review")).toBeVisible()
+    const list = screen.getByTestId("machine-list")
+    expect(within(list).getByText("dev")).toBeVisible()
+    expect(within(list).getByText("personal")).toBeVisible()
+    expect(within(list).queryByText("client-alpha-integration")).not.toBeInTheDocument()
     expect(screen.getByText("27 of 36 operations complete")).toBeVisible()
-    expect(screen.getByText("3 ready · 1 working · 8 waiting")).toBeVisible()
+    expect(screen.getByText("3 configured · 3 VM · 0 SSH")).toBeVisible()
     const activityControls = screen.getByRole("group", { name: "Live activity controls" })
     const activityCard = activityControls.parentElement
     const activitySlot = activityCard?.parentElement
@@ -431,11 +451,21 @@ describe("onboarding", () => {
     expect(screen.getByRole("button", { name: "Finish" })).toBeDisabled()
     running.unmount()
 
-    renderScenario("complete")
+    const finishSetup = vi.fn()
+    render(<OnboardingApp source={onboardingScenarios.complete} actions={{
+      saveMachineConfiguration: vi.fn(),
+      repairRuntime: vi.fn(),
+      retryWorkspaceSetup: vi.fn(),
+      finishSetup,
+    }} />)
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByRole("button", { name: "Finish" })).toBeEnabled()
-    expect(screen.getAllByRole("listitem")).toHaveLength(7)
+    expect(within(screen.getByRole("list", { name: "Setup operations" })).getAllByRole("listitem")).toHaveLength(7)
     await user.click(screen.getByRole("button", { name: "Finish" }))
+    expect(finishSetup).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      machines: onboardingScenarios.complete.machineConfigurations,
+    })
     expect(screen.getByRole("status")).toHaveTextContent("Setup complete")
   })
 
@@ -476,7 +506,7 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     const repairRuntime = vi.fn()
     const retryWorkspaceSetup = vi.fn()
-    const actions = { repairRuntime, retryWorkspaceSetup, finishSetup: vi.fn() }
+    const actions = { saveMachineConfiguration: vi.fn(), repairRuntime, retryWorkspaceSetup, finishSetup: vi.fn() }
     const dependency = render(<OnboardingApp source={onboardingScenarios["dependency-failure"]} actions={actions} />)
 
     await user.click(screen.getByRole("button", { name: "Repair…" }))
@@ -487,5 +517,211 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
     await user.click(screen.getByRole("button", { name: "Retry" }))
     expect(retryWorkspaceSetup).toHaveBeenCalledOnce()
+  })
+
+  it("starts from the exact three production machine defaults instead of the activity stress fixture", async () => {
+    await renderMachineScenario()
+    const list = screen.getByRole("list", { name: "Configured machines" })
+    const rows = within(list).getAllByRole("listitem")
+
+    expect(rows).toHaveLength(3)
+    expect(rows.map((row) => within(row).getByText(/^(dev|playgrounds|personal)$/).textContent)).toEqual(["dev", "playgrounds", "personal"])
+    expect(rows[0]).toHaveTextContent("8 CPU · 32 GB RAM · 120 GB workspace")
+    expect(rows[1]).toHaveTextContent("4 CPU · 32 GB RAM · 60 GB workspace")
+    expect(rows[2]).toHaveTextContent("6 CPU · 16 GB RAM · 100 GB workspace")
+    expect(within(list).queryByText("docs-build")).not.toBeInTheDocument()
+  })
+
+  it("adds, cancels, and saves a virtual machine through the typed configuration action", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+
+    await user.click(screen.getByRole("button", { name: "Add" }))
+    await user.click(screen.getByRole("menuitem", { name: "New virtual machine" }))
+    const draftName = screen.getByRole("textbox", { name: "Machine name" })
+    expect(draftName).toHaveValue("workspace-4")
+    expect(draftName).toHaveFocus()
+    expect(screen.getByRole("combobox", { name: "CPU limit" })).toHaveValue("8")
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(screen.queryByDisplayValue("workspace-4")).not.toBeInTheDocument()
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Add" }))
+    await user.click(screen.getByRole("menuitem", { name: "New virtual machine" }))
+    await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
+    await user.type(screen.getByRole("textbox", { name: "Machine name" }), "build")
+    await user.selectOptions(screen.getByRole("combobox", { name: "CPU limit" }), "4")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(saveMachineConfiguration).toHaveBeenCalledOnce()
+    expect(saveMachineConfiguration.mock.lastCall?.[0]).toMatchObject({
+      schemaVersion: 1,
+      machines: [
+        { kind: "vm", name: "dev" },
+        { kind: "vm", name: "playgrounds" },
+        { kind: "vm", name: "personal" },
+        { kind: "vm", name: "build", cpus: 4, maxCPUs: 12, memoryGiB: 32, maxMemoryGiB: 48, workspaceStorageGiB: 120, runtimeStorageGiB: 100 },
+      ],
+    })
+    expect(screen.getByRole("list", { name: "Configured machines" })).toHaveTextContent("build")
+  })
+
+  it("adds, validates, cancels, and saves an SSH machine without claiming a connection", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+
+    await user.click(screen.getByRole("button", { name: "Add" }))
+    await user.click(screen.getByRole("menuitem", { name: "Add via SSH" }))
+    expect(screen.getByRole("textbox", { name: "Machine name" })).toHaveValue("remote-1")
+    expect(screen.getByRole("spinbutton", { name: "SSH port" })).toHaveValue(22)
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(screen.getByText("Enter an SSH host.")).toBeVisible()
+    expect(screen.getByText("Enter an SSH user.")).toBeVisible()
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(screen.queryByDisplayValue("remote-1")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Add" }))
+    await user.click(screen.getByRole("menuitem", { name: "Add via SSH" }))
+    await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
+    await user.type(screen.getByRole("textbox", { name: "Machine name" }), "staging")
+    await user.type(screen.getByRole("textbox", { name: "SSH host" }), "staging.example.com")
+    await user.type(screen.getByRole("textbox", { name: "SSH user" }), "deploy")
+    await user.clear(screen.getByRole("spinbutton", { name: "SSH port" }))
+    await user.type(screen.getByRole("spinbutton", { name: "SSH port" }), "2222")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.at(-1)).toMatchObject({
+      kind: "ssh",
+      name: "staging",
+      host: "staging.example.com",
+      user: "deploy",
+      port: 2222,
+    })
+    expect(screen.getByText("deploy@staging.example.com:2222")).toBeVisible()
+    expect(screen.queryByText(/connected/i)).not.toBeInTheDocument()
+  })
+
+  it("restores an existing VM exactly on Cancel and persists a valid edit on Save", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+
+    await user.click(screen.getByRole("button", { name: "Edit dev" }))
+    const name = screen.getByRole("textbox", { name: "Machine name" })
+    expect(name).toHaveFocus()
+    await user.clear(name)
+    await user.type(name, "changed")
+    await user.selectOptions(screen.getByRole("combobox", { name: "Memory limit" }), "16")
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+    expect(screen.getByRole("button", { name: "Edit dev" })).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "Edit dev" }))
+    await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
+    await user.type(screen.getByRole("textbox", { name: "Machine name" }), "development")
+    await user.selectOptions(screen.getByRole("combobox", { name: "Memory limit" }), "16")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines[0]).toMatchObject({ name: "development", memoryGiB: 16 })
+    expect(screen.getByRole("button", { name: "Edit development" })).toBeVisible()
+  })
+
+  it("duplicates after the source, cancels drafts, and generates collision-free copy names", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+
+    await user.click(screen.getByRole("button", { name: "Duplicate dev" }))
+    expect(screen.getByRole("textbox", { name: "Machine name" })).toHaveValue("dev-copy")
+    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Duplicate dev" }))
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual(["dev", "dev-copy", "playgrounds", "personal"])
+
+    await user.click(screen.getByRole("button", { name: "Duplicate dev" }))
+    expect(screen.getByRole("textbox", { name: "Machine name" })).toHaveValue("dev-copy-2")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual(["dev", "dev-copy-2", "dev-copy", "playgrounds", "personal"])
+  })
+
+  it("arms inline deletion, cancels with Escape or outside input, and deletes only after confirmation", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+
+    await user.click(screen.getByRole("button", { name: "Delete dev" }))
+    expect(screen.getByRole("button", { name: "Confirm deletion of dev" })).toBeVisible()
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("button", { name: "Confirm deletion of dev" })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Delete dev" })).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "Delete dev" }))
+    fireEvent.pointerDown(screen.getByRole("heading", { name: "Creating your workspaces" }))
+    expect(screen.queryByRole("button", { name: "Confirm deletion of dev" })).not.toBeInTheDocument()
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole("button", { name: "Delete dev" }))
+    await user.click(screen.getByRole("button", { name: "Confirm deletion of dev" }))
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual(["playgrounds", "personal"])
+    expect(screen.queryByRole("button", { name: "Edit dev" })).not.toBeInTheDocument()
+  })
+
+  it("persists pointer drag reorder and the quiet keyboard reorder path", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+    const data = new Map<string, string>()
+    const dataTransfer = {
+      effectAllowed: "none",
+      setData: (type: string, value: string) => data.set(type, value),
+      getData: (type: string) => data.get(type) ?? "",
+    }
+    const target = screen.getByRole("button", { name: "Edit personal" }).closest("li")
+    expect(target).not.toBeNull()
+
+    fireEvent.dragStart(screen.getByRole("button", { name: "Reorder dev" }), { dataTransfer })
+    fireEvent.dragOver(target!, { dataTransfer })
+    fireEvent.drop(target!, { dataTransfer })
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual(["playgrounds", "personal", "dev"])
+
+    const devHandle = screen.getByRole("button", { name: "Reorder dev" })
+    devHandle.focus()
+    await user.keyboard("{ArrowUp}")
+    expect(saveMachineConfiguration.mock.lastCall?.[0].machines.map(({ name }: { name: string }) => name)).toEqual(["playgrounds", "dev", "personal"])
+    expect(screen.getByText("dev moved to position 2 of 3.")).toBeInTheDocument()
+  })
+
+  it("blocks duplicate names and invalid VM resource ranges", async () => {
+    const { user, saveMachineConfiguration } = await renderMachineScenario()
+    await user.click(screen.getByRole("button", { name: "Edit dev" }))
+    await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
+    await user.type(screen.getByRole("textbox", { name: "Machine name" }), "personal")
+    await user.selectOptions(screen.getByRole("combobox", { name: "CPU limit" }), "12")
+    await user.selectOptions(screen.getByRole("combobox", { name: "CPU ceiling" }), "4")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    expect(screen.getByText("Machine names must be unique.")).toBeVisible()
+    expect(screen.getByText("CPU limit cannot exceed its ceiling.")).toBeVisible()
+    expect(saveMachineConfiguration).not.toHaveBeenCalled()
+  })
+
+  it("mirrors final machine order and kind in Review while preserving activity collapse", async () => {
+    const { user } = await renderMachineScenario()
+    await user.click(screen.getByRole("button", { name: "Add" }))
+    await user.click(screen.getByRole("menuitem", { name: "Add via SSH" }))
+    await user.clear(screen.getByRole("textbox", { name: "Machine name" }))
+    await user.type(screen.getByRole("textbox", { name: "Machine name" }), "remote")
+    await user.type(screen.getByRole("textbox", { name: "SSH host" }), "remote.example.com")
+    await user.type(screen.getByRole("textbox", { name: "SSH user" }), "ops")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    await user.click(screen.getByRole("button", { name: "Reorder remote" }))
+    await user.keyboard("{ArrowUp}{ArrowUp}{ArrowUp}")
+
+    const activity = screen.getByRole("button", { name: "Collapse activity" })
+    await user.click(activity)
+    expect(screen.queryByLabelText("Workspace activity")).not.toBeInTheDocument()
+    expect(screen.getByTestId("machine-list")).toBeVisible()
+
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+    const review = screen.getByRole("list", { name: "Machines in setup order" })
+    expect(within(review).getAllByRole("listitem").map((row) => row.textContent)).toEqual([
+      expect.stringContaining("remotesshops@remote.example.com:22"),
+      expect.stringContaining("devvm8 CPU · 32 GB RAM"),
+      expect.stringContaining("playgroundsvm4 CPU · 32 GB RAM"),
+      expect.stringContaining("personalvm6 CPU · 16 GB RAM"),
+    ])
   })
 })

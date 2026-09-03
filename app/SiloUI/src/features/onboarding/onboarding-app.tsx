@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { TabsContent } from "@/components/ui/tabs"
+import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { OnboardingShell } from "@/features/onboarding/components/onboarding-shell"
 import type { OnboardingActions, OnboardingSource } from "@/features/onboarding/model/onboarding-source"
-import { onboardingSteps, projectOnboarding, type OnboardingStep } from "@/features/onboarding/model/onboarding-state"
+import { onboardingSteps, projectOnboarding, type OnboardingStep, type WorkspaceView } from "@/features/onboarding/model/onboarding-state"
+import { configurationRequest } from "@/features/onboarding/model/machine-configuration"
 import { DependenciesStep } from "@/features/onboarding/steps/dependencies-step"
 import {
   GitHubStep,
@@ -46,7 +48,7 @@ function uniqueWorkspaceSelections(selections: readonly WorkspaceRepositorySelec
 }
 
 function initialWorkspaceSelections(source: OnboardingSource): Record<string, WorkspaceRepositorySelection[]> {
-  return Object.fromEntries(source.bootstrapConfiguration.workspaces.map(({ name }) => {
+  return Object.fromEntries(source.machineConfigurations.map(({ name }) => {
     const repositories = source.githubPolicies
       .filter(({ workspace }) => workspace === name)
       .flatMap(({ repositories: policyRepositories }) => policyRepositories)
@@ -59,7 +61,7 @@ function initialWorkspaceSelections(source: OnboardingSource): Record<string, Wo
 
 function initialWorkspaceIdentities(source: OnboardingSource): Record<string, WorkspaceGitIdentity> {
   const { name = "", email = "" } = source.currentHostGitIdentity ?? {}
-  return Object.fromEntries(source.bootstrapConfiguration.workspaces.map((workspace) => [
+  return Object.fromEntries(source.machineConfigurations.map((workspace) => [
     workspace.name,
     { name, email, apply: true },
   ]))
@@ -118,6 +120,7 @@ export function OnboardingApp({
   const [repositoryAccessSkipped, setRepositoryAccessSkipped] = useState(false)
   const [workspaceSelections, setWorkspaceSelections] = useState(() => initialWorkspaceSelections(source))
   const [workspaceIdentities, setWorkspaceIdentities] = useState(() => initialWorkspaceIdentities(source))
+  const [machines, setMachines] = useState<SetupMachineConfiguration[]>(() => source.machineConfigurations.map((machine) => ({ ...machine })))
   const [finished, setFinished] = useState(false)
   const connectTimer = useRef<number | undefined>(undefined)
   const availableRepositories = useMemo(
@@ -131,6 +134,17 @@ export function OnboardingApp({
     const current = onboardingSteps.indexOf(activeStep)
     const next = onboardingSteps[current + offset]
     if (next) setActiveStep(next)
+  }
+
+  function saveMachines(updated: SetupMachineConfiguration[]) {
+    const request = configurationRequest(updated)
+    setWorkspaceSelections((current) => Object.fromEntries(request.machines.map(({ name }) => [name, current[name] ?? []])))
+    setWorkspaceIdentities((current) => Object.fromEntries(request.machines.map(({ name }) => [
+      name,
+      current[name] ?? { ...(source.currentHostGitIdentity ?? { name: "", email: "" }), apply: true },
+    ])))
+    setMachines(request.machines)
+    actions.saveMachineConfiguration(request)
   }
 
   function connectGitHub() {
@@ -171,7 +185,7 @@ export function OnboardingApp({
   function continueSetup() {
     if (activeStep === "review") {
       if (viewModel.finishEnabled) {
-        actions.finishSetup()
+        actions.finishSetup(configurationRequest(machines))
         setFinished(true)
       }
       return
@@ -180,10 +194,11 @@ export function OnboardingApp({
     move(1)
   }
 
-  const configuredWorkspaceCount = Object.values(workspaceSelections).filter((repositories) => repositories.length > 0).length
-  const repositoryCount = Object.values(workspaceSelections).reduce((total, repositories) => total + repositories.length, 0)
-  const pushEnabledRepositoryCount = Object.values(workspaceSelections).reduce(
-    (total, repositories) => total + repositories.filter(({ allowPushes }) => allowPushes).length,
+  const machineNames = machines.map(({ name }) => name)
+  const configuredWorkspaceCount = machineNames.filter((name) => (workspaceSelections[name] ?? []).length > 0).length
+  const repositoryCount = machineNames.reduce((total, name) => total + (workspaceSelections[name] ?? []).length, 0)
+  const pushEnabledRepositoryCount = machineNames.reduce(
+    (total, name) => total + (workspaceSelections[name] ?? []).filter(({ allowPushes }) => allowPushes).length,
     0,
   )
   const repositoryLabel = repositoryCount === 1 ? "repository" : "repositories"
@@ -191,12 +206,16 @@ export function OnboardingApp({
   const githubSummary = repositoryAccessSkipped
     ? "Repository access skipped"
     : githubConnectionState === "connected"
-      ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${viewModel.workspaceProgress.workspaces.length} workspaces · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
+      ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${machines.length} workspaces · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
       : "GitHub not connected"
   const identitySummary = workspaceIdentitySummary(
     workspaceIdentities,
-    viewModel.workspaceProgress.workspaces.map(({ name }) => name),
+    machineNames,
   )
+  const machineWorkspaceViews = machines.map((machine): WorkspaceView => (
+    viewModel.workspaceProgress.workspaces.find(({ name }) => name === machine.name)
+      ?? { name: machine.name, status: "waiting", detail: machine.kind === "ssh" ? "Remote via SSH" : "Waiting" }
+  ))
 
   return (
     <OnboardingShell
@@ -211,11 +230,11 @@ export function OnboardingApp({
         <DependenciesStep groups={viewModel.dependencies} onRepairRuntime={actions.repairRuntime} />
       </TabsContent>
       <TabsContent value="workspaces" className="mt-0 h-full min-h-0 overflow-hidden outline-none">
-        <WorkspacesStep progress={viewModel.workspaceProgress} onRetry={actions.retryWorkspaceSetup} />
+        <WorkspacesStep key={activeStep} machines={machines} progress={viewModel.workspaceProgress} onMachinesChange={saveMachines} onRetry={actions.retryWorkspaceSetup} />
       </TabsContent>
       <TabsContent value="github" className="mt-0 h-full outline-none">
         <GitHubStep
-          workspaces={viewModel.workspaceProgress.workspaces}
+          workspaces={machineWorkspaceViews}
           connectionState={githubConnectionState}
           repositoryOptions={availableRepositories}
           workspaceSelections={workspaceSelections}
@@ -231,6 +250,7 @@ export function OnboardingApp({
         <ReviewStep
           workspaceRetryable={viewModel.workspaceProgress.retryable}
           queueItems={viewModel.queueItems}
+          machines={machines}
           githubSummary={githubSummary}
           identitySummary={identitySummary}
           errorMessage={viewModel.error?.message}

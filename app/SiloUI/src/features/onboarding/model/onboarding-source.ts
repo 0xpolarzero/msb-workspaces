@@ -8,12 +8,15 @@ import {
   siloPreflightCheckSchema,
   siloProgressEventSchema,
   siloProtocolErrorSchema,
+  setupMachineConfigurationSchema,
 } from "@/contracts/silo"
+import type { SetupMachineConfigurationRequest } from "@/contracts/silo"
 
 // This is the frontend's narrow input seam, not a Silo wire object. Each field
 // remains an unmodified current protocol or app-state shape so a future bridge
 // only has to replace the provider.
 export const onboardingSourceSchema = z.object({
+  machineConfigurations: z.array(setupMachineConfigurationSchema).min(1).max(64),
   bootstrapConfiguration: siloBootstrapConfigurationSchema,
   bootstrapState: siloBootstrapStateSchema,
   preflightChecks: z.array(siloPreflightCheckSchema),
@@ -30,9 +33,10 @@ export const onboardingSourceSchema = z.object({
 export type OnboardingSource = z.infer<typeof onboardingSourceSchema>
 
 export interface OnboardingActions {
+  saveMachineConfiguration: (request: SetupMachineConfigurationRequest) => void
   repairRuntime: () => void
   retryWorkspaceSetup: () => void
-  finishSetup: () => void
+  finishSetup: (request: SetupMachineConfigurationRequest) => void
 }
 
 export function parseOnboardingSource(input: unknown): OnboardingSource {
