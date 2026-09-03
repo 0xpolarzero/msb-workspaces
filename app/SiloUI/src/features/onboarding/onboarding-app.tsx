@@ -8,7 +8,7 @@ import { DependenciesStep } from "@/features/onboarding/steps/dependencies-step"
 import {
   GitHubStep,
   type GitHubConnectionState,
-  type WorkspaceRepositoryAccess,
+  type WorkspaceRepositorySelection,
 } from "@/features/onboarding/steps/github-step"
 import { IdentityStep, type IdentityChoice } from "@/features/onboarding/steps/identity-step"
 import { ReviewStep } from "@/features/onboarding/steps/review-step"
@@ -21,13 +21,19 @@ interface OnboardingAppProps {
   repositoryOptions?: readonly string[]
 }
 
-function initialWorkspaceAccess(source: OnboardingSource): Record<string, WorkspaceRepositoryAccess> {
+function initialWorkspaceSelections(source: OnboardingSource): Record<string, WorkspaceRepositorySelection[]> {
   return Object.fromEntries(source.bootstrapConfiguration.workspaces.map(({ name }) => {
-    const repository = source.githubPolicies.find(({ workspace }) => workspace === name)?.repositories[0]
-    return [name, {
-      repository: repository?.fullName ?? null,
-      permission: repository?.mode ?? "read-only",
-    }]
+    const repositories = source.githubPolicies
+      .filter(({ workspace }) => workspace === name)
+      .flatMap(({ repositories: policyRepositories }) => policyRepositories)
+    const selections = new Map<string, WorkspaceRepositorySelection>()
+    for (const repository of repositories) {
+      selections.set(repository.fullName, {
+        repository: repository.fullName,
+        allowPushes: repository.mode === "read-write",
+      })
+    }
+    return [name, [...selections.values()]]
   }))
 }
 
@@ -47,7 +53,7 @@ export function OnboardingApp({
     initialGitHubConnectionState ?? (source.githubPolicies.some(({ repositories }) => repositories.length > 0) ? "connected" : "disconnected"),
   )
   const [githubSkipped, setGithubSkipped] = useState(false)
-  const [workspaceAccess, setWorkspaceAccess] = useState(() => initialWorkspaceAccess(source))
+  const [workspaceSelections, setWorkspaceSelections] = useState(() => initialWorkspaceSelections(source))
   const defaultIdentityTarget = source.identityInput.target ?? source.bootstrapConfiguration.workspaces[0]?.name ?? null
   const [identity, setIdentity] = useState<IdentityChoice>({
     name: source.identityInput.name,
@@ -57,7 +63,10 @@ export function OnboardingApp({
   const [identitySkipped, setIdentitySkipped] = useState(false)
   const [finished, setFinished] = useState(false)
   const connectTimer = useRef<number | undefined>(undefined)
-  const availableRepositories = repositoryOptions ?? defaultRepositoryOptions(source)
+  const availableRepositories = useMemo(
+    () => [...new Set(repositoryOptions ?? defaultRepositoryOptions(source))],
+    [repositoryOptions, source],
+  )
 
   useEffect(() => () => window.clearTimeout(connectTimer.current), [])
 
@@ -74,9 +83,9 @@ export function OnboardingApp({
     connectTimer.current = window.setTimeout(() => setGithubConnectionState("connected"), 700)
   }
 
-  function updateWorkspaceAccess(workspace: string, access: WorkspaceRepositoryAccess) {
+  function updateWorkspaceSelections(workspace: string, selections: WorkspaceRepositorySelection[]) {
     setGithubSkipped(false)
-    setWorkspaceAccess((current) => ({ ...current, [workspace]: access }))
+    setWorkspaceSelections((current) => ({ ...current, [workspace]: selections }))
   }
 
   function updateIdentity(nextIdentity: IdentityChoice) {
@@ -111,13 +120,18 @@ export function OnboardingApp({
     move(1)
   }
 
-  const configuredWorkspaceCount = Object.values(workspaceAccess).filter(({ repository }) => repository !== null).length
-  const pushEnabledWorkspaceCount = Object.values(workspaceAccess).filter(({ repository, permission }) => repository !== null && permission === "read-write").length
-  const pushSummary = `${pushEnabledWorkspaceCount} ${pushEnabledWorkspaceCount === 1 ? "workspace" : "workspaces"} can push`
+  const configuredWorkspaceCount = Object.values(workspaceSelections).filter((repositories) => repositories.length > 0).length
+  const repositoryCount = Object.values(workspaceSelections).reduce((total, repositories) => total + repositories.length, 0)
+  const pushEnabledRepositoryCount = Object.values(workspaceSelections).reduce(
+    (total, repositories) => total + repositories.filter(({ allowPushes }) => allowPushes).length,
+    0,
+  )
+  const repositoryLabel = repositoryCount === 1 ? "repository" : "repositories"
+  const pushRepositoryLabel = pushEnabledRepositoryCount === 1 ? "repository" : "repositories"
   const githubSummary = githubSkipped
     ? "GitHub access skipped"
     : githubConnectionState === "connected"
-      ? `${configuredWorkspaceCount} of ${viewModel.workspaceProgress.workspaces.length} workspaces configured · ${pushSummary}`
+      ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${viewModel.workspaceProgress.workspaces.length} workspaces · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
       : "GitHub not connected"
   const identitySummary = identitySkipped
     ? "Git identity skipped"
@@ -144,9 +158,9 @@ export function OnboardingApp({
           progress={viewModel.workspaceProgress}
           connectionState={githubConnectionState}
           repositoryOptions={availableRepositories}
-          workspaceAccess={workspaceAccess}
+          workspaceSelections={workspaceSelections}
           onConnect={connectGitHub}
-          onWorkspaceAccessChange={updateWorkspaceAccess}
+          onWorkspaceSelectionsChange={updateWorkspaceSelections}
           onViewProgress={() => setActiveStep("workspaces")}
         />
       </TabsContent>
