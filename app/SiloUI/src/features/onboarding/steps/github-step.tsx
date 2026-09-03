@@ -207,6 +207,20 @@ export function GitHubStep({
                     data-layout="compact-row"
                     className="flex min-w-0 items-center gap-1.5"
                   >
+                    <TooltipProvider delayDuration={150}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            tabIndex={0}
+                            aria-label={`About Git identity for ${name}`}
+                            className="grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+                          >
+                            <GitBranch aria-hidden="true" className="size-3.5" />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>Name and email used for Git commits in this VM.</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                     <Input
                       aria-label={`Git name for ${name}`}
                       autoComplete="off"
