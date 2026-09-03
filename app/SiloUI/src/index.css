@@ -176,4 +176,8 @@
   .activity-output-content {
     animation: none !important;
   }
+
+  .activity-output-collapsible .disclosure-caret {
+    transition-duration: 0s;
+  }
 }
