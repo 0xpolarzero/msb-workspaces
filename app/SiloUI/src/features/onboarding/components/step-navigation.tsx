@@ -1,6 +1,6 @@
 import { Check, LoaderCircle, Minus, TriangleAlert } from "lucide-react"
 
-import { SiloMark } from "@/features/onboarding/components/silo-mark"
+import { SiloMark } from "@/components/silo-mark"
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import type { OnboardingStep, PresentationStatus } from "@/features/onboarding/model/onboarding-state"
