@@ -229,7 +229,7 @@ describe("onboarding", () => {
     await user.tab({ shift: true })
 
     expect(tooltipTrigger).toHaveFocus()
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Enabled allows pushes from the VM. Disabled does not.")
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("On lets the VM push. Off blocks pushes.")
   })
 
   it("preserves and truthfully summarizes the native identity target", async () => {

@@ -208,7 +208,7 @@ export function GitHubStep({
                                         <Info aria-hidden="true" className="size-3" />
                                       </Button>
                                     </TooltipTrigger>
-                                    <TooltipContent>Enabled allows pushes from the VM. Disabled does not.</TooltipContent>
+                                    <TooltipContent>On lets the VM push. Off blocks pushes.</TooltipContent>
                                   </Tooltip>
                                 </TooltipProvider>
                               </span>
