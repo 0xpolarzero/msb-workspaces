@@ -3,16 +3,13 @@ import { TabsContent } from "@/components/ui/tabs"
 
 import { ApplicationShell } from "@/features/application/components/application-shell"
 import type { ApplicationActions, ApplicationSource, ApplicationTab, WorkspaceSection } from "@/features/application/model/application-source"
+import { BackupPage } from "@/features/application/pages/backup-page"
+import { GeneralPage } from "@/features/application/pages/general-page"
+import { GitHubPage } from "@/features/application/pages/github-page"
+import { NotificationsPage } from "@/features/application/pages/notifications-page"
 import { OverviewPage } from "@/features/application/pages/overview-page"
+import { SecretsPage } from "@/features/application/pages/secrets-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
-
-const placeholderCopy: Record<Exclude<ApplicationTab, "overview" | "workspaces">, string> = {
-  github: "Account and repository access",
-  secrets: "Host-held credentials",
-  backup: "Backup and restore",
-  notifications: "Workspace and operation alerts",
-  general: "Startup and application preferences",
-}
 
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
   const [activeTab, setActiveTab] = useState<ApplicationTab>("overview")
@@ -28,10 +25,10 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
 
   return (
     <ApplicationShell activeTab={activeTab} onTabChange={setActiveTab}>
-      <TabsContent value="overview" className="m-0">
+      <TabsContent value="overview" forceMount className="m-0 data-[state=inactive]:hidden">
         <OverviewPage source={source} actions={actions} onOpenWorkspace={openWorkspace} />
       </TabsContent>
-      <TabsContent value="workspaces" className="m-0">
+      <TabsContent value="workspaces" forceMount className="m-0 data-[state=inactive]:hidden">
         <WorkspacesPage
           workspaces={source.workspaces}
           selectedWorkspace={selectedWorkspace}
@@ -43,16 +40,11 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
           onLogQueryChange={setLogQuery}
         />
       </TabsContent>
-      {(Object.keys(placeholderCopy) as Array<keyof typeof placeholderCopy>).map((tab) => (
-        <TabsContent key={tab} value={tab} className="m-0">
-          <div className="mx-auto grid min-h-80 w-full max-w-4xl place-items-center px-6 text-center">
-            <div>
-              <h2 className="text-xl font-semibold tracking-tight capitalize">{tab}</h2>
-              <p className="mt-2 text-sm text-muted-foreground">{placeholderCopy[tab]}</p>
-            </div>
-          </div>
-        </TabsContent>
-      ))}
+      <TabsContent value="github" forceMount className="m-0 data-[state=inactive]:hidden"><GitHubPage source={source} /></TabsContent>
+      <TabsContent value="secrets" forceMount className="m-0 data-[state=inactive]:hidden"><SecretsPage source={source} /></TabsContent>
+      <TabsContent value="backup" forceMount className="m-0 data-[state=inactive]:hidden"><BackupPage source={source} /></TabsContent>
+      <TabsContent value="notifications" forceMount className="m-0 data-[state=inactive]:hidden"><NotificationsPage /></TabsContent>
+      <TabsContent value="general" forceMount className="m-0 data-[state=inactive]:hidden"><GeneralPage source={source} /></TabsContent>
     </ApplicationShell>
   )
 }
