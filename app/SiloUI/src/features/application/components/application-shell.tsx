@@ -27,7 +27,7 @@ function NavigationItems({ items }: { items: ReadonlyArray<{ id: ApplicationTab;
       key={id}
       value={id}
       data-appearance="borderless"
-      className="h-10 min-w-fit justify-center gap-2 rounded-md border-0 bg-transparent px-3 py-2 text-xs text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]"
+      className="h-10 min-w-fit flex-none justify-center gap-2 rounded-md border-0 bg-transparent px-3 py-2 text-xs text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]"
     >
       <Icon className="size-4" />
       {label}
@@ -94,7 +94,7 @@ export function ApplicationShell({
               data-appearance="borderless"
               aria-expanded={settingsOpen}
               aria-controls={settingsOpen ? "settings-sections" : undefined}
-              className="h-10 min-w-fit justify-center gap-2 rounded-md border-0 bg-transparent px-3 py-2 text-xs text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]"
+              className="h-10 min-w-fit flex-none justify-center gap-2 rounded-md border-0 bg-transparent px-3 py-2 text-xs text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]"
             >
               <Settings2 className="size-4" />
               <span className="md:flex-1 md:text-left">Settings</span>

@@ -37,7 +37,8 @@ describe("application", () => {
   it("opens on Overview with the complete app navigation", () => {
     renderApplication()
 
-    expect(within(appNavigation()).getAllByRole("tab").map(({ textContent }) => textContent)).toEqual([
+    const navigationTabs = within(appNavigation()).getAllByRole("tab")
+    expect(navigationTabs.map(({ textContent }) => textContent)).toEqual([
       "Overview",
       "Sandboxes",
       "GitHub",
@@ -45,6 +46,7 @@ describe("application", () => {
       "Backup",
       "Settings",
     ])
+    for (const tab of navigationTabs) expect(tab).toHaveClass("flex-none")
     expect(within(appNavigation()).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true")
     expect(screen.getByRole("heading", { name: "Overview", level: 2 })).toBeVisible()
     expect(screen.getByText("3 sandboxes · Updated just now")).toBeVisible()
