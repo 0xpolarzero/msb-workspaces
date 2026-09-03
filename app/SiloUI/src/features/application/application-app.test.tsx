@@ -40,14 +40,13 @@ describe("application", () => {
     const navigation = appNavigation()
     const primaryItems = [...navigation.querySelectorAll<HTMLElement>("[data-navigation-level='primary']")]
     expect(primaryItems.map(({ textContent }) => textContent)).toEqual(["Sandboxes", "GitHub", "Secrets", "Backup", "Settings"])
-    for (const item of primaryItems) expect(item).toHaveClass("flex-none")
+    for (const item of primaryItems) expect(item).toHaveClass("flex-none", "md:w-full")
 
     expect(within(navigation).getByRole("button", { name: "Sandboxes" })).toHaveAttribute("aria-current", "page")
     const sandboxSections = within(navigation).getByRole("group", { name: "Sandbox sections" })
     expect(within(sandboxSections).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Overview", "Files", "Logs", "Network", "Activity"])
     expect(within(sandboxSections).getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page")
-    expect(sandboxSections).toHaveClass("md:pl-3")
-    expect(sandboxSections).not.toHaveClass("md:border-l")
+    expect(sandboxSections).toHaveClass("md:ml-3", "md:w-[calc(100%-0.75rem)]", "md:border-l", "md:pl-2")
 
     expect(within(appPanel("Sandboxes")).getByRole("heading", { name: "Overview", level: 2 })).toBeVisible()
     expect(screen.queryByRole("group", { name: "Settings sections" })).not.toBeInTheDocument()
@@ -62,8 +61,14 @@ describe("application", () => {
     expect(navigation.queryByRole("group", { name: "Sandbox sections" })).not.toBeInTheDocument()
     expect(sandboxes).toHaveAttribute("aria-current", "page")
     expect(within(appPanel("Sandboxes")).getByRole("heading", { name: "Overview", level: 2 })).toBeVisible()
+    const sandboxCaret = navigation.getByRole("button", { name: "Expand Sandboxes menu" })
+    expect(sandboxCaret).toBeVisible()
+    expect(sandboxCaret.querySelector("svg")).toBeVisible()
 
-    await user.click(navigation.getByRole("button", { name: "Expand Settings menu" }))
+    const settingsCaret = navigation.getByRole("button", { name: "Expand Settings menu" })
+    expect(settingsCaret).toBeVisible()
+    expect(settingsCaret.querySelector("svg")).toBeVisible()
+    await user.click(settingsCaret)
     expect(navigation.getByRole("group", { name: "Settings sections" })).toBeVisible()
     expect(sandboxes).toHaveAttribute("aria-current", "page")
     expect(navigation.getByRole("button", { name: "Settings" })).not.toHaveAttribute("aria-current")
