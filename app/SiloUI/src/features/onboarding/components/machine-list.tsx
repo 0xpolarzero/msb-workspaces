@@ -345,28 +345,23 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                     <MachineEditor editor={editor} machines={machines} onCancel={() => setEditor(null)} onSave={save} />
                   ) : (
                     <div className="flex min-w-0 items-center gap-1.5 px-2 py-2">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span
-                            role="button"
-                            tabIndex={0}
-                            draggable={!editor}
-                            aria-label={`Reorder ${machine.name}`}
-                            className="grid size-7 shrink-0 cursor-grab place-items-center rounded-md text-muted-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 active:cursor-grabbing"
-                            onKeyDown={(event) => handleReorderKey(event, machine, index)}
-                            onDragStart={(event) => {
-                              beginOperation()
-                              setDraggedID(machine.id)
-                              event.dataTransfer.effectAllowed = "move"
-                              event.dataTransfer.setData("text/plain", machine.id)
-                            }}
-                            onDragEnd={() => setDraggedID(null)}
-                          >
-                            <GripVertical className="size-4" aria-hidden="true" />
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>Drag to reorder; use Up and Down arrow keys.</TooltipContent>
-                      </Tooltip>
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        draggable={!editor}
+                        aria-label={`Reorder ${machine.name}`}
+                        className="grid size-7 shrink-0 cursor-grab place-items-center rounded-md text-muted-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 active:cursor-grabbing"
+                        onKeyDown={(event) => handleReorderKey(event, machine, index)}
+                        onDragStart={(event) => {
+                          beginOperation()
+                          setDraggedID(machine.id)
+                          event.dataTransfer.effectAllowed = "move"
+                          event.dataTransfer.setData("text/plain", machine.id)
+                        }}
+                        onDragEnd={() => setDraggedID(null)}
+                      >
+                        <GripVertical className="size-4" aria-hidden="true" />
+                      </span>
                       <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
                         {machine.kind === "vm" ? <Monitor className="size-3.5" aria-hidden="true" /> : <Server className="size-3.5" aria-hidden="true" />}
                       </span>

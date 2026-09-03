@@ -766,10 +766,17 @@ describe("onboarding", () => {
     expect(screen.getByRole("button", { name: "Edit development" })).toBeVisible()
   })
 
-  it("uses one custom tooltip for reorder and machine actions", async () => {
+  it("keeps machine actions on one custom tooltip and the drag handle tooltip-free", async () => {
     const { user } = await renderMachineScenario()
+    const dragHandle = screen.getByRole("button", { name: "Reorder dev" })
+    expect(dragHandle).toHaveAccessibleName("Reorder dev")
+    expect(dragHandle).not.toHaveAttribute("title")
+    fireEvent.focus(dragHandle)
+    await user.keyboard("{ArrowDown}")
+    fireEvent.blur(dragHandle)
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+
     const tooltipCases = [
-      ["Reorder dev", "Drag to reorder; use Up and Down arrow keys."],
       ["Edit dev", "Edit dev"],
       ["Duplicate dev", "Duplicate dev"],
       ["Delete dev", "Delete dev"],
