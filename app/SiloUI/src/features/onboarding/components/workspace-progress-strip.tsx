@@ -13,7 +13,7 @@ export function WorkspaceProgressStrip({ progress, onView }: { progress: Workspa
         : "Workspace setup is waiting"
 
   return (
-    <div className="mb-5 grid grid-cols-[auto_1fr_auto] items-center gap-2.5 rounded-lg border border-border bg-muted/45 px-3 py-2" aria-label="Workspace progress">
+    <div className="mb-3 grid grid-cols-[auto_1fr_auto] items-center gap-2.5 rounded-lg border border-border bg-muted/45 px-3 py-2" aria-label="Workspace progress">
       {progress.status === "failed" ? (
         <AlertCircle className="size-4 text-destructive" aria-hidden="true" />
       ) : progress.status === "succeeded" ? (

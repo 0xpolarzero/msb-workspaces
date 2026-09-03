@@ -15,13 +15,11 @@ function formatElapsed(seconds: number): string {
 export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgressView; onRetry: () => void }) {
   return (
     <section aria-labelledby="workspaces-title" className="mx-auto max-w-4xl">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <h2 id="workspaces-title" className="text-xl font-semibold tracking-tight">
-            {progress.status === "failed" ? "Workspace setup needs action" : progress.status === "succeeded" ? "Workspaces are ready" : progress.status === "running" ? "Creating your workspaces" : "Workspaces are waiting"}
-          </h2>
-        </div>
-        <span className="shrink-0 pt-1 font-mono text-[11px] text-muted-foreground">{formatElapsed(progress.elapsedSeconds)}</span>
+      <h2 id="workspaces-title" className="sr-only" data-visual-heading="hidden">
+        {progress.status === "failed" ? "Workspace setup needs action" : progress.status === "succeeded" ? "Workspaces are ready" : progress.status === "running" ? "Creating your workspaces" : "Workspaces are waiting"}
+      </h2>
+      <div className="mb-2 flex justify-end">
+        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{formatElapsed(progress.elapsedSeconds)}</span>
       </div>
 
       <div className="mb-4 space-y-4">

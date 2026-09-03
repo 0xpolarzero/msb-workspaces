@@ -30,9 +30,7 @@ export function ReviewStep({ progress, queueItems, identitySummary, githubSummar
   return (
     <section aria-labelledby="review-title" className="mx-auto max-w-3xl">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
-      <div className="mb-5">
-        <h2 id="review-title" className="text-xl font-semibold tracking-tight">Review setup</h2>
-      </div>
+      <h2 id="review-title" className="sr-only" data-visual-heading="hidden">Review setup</h2>
 
       {errorMessage && (
         <div className="mb-3 flex gap-2 rounded-lg border border-destructive/25 bg-destructive/8 p-3 text-xs text-destructive" role="alert">

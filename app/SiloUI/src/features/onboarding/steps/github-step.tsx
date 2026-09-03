@@ -1,5 +1,5 @@
 import { useId, useMemo, useState } from "react"
-import { Check, GitBranch, Info, LoaderCircle, Search, X } from "lucide-react"
+import { Check, GitBranch, Info, LoaderCircle, RotateCcw, Search, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -151,10 +151,8 @@ export function GitHubStep({
   return (
     <section aria-labelledby="github-title" className="mx-auto flex h-full min-h-0 max-w-3xl flex-col">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
-      <div className="mb-5">
-        <h2 id="github-title" className="text-xl font-semibold tracking-tight">GitHub</h2>
-        <p className="mt-1 text-xs text-muted-foreground">Set a Git identity for each VM. Connect GitHub only to select repository access.</p>
-      </div>
+      <h2 id="github-title" className="sr-only" data-visual-heading="hidden">GitHub</h2>
+      <p className="mb-3 shrink-0 text-xs text-muted-foreground">Set a Git identity for each VM. Connect GitHub only to select repository access.</p>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {connectionState === "disconnected" && (
@@ -206,50 +204,51 @@ export function GitHubStep({
               return (
                 <div key={name} className="grid gap-3 p-3">
                   <span className="truncate text-xs font-semibold" title={name}>{name}</span>
-                  <div className="grid gap-2 rounded-md bg-muted/40 p-2.5">
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <label className="grid gap-1 text-[11px] font-medium">
-                        Git name
-                        <Input
-                          aria-label={`Git name for ${name}`}
-                          autoComplete="off"
-                          value={identity.name}
-                          onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
-                        />
-                      </label>
-                      <label className="grid gap-1 text-[11px] font-medium">
-                        Git email
-                        <Input
-                          aria-label={`Git email for ${name}`}
-                          autoComplete="off"
-                          inputMode="email"
-                          type="email"
-                          value={identity.email}
-                          onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, email: event.target.value })}
-                        />
-                      </label>
-                    </div>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <label className="flex items-center gap-2 text-xs">
-                        <Checkbox
-                          aria-label={`Apply Git identity to ${name}`}
-                          checked={identity.apply}
-                          onCheckedChange={(checked) => onWorkspaceIdentityChange(name, { ...identity, apply: checked === true })}
-                        />
-                        Apply identity
-                      </label>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="xs"
-                        aria-label={`Reset Git identity for ${name}`}
-                        aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
-                        disabled={!currentHostGitIdentity}
-                        onClick={() => onResetWorkspaceIdentity(name)}
-                      >
-                        Reset
-                      </Button>
-                    </div>
+                  <div
+                    role="group"
+                    aria-label={`Git identity for ${name}`}
+                    data-layout="compact-row"
+                    className="flex min-w-0 items-center gap-1.5"
+                  >
+                    <Input
+                      aria-label={`Git name for ${name}`}
+                      autoComplete="off"
+                      className="h-7 min-w-0 flex-[0.8] rounded-md px-2 text-xs"
+                      placeholder="Name"
+                      value={identity.name}
+                      onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
+                    />
+                    <Input
+                      aria-label={`Git email for ${name}`}
+                      autoComplete="off"
+                      className="h-7 min-w-0 flex-[1.2] rounded-md px-2 text-xs"
+                      inputMode="email"
+                      placeholder="Email"
+                      type="email"
+                      value={identity.email}
+                      onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, email: event.target.value })}
+                    />
+                    <label className="flex shrink-0 items-center gap-1 text-[11px]">
+                      <Checkbox
+                        aria-label={`Apply Git identity to ${name}`}
+                        checked={identity.apply}
+                        onCheckedChange={(checked) => onWorkspaceIdentityChange(name, { ...identity, apply: checked === true })}
+                      />
+                      Apply
+                    </label>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="shrink-0"
+                      aria-label={`Reset Git identity for ${name}`}
+                      aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
+                      disabled={!currentHostGitIdentity}
+                      title={`Reset Git identity for ${name}`}
+                      onClick={() => onResetWorkspaceIdentity(name)}
+                    >
+                      <RotateCcw aria-hidden="true" />
+                    </Button>
                   </div>
                   {connectionState === "connected" && (
                     <>

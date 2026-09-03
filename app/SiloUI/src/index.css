@@ -134,3 +134,18 @@
     @apply bg-primary/20;
     }
 }
+
+[data-appearance="borderless"] {
+  border-width: 0;
+}
+
+[data-appearance="borderless"][aria-selected="true"] {
+  background-color: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+@media (min-width: 48rem) {
+  [data-appearance="borderless"] {
+    min-height: 2.75rem;
+  }
+}

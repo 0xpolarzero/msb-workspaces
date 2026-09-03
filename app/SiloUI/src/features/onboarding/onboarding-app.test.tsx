@@ -15,6 +15,12 @@ function renderScenario(name: keyof typeof onboardingScenarios = "running", gith
   }} />)
 }
 
+function expectHiddenPanelHeading(name: string) {
+  const heading = screen.getByRole("heading", { name, level: 2 })
+  expect(heading).toHaveAttribute("data-visual-heading", "hidden")
+  expect(heading.parentElement?.tagName).toBe("SECTION")
+}
+
 describe("onboarding", () => {
   it("only applies valid explicit GitHub fixture overrides", () => {
     expect(githubStateFromSearch("")).toBeUndefined()
@@ -28,18 +34,27 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     renderScenario()
 
-    expect(screen.getByRole("heading", { name: "Dependencies" })).toBeVisible()
+    expectHiddenPanelHeading("Dependencies")
     await user.click(screen.getByRole("button", { name: "Continue" }))
-    expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
+    expectHiddenPanelHeading("Creating your workspaces")
     await user.click(screen.getByRole("button", { name: "Continue" }))
-    expect(screen.getByRole("heading", { name: "GitHub" })).toBeVisible()
+    expectHiddenPanelHeading("GitHub")
     expect(screen.queryByRole("tab", { name: "Git" })).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Continue" }))
-    expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
+    expectHiddenPanelHeading("Review setup")
     await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
+    expectHiddenPanelHeading("Review setup")
     await user.click(screen.getByRole("button", { name: "Back" }))
-    expect(screen.getByRole("heading", { name: "GitHub" })).toBeVisible()
+    expectHiddenPanelHeading("GitHub")
+  })
+
+  it("renders four borderless setup navigation items", () => {
+    renderScenario()
+
+    const navigation = screen.getByRole("navigation", { name: "Setup steps" })
+    const tabs = within(navigation).getAllByRole("tab")
+    expect(tabs).toHaveLength(4)
+    for (const tab of tabs) expect(tab).toHaveAttribute("data-appearance", "borderless")
   })
 
   it("supports arrow-key navigation across the responsive tab list", async () => {
@@ -51,7 +66,7 @@ describe("onboarding", () => {
     await user.keyboard("{ArrowRight}")
 
     expect(screen.getByRole("tab", { name: /Workspaces/ })).toHaveAttribute("aria-selected", "true")
-    expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
+    expectHiddenPanelHeading("Creating your workspaces")
   })
 
   it("keeps background workspace progress visible on later steps and View returns to Workspaces", async () => {
@@ -64,7 +79,7 @@ describe("onboarding", () => {
     }
     expect(screen.getByRole("tab", { name: /Workspaces/ })).toHaveTextContent("Workspaces")
     await user.click(within(screen.getByLabelText("Workspace progress")).getByRole("button", { name: "View" }))
-    expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
+    expectHiddenPanelHeading("Creating your workspaces")
   })
 
   it("places contextual Skip before Back and skips only GitHub repository access", async () => {
@@ -77,7 +92,7 @@ describe("onboarding", () => {
     expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeEnabled()
     expect(screen.queryByText("Skip for now")).not.toBeInTheDocument()
     await user.click(within(githubFooter).getByRole("button", { name: "Skip repository access" }))
-    expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
+    expectHiddenPanelHeading("Review setup")
     expect(screen.getByText("Repository access skipped")).toBeVisible()
     expect(screen.getByText("Taylor Example <taylor@example.com> → all 12 workspaces")).toBeVisible()
   })
@@ -243,6 +258,16 @@ describe("onboarding", () => {
     for (const checkbox of screen.getAllByRole("checkbox", { name: /^Apply Git identity to / })) {
       expect(checkbox).toBeChecked()
     }
+    const identityRows = screen.getAllByRole("group", { name: /^Git identity for / })
+    expect(identityRows).toHaveLength(12)
+    for (const row of identityRows) expect(row).toHaveAttribute("data-layout", "compact-row")
+    const devIdentity = screen.getByRole("group", { name: "Git identity for dev" })
+    expect(within(devIdentity).getByPlaceholderText("Name")).toHaveAccessibleName("Git name for dev")
+    expect(within(devIdentity).getByPlaceholderText("Email")).toHaveAccessibleName("Git email for dev")
+    expect(within(devIdentity).getByRole("checkbox")).toHaveAccessibleName("Apply Git identity to dev")
+    expect(within(devIdentity).getByRole("button")).toHaveAccessibleName("Reset Git identity for dev")
+    expect(screen.queryByText("Git name")).not.toBeInTheDocument()
+    expect(screen.queryByText("Git email")).not.toBeInTheDocument()
     expect(screen.getByLabelText("Git name for security-review")).toHaveValue("Taylor Example")
     expect(screen.getByLabelText("Git email for security-review")).toHaveValue("taylor@example.com")
     expect(screen.getByRole("button", { name: "Reset Git identity for security-review" })).toBeEnabled()
@@ -385,7 +410,7 @@ describe("onboarding", () => {
     renderScenario("dependency-failure")
 
     await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
-    expect(screen.getByRole("heading", { name: "Workspaces are waiting" })).toBeVisible()
+    expectHiddenPanelHeading("Workspaces are waiting")
     expect(screen.queryByText("Complete the dependency checks before workspace creation starts.")).not.toBeInTheDocument()
   })
 

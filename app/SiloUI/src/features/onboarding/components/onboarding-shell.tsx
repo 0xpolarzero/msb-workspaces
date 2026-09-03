@@ -28,7 +28,7 @@ export function OnboardingShell({ activeStep, viewModel, onStepChange, onBack, o
           <h1 className="text-xs font-medium">Silo Setup</h1>
           <div />
         </header>
-        <Tabs orientation={usesSidebar ? "vertical" : "horizontal"} value={activeStep} onValueChange={(value) => onStepChange(value as OnboardingStep)} className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[10.75rem_1fr] md:grid-rows-1">
+        <Tabs orientation={usesSidebar ? "vertical" : "horizontal"} value={activeStep} onValueChange={(value) => onStepChange(value as OnboardingStep)} className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[13.5rem_minmax(0,1fr)] md:grid-rows-1">
           <StepNavigation status={viewModel.stepStatus} />
           <div className="flex min-h-0 min-w-0 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">{children}</div>

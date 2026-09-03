@@ -20,17 +20,18 @@ function StepMark({ index, status }: { index: number; status: PresentationStatus
 
 export function StepNavigation({ status }: { status: Record<OnboardingStep, PresentationStatus> }) {
   return (
-    <nav aria-label="Setup steps" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:border-r md:border-b-0 md:px-2 md:py-4">
-      <div className="mb-5 hidden items-center gap-2 px-2 text-sm font-semibold md:flex">
+    <nav aria-label="Setup steps" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:border-r md:border-b-0 md:px-3 md:py-5">
+      <div className="mb-5 hidden items-center gap-2 px-3 text-sm font-semibold md:flex">
         <span className="grid size-6 place-items-center rounded-md bg-primary text-xs text-primary-foreground">S</span>
         Silo
       </div>
-      <TabsList className="grid h-auto w-full min-w-0 grid-cols-4 gap-1 bg-transparent p-0 md:flex md:w-fit md:flex-col md:items-stretch" aria-label="Setup steps">
+      <TabsList className="grid h-auto w-full min-w-0 grid-cols-4 gap-1 bg-transparent p-0 md:flex md:flex-col md:items-stretch" aria-label="Setup steps">
         {steps.map((step, index) => (
           <TabsTrigger
             key={step.id}
             value={step.id}
-            className="h-9 min-w-0 justify-center gap-1 rounded-md border border-transparent px-1 text-[11px] text-muted-foreground shadow-none data-[state=active]:border-border data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-xs md:w-full md:justify-start md:gap-2 md:px-2.5 md:text-xs"
+            data-appearance="borderless"
+            className="h-10 min-w-0 justify-center gap-1 rounded-md border-0 bg-transparent px-1 py-2 text-[10px] text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start md:gap-2 md:px-3.5 md:py-2.5 md:text-[13px]"
           >
             <span className={cn(
               "grid size-5 place-items-center rounded-full border border-border text-[10px]",
