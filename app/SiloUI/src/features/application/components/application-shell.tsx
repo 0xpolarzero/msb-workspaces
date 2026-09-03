@@ -45,14 +45,14 @@ export function ApplicationShell({ activeTab, onTabChange, children }: { activeT
         onValueChange={(value) => onTabChange(value as ApplicationTab)}
         className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[13.5rem_minmax(0,1fr)] md:grid-rows-1"
       >
-        <nav aria-label="Silo navigation" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:border-r md:border-b-0 md:py-5">
+        <nav aria-label="Silo navigation" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:flex md:flex-col md:border-r md:border-b-0 md:py-5">
           <div className="mb-5 hidden items-center gap-3 border-b border-border px-3 pb-5 md:flex">
             <SiloMark className="size-8" />
             <span className="text-base font-semibold tracking-tight">Silo</span>
           </div>
-          <TabsList className="flex h-auto w-max min-w-full items-stretch gap-1 bg-transparent p-0 md:w-full md:flex-col" aria-label="App sections">
+          <TabsList className="flex h-auto w-max min-w-full items-stretch gap-1 bg-transparent p-0 md:w-full md:flex-1 md:flex-col" aria-label="App sections">
             <NavigationItems items={primaryItems} />
-            <div className="mx-3 my-2 hidden border-t border-border md:block" aria-hidden="true" />
+            <div className="mx-3 my-2 hidden border-t border-border md:mt-auto md:block" aria-hidden="true" />
             <NavigationItems items={preferenceItems} />
           </TabsList>
         </nav>
