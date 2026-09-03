@@ -18,6 +18,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [activeTab, setActiveTab] = useState<ApplicationTab>("overview")
   const [selectedWorkspace, setSelectedWorkspace] = useState(source.workspaces[0]?.id ?? "")
   const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>("summary")
+  const [logQuery, setLogQuery] = useState("")
 
   function openWorkspace(workspace: string) {
     setSelectedWorkspace(workspace)
@@ -35,9 +36,11 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
           workspaces={source.workspaces}
           selectedWorkspace={selectedWorkspace}
           section={workspaceSection}
+          logQuery={logQuery}
           actions={actions}
           onWorkspaceChange={setSelectedWorkspace}
           onSectionChange={setWorkspaceSection}
+          onLogQueryChange={setLogQuery}
         />
       </TabsContent>
       {(Object.keys(placeholderCopy) as Array<keyof typeof placeholderCopy>).map((tab) => (

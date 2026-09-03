@@ -1,7 +1,7 @@
-import { Code2, Folder, Play, RotateCw, Square, Terminal } from "lucide-react"
+import { Activity, Check, Code2, Copy, ExternalLink, File, Folder, GitBranch, Play, RotateCw, Search, Square, Terminal, TriangleAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DetailCard, PageHeader, WorkspaceStatus } from "@/features/application/components/application-ui"
 import type { ApplicationActions, ApplicationWorkspace, WorkspaceSection } from "@/features/application/model/application-source"
@@ -54,17 +54,92 @@ function Summary({ workspace, actions }: { workspace: ApplicationWorkspace; acti
   )
 }
 
-function PlaceholderSection({ section, workspace }: { section: Exclude<WorkspaceSection, "summary">; workspace: ApplicationWorkspace }) {
+function Files({ workspace }: { workspace: ApplicationWorkspace }) {
   return (
-    <Card size="sm">
-      <CardContent className="grid min-h-48 place-items-center text-center">
-        <div>
-          <Folder className="mx-auto size-5 text-muted-foreground" />
-          <h3 className="mt-3 text-sm font-medium">{sections.find((item) => item.id === section)?.label}</h3>
-          <p className="mt-1 text-xs text-muted-foreground">{workspace.id} content is ready for the full view.</p>
+    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <DetailCard title="Repositories" description={`${workspace.repositories.length} checked out`}>
+        <div className="divide-y divide-border">
+          {workspace.repositories.map((repository) => (
+            <div key={repository.path} className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
+              <GitBranch className="size-4 text-muted-foreground" />
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{repository.path}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind{repository.dirty ? " · local changes" : ""}</div>
+              </div>
+              {repository.ahead > 0 && <Button variant="outline" size="xs">Push {repository.ahead}</Button>}
+            </div>
+          ))}
         </div>
-      </CardContent>
-    </Card>
+      </DetailCard>
+      <DetailCard title="Files" description="Workspace root">
+        <div className="grid gap-1 font-mono text-xs">
+          {[{ icon: Folder, name: "projects" }, { icon: Folder, name: ".config" }, { icon: File, name: ".gitconfig" }, { icon: File, name: "README.md" }].map(({ icon: Icon, name }) => (
+            <button key={name} type="button" className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <Icon className="size-4 text-muted-foreground" />{name}
+            </button>
+          ))}
+        </div>
+      </DetailCard>
+    </div>
+  )
+}
+
+function Logs({ workspace, query, onQueryChange }: { workspace: ApplicationWorkspace; query: string; onQueryChange: (query: string) => void }) {
+  const filteredLogs = workspace.logs.filter((line) => line.toLowerCase().includes(query.toLowerCase()))
+  return (
+    <DetailCard title="Logs" description="Latest workspace output">
+      <div className="mb-3 flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute top-2 left-2.5 size-4 text-muted-foreground" />
+          <Input aria-label="Search logs" placeholder="Search logs" value={query} onChange={(event) => onQueryChange(event.target.value)} className="pl-8" />
+        </div>
+        <Button variant="outline" size="sm"><Copy data-icon="inline-start" />Copy all</Button>
+      </div>
+      <div className="min-h-40 overflow-x-auto rounded-lg bg-muted/55 p-3 font-mono text-xs leading-6">
+        {filteredLogs.length > 0 ? filteredLogs.map((line) => <div key={line} className="whitespace-pre text-foreground/85">{line}</div>) : <div className="text-muted-foreground">No logs match “{query}”.</div>}
+      </div>
+    </DetailCard>
+  )
+}
+
+function Network({ workspace }: { workspace: ApplicationWorkspace }) {
+  return (
+    <DetailCard title="Network" description={`Routes for ${workspace.host}`}>
+      {workspace.ports.length > 0 ? (
+        <div className="divide-y divide-border">
+          {workspace.ports.map((port) => (
+            <div key={port.port} className="grid grid-cols-[1rem_4rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
+              <span className={cn("size-2 rounded-full", port.active ? "bg-emerald-500" : "bg-muted-foreground/45")} aria-hidden="true" />
+              <span className="font-mono text-xs">:{port.port}</span>
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{port.process}</div>
+                <div className="truncate text-xs text-muted-foreground">{port.url ?? "Configured, not active"}</div>
+              </div>
+              {port.url && <Button variant="ghost" size="icon-sm" aria-label={`Open port ${port.port}`}><ExternalLink /></Button>}
+            </div>
+          ))}
+        </div>
+      ) : <p className="text-sm text-muted-foreground">No configured ports for this sandbox.</p>}
+    </DetailCard>
+  )
+}
+
+function ActivityLog({ workspace }: { workspace: ApplicationWorkspace }) {
+  return (
+    <DetailCard title="Activity" description="Latest 50 workspace operations">
+      <div className="divide-y divide-border">
+        {workspace.activities.map((item) => (
+          <div key={item.id} className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
+            {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" />}
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{item.title}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{item.detail}</div>
+            </div>
+            <span className="text-xs text-muted-foreground">{item.time}</span>
+          </div>
+        ))}
+      </div>
+    </DetailCard>
   )
 }
 
@@ -72,16 +147,20 @@ export function WorkspacesPage({
   workspaces,
   selectedWorkspace,
   section,
+  logQuery,
   actions,
   onWorkspaceChange,
   onSectionChange,
+  onLogQueryChange,
 }: {
   workspaces: ApplicationWorkspace[]
   selectedWorkspace: string
   section: WorkspaceSection
+  logQuery: string
   actions: ApplicationActions
   onWorkspaceChange: (workspace: string) => void
   onSectionChange: (section: WorkspaceSection) => void
+  onLogQueryChange: (query: string) => void
 }) {
   const workspace = workspaces.find((item) => item.id === selectedWorkspace) ?? workspaces[0]
 
@@ -116,7 +195,11 @@ export function WorkspacesPage({
           <TabsList variant="line" className="w-full justify-start overflow-x-auto" aria-label={`${workspace.id} sections`}>
             {sections.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
           </TabsList>
-          {section === "summary" ? <Summary workspace={workspace} actions={actions} /> : <PlaceholderSection section={section} workspace={workspace} />}
+          {section === "summary" && <Summary workspace={workspace} actions={actions} />}
+          {section === "files" && <Files workspace={workspace} />}
+          {section === "logs" && <Logs workspace={workspace} query={logQuery} onQueryChange={onLogQueryChange} />}
+          {section === "network" && <Network workspace={workspace} />}
+          {section === "activity" && <ActivityLog workspace={workspace} />}
         </Tabs>
       </div>
     </div>
