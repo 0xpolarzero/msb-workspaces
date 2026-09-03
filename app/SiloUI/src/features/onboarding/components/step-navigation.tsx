@@ -1,7 +1,6 @@
 import { AlertCircle, Check, LoaderCircle } from "lucide-react"
 
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { SiloMark } from "@/features/onboarding/components/silo-mark"
 import { cn } from "@/lib/utils"
 import type { OnboardingStep, PresentationStatus } from "@/features/onboarding/model/onboarding-state"
 
@@ -22,10 +21,6 @@ function StepMark({ index, status }: { index: number; status: PresentationStatus
 export function StepNavigation({ status }: { status: Record<OnboardingStep, PresentationStatus> }) {
   return (
     <nav aria-label="Setup steps" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:border-r md:border-b-0 md:px-3 md:py-5">
-      <div className="mb-5 hidden items-center gap-2 px-3 text-sm font-semibold md:flex">
-        <SiloMark className="size-6" />
-        Silo
-      </div>
       <TabsList className="grid h-auto w-full min-w-0 grid-cols-4 gap-1 bg-transparent p-0 md:flex md:flex-col md:items-stretch" aria-label="Setup steps">
         {steps.map((step, index) => (
           <TabsTrigger
