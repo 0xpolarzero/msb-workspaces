@@ -152,7 +152,6 @@ export function GitHubStep({
     <section aria-labelledby="github-title" className="mx-auto flex h-full min-h-0 max-w-3xl flex-col">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <h2 id="github-title" className="sr-only" data-visual-heading="hidden">GitHub</h2>
-      <p className="mb-3 shrink-0 text-xs text-muted-foreground">Set a Git identity for each VM. Connect GitHub only to select repository access.</p>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         {connectionState === "disconnected" && (

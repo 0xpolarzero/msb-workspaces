@@ -9,7 +9,7 @@ import type { WorkspaceProgressView } from "@/features/onboarding/model/onboardi
 function formatElapsed(seconds: number): string {
   const minutes = Math.floor(seconds / 60)
   const remainder = Math.floor(seconds % 60)
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")} elapsed`
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
 }
 
 export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgressView; onRetry: () => void }) {
@@ -18,9 +18,6 @@ export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgr
       <h2 id="workspaces-title" className="sr-only" data-visual-heading="hidden">
         {progress.status === "failed" ? "Workspace setup needs action" : progress.status === "succeeded" ? "Workspaces are ready" : progress.status === "running" ? "Creating your workspaces" : "Workspaces are waiting"}
       </h2>
-      <div className="mb-2 flex justify-end">
-        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{formatElapsed(progress.elapsedSeconds)}</span>
-      </div>
 
       <div className="mb-4 space-y-4">
         <div className="grid grid-cols-[auto_1fr] gap-3">
@@ -29,7 +26,10 @@ export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgr
               : progress.status === "running" ? <LoaderCircle className="mt-0.5 size-5 animate-spin text-primary" aria-hidden="true" />
                 : <Clock3 className="mt-0.5 size-5 text-muted-foreground" aria-hidden="true" />}
           <div className="min-w-0">
-            <div className="font-medium">{progress.currentWorkspace ? `${progress.currentWorkspace}` : "Workspace setup"}</div>
+            <div className="flex min-w-0 items-baseline gap-2">
+              <div className="truncate font-medium">{progress.currentWorkspace ?? "Workspace setup"}</div>
+              <span aria-label="Elapsed time" className="shrink-0 font-mono text-[11px] text-muted-foreground">{formatElapsed(progress.elapsedSeconds)}</span>
+            </div>
             <div className="select-text text-xs text-muted-foreground">{progress.currentMessage}</div>
           </div>
         </div>

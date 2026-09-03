@@ -341,6 +341,10 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
 
     expect(screen.getByLabelText("Workspace activity")).toHaveTextContent("Verifying 'docs-build'.")
+    const elapsedTime = screen.getByLabelText("Elapsed time")
+    expect(elapsedTime.parentElement).toHaveTextContent("docs-build02:18")
+    expect(elapsedTime).toHaveTextContent("02:18")
+    expect(screen.queryByText(/elapsed/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Internal verification path/)).not.toBeInTheDocument()
     const list = screen.getByTestId("workspace-list")
     expect(within(list).getByText("client-alpha-integration")).toBeVisible()
