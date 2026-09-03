@@ -1,4 +1,4 @@
-import { Check, Loader, Minus, TriangleAlert } from "lucide-react"
+import { Check, LoaderCircle, Minus, TriangleAlert } from "lucide-react"
 
 import { SiloMark } from "@/features/onboarding/components/silo-mark"
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -15,7 +15,7 @@ const steps: { id: OnboardingStep; label: string }[] = [
 function StepMark({ status }: { status: PresentationStatus }) {
   if (status === "succeeded") return <Check className="size-4" aria-label="Complete" />
   if (status === "failed") return <TriangleAlert className="size-4" aria-label="Needs action" />
-  if (status === "running") return <Loader className="size-4 animate-spin" aria-label="In progress" />
+  if (status === "running") return <LoaderCircle className="size-4 animate-spin" aria-label="In progress" />
   return <Minus className="size-4" aria-hidden="true" />
 }
 
