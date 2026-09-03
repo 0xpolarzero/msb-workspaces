@@ -393,12 +393,17 @@ describe("onboarding", () => {
     expect(disclosure).toHaveAttribute("aria-expanded", "false")
     expect(activityCard).toHaveAttribute("data-state", "closed")
     expect(activityContent).toHaveAttribute("data-state", "closed")
+    expect(activityContent).toHaveAttribute("hidden")
+    expect(activityContent?.children).toHaveLength(0)
+    expect(activityCard?.firstElementChild).toBe(activityControls)
     expect(activitySlot?.firstElementChild).toBe(activityCard)
     expect(activitySlot?.style.minHeight).toBe("")
     const expand = screen.getByRole("button", { name: "Expand activity" })
     await user.click(expand)
     expect(expand).toHaveAttribute("aria-expanded", "true")
     expect(screen.getByLabelText("Workspace activity")).toBeVisible()
+    expect(activityContent).not.toHaveAttribute("hidden")
+    expect(activityContent?.children).toHaveLength(1)
   })
 
   it("reports a clipboard denial without an unhandled interaction failure", async () => {
