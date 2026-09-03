@@ -359,10 +359,17 @@ describe("onboarding", () => {
     expect(within(list).getByText("security-review")).toBeVisible()
     expect(screen.getByText("27 of 36 operations complete")).toBeVisible()
     expect(screen.getByText("3 ready · 1 working · 8 waiting")).toBeVisible()
+    const activityControls = screen.getByRole("group", { name: "Live activity controls" })
+    const activityButtons = within(activityControls).getAllByRole("button")
+    expect(activityButtons.map((button) => button.getAttribute("aria-label"))).toEqual(["Copy activity", "Collapse activity"])
+    expect(within(activityControls).getAllByRole("button", { expanded: true })).toHaveLength(1)
+    expect(within(activityControls).queryByText(/^(Copy|Copied|Copy failed)$/)).not.toBeInTheDocument()
     const copy = vi.spyOn(navigator.clipboard, "writeText")
     await user.click(screen.getByRole("button", { name: "Copy activity" }))
     expect(copy).toHaveBeenCalledWith(expect.stringContaining("Verifying 'docs-build'."))
     expect(copy).not.toHaveBeenCalledWith(expect.stringContaining("Internal verification path"))
+    expect(screen.getByRole("button", { name: "Activity copied" })).toBeInTheDocument()
+    expect(within(activityControls).queryByText(/^(Copy|Copied|Copy failed)$/)).not.toBeInTheDocument()
     const disclosure = screen.getByRole("button", { name: "Collapse activity" })
     expectDisclosureIndicator(disclosure)
     await user.click(disclosure)
@@ -379,7 +386,8 @@ describe("onboarding", () => {
 
     await user.click(screen.getByRole("button", { name: "Copy activity" }))
 
-    expect(screen.getByRole("button", { name: "Copy activity" })).toHaveTextContent("Copy failed")
+    expect(screen.getByRole("button", { name: "Copy activity failed" })).toBeInTheDocument()
+    expect(screen.queryByText("Copy failed")).not.toBeInTheDocument()
   })
 
   it("enables Finish only after every queue operation succeeds", async () => {

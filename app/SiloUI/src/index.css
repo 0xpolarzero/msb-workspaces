@@ -149,3 +149,31 @@
     min-height: 2.75rem;
   }
 }
+
+.activity-output-content {
+  overflow: hidden;
+}
+
+.activity-output-content[data-state="open"] {
+  animation: activity-output-reveal 180ms ease-out;
+}
+
+.activity-output-content[data-state="closed"] {
+  animation: activity-output-collapse 180ms ease-in;
+}
+
+@keyframes activity-output-reveal {
+  from { height: 0; }
+  to { height: var(--radix-collapsible-content-height); }
+}
+
+@keyframes activity-output-collapse {
+  from { height: var(--radix-collapsible-content-height); }
+  to { height: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-output-content {
+    animation: none !important;
+  }
+}
