@@ -39,7 +39,7 @@ function IconAction({ label, destructive = false, children, ...props }: {
   children: ReactNode
 } & Omit<React.ComponentProps<typeof Button>, "children" | "aria-label">) {
   return (
-    <Tooltip>
+    <Tooltip key={label}>
       <TooltipTrigger asChild>
         <Button
           type="button"

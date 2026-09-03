@@ -344,20 +344,29 @@ describe("onboarding", () => {
     renderScenario("running", "disconnected")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    const reset = screen.getByRole("button", { name: "Reset Git identity for dev" })
-    expect(reset).toHaveAccessibleName("Reset Git identity for dev")
-    expect(reset).not.toHaveAttribute("title")
+    for (const workspace of ["dev", "playgrounds", "personal"]) {
+      const name = `Reset Git identity for ${workspace}`
+      const reset = screen.getByRole("button", { name })
+      const trigger = reset.parentElement
+      expect(trigger).not.toBeNull()
+      expect(reset).toHaveAccessibleName(name)
+      expect(reset).not.toHaveAttribute("title")
+      expect(trigger).not.toHaveAttribute("title")
 
-    fireEvent.focus(reset)
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
-    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
-    fireEvent.blur(reset)
-    await user.keyboard("{Escape}")
-    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+      fireEvent.focus(reset)
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(name)
+      expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+      fireEvent.blur(reset)
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
 
-    await user.hover(reset)
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
-    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+      await user.hover(reset)
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(name)
+      expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+      await user.unhover(reset)
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+    }
   })
 
   it("keeps workspace identity edits and apply choices independent and resets one workspace", async () => {
@@ -409,9 +418,21 @@ describe("onboarding", () => {
 
     const resetTooltipTrigger = reset.parentElement
     expect(resetTooltipTrigger).not.toBeNull()
+    expect(resetTooltipTrigger).toHaveAccessibleName("Reset Git identity for dev")
+    expect(resetTooltipTrigger).not.toHaveAttribute("title")
     fireEvent.focus(resetTooltipTrigger!)
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
     expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+    fireEvent.blur(resetTooltipTrigger!)
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+
+    await user.hover(resetTooltipTrigger!)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+    await user.unhover(resetTooltipTrigger!)
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
 
     await user.type(name, "Local User")
     await user.click(reset)
@@ -764,18 +785,20 @@ describe("onboarding", () => {
       fireEvent.blur(trigger)
       await user.keyboard("{Escape}")
       await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
-    }
 
-    const edit = screen.getByRole("button", { name: "Edit dev" })
-    await user.hover(edit)
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Edit dev")
-    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
-    await user.unhover(edit)
+      await user.hover(trigger)
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(explanation)
+      expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+      await user.unhover(trigger)
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+    }
 
     await user.click(screen.getByRole("button", { name: "Delete dev" }))
     await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
     const confirm = screen.getByRole("button", { name: "Confirm deletion of dev" })
     expect(confirm).not.toHaveAttribute("title")
+    expect(confirm).toHaveAccessibleName("Confirm deletion of dev")
     fireEvent.focus(confirm)
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Confirm deletion of dev")
     expect(screen.getAllByRole("tooltip")).toHaveLength(1)
