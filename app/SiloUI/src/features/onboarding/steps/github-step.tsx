@@ -84,7 +84,7 @@ export function GitHubStep({
                 <span className="hidden text-[11px] font-medium text-muted-foreground sm:block">Repository</span>
                 <span className="hidden text-[11px] font-medium text-muted-foreground sm:block">Permission</span>
               </div>
-              <ScrollArea className="h-72 rounded-md border border-border" aria-label="Workspace repository access">
+              <ScrollArea className="h-72 rounded-md border border-border" role="region" aria-label="Workspace repository access">
                 <div className="divide-y divide-border">
                   {progress.workspaces.map(({ name }) => {
                     const access = workspaceAccess[name] ?? { repository: null, permission: "read-only" as const }

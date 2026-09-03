@@ -48,10 +48,11 @@ export function OnboardingApp({
   )
   const [githubSkipped, setGithubSkipped] = useState(false)
   const [workspaceAccess, setWorkspaceAccess] = useState(() => initialWorkspaceAccess(source))
+  const defaultIdentityTarget = source.identityInput.target ?? source.bootstrapConfiguration.workspaces[0]?.name ?? null
   const [identity, setIdentity] = useState<IdentityChoice>({
     name: source.identityInput.name,
     email: source.identityInput.email,
-    applyToAll: source.identityInput.target === null,
+    target: source.identityInput.target,
   })
   const [identitySkipped, setIdentitySkipped] = useState(false)
   const [finished, setFinished] = useState(false)
@@ -120,7 +121,7 @@ export function OnboardingApp({
       : "GitHub not connected"
   const identitySummary = identitySkipped
     ? "Git identity skipped"
-    : `${identity.name || "No name"} · ${identity.email || "No email"} · ${identity.applyToAll ? "all workspaces" : "dev only"}`
+    : `${identity.name || "No name"} · ${identity.email || "No email"} · ${identity.target === null ? "all workspaces" : `${identity.target} only`}`
 
   return (
     <OnboardingShell
@@ -150,7 +151,7 @@ export function OnboardingApp({
         />
       </TabsContent>
       <TabsContent value="identity" className="mt-0 outline-none">
-        <IdentityStep progress={viewModel.workspaceProgress} identity={identity} onIdentityChange={updateIdentity} onViewProgress={() => setActiveStep("workspaces")} />
+        <IdentityStep progress={viewModel.workspaceProgress} identity={identity} defaultTarget={defaultIdentityTarget} onIdentityChange={updateIdentity} onViewProgress={() => setActiveStep("workspaces")} />
       </TabsContent>
       <TabsContent value="review" className="mt-0 outline-none">
         <ReviewStep

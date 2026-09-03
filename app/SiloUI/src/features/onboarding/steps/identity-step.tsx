@@ -6,17 +6,18 @@ import type { WorkspaceProgressView } from "@/features/onboarding/model/onboardi
 export interface IdentityChoice {
   name: string
   email: string
-  applyToAll: boolean
+  target: string | null
 }
 
 interface IdentityStepProps {
   progress: WorkspaceProgressView
   identity: IdentityChoice
+  defaultTarget: string | null
   onIdentityChange: (identity: IdentityChoice) => void
   onViewProgress: () => void
 }
 
-export function IdentityStep({ progress, identity, onIdentityChange, onViewProgress }: IdentityStepProps) {
+export function IdentityStep({ progress, identity, defaultTarget, onIdentityChange, onViewProgress }: IdentityStepProps) {
   return (
     <section aria-labelledby="identity-title" className="mx-auto max-w-3xl">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
@@ -36,8 +37,16 @@ export function IdentityStep({ progress, identity, onIdentityChange, onViewProgr
           </label>
         </div>
         <label className="flex items-start gap-2.5 rounded-md border border-border p-3 text-xs">
-          <Checkbox checked={identity.applyToAll} onCheckedChange={(checked) => onIdentityChange({ ...identity, applyToAll: checked === true })} aria-label="Apply identity to all workspaces" />
-          <span>Apply to all {progress.workspaces.length} workspaces when they are ready</span>
+          <Checkbox
+            checked={identity.target === null}
+            disabled={defaultTarget === null}
+            onCheckedChange={(checked) => onIdentityChange({ ...identity, target: checked === true ? null : defaultTarget })}
+            aria-label="Apply identity to all workspaces"
+          />
+          <span>
+            Apply to all {progress.workspaces.length} workspaces when they are ready
+            {identity.target !== null && <span className="mt-0.5 block text-muted-foreground">Currently limited to {identity.target}.</span>}
+          </span>
         </label>
       </div>
     </section>

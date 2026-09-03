@@ -223,7 +223,7 @@ export function scenarioFromSearch(search: string): ScenarioName {
   return scenarioNames.find((name) => name === requested) ?? "running"
 }
 
-export function githubStateFromSearch(search: string): GitHubFixtureState {
+export function githubStateFromSearch(search: string): GitHubFixtureState | undefined {
   const requested = new URLSearchParams(search).get("github")
-  return githubFixtureStates.find((state) => state === requested) ?? "disconnected"
+  return githubFixtureStates.find((state) => state === requested)
 }

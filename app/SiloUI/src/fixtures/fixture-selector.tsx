@@ -1,10 +1,11 @@
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
 
-export function FixtureSelector({ scenario, githubState }: { scenario: ScenarioName; githubState: GitHubFixtureState }) {
+export function FixtureSelector({ scenario, githubState }: { scenario: ScenarioName; githubState?: GitHubFixtureState }) {
   function selectFixture(parameter: string, value: string) {
     const url = new URL(window.location.href)
-    url.searchParams.set(parameter, value)
+    if (value === "source") url.searchParams.delete(parameter)
+    else url.searchParams.set(parameter, value)
     window.location.assign(url)
   }
 
@@ -26,9 +27,10 @@ export function FixtureSelector({ scenario, githubState }: { scenario: ScenarioN
         <select
           aria-label="GitHub fixture state"
           className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          value={githubState}
+          value={githubState ?? "source"}
           onChange={(event) => selectFixture("github", event.target.value)}
         >
+          <option value="source">source</option>
           {githubFixtureStates.map((state) => <option key={state} value={state}>{state}</option>)}
         </select>
       </label>

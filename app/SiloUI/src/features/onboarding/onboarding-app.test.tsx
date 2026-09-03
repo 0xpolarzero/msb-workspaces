@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
 import { projectOnboarding } from "@/features/onboarding/model/onboarding-state"
 import type { GitHubConnectionState } from "@/features/onboarding/steps/github-step"
-import { onboardingScenarios, repositoryFixtures } from "@/fixtures/scenarios"
+import { githubStateFromSearch, onboardingScenarios, repositoryFixtures } from "@/fixtures/scenarios"
 
 function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
   return render(<OnboardingApp source={onboardingScenarios[name]} initialGitHubConnectionState={githubState} repositoryOptions={repositoryFixtures} actions={{
@@ -16,6 +16,14 @@ function renderScenario(name: keyof typeof onboardingScenarios = "running", gith
 }
 
 describe("onboarding", () => {
+  it("only applies valid explicit GitHub fixture overrides", () => {
+    expect(githubStateFromSearch("")).toBeUndefined()
+    expect(githubStateFromSearch("?github=unknown")).toBeUndefined()
+    expect(githubStateFromSearch("?github=disconnected")).toBe("disconnected")
+    expect(githubStateFromSearch("?github=connecting")).toBe("connecting")
+    expect(githubStateFromSearch("?github=connected")).toBe("connected")
+  })
+
   it("navigates all five steps with tabs, Back, and Continue", async () => {
     const user = userEvent.setup()
     renderScenario()
@@ -49,8 +57,10 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     renderScenario()
 
-    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
-    expect(screen.getByLabelText("Workspace progress")).toHaveTextContent("Creating workspaces · 3 of 12 ready")
+    for (const step of [/GitHub/, /Git identity/, /Review/]) {
+      await user.click(screen.getByRole("tab", { name: step }))
+      expect(screen.getByLabelText("Workspace progress")).toHaveTextContent("Creating workspaces · 3 of 12 ready")
+    }
     expect(screen.getByRole("tab", { name: /Workspaces/ })).toHaveTextContent("Workspaces")
     await user.click(within(screen.getByLabelText("Workspace progress")).getByRole("button", { name: "View" }))
     expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
@@ -97,12 +107,26 @@ describe("onboarding", () => {
     expect(screen.getByRole("heading", { name: "Connected to GitHub" })).toBeVisible()
   })
 
+  it("derives the default GitHub state and repository catalog from the native source", async () => {
+    const user = userEvent.setup()
+    render(<OnboardingApp source={onboardingScenarios.running} actions={{
+      repairRuntime: vi.fn(),
+      retryWorkspaceSetup: vi.fn(),
+      finishSetup: vi.fn(),
+    }} />)
+
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    expect(screen.getByRole("heading", { name: "Connected to GitHub" })).toBeVisible()
+    await user.click(screen.getByLabelText("Repository for dev"))
+    expect(screen.getAllByRole("option").map(({ textContent }) => textContent)).toEqual(["No access", "acme/silo"])
+  })
+
   it("configures every workspace and retains repository, permission, and identity edits", async () => {
     const user = userEvent.setup()
     renderScenario("running", "connected")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    expect(screen.getByLabelText("Workspace repository access")).toBeVisible()
+    expect(screen.getByRole("region", { name: "Workspace repository access" })).toBeVisible()
     expect(screen.getAllByRole("combobox")).toHaveLength(24)
     expect(screen.getByLabelText("Repository for dev")).toHaveTextContent("acme/silo")
     expect(screen.getByLabelText("Permission for playgrounds")).toBeDisabled()
@@ -124,6 +148,47 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByText("2 of 12 workspaces configured · 1 workspace can push")).toBeVisible()
     expect(screen.getByText("Morgan Example · taylor@example.com · all workspaces")).toBeVisible()
+  })
+
+  it("disables permission and reports zero configured workspaces after repository access is removed", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    await user.click(screen.getByLabelText("Repository for dev"))
+    await user.click(screen.getByRole("option", { name: "No access" }))
+    expect(screen.getByLabelText("Permission for dev")).toBeDisabled()
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+
+    expect(screen.getByText("0 of 12 workspaces configured · 0 workspaces can push")).toBeVisible()
+  })
+
+  it("preserves and truthfully summarizes the native identity target", async () => {
+    const user = userEvent.setup()
+    render(<OnboardingApp
+      source={{
+        ...onboardingScenarios.running,
+        identityInput: { ...onboardingScenarios.running.identityInput, target: "personal" },
+      }}
+      actions={{ repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
+    />)
+
+    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    const applyToAll = screen.getByRole("checkbox", { name: "Apply identity to all workspaces" })
+    expect(applyToAll).not.toBeChecked()
+    expect(screen.getByText("Currently limited to personal.")).toBeVisible()
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+    expect(screen.getByText("Taylor Example · taylor@example.com · personal only")).toBeVisible()
+
+    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    await user.click(screen.getByRole("checkbox", { name: "Apply identity to all workspaces" }))
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+    expect(screen.getByText("Taylor Example · taylor@example.com · all workspaces")).toBeVisible()
+
+    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    await user.click(screen.getByRole("checkbox", { name: "Apply identity to all workspaces" }))
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+    expect(screen.getByText("Taylor Example · taylor@example.com · personal only")).toBeVisible()
   })
 
   it("expands dependency groups and exposes real remediation", async () => {

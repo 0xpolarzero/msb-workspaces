@@ -6,12 +6,12 @@ import { githubStateFromSearch, onboardingScenarios, repositoryFixtures, scenari
 
 export default function App() {
   const scenario = scenarioFromSearch(window.location.search)
-  const githubState = githubStateFromSearch(window.location.search)
+  const githubState = import.meta.env.DEV ? githubStateFromSearch(window.location.search) : undefined
   const [source, setSource] = useState(onboardingScenarios[scenario])
   return (
     <>
       <OnboardingApp
-        key={`${scenario}:${githubState}`}
+        key={`${scenario}:${githubState ?? "source"}`}
         source={source}
         initialGitHubConnectionState={githubState}
         repositoryOptions={repositoryFixtures}
