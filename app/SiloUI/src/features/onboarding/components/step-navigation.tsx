@@ -1,4 +1,4 @@
-import { AlertCircle, Check, LoaderCircle } from "lucide-react"
+import { Check, LoaderCircle } from "lucide-react"
 
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
@@ -13,7 +13,12 @@ const steps: { id: OnboardingStep; label: string }[] = [
 
 function StepMark({ index, status }: { index: number; status: PresentationStatus }) {
   if (status === "succeeded") return <Check className="size-3.5" aria-label="Complete" />
-  if (status === "failed") return <AlertCircle className="size-3.5" aria-label="Needs action" />
+  if (status === "failed") return (
+    <svg viewBox="0 0 24 24" aria-label="Needs action" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <path d="M12 6.5v7" />
+      <path d="M12 17.5h.01" />
+    </svg>
+  )
   if (status === "running") return <LoaderCircle className="size-3.5 animate-spin" aria-label="In progress" />
   return <span aria-hidden="true">{index + 1}</span>
 }
