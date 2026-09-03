@@ -31,7 +31,7 @@ export function StepNavigation({ status }: { status: Record<OnboardingStep, Pres
             key={step.id}
             value={step.id}
             data-appearance="borderless"
-            className="h-10 min-w-0 justify-center gap-1 rounded-md border-0 bg-transparent px-1 py-2 text-[10px] text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start md:gap-2 md:px-3.5 md:py-2.5 md:text-[13px]"
+            className="h-10 min-w-0 justify-center gap-1 rounded-md border-0 bg-transparent px-2 py-2 text-[10px] text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start md:gap-2 md:px-3.5 md:py-2.5 md:text-[13px]"
           >
             <span className={cn(
               "grid size-5 place-items-center rounded-full border border-border text-[10px]",
