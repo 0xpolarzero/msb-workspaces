@@ -1,4 +1,4 @@
-import { Check, LoaderCircle } from "lucide-react"
+import { Check, Loader, Minus, TriangleAlert } from "lucide-react"
 
 import { SiloMark } from "@/features/onboarding/components/silo-mark"
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -12,16 +12,11 @@ const steps: { id: OnboardingStep; label: string }[] = [
   { id: "review", label: "Review" },
 ]
 
-function StepMark({ index, status }: { index: number; status: PresentationStatus }) {
-  if (status === "succeeded") return <Check className="size-3.5" aria-label="Complete" />
-  if (status === "failed") return (
-    <svg viewBox="0 0 24 24" aria-label="Needs action" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M12 6.5v7" />
-      <path d="M12 17.5h.01" />
-    </svg>
-  )
-  if (status === "running") return <LoaderCircle className="size-3.5 animate-spin" aria-label="In progress" />
-  return <span aria-hidden="true">{index + 1}</span>
+function StepMark({ status }: { status: PresentationStatus }) {
+  if (status === "succeeded") return <Check className="size-4" aria-label="Complete" />
+  if (status === "failed") return <TriangleAlert className="size-4" aria-label="Needs action" />
+  if (status === "running") return <Loader className="size-4 animate-spin" aria-label="In progress" />
+  return <Minus className="size-4" aria-hidden="true" />
 }
 
 export function StepNavigation({ status }: { status: Record<OnboardingStep, PresentationStatus> }) {
@@ -32,7 +27,7 @@ export function StepNavigation({ status }: { status: Record<OnboardingStep, Pres
         <span className="text-base font-semibold tracking-tight text-foreground">Silo</span>
       </div>
       <TabsList className="grid h-auto w-full min-w-0 grid-cols-4 gap-1 bg-transparent p-0 md:flex md:flex-col md:items-stretch" aria-label="Setup steps">
-        {steps.map((step, index) => (
+        {steps.map((step) => (
           <TabsTrigger
             key={step.id}
             value={step.id}
@@ -40,12 +35,12 @@ export function StepNavigation({ status }: { status: Record<OnboardingStep, Pres
             className="h-10 min-w-0 justify-center gap-1 rounded-md border-0 bg-transparent px-2 py-2 text-[10px] text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start md:gap-2 md:px-3.5 md:py-2.5 md:text-[13px]"
           >
             <span className={cn(
-              "grid size-5 place-items-center rounded-full border border-border text-[10px]",
-              status[step.id] === "failed" && "border-destructive text-destructive",
-              status[step.id] === "running" && "border-primary/30 text-primary",
-              status[step.id] === "succeeded" && "border-emerald-600/30 text-emerald-600 dark:text-emerald-400",
+              "grid size-5 shrink-0 place-items-center",
+              status[step.id] === "failed" && "text-destructive",
+              status[step.id] === "running" && "text-primary",
+              status[step.id] === "succeeded" && "text-emerald-600 dark:text-emerald-400",
             )}>
-              <StepMark index={index} status={status[step.id]} />
+              <StepMark status={status[step.id]} />
             </span>
             {step.label}
           </TabsTrigger>
