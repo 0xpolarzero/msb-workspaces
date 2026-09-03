@@ -17,12 +17,12 @@ interface ReviewStepProps {
 }
 
 const detailById: Record<ReviewQueueItemView["id"], string> = {
-  workspaceRun: "Applies the submitted workspace boundary",
+  workspaceRun: "Applies the submitted machine boundary",
   workspaceVerify: "Runs complete deep verification and restores lifecycle state",
   githubRun: "Saves the retained repository policy",
   githubVerify: "Verifies scoped access and restored lifecycle state",
-  identityRun: "Saves each applied workspace author name and email",
-  identityVerify: "Reads each applied workspace identity back independently",
+  identityRun: "Saves each applied machine author name and email",
+  identityVerify: "Reads each applied machine identity back independently",
   completion: "Closes setup after every required verification succeeds",
 }
 

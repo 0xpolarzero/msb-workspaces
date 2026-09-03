@@ -50,7 +50,7 @@ export function ActivityOutput({ events }: { events: SiloProgressEvent[] }) {
         </CollapsibleTrigger>
       </div>
       <CollapsibleContent className="activity-output-content">
-        <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-zinc-950 px-3 py-2.5 font-mono text-[11px] leading-5 text-zinc-200 select-text dark:bg-black" aria-label="Workspace activity">{output || "No activity yet."}</pre>
+        <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-zinc-950 px-3 py-2.5 font-mono text-[11px] leading-5 text-zinc-200 select-text dark:bg-black" aria-label="Machine activity">{output || "No activity yet."}</pre>
       </CollapsibleContent>
     </Collapsible>
   )

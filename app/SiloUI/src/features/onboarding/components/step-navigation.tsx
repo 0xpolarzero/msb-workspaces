@@ -6,7 +6,7 @@ import type { OnboardingStep, PresentationStatus } from "@/features/onboarding/m
 
 const steps: { id: OnboardingStep; label: string }[] = [
   { id: "dependencies", label: "Dependencies" },
-  { id: "workspaces", label: "Workspaces" },
+  { id: "workspaces", label: "Machines" },
   { id: "github", label: "GitHub" },
   { id: "review", label: "Review" },
 ]
