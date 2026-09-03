@@ -43,8 +43,7 @@ describe("application", () => {
       "GitHub",
       "Secrets",
       "Backup",
-      "Notifications",
-      "General",
+      "Settings",
     ])
     expect(within(appNavigation()).getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true")
     expect(screen.getByRole("heading", { name: "Overview", level: 2 })).toBeVisible()
@@ -107,23 +106,33 @@ describe("application", () => {
     const { user } = renderApplication()
     const navigation = within(appNavigation())
 
-    await user.click(navigation.getByRole("tab", { name: "Notifications" }))
-    const notifications = within(appPanel("Notifications"))
-    await user.click(notifications.getByRole("switch", { name: "Enable notifications" }))
-    expect(notifications.getByRole("switch", { name: "Sandbox health" })).toBeDisabled()
+    const settingsTab = navigation.getByRole("tab", { name: "Settings" })
+    expect(settingsTab).toHaveAttribute("aria-expanded", "false")
+    expect(navigation.queryByRole("button", { name: "Notifications" })).not.toBeInTheDocument()
 
-    await user.click(navigation.getByRole("tab", { name: "General" }))
-    const general = within(appPanel("General"))
+    await user.click(settingsTab)
+    expect(settingsTab).toHaveAttribute("aria-expanded", "true")
+    const settingsNavigation = within(navigation.getByRole("group", { name: "Settings sections" }))
+    expect(settingsNavigation.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page")
+    const settings = within(appPanel("Settings"))
+
+    await user.click(settingsNavigation.getByRole("button", { name: "Notifications" }))
+    await user.click(settings.getByRole("switch", { name: "Enable notifications" }))
+    expect(settings.getByRole("switch", { name: "Sandbox health" })).toBeDisabled()
+
+    await user.click(settingsNavigation.getByRole("button", { name: "General" }))
+    const general = within(appPanel("Settings"))
     await user.click(general.getByRole("switch", { name: "Start sandboxes at launch" }))
     const playgrounds = general.getByRole("checkbox", { name: "playgrounds" })
     await user.click(playgrounds)
     expect(playgrounds).toBeChecked()
 
     await user.click(navigation.getByRole("tab", { name: "Overview" }))
-    await user.click(navigation.getByRole("tab", { name: "General" }))
+    expect(navigation.queryByRole("group", { name: "Settings sections" })).not.toBeInTheDocument()
+    await user.click(settingsTab)
     expect(general.getByRole("checkbox", { name: "playgrounds" })).toBeChecked()
 
-    await user.click(navigation.getByRole("tab", { name: "Notifications" }))
-    expect(notifications.getByRole("switch", { name: "Enable notifications" })).not.toBeChecked()
+    await user.click(within(navigation.getByRole("group", { name: "Settings sections" })).getByRole("button", { name: "Notifications" }))
+    expect(settings.getByRole("switch", { name: "Enable notifications" })).not.toBeChecked()
   })
 })

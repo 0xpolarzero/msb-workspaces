@@ -1,4 +1,5 @@
-export type ApplicationTab = "overview" | "workspaces" | "github" | "secrets" | "backup" | "notifications" | "general"
+export type ApplicationTab = "overview" | "workspaces" | "github" | "secrets" | "backup" | "settings"
+export type SettingsSection = "general" | "notifications"
 export type WorkspaceSection = "summary" | "files" | "logs" | "network" | "activity"
 export type WorkspaceState = "running" | "starting" | "stopped" | "failed"
 
