@@ -135,7 +135,7 @@ export function GitHubStep({
   onViewProgress,
 }: GitHubStepProps) {
   return (
-    <section aria-labelledby="github-title" className="mx-auto max-w-3xl">
+    <section aria-labelledby="github-title" className="mx-auto flex h-full min-h-0 max-w-3xl flex-col">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
         <h2 id="github-title" className="text-xl font-semibold tracking-tight">GitHub</h2>
@@ -167,8 +167,8 @@ export function GitHubStep({
       )}
 
       {connectionState === "connected" && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-3">
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
+          <div className="flex shrink-0 items-center gap-3">
             <span className="grid size-9 shrink-0 place-items-center rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"><Check className="size-4" /></span>
             <div>
               <h3 className="text-sm font-medium">Connected to GitHub</h3>
@@ -176,76 +176,70 @@ export function GitHubStep({
             </div>
           </div>
 
-          <div className="border-t border-border pt-4">
-            <div className="mb-2">
-              <h3 className="text-xs font-medium">Workspace repository access</h3>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">Selected repositories always allow local writes and commits.</p>
-            </div>
-            <ScrollArea className="h-72 rounded-md border border-border" role="region" aria-label="Workspace repository access">
-              <div className="divide-y divide-border">
-                {progress.workspaces.map(({ name }) => {
-                  const selections = workspaceSelections[name] ?? []
-                  return (
-                    <div key={name} className="grid gap-2 p-3">
-                      <span className="truncate text-xs font-medium" title={name}>{name}</span>
-                      <RepositoryCombobox
-                        workspace={name}
-                        repositoryOptions={repositoryOptions}
-                        selectedRepositories={selections}
-                        onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
-                      />
-                      {selections.length > 0 && (
-                        <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
-                          <div role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 bg-muted/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
-                            <span role="columnheader">Repository</span>
-                            <span role="columnheader" className="flex items-center justify-center gap-0.5 text-center">
-                              Allow pushes
-                              <TooltipProvider delayDuration={150}>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button type="button" variant="ghost" size="icon-xs" className="size-5" aria-label="About Allow pushes">
-                                      <Info aria-hidden="true" className="size-3" />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>Checked: the VM can push. Unchecked: it can’t.</TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-                            </span>
-                            <span role="columnheader" className="sr-only">Remove</span>
-                          </div>
-                          {selections.map((selection) => (
-                            <div key={selection.repository} role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 border-t border-border px-2 py-2">
-                              <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
-                              <span role="cell" className="flex justify-center">
-                                <Checkbox
-                                  aria-label={`Allow pushes for ${selection.repository}`}
-                                  checked={selection.allowPushes}
-                                  onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
-                                    item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
-                                  )))}
-                                />
-                              </span>
-                              <span role="cell">
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  aria-label={`Remove ${selection.repository} from ${name}`}
-                                  onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
-                                >
-                                  <X aria-hidden="true" />
-                                </Button>
-                              </span>
-                            </div>
-                          ))}
+          <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" role="region" aria-label="Workspace repository access">
+            <div className="divide-y divide-border">
+              {progress.workspaces.map(({ name }) => {
+                const selections = workspaceSelections[name] ?? []
+                return (
+                  <div key={name} className="grid gap-2 p-3">
+                    <span className="truncate text-xs font-medium" title={name}>{name}</span>
+                    <RepositoryCombobox
+                      workspace={name}
+                      repositoryOptions={repositoryOptions}
+                      selectedRepositories={selections}
+                      onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
+                    />
+                    {selections.length > 0 && (
+                      <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
+                        <div role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 bg-muted/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                          <span role="columnheader">Repository</span>
+                          <span role="columnheader" className="flex items-center justify-center gap-0.5 text-center">
+                            Allow pushes
+                            <TooltipProvider delayDuration={150}>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button type="button" variant="ghost" size="icon-xs" className="size-5" aria-label="About Allow pushes">
+                                    <Info aria-hidden="true" className="size-3" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Checked: the VM can push. Unchecked: it can’t.</TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          </span>
+                          <span role="columnheader" className="sr-only">Remove</span>
                         </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </ScrollArea>
-          </div>
+                        {selections.map((selection) => (
+                          <div key={selection.repository} role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 border-t border-border px-2 py-2">
+                            <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
+                            <span role="cell" className="flex justify-center">
+                              <Checkbox
+                                aria-label={`Allow pushes for ${selection.repository}`}
+                                checked={selection.allowPushes}
+                                onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
+                                  item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
+                                )))}
+                              />
+                            </span>
+                            <span role="cell">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-xs"
+                                aria-label={`Remove ${selection.repository} from ${name}`}
+                                onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
+                              >
+                                <X aria-hidden="true" />
+                              </Button>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </ScrollArea>
         </div>
       )}
     </section>

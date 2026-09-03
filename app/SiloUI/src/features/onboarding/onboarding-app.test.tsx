@@ -149,6 +149,8 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
     expect(screen.getByRole("region", { name: "Workspace repository access" })).toBeVisible()
+    expect(screen.queryByRole("heading", { name: "Workspace repository access" })).not.toBeInTheDocument()
+    expect(screen.queryByText("Selected repositories always allow local writes and commits.")).not.toBeInTheDocument()
     expect(screen.getAllByRole("combobox")).toHaveLength(12)
     expect(screen.queryByText(/read only|read-write/i)).not.toBeInTheDocument()
 

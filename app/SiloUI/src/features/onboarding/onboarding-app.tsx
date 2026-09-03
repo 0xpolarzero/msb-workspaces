@@ -173,7 +173,7 @@ export function OnboardingApp({
       <TabsContent value="workspaces" className="mt-0 outline-none">
         <WorkspacesStep progress={viewModel.workspaceProgress} onRetry={actions.retryWorkspaceSetup} />
       </TabsContent>
-      <TabsContent value="github" className="mt-0 outline-none">
+      <TabsContent value="github" className="mt-0 h-full outline-none">
         <GitHubStep
           progress={viewModel.workspaceProgress}
           connectionState={githubConnectionState}
