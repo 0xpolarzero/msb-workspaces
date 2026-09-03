@@ -186,6 +186,27 @@ describe("onboarding", () => {
     expect(screen.getByText("Morgan Example · taylor@example.com · all workspaces")).toBeVisible()
   })
 
+  it("treats repository names as case-insensitive when preventing duplicates", async () => {
+    const user = userEvent.setup()
+    render(<OnboardingApp
+      source={onboardingScenarios.running}
+      initialGitHubConnectionState="connected"
+      repositoryOptions={["ACME/SILO", "acme/silo", "acme/design-system"]}
+      actions={{ repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
+    />)
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    const picker = screen.getByLabelText("Add repository to playgrounds")
+    await user.click(picker)
+    expect(screen.getAllByRole("option").map(({ textContent }) => textContent)).toEqual(["ACME/SILO", "acme/design-system"])
+
+    await user.click(screen.getByRole("option", { name: "ACME/SILO" }))
+    await user.click(picker)
+
+    expect(screen.getAllByRole("option").map(({ textContent }) => textContent)).toEqual(["acme/design-system"])
+    expect(within(screen.getByRole("table", { name: "Selected repositories for playgrounds" })).getAllByRole("row")).toHaveLength(2)
+  })
+
   it("removes repositories and keeps the review summary truthful", async () => {
     const user = userEvent.setup()
     renderScenario("running", "connected")

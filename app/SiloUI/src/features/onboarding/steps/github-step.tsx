@@ -31,15 +31,15 @@ function RepositoryCombobox({ workspace, repositoryOptions, selectedRepositories
   const [query, setQuery] = useState("")
   const [activeIndex, setActiveIndex] = useState(0)
   const selectedNames = useMemo(
-    () => new Set(selectedRepositories.map(({ repository }) => repository)),
+    () => new Set(selectedRepositories.map(({ repository }) => repository.toLowerCase())),
     [selectedRepositories],
   )
   const results = repositoryOptions.filter((repository) => (
-    !selectedNames.has(repository) && repository.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+    !selectedNames.has(repository.toLowerCase()) && repository.toLowerCase().includes(query.trim().toLowerCase())
   ))
 
   function add(repository: string) {
-    if (selectedNames.has(repository)) return
+    if (selectedNames.has(repository.toLowerCase())) return
     onAdd(repository)
     setQuery("")
     setActiveIndex(0)
@@ -90,7 +90,7 @@ function RepositoryCombobox({ workspace, repositoryOptions, selectedRepositories
         id={listboxId}
         role="listbox"
         aria-label={`Repository results for ${workspace}`}
-        className="w-[var(--radix-popover-trigger-width)] p-1"
+        className="max-h-[min(15rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] overflow-y-auto overscroll-contain p-1"
         onOpenAutoFocus={(event) => event.preventDefault()}
       >
         {results.length > 0 ? results.map((repository, index) => (

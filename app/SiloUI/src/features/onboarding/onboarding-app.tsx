@@ -21,24 +21,44 @@ interface OnboardingAppProps {
   repositoryOptions?: readonly string[]
 }
 
+function repositoryKey(repository: string): string {
+  return repository.toLowerCase()
+}
+
+function uniqueRepositoryOptions(repositories: readonly string[]): string[] {
+  const seen = new Set<string>()
+  return repositories.filter((repository) => {
+    const key = repositoryKey(repository)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function uniqueWorkspaceSelections(selections: readonly WorkspaceRepositorySelection[]): WorkspaceRepositorySelection[] {
+  const seen = new Set<string>()
+  return selections.filter(({ repository }) => {
+    const key = repositoryKey(repository)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 function initialWorkspaceSelections(source: OnboardingSource): Record<string, WorkspaceRepositorySelection[]> {
   return Object.fromEntries(source.bootstrapConfiguration.workspaces.map(({ name }) => {
     const repositories = source.githubPolicies
       .filter(({ workspace }) => workspace === name)
       .flatMap(({ repositories: policyRepositories }) => policyRepositories)
-    const selections = new Map<string, WorkspaceRepositorySelection>()
-    for (const repository of repositories) {
-      selections.set(repository.fullName, {
-        repository: repository.fullName,
-        allowPushes: repository.mode === "read-write",
-      })
-    }
-    return [name, [...selections.values()]]
+    return [name, uniqueWorkspaceSelections(repositories.map((repository) => ({
+      repository: repository.fullName,
+      allowPushes: repository.mode === "read-write",
+    })))]
   }))
 }
 
 function defaultRepositoryOptions(source: OnboardingSource): string[] {
-  return [...new Set(source.githubPolicies.flatMap(({ repositories }) => repositories.map(({ fullName }) => fullName)))]
+  return source.githubPolicies.flatMap(({ repositories }) => repositories.map(({ fullName }) => fullName))
 }
 
 export function OnboardingApp({
@@ -64,7 +84,7 @@ export function OnboardingApp({
   const [finished, setFinished] = useState(false)
   const connectTimer = useRef<number | undefined>(undefined)
   const availableRepositories = useMemo(
-    () => [...new Set(repositoryOptions ?? defaultRepositoryOptions(source))],
+    () => uniqueRepositoryOptions(repositoryOptions ?? defaultRepositoryOptions(source)),
     [repositoryOptions, source],
   )
 
@@ -85,7 +105,7 @@ export function OnboardingApp({
 
   function updateWorkspaceSelections(workspace: string, selections: WorkspaceRepositorySelection[]) {
     setGithubSkipped(false)
-    setWorkspaceSelections((current) => ({ ...current, [workspace]: selections }))
+    setWorkspaceSelections((current) => ({ ...current, [workspace]: uniqueWorkspaceSelections(selections) }))
   }
 
   function updateIdentity(nextIdentity: IdentityChoice) {
