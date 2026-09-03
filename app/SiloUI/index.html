@@ -8,6 +8,18 @@
     <title>Silo Setup</title>
   </head>
   <body>
+    <script>
+      // Resolve the theme before first paint: stored choice wins, else system.
+      (function () {
+        try {
+          var stored = localStorage.getItem("silo-theme");
+          var dark = stored
+            ? stored === "dark"
+            : window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (_) {}
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

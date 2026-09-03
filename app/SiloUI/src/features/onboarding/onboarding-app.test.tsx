@@ -971,4 +971,21 @@ describe("onboarding", () => {
       expect.stringContaining("personalvm6 CPU · 16 GB RAM"),
     ])
   })
+
+  it("switches the theme from the footer and persists the choice", async () => {
+    const user = userEvent.setup()
+    localStorage.removeItem("silo-theme")
+    renderScenario()
+
+    expect(document.documentElement.classList.contains("dark")).toBe(false)
+    await user.click(screen.getByRole("button", { name: "Switch to dark theme" }))
+
+    expect(document.documentElement.classList.contains("dark")).toBe(true)
+    expect(localStorage.getItem("silo-theme")).toBe("dark")
+    expect(screen.getByRole("button", { name: "Switch to light theme" })).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "Switch to light theme" }))
+    expect(document.documentElement.classList.contains("dark")).toBe(false)
+    expect(localStorage.getItem("silo-theme")).toBe("light")
+  })
 })
