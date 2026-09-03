@@ -5,7 +5,7 @@ import type {
 } from "@/contracts/silo"
 import type { OnboardingSource } from "@/features/onboarding/model/onboarding-source"
 
-export const onboardingSteps = ["dependencies", "workspaces", "github", "identity", "review"] as const
+export const onboardingSteps = ["dependencies", "workspaces", "github", "review"] as const
 export type OnboardingStep = (typeof onboardingSteps)[number]
 
 export type PresentationStatus = "waiting" | "running" | "succeeded" | "failed"
@@ -113,8 +113,7 @@ const inventory = [
 
 const queueByStep: Record<Exclude<OnboardingStep, "dependencies">, SetupQueueItemID[]> = {
   workspaces: ["workspaceRun", "workspaceVerify"],
-  github: ["githubRun", "githubVerify"],
-  identity: ["identityRun", "identityVerify"],
+  github: ["githubRun", "githubVerify", "identityRun", "identityVerify"],
   review: ["completion"],
 }
 
@@ -141,8 +140,8 @@ const queueLabels: Record<SetupQueueItemID, string> = {
   workspaceVerify: "Verify workspaces",
   githubRun: "Save GitHub",
   githubVerify: "Verify GitHub",
-  identityRun: "Save Git",
-  identityVerify: "Verify Git",
+  identityRun: "Save Git identities",
+  identityVerify: "Verify Git identities",
   completion: "Finish setup",
 }
 
@@ -258,7 +257,6 @@ export function projectOnboarding(source: OnboardingSource): OnboardingViewModel
     dependencies: dependencyStatus,
     workspaces: workspaceProgress.status,
     github: combineQueueStatus(queueItems.filter(({ id }) => queueByStep.github.includes(id))),
-    identity: combineQueueStatus(queueItems.filter(({ id }) => queueByStep.identity.includes(id))),
     review: combineQueueStatus(queueItems.filter(({ id }) => queueByStep.review.includes(id))),
   } satisfies Record<OnboardingStep, PresentationStatus>
 

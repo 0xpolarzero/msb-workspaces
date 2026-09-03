@@ -24,7 +24,7 @@ describe("onboarding", () => {
     expect(githubStateFromSearch("?github=connected")).toBe("connected")
   })
 
-  it("navigates all five steps with tabs, Back, and Continue", async () => {
+  it("navigates four steps with GitHub going directly to Review", async () => {
     const user = userEvent.setup()
     renderScenario()
 
@@ -33,12 +33,13 @@ describe("onboarding", () => {
     expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Continue" }))
     expect(screen.getByRole("heading", { name: "GitHub" })).toBeVisible()
-    await user.click(screen.getByRole("tab", { name: "Git" }))
-    expect(screen.getByRole("heading", { name: "Git" })).toBeVisible()
+    expect(screen.queryByRole("tab", { name: "Git" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Continue" }))
+    expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Back" }))
-    expect(screen.getByRole("heading", { name: "Git" })).toBeVisible()
+    expect(screen.getByRole("heading", { name: "GitHub" })).toBeVisible()
   })
 
   it("supports arrow-key navigation across the responsive tab list", async () => {
@@ -57,7 +58,7 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     renderScenario()
 
-    for (const step of ["GitHub", "Git", "Review"]) {
+    for (const step of ["GitHub", "Review"]) {
       await user.click(screen.getByRole("tab", { name: step }))
       expect(screen.getByLabelText("Workspace progress")).toHaveTextContent("Creating workspaces · 3 of 12 ready")
     }
@@ -66,24 +67,19 @@ describe("onboarding", () => {
     expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
   })
 
-  it("places contextual Skip before Back and records both skipped choices", async () => {
+  it("places contextual Skip before Back and skips only GitHub repository access", async () => {
     const user = userEvent.setup()
     renderScenario("running", "disconnected")
 
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     const githubFooter = screen.getByLabelText("Onboarding actions")
     expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip", "Back", "Continue"])
-    expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeDisabled()
+    expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeEnabled()
     expect(screen.queryByText("Skip for now")).not.toBeInTheDocument()
     await user.click(within(githubFooter).getByRole("button", { name: "Skip" }))
-    expect(screen.getByRole("heading", { name: "Git" })).toBeVisible()
-
-    const identityFooter = screen.getByLabelText("Onboarding actions")
-    expect(within(identityFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip", "Back", "Continue"])
-    await user.click(within(identityFooter).getByRole("button", { name: "Skip" }))
     expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
     expect(screen.getByText("GitHub skipped")).toBeVisible()
-    expect(screen.getByText("Git skipped")).toBeVisible()
+    expect(screen.getByText("Taylor Example <taylor@example.com> → all 12 workspaces")).toBeVisible()
   })
 
   it("renders stable disconnected, connecting, and connected GitHub states", async () => {
@@ -92,9 +88,15 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
     expect(screen.getByRole("heading", { name: "Not connected" })).toBeVisible()
+    expect(screen.getByLabelText("Git name for dev")).toHaveValue("Taylor Example")
+    expect(screen.getByLabelText("Git email for dev")).toHaveValue("taylor@example.com")
+    expect(screen.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
     expect(screen.getByRole("heading", { name: "Connecting to GitHub…" })).toBeVisible()
+    expect(screen.getByLabelText("Git name for dev")).toBeEnabled()
+    expect(screen.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
     expect(await screen.findByRole("heading", { name: "Connected to GitHub" }, { timeout: 1500 })).toBeVisible()
+    expect(screen.getByLabelText("Add repository to dev")).toBeVisible()
     disconnected.unmount()
 
     const connecting = renderScenario("running", "connecting")
@@ -173,11 +175,9 @@ describe("onboarding", () => {
     await user.click(pushes)
     expect(pushes).toBeChecked()
 
-    await user.click(screen.getByRole("tab", { name: "Git" }))
-    const name = screen.getByLabelText("Name")
+    const name = screen.getByLabelText("Git name for playgrounds")
     await user.clear(name)
     await user.type(name, "Morgan Example")
-    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     const retained = screen.getByRole("table", { name: "Selected repositories for playgrounds" })
     expect(within(retained).getByText("acme/design-system")).toBeVisible()
     expect(within(retained).getByText("acme/platform-tools")).toBeVisible()
@@ -185,7 +185,7 @@ describe("onboarding", () => {
 
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByText("3 repositories across 2 of 12 workspaces · 1 push-enabled repository")).toBeVisible()
-    expect(screen.getByText("Morgan Example · taylor@example.com · all workspaces")).toBeVisible()
+    expect(screen.getByText("Taylor Example <taylor@example.com> → dev, personal, docs-build, client-alpha-integration, qa-macos, qa-linux, release, data-lab, api-benchmarks, customer-demo, security-review; Morgan Example <taylor@example.com> → playgrounds")).toBeVisible()
   })
 
   it("treats repository names as case-insensitive when preventing duplicates", async () => {
@@ -234,32 +234,67 @@ describe("onboarding", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Checked: the VM can push. Unchecked: it can’t.")
   })
 
-  it("preserves and truthfully summarizes the native identity target", async () => {
+  it("prefills and enables every workspace identity from the optional host identity", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "disconnected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    expect(screen.getAllByRole("checkbox", { name: /^Apply Git identity to / })).toHaveLength(12)
+    for (const checkbox of screen.getAllByRole("checkbox", { name: /^Apply Git identity to / })) {
+      expect(checkbox).toBeChecked()
+    }
+    expect(screen.getByLabelText("Git name for security-review")).toHaveValue("Taylor Example")
+    expect(screen.getByLabelText("Git email for security-review")).toHaveValue("taylor@example.com")
+    expect(screen.getByRole("button", { name: "Reset Git identity for security-review" })).toBeEnabled()
+  })
+
+  it("keeps workspace identity edits and apply choices independent and resets one workspace", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    const playgroundsName = screen.getByLabelText("Git name for playgrounds")
+    const playgroundsEmail = screen.getByLabelText("Git email for playgrounds")
+    await user.clear(playgroundsName)
+    await user.type(playgroundsName, "Morgan Example")
+    await user.clear(playgroundsEmail)
+    await user.type(playgroundsEmail, "morgan@example.com")
+    await user.click(screen.getByRole("checkbox", { name: "Apply Git identity to personal" }))
+
+    expect(screen.getByLabelText("Git name for dev")).toHaveValue("Taylor Example")
+    expect(screen.getByRole("checkbox", { name: "Apply Git identity to dev" })).toBeChecked()
+    expect(screen.getByRole("checkbox", { name: "Apply Git identity to personal" })).not.toBeChecked()
+
+    await user.click(screen.getByRole("button", { name: "Reset Git identity for playgrounds" }))
+    expect(playgroundsName).toHaveValue("Taylor Example")
+    expect(playgroundsEmail).toHaveValue("taylor@example.com")
+    expect(screen.getByRole("checkbox", { name: "Apply Git identity to personal" })).not.toBeChecked()
+
+    await user.clear(playgroundsName)
+    await user.type(playgroundsName, "Morgan Example")
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+    expect(screen.getByText("Taylor Example <taylor@example.com> → dev, docs-build, client-alpha-integration, qa-macos, qa-linux, release, data-lab, api-benchmarks, customer-demo, security-review; Morgan Example <taylor@example.com> → playgrounds; not applied → personal")).toBeVisible()
+  })
+
+  it("starts blank and leaves Reset safely unavailable without a host identity", async () => {
     const user = userEvent.setup()
     render(<OnboardingApp
-      source={{
-        ...onboardingScenarios.running,
-        identityInput: { ...onboardingScenarios.running.identityInput, target: "personal" },
-      }}
+      source={{ ...onboardingScenarios.running, currentHostGitIdentity: null }}
+      initialGitHubConnectionState="disconnected"
       actions={{ repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
     />)
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    await user.click(screen.getByRole("tab", { name: "Git" }))
-    const applyToAll = screen.getByRole("checkbox", { name: "Apply identity to all workspaces" })
-    expect(applyToAll).not.toBeChecked()
-    expect(screen.getByText("Currently limited to personal.")).toBeVisible()
-    await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByText("Taylor Example · taylor@example.com · personal only")).toBeVisible()
-
-    await user.click(screen.getByRole("tab", { name: "Git" }))
-    await user.click(screen.getByRole("checkbox", { name: "Apply identity to all workspaces" }))
-    await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByText("Taylor Example · taylor@example.com · all workspaces")).toBeVisible()
-
-    await user.click(screen.getByRole("tab", { name: "Git" }))
-    await user.click(screen.getByRole("checkbox", { name: "Apply identity to all workspaces" }))
-    await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByText("Taylor Example · taylor@example.com · personal only")).toBeVisible()
+    const name = screen.getByLabelText("Git name for dev")
+    const email = screen.getByLabelText("Git email for dev")
+    const reset = screen.getByRole("button", { name: "Reset Git identity for dev" })
+    expect(name).toHaveValue("")
+    expect(email).toHaveValue("")
+    expect(reset).toBeDisabled()
+    expect(screen.getByText("No host Git identity is available. Enter values manually; Reset is unavailable.")).toBeVisible()
+    await user.type(name, "Local User")
+    await user.click(reset)
+    expect(name).toHaveValue("Local User")
   })
 
   it("expands dependency groups and exposes real remediation", async () => {

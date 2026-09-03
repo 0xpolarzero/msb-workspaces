@@ -15,6 +15,17 @@ describe("Silo contract fixtures", () => {
     }
   })
 
+  it("accepts an explicit optional host Git identity without reading local configuration", () => {
+    expect(onboardingSourceSchema.parse({
+      ...onboardingScenarios.running,
+      currentHostGitIdentity: null,
+    }).currentHostGitIdentity).toBeNull()
+    expect(onboardingScenarios.running.currentHostGitIdentity).toEqual({
+      name: "Taylor Example",
+      email: "taylor@example.com",
+    })
+  })
+
   it("keeps progress events on the exact schema-version 1 contract", () => {
     const event = onboardingScenarios.running.progressEvents.at(-1)
     expect(event).toMatchObject({

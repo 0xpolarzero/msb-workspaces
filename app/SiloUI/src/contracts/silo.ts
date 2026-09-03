@@ -116,19 +116,6 @@ export const githubWorkspacePolicySchema = z.object({
   policy.repositories.every((repository) => repository.workspace === policy.workspace)
 ), { message: "repository workspaces must match the policy workspace" })
 
-export const siloIdentityResultSchema = z.object({
-  target: z.string(),
-  name: z.string(),
-  email: z.string(),
-  workspaces: z.array(z.string()),
-}).strict()
-
-export const setupIdentityQueueInputSchema = z.object({
-  name: z.string(),
-  email: z.string(),
-  target: z.string().nullable(),
-}).strict()
-
 export const setupQueueItemIdSchema = z.enum([
   "workspaceRun",
   "workspaceVerify",
@@ -147,7 +134,5 @@ export type SiloBootstrapState = z.infer<typeof siloBootstrapStateSchema>
 export type SiloProgressEvent = z.infer<typeof siloProgressEventSchema>
 export type SiloProtocolError = z.infer<typeof siloProtocolErrorSchema>
 export type GitHubWorkspacePolicy = z.infer<typeof githubWorkspacePolicySchema>
-export type SiloIdentityResult = z.infer<typeof siloIdentityResultSchema>
-export type SetupIdentityQueueInput = z.infer<typeof setupIdentityQueueInputSchema>
 export type SetupQueueItemID = z.infer<typeof setupQueueItemIdSchema>
 export type SetupQueueItemStatus = z.infer<typeof setupQueueItemStatusSchema>

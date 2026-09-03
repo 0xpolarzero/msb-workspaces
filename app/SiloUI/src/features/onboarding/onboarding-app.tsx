@@ -8,9 +8,9 @@ import { DependenciesStep } from "@/features/onboarding/steps/dependencies-step"
 import {
   GitHubStep,
   type GitHubConnectionState,
+  type WorkspaceGitIdentity,
   type WorkspaceRepositorySelection,
 } from "@/features/onboarding/steps/github-step"
-import { IdentityStep, type IdentityChoice } from "@/features/onboarding/steps/identity-step"
 import { ReviewStep } from "@/features/onboarding/steps/review-step"
 import { WorkspacesStep } from "@/features/onboarding/steps/workspaces-step"
 
@@ -57,6 +57,49 @@ function initialWorkspaceSelections(source: OnboardingSource): Record<string, Wo
   }))
 }
 
+function initialWorkspaceIdentities(source: OnboardingSource): Record<string, WorkspaceGitIdentity> {
+  const { name = "", email = "" } = source.currentHostGitIdentity ?? {}
+  return Object.fromEntries(source.bootstrapConfiguration.workspaces.map((workspace) => [
+    workspace.name,
+    { name, email, apply: true },
+  ]))
+}
+
+function gitIdentityLabel(identity: WorkspaceGitIdentity): string {
+  return `${identity.name || "No name"} <${identity.email || "No email"}>`
+}
+
+function workspaceIdentitySummary(
+  identities: Record<string, WorkspaceGitIdentity>,
+  workspaceNames: readonly string[],
+): string {
+  const appliedGroups = new Map<string, { identity: WorkspaceGitIdentity; workspaces: string[] }>()
+  const notApplied: string[] = []
+
+  for (const workspace of workspaceNames) {
+    const identity = identities[workspace]
+    if (!identity?.apply) {
+      notApplied.push(workspace)
+      continue
+    }
+    const key = JSON.stringify([identity.name, identity.email])
+    const group = appliedGroups.get(key)
+    if (group) group.workspaces.push(workspace)
+    else appliedGroups.set(key, { identity, workspaces: [workspace] })
+  }
+
+  const summaries = [...appliedGroups.values()].map(({ identity, workspaces }) => {
+    const target = workspaces.length === workspaceNames.length
+      ? `all ${workspaceNames.length} workspaces`
+      : workspaces.join(", ")
+    return `${gitIdentityLabel(identity)} → ${target}`
+  })
+  if (notApplied.length > 0) {
+    summaries.push(`not applied → ${notApplied.join(", ")}`)
+  }
+  return summaries.join("; ")
+}
+
 function defaultRepositoryOptions(source: OnboardingSource): string[] {
   return source.githubPolicies.flatMap(({ repositories }) => repositories.map(({ fullName }) => fullName))
 }
@@ -74,13 +117,7 @@ export function OnboardingApp({
   )
   const [githubSkipped, setGithubSkipped] = useState(false)
   const [workspaceSelections, setWorkspaceSelections] = useState(() => initialWorkspaceSelections(source))
-  const defaultIdentityTarget = source.identityInput.target ?? source.bootstrapConfiguration.workspaces[0]?.name ?? null
-  const [identity, setIdentity] = useState<IdentityChoice>({
-    name: source.identityInput.name,
-    email: source.identityInput.email,
-    target: source.identityInput.target,
-  })
-  const [identitySkipped, setIdentitySkipped] = useState(false)
+  const [workspaceIdentities, setWorkspaceIdentities] = useState(() => initialWorkspaceIdentities(source))
   const [finished, setFinished] = useState(false)
   const connectTimer = useRef<number | undefined>(undefined)
   const availableRepositories = useMemo(
@@ -108,9 +145,16 @@ export function OnboardingApp({
     setWorkspaceSelections((current) => ({ ...current, [workspace]: uniqueWorkspaceSelections(selections) }))
   }
 
-  function updateIdentity(nextIdentity: IdentityChoice) {
-    setIdentitySkipped(false)
-    setIdentity(nextIdentity)
+  function updateWorkspaceIdentity(workspace: string, identity: WorkspaceGitIdentity) {
+    setWorkspaceIdentities((current) => ({ ...current, [workspace]: identity }))
+  }
+
+  function resetWorkspaceIdentity(workspace: string) {
+    if (!source.currentHostGitIdentity) return
+    setWorkspaceIdentities((current) => ({
+      ...current,
+      [workspace]: { ...current[workspace], ...source.currentHostGitIdentity },
+    }))
   }
 
   function skipSetup() {
@@ -120,9 +164,6 @@ export function OnboardingApp({
         setGithubConnectionState("disconnected")
       }
       setGithubSkipped(true)
-      setActiveStep("identity")
-    } else if (activeStep === "identity") {
-      setIdentitySkipped(true)
       setActiveStep("review")
     }
   }
@@ -136,7 +177,6 @@ export function OnboardingApp({
       return
     }
     if (activeStep === "github") setGithubSkipped(false)
-    if (activeStep === "identity") setIdentitySkipped(false)
     move(1)
   }
 
@@ -153,9 +193,10 @@ export function OnboardingApp({
     : githubConnectionState === "connected"
       ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${viewModel.workspaceProgress.workspaces.length} workspaces · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
       : "GitHub not connected"
-  const identitySummary = identitySkipped
-    ? "Git skipped"
-    : `${identity.name || "No name"} · ${identity.email || "No email"} · ${identity.target === null ? "all workspaces" : `${identity.target} only`}`
+  const identitySummary = workspaceIdentitySummary(
+    workspaceIdentities,
+    viewModel.workspaceProgress.workspaces.map(({ name }) => name),
+  )
 
   return (
     <OnboardingShell
@@ -165,7 +206,6 @@ export function OnboardingApp({
       onBack={() => move(-1)}
       onContinue={continueSetup}
       onSkip={skipSetup}
-      continueDisabled={activeStep === "github" && githubConnectionState !== "connected"}
     >
       <TabsContent value="dependencies" className="mt-0 outline-none">
         <DependenciesStep groups={viewModel.dependencies} onRepairRuntime={actions.repairRuntime} />
@@ -179,13 +219,14 @@ export function OnboardingApp({
           connectionState={githubConnectionState}
           repositoryOptions={availableRepositories}
           workspaceSelections={workspaceSelections}
+          workspaceIdentities={workspaceIdentities}
+          currentHostGitIdentity={source.currentHostGitIdentity}
           onConnect={connectGitHub}
           onWorkspaceSelectionsChange={updateWorkspaceSelections}
+          onWorkspaceIdentityChange={updateWorkspaceIdentity}
+          onResetWorkspaceIdentity={resetWorkspaceIdentity}
           onViewProgress={() => setActiveStep("workspaces")}
         />
-      </TabsContent>
-      <TabsContent value="identity" className="mt-0 outline-none">
-        <IdentityStep progress={viewModel.workspaceProgress} identity={identity} defaultTarget={defaultIdentityTarget} onIdentityChange={updateIdentity} onViewProgress={() => setActiveStep("workspaces")} />
       </TabsContent>
       <TabsContent value="review" className="mt-0 outline-none">
         <ReviewStep

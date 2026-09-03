@@ -127,8 +127,7 @@ const runningSource = {
       mode: "read-only",
     }],
   }],
-  identityInput: {
-    target: null,
+  currentHostGitIdentity: {
     name: "Taylor Example",
     email: "taylor@example.com",
   },

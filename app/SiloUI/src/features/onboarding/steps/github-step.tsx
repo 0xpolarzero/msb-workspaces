@@ -18,6 +18,12 @@ export interface WorkspaceRepositorySelection {
   allowPushes: boolean
 }
 
+export interface WorkspaceGitIdentity {
+  name: string
+  email: string
+  apply: boolean
+}
+
 interface RepositoryComboboxProps {
   workspace: string
   repositoryOptions: readonly string[]
@@ -120,8 +126,12 @@ interface GitHubStepProps {
   connectionState: GitHubConnectionState
   repositoryOptions: readonly string[]
   workspaceSelections: Record<string, WorkspaceRepositorySelection[]>
+  workspaceIdentities: Record<string, WorkspaceGitIdentity>
+  currentHostGitIdentity: { name: string; email: string } | null
   onConnect: () => void
   onWorkspaceSelectionsChange: (workspace: string, selections: WorkspaceRepositorySelection[]) => void
+  onWorkspaceIdentityChange: (workspace: string, identity: WorkspaceGitIdentity) => void
+  onResetWorkspaceIdentity: (workspace: string) => void
   onViewProgress: () => void
 }
 
@@ -130,8 +140,12 @@ export function GitHubStep({
   connectionState,
   repositoryOptions,
   workspaceSelections,
+  workspaceIdentities,
+  currentHostGitIdentity,
   onConnect,
   onWorkspaceSelectionsChange,
+  onWorkspaceIdentityChange,
+  onResetWorkspaceIdentity,
   onViewProgress,
 }: GitHubStepProps) {
   return (
@@ -139,35 +153,36 @@ export function GitHubStep({
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
         <h2 id="github-title" className="text-xl font-semibold tracking-tight">GitHub</h2>
+        <p className="mt-1 text-xs text-muted-foreground">Set a Git identity for each VM. Connect GitHub only to select repository access.</p>
       </div>
 
-      {connectionState === "disconnected" && (
-        <Card className="py-0">
-          <CardContent className="flex items-center gap-3 p-4">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><GitBranch className="size-4" /></span>
-            <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium">Not connected</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">Connect to select private repositories and push permissions.</p>
-            </div>
-            <Button type="button" onClick={onConnect}>Connect GitHub</Button>
-          </CardContent>
-        </Card>
-      )}
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {connectionState === "disconnected" && (
+          <Card className="shrink-0 py-0">
+            <CardContent className="flex flex-col items-start gap-3 p-4 sm:flex-row sm:items-center">
+              <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><GitBranch className="size-4" /></span>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-medium">Not connected</h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">Connect to select private repositories and push permissions.</p>
+              </div>
+              <Button type="button" className="sm:self-center" onClick={onConnect}>Connect GitHub</Button>
+            </CardContent>
+          </Card>
+        )}
 
-      {connectionState === "connecting" && (
-        <Card className="py-0" role="status" aria-live="polite">
-          <CardContent className="flex items-center gap-3 p-4">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><LoaderCircle className="size-4 animate-spin" /></span>
-            <div>
-              <h3 className="text-sm font-medium">Connecting to GitHub…</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">Completing the secure browser authorization.</p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+        {connectionState === "connecting" && (
+          <Card className="shrink-0 py-0" role="status" aria-live="polite">
+            <CardContent className="flex items-center gap-3 p-4">
+              <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><LoaderCircle className="size-4 animate-spin" /></span>
+              <div>
+                <h3 className="text-sm font-medium">Connecting to GitHub…</h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">Completing the secure browser authorization.</p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
-      {connectionState === "connected" && (
-        <div className="flex min-h-0 flex-1 flex-col gap-3">
+        {connectionState === "connected" && (
           <div className="flex shrink-0 items-center gap-3">
             <span className="grid size-9 shrink-0 place-items-center rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"><Check className="size-4" /></span>
             <div>
@@ -175,73 +190,129 @@ export function GitHubStep({
               <p className="mt-0.5 text-xs text-muted-foreground">Repository credentials remain scoped to each workspace.</p>
             </div>
           </div>
+        )}
 
-          <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" role="region" aria-label="Workspace repository access">
-            <div className="divide-y divide-border">
-              {progress.workspaces.map(({ name }) => {
-                const selections = workspaceSelections[name] ?? []
-                return (
-                  <div key={name} className="grid gap-2 p-3">
-                    <span className="truncate text-xs font-medium" title={name}>{name}</span>
-                    <RepositoryCombobox
-                      workspace={name}
-                      repositoryOptions={repositoryOptions}
-                      selectedRepositories={selections}
-                      onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
-                    />
-                    {selections.length > 0 && (
-                      <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
-                        <div role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 bg-muted/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
-                          <span role="columnheader">Repository</span>
-                          <span role="columnheader" className="flex items-center justify-center gap-0.5 text-center">
-                            Allow pushes
-                            <TooltipProvider delayDuration={150}>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="ghost" size="icon-xs" className="size-5" aria-label="About Allow pushes">
-                                    <Info aria-hidden="true" className="size-3" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Checked: the VM can push. Unchecked: it can’t.</TooltipContent>
-                              </Tooltip>
-                            </TooltipProvider>
-                          </span>
-                          <span role="columnheader" className="sr-only">Remove</span>
-                        </div>
-                        {selections.map((selection) => (
-                          <div key={selection.repository} role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 border-t border-border px-2 py-2">
-                            <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
-                            <span role="cell" className="flex justify-center">
-                              <Checkbox
-                                aria-label={`Allow pushes for ${selection.repository}`}
-                                checked={selection.allowPushes}
-                                onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
-                                  item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
-                                )))}
-                              />
-                            </span>
-                            <span role="cell">
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-xs"
-                                aria-label={`Remove ${selection.repository} from ${name}`}
-                                onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
-                              >
-                                <X aria-hidden="true" />
-                              </Button>
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+        {!currentHostGitIdentity && (
+          <p id="host-git-identity-unavailable" className="shrink-0 text-xs text-muted-foreground">
+            No host Git identity is available. Enter values manually; Reset is unavailable.
+          </p>
+        )}
+
+        <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" role="region" aria-label="Workspace repository access">
+          <div className="divide-y divide-border">
+            {progress.workspaces.map(({ name }) => {
+              const selections = workspaceSelections[name] ?? []
+              const identity = workspaceIdentities[name] ?? { name: "", email: "", apply: true }
+              return (
+                <div key={name} className="grid gap-3 p-3">
+                  <span className="truncate text-xs font-semibold" title={name}>{name}</span>
+                  <div className="grid gap-2 rounded-md bg-muted/40 p-2.5">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <label className="grid gap-1 text-[11px] font-medium">
+                        Git name
+                        <Input
+                          aria-label={`Git name for ${name}`}
+                          autoComplete="off"
+                          value={identity.name}
+                          onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
+                        />
+                      </label>
+                      <label className="grid gap-1 text-[11px] font-medium">
+                        Git email
+                        <Input
+                          aria-label={`Git email for ${name}`}
+                          autoComplete="off"
+                          inputMode="email"
+                          type="email"
+                          value={identity.email}
+                          onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, email: event.target.value })}
+                        />
+                      </label>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label className="flex items-center gap-2 text-xs">
+                        <Checkbox
+                          aria-label={`Apply Git identity to ${name}`}
+                          checked={identity.apply}
+                          onCheckedChange={(checked) => onWorkspaceIdentityChange(name, { ...identity, apply: checked === true })}
+                        />
+                        Apply identity
+                      </label>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="xs"
+                        aria-label={`Reset Git identity for ${name}`}
+                        aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
+                        disabled={!currentHostGitIdentity}
+                        onClick={() => onResetWorkspaceIdentity(name)}
+                      >
+                        Reset
+                      </Button>
+                    </div>
                   </div>
-                )
-              })}
-            </div>
-          </ScrollArea>
-        </div>
-      )}
+                  {connectionState === "connected" && (
+                    <>
+                      <RepositoryCombobox
+                        workspace={name}
+                        repositoryOptions={repositoryOptions}
+                        selectedRepositories={selections}
+                        onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
+                      />
+                      {selections.length > 0 && (
+                        <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
+                          <div role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 bg-muted/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                            <span role="columnheader">Repository</span>
+                            <span role="columnheader" className="flex items-center justify-center gap-0.5 text-center">
+                              Allow pushes
+                              <TooltipProvider delayDuration={150}>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button type="button" variant="ghost" size="icon-xs" className="size-5" aria-label="About Allow pushes">
+                                      <Info aria-hidden="true" className="size-3" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Checked: the VM can push. Unchecked: it can’t.</TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            </span>
+                            <span role="columnheader" className="sr-only">Remove</span>
+                          </div>
+                          {selections.map((selection) => (
+                            <div key={selection.repository} role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 border-t border-border px-2 py-2">
+                              <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
+                              <span role="cell" className="flex justify-center">
+                                <Checkbox
+                                  aria-label={`Allow pushes for ${selection.repository}`}
+                                  checked={selection.allowPushes}
+                                  onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
+                                    item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
+                                  )))}
+                                />
+                              </span>
+                              <span role="cell">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  aria-label={`Remove ${selection.repository} from ${name}`}
+                                  onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
+                                >
+                                  <X aria-hidden="true" />
+                                </Button>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </ScrollArea>
+      </div>
     </section>
   )
 }

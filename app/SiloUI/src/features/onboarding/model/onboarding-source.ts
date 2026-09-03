@@ -2,7 +2,6 @@ import { z } from "zod"
 
 import {
   githubWorkspacePolicySchema,
-  setupIdentityQueueInputSchema,
   siloBootstrapConfigurationSchema,
   siloBootstrapResultSchema,
   siloBootstrapStateSchema,
@@ -20,7 +19,10 @@ export const onboardingSourceSchema = z.object({
   preflightChecks: z.array(siloPreflightCheckSchema),
   progressEvents: z.array(siloProgressEventSchema),
   githubPolicies: z.array(githubWorkspacePolicySchema),
-  identityInput: setupIdentityQueueInputSchema,
+  currentHostGitIdentity: z.object({
+    name: z.string(),
+    email: z.string(),
+  }).strict().nullable(),
   bootstrapResult: siloBootstrapResultSchema.nullable(),
   error: siloProtocolErrorSchema.nullable(),
 }).strict()

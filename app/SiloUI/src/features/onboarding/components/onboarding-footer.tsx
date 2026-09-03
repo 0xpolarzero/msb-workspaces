@@ -15,7 +15,7 @@ interface OnboardingFooterProps {
 export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue, onSkip, continueDisabled = false }: OnboardingFooterProps) {
   const { workspaceProgress } = viewModel
   const isReview = activeStep === "review"
-  const canSkip = activeStep === "github" || activeStep === "identity"
+  const canSkip = activeStep === "github"
   const dependenciesBlocked = activeStep === "dependencies" && viewModel.dependencyStatus === "failed"
   const statusText = dependenciesBlocked
     ? "Resolve dependency checks to continue"

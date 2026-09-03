@@ -21,8 +21,8 @@ const detailById: Record<ReviewQueueItemView["id"], string> = {
   workspaceVerify: "Runs complete deep verification and restores lifecycle state",
   githubRun: "Saves the retained repository policy",
   githubVerify: "Verifies scoped access and restored lifecycle state",
-  identityRun: "Saves author name and email inside the selected workspaces",
-  identityVerify: "Reads the saved identity back from each target workspace",
+  identityRun: "Saves each applied workspace author name and email",
+  identityVerify: "Reads each applied workspace identity back independently",
   completion: "Closes setup after every required verification succeeds",
 }
 
@@ -53,7 +53,7 @@ export function ReviewStep({ progress, queueItems, identitySummary, githubSummar
           return (
             <li key={item.id} className="grid grid-cols-[1.25rem_1fr_auto] items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5 text-xs">
               <StatusIcon status={status} waitingLabel={String(index + 1)} />
-              <div className="min-w-0"><div className="font-medium">{item.label}</div><div className="truncate text-[11px] text-muted-foreground" title={item.failure ?? choiceDetail}>{item.failure ?? choiceDetail}</div></div>
+              <div className="min-w-0"><div className="font-medium">{item.label}</div><div className="break-words text-[11px] text-muted-foreground" title={item.failure ?? choiceDetail}>{item.failure ?? choiceDetail}</div></div>
               <span className="rounded-full bg-muted px-2 py-1 text-[10px] capitalize text-muted-foreground">{item.status}</span>
             </li>
           )
