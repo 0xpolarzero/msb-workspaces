@@ -8,6 +8,16 @@ import { parseOnboardingSource, type OnboardingSource } from "@/features/onboard
 export const scenarioNames = ["running", "complete", "dependency-failure", "bootstrap-failure"] as const
 export type ScenarioName = (typeof scenarioNames)[number]
 
+export const githubFixtureStates = ["disconnected", "connecting", "connected"] as const
+export type GitHubFixtureState = (typeof githubFixtureStates)[number]
+
+export const repositoryFixtures = [
+  "acme/silo",
+  "acme/design-system",
+  "acme/platform-tools",
+  "taylor/docs-site",
+] as const
+
 const revision = "9f3b7f095c93fced946f31c2847ad6f147e9d35ca91949845f959819f547440d"
 const requestId = "setup-bootstrap-20260903"
 
@@ -211,4 +221,9 @@ export const onboardingScenarios: Record<ScenarioName, OnboardingSource> = {
 export function scenarioFromSearch(search: string): ScenarioName {
   const requested = new URLSearchParams(search).get("scenario")
   return scenarioNames.find((name) => name === requested) ?? "running"
+}
+
+export function githubStateFromSearch(search: string): GitHubFixtureState {
+  const requested = new URLSearchParams(search).get("github")
+  return githubFixtureStates.find((state) => state === requested) ?? "disconnected"
 }

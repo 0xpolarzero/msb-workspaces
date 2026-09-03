@@ -8,11 +8,14 @@ interface OnboardingFooterProps {
   viewModel: OnboardingViewModel
   onBack: () => void
   onContinue: () => void
+  onSkip: () => void
+  continueDisabled?: boolean
 }
 
-export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue }: OnboardingFooterProps) {
+export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue, onSkip, continueDisabled = false }: OnboardingFooterProps) {
   const { workspaceProgress } = viewModel
   const isReview = activeStep === "review"
+  const canSkip = activeStep === "github" || activeStep === "identity"
   const dependenciesBlocked = activeStep === "dependencies" && viewModel.dependencyStatus === "failed"
   const statusText = dependenciesBlocked
     ? "Resolve dependency checks to continue"
@@ -23,7 +26,7 @@ export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue }: 
       : workspaceProgress.currentMessage
 
   return (
-    <footer className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-4 py-3">
+    <footer className="flex items-center justify-between gap-3 border-t border-border bg-muted/20 px-4 py-3" aria-label="Onboarding actions">
       <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
         {dependenciesBlocked || workspaceProgress.status === "failed" ? <AlertCircle className="size-3.5 shrink-0 text-destructive" />
           : workspaceProgress.status === "succeeded" ? <Check className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
@@ -32,8 +35,9 @@ export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue }: 
         <span className="truncate">{statusText}</span>
       </div>
       <div className="flex shrink-0 gap-2">
+        {canSkip && <Button variant="ghost" onClick={onSkip}>Skip</Button>}
         <Button variant="outline" onClick={onBack} disabled={activeStep === "dependencies"}>Back</Button>
-        <Button onClick={onContinue} disabled={isReview ? !viewModel.finishEnabled : dependenciesBlocked}>
+        <Button onClick={onContinue} disabled={isReview ? !viewModel.finishEnabled : dependenciesBlocked || continueDisabled}>
           {isReview ? "Finish" : "Continue"}
         </Button>
       </div>

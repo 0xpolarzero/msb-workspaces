@@ -4,10 +4,11 @@ import { describe, expect, it, vi } from "vitest"
 
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
 import { projectOnboarding } from "@/features/onboarding/model/onboarding-state"
-import { onboardingScenarios } from "@/fixtures/scenarios"
+import type { GitHubConnectionState } from "@/features/onboarding/steps/github-step"
+import { onboardingScenarios, repositoryFixtures } from "@/fixtures/scenarios"
 
-function renderScenario(name: keyof typeof onboardingScenarios = "running") {
-  return render(<OnboardingApp source={onboardingScenarios[name]} actions={{
+function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
+  return render(<OnboardingApp source={onboardingScenarios[name]} initialGitHubConnectionState={githubState} repositoryOptions={repositoryFixtures} actions={{
     repairRuntime: vi.fn(),
     retryWorkspaceSetup: vi.fn(),
     finishSetup: vi.fn(),
@@ -55,22 +56,74 @@ describe("onboarding", () => {
     expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
   })
 
-  it("retains GitHub and identity choices while navigating", async () => {
+  it("places contextual Skip before Back and records both skipped choices", async () => {
     const user = userEvent.setup()
-    renderScenario()
+    renderScenario("running", "disconnected")
 
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
-    await user.click(screen.getByRole("radio", { name: /Skip for now/ }))
-    expect(screen.getByRole("radio", { name: /Skip for now/ })).toHaveAttribute("aria-checked", "true")
+    const githubFooter = screen.getByLabelText("Onboarding actions")
+    expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip", "Back", "Continue"])
+    expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeDisabled()
+    expect(screen.queryByText("Skip for now")).not.toBeInTheDocument()
+    await user.click(within(githubFooter).getByRole("button", { name: "Skip" }))
+    expect(screen.getByRole("heading", { name: "Git identity" })).toBeVisible()
+
+    const identityFooter = screen.getByLabelText("Onboarding actions")
+    expect(within(identityFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip", "Back", "Continue"])
+    await user.click(within(identityFooter).getByRole("button", { name: "Skip" }))
+    expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
+    expect(screen.getByText("GitHub access skipped")).toBeVisible()
+    expect(screen.getByText("Git identity skipped")).toBeVisible()
+  })
+
+  it("renders stable disconnected, connecting, and connected GitHub states", async () => {
+    const user = userEvent.setup()
+    const disconnected = renderScenario("running", "disconnected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    expect(screen.getByRole("heading", { name: "Not connected" })).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
+    expect(screen.getByRole("heading", { name: "Connecting to GitHub…" })).toBeVisible()
+    expect(await screen.findByRole("heading", { name: "Connected to GitHub" }, { timeout: 1500 })).toBeVisible()
+    disconnected.unmount()
+
+    const connecting = renderScenario("running", "connecting")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    expect(screen.getByRole("heading", { name: "Connecting to GitHub…" })).toBeVisible()
+    connecting.unmount()
+
+    renderScenario("running", "connected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    expect(screen.getByRole("heading", { name: "Connected to GitHub" })).toBeVisible()
+  })
+
+  it("configures every workspace and retains repository, permission, and identity edits", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    expect(screen.getByLabelText("Workspace repository access")).toBeVisible()
+    expect(screen.getAllByRole("combobox")).toHaveLength(24)
+    expect(screen.getByLabelText("Repository for dev")).toHaveTextContent("acme/silo")
+    expect(screen.getByLabelText("Permission for playgrounds")).toBeDisabled()
+
+    await user.click(screen.getByLabelText("Repository for playgrounds"))
+    await user.click(screen.getByRole("option", { name: "acme/design-system" }))
+    expect(screen.getByLabelText("Permission for playgrounds")).toBeEnabled()
+    await user.click(screen.getByLabelText("Permission for playgrounds"))
+    await user.click(screen.getByRole("option", { name: "Allow pushes" }))
 
     await user.click(screen.getByRole("tab", { name: /Git identity/ }))
     const name = screen.getByLabelText("Name")
     await user.clear(name)
     await user.type(name, "Morgan Example")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
-    expect(screen.getByRole("radio", { name: /Skip for now/ })).toHaveAttribute("aria-checked", "true")
-    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
-    expect(screen.getByLabelText("Name")).toHaveValue("Morgan Example")
+    expect(screen.getByLabelText("Repository for playgrounds")).toHaveTextContent("acme/design-system")
+    expect(screen.getByLabelText("Permission for playgrounds")).toHaveTextContent("Allow pushes")
+
+    await user.click(screen.getByRole("tab", { name: /Review/ }))
+    expect(screen.getByText("2 of 12 workspaces configured · 1 workspace can push")).toBeVisible()
+    expect(screen.getByText("Morgan Example · taylor@example.com · all workspaces")).toBeVisible()
   })
 
   it("expands dependency groups and exposes real remediation", async () => {
