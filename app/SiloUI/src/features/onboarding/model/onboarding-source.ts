@@ -42,11 +42,36 @@ export const onboardingSourceSchema = z.object({
 
 export type OnboardingSource = z.infer<typeof onboardingSourceSchema>
 
+export type GitHubConnectionState = "disconnected" | "connecting" | "connected"
+
+export interface WorkspaceRepositorySelection {
+  repository: string
+  allowPushes: boolean
+}
+
+export interface WorkspaceGitIdentity {
+  name: string
+  email: string
+  apply: boolean
+}
+
+export interface OnboardingCompletionRequest {
+  machineConfiguration: SetupMachineConfigurationRequest
+  github: {
+    connectionState: GitHubConnectionState
+    workspaces: Array<{
+      workspace: string
+      repositories: WorkspaceRepositorySelection[]
+      identity: WorkspaceGitIdentity
+    }>
+  }
+}
+
 export interface OnboardingActions {
   saveMachineConfiguration: (request: SetupMachineConfigurationRequest) => void
   repairRuntime: () => void
   retryWorkspaceSetup: () => void
-  finishSetup: (request: SetupMachineConfigurationRequest) => void
+  finishSetup: (request: OnboardingCompletionRequest) => void
 }
 
 export function parseOnboardingSource(input: unknown): OnboardingSource {

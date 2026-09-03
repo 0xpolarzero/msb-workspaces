@@ -1,10 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
+import type { GitHubConnectionState } from "@/features/onboarding/model/onboarding-source"
 import { projectOnboarding } from "@/features/onboarding/model/onboarding-state"
-import type { GitHubConnectionState } from "@/features/onboarding/steps/github-step"
 import { githubStateFromSearch, onboardingScenarios, repositoryFixtures } from "@/fixtures/scenarios"
 
 function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
@@ -98,26 +98,64 @@ describe("onboarding", () => {
     renderScenario()
 
     for (const step of ["GitHub", "Review"]) {
-      await user.click(screen.getByRole("tab", { name: step }))
+      await user.click(screen.getByRole("tab", { name: new RegExp(step) }))
       expect(screen.queryByLabelText("Workspace progress")).not.toBeInTheDocument()
       expect(screen.queryByText(/Creating workspaces ·/)).not.toBeInTheDocument()
       expect(within(screen.getByRole("tab", { name: /Workspaces/ })).getByLabelText("In progress")).toBeVisible()
     }
   })
 
-  it("places contextual Skip before Back and skips only GitHub repository access", async () => {
+  it("continues from disconnected GitHub without marking it complete", async () => {
     const user = userEvent.setup()
     renderScenario("running", "disconnected")
 
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     const githubFooter = screen.getByLabelText("Onboarding actions")
-    expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip repository access", "Back", "Continue"])
+    const githubTab = screen.getByRole("tab", { name: /GitHub/ })
+    expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Back", "Continue"])
     expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeEnabled()
-    expect(screen.queryByText("Skip for now")).not.toBeInTheDocument()
-    await user.click(within(githubFooter).getByRole("button", { name: "Skip repository access" }))
+    expect(within(githubFooter).queryByRole("button", { name: /skip/i })).not.toBeInTheDocument()
+    expect(within(githubTab).queryByLabelText("Complete")).not.toBeInTheDocument()
+    expect(within(githubTab).queryByLabelText("In progress")).not.toBeInTheDocument()
+
+    await user.click(within(githubFooter).getByRole("button", { name: "Continue" }))
     expectHiddenPanelHeading("Review setup")
-    expect(screen.getByText("Repository access skipped")).toBeVisible()
+    expect(screen.getByText("GitHub not connected")).toBeVisible()
     expect(screen.getByText("Taylor Example <taylor@example.com> → all 3 workspaces")).toBeVisible()
+  })
+
+  it("continues while GitHub is connecting and marks it in progress", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connecting")
+
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    const githubTab = screen.getByRole("tab", { name: /GitHub/ })
+    expect(within(githubTab).getByLabelText("In progress")).toBeVisible()
+    expect(within(githubTab).queryByLabelText("Complete")).not.toBeInTheDocument()
+    const continueButton = screen.getByRole("button", { name: "Continue" })
+    expect(continueButton).toBeEnabled()
+
+    await user.click(continueButton)
+    expectHiddenPanelHeading("Review setup")
+  })
+
+  it("continues with zero repository access and keeps connected GitHub complete", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connected")
+
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    const githubTab = screen.getByRole("tab", { name: /GitHub/ })
+    expect(within(githubTab).getByLabelText("Complete")).toBeVisible()
+    expect(within(githubTab).queryByLabelText("In progress")).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Remove acme/silo from dev" }))
+    expect(within(githubTab).getByLabelText("Complete")).toBeVisible()
+    const continueButton = screen.getByRole("button", { name: "Continue" })
+    expect(continueButton).toBeEnabled()
+    await user.click(continueButton)
+
+    expectHiddenPanelHeading("Review setup")
+    expect(screen.getByText("0 repositories across 0 of 3 workspaces · 0 push-enabled repositories")).toBeVisible()
   })
 
   it("renders stable disconnected, connecting, and connected GitHub states", async () => {
@@ -301,6 +339,27 @@ describe("onboarding", () => {
     expect(screen.getByRole("button", { name: "Reset Git identity for personal" })).toBeEnabled()
   })
 
+  it("uses one custom tooltip for each Git identity Reset control", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "disconnected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    const reset = screen.getByRole("button", { name: "Reset Git identity for dev" })
+    expect(reset).toHaveAccessibleName("Reset Git identity for dev")
+    expect(reset).not.toHaveAttribute("title")
+
+    fireEvent.focus(reset)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+    fireEvent.blur(reset)
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+
+    await user.hover(reset)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+  })
+
   it("keeps workspace identity edits and apply choices independent and resets one workspace", async () => {
     const user = userEvent.setup()
     renderScenario("running", "connected")
@@ -344,7 +403,16 @@ describe("onboarding", () => {
     expect(name).toHaveValue("")
     expect(email).toHaveValue("")
     expect(reset).toBeDisabled()
+    expect(reset).toHaveAccessibleName("Reset Git identity for dev")
+    expect(reset).not.toHaveAttribute("title")
     expect(screen.getByText("No host Git identity is available. Enter values manually; Reset is unavailable.")).toBeVisible()
+
+    const resetTooltipTrigger = reset.parentElement
+    expect(resetTooltipTrigger).not.toBeNull()
+    fireEvent.focus(resetTooltipTrigger!)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Reset Git identity for dev")
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+
     await user.type(name, "Local User")
     await user.click(reset)
     expect(name).toHaveValue("Local User")
@@ -463,10 +531,65 @@ describe("onboarding", () => {
     expect(within(screen.getByRole("list", { name: "Setup operations" })).getAllByRole("listitem")).toHaveLength(7)
     await user.click(screen.getByRole("button", { name: "Finish" }))
     expect(finishSetup).toHaveBeenCalledWith({
-      schemaVersion: 1,
-      machines: onboardingScenarios.complete.machineConfigurations,
+      machineConfiguration: {
+        schemaVersion: 1,
+        machines: onboardingScenarios.complete.machineConfigurations,
+      },
+      github: {
+        connectionState: "connected",
+        workspaces: [
+          {
+            workspace: "dev",
+            repositories: [{ repository: "acme/silo", allowPushes: false }],
+            identity: { name: "Taylor Example", email: "taylor@example.com", apply: true },
+          },
+          {
+            workspace: "playgrounds",
+            repositories: [],
+            identity: { name: "Taylor Example", email: "taylor@example.com", apply: true },
+          },
+          {
+            workspace: "personal",
+            repositories: [],
+            identity: { name: "Taylor Example", email: "taylor@example.com", apply: true },
+          },
+        ],
+      },
     })
     expect(screen.getByRole("status")).toHaveTextContent("Setup complete")
+  })
+
+  it("finishes connected setup with explicit zero repository access and no skip state", async () => {
+    const user = userEvent.setup()
+    const finishSetup = vi.fn()
+    render(<OnboardingApp
+      source={onboardingScenarios.complete}
+      initialGitHubConnectionState="connected"
+      repositoryOptions={repositoryFixtures}
+      actions={{
+        saveMachineConfiguration: vi.fn(),
+        repairRuntime: vi.fn(),
+        retryWorkspaceSetup: vi.fn(),
+        finishSetup,
+      }}
+    />)
+
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+    await user.click(screen.getByRole("button", { name: "Remove acme/silo from dev" }))
+    await user.click(screen.getByRole("button", { name: "Continue" }))
+    expect(screen.getByText("0 repositories across 0 of 3 workspaces · 0 push-enabled repositories")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Finish" }))
+
+    expect(finishSetup).toHaveBeenCalledOnce()
+    const request = finishSetup.mock.lastCall?.[0]
+    expect(request.github.connectionState).toBe("connected")
+    expect(request.github.workspaces.map(({ workspace, repositories }: { workspace: string; repositories: unknown[] }) => ({ workspace, repositories }))).toEqual([
+      { workspace: "dev", repositories: [] },
+      { workspace: "playgrounds", repositories: [] },
+      { workspace: "personal", repositories: [] },
+    ])
+    expect(request.github).not.toHaveProperty("skipped")
+    expect(request).not.toHaveProperty("repositoryAccessSkipped")
   })
 
   it("does not treat CLI workspace completion as completion of later setup work", () => {
@@ -477,7 +600,7 @@ describe("onboarding", () => {
         ...source.bootstrapState,
         completedPhases: ["preflight", "toolchain", "hostIntegration", "workspaces"],
       },
-    })
+    }, "connected")
 
     expect(workspaceOnly.queueItems.find(({ id }) => id === "workspaceVerify")?.status).toBe("succeeded")
     expect(workspaceOnly.queueItems.find(({ id }) => id === "githubRun")?.status).toBe("queued")
@@ -620,6 +743,42 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Save" }))
     expect(saveMachineConfiguration.mock.lastCall?.[0].machines[0]).toMatchObject({ name: "development", memoryGiB: 16 })
     expect(screen.getByRole("button", { name: "Edit development" })).toBeVisible()
+  })
+
+  it("uses one custom tooltip for reorder and machine actions", async () => {
+    const { user } = await renderMachineScenario()
+    const tooltipCases = [
+      ["Reorder dev", "Drag to reorder; use Up and Down arrow keys."],
+      ["Edit dev", "Edit dev"],
+      ["Duplicate dev", "Duplicate dev"],
+      ["Delete dev", "Delete dev"],
+    ] as const
+
+    for (const [name, explanation] of tooltipCases) {
+      const trigger = screen.getByRole("button", { name })
+      expect(trigger).toHaveAccessibleName(name)
+      expect(trigger).not.toHaveAttribute("title")
+      fireEvent.focus(trigger)
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(explanation)
+      expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+      fireEvent.blur(trigger)
+      await user.keyboard("{Escape}")
+      await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+    }
+
+    const edit = screen.getByRole("button", { name: "Edit dev" })
+    await user.hover(edit)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Edit dev")
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
+    await user.unhover(edit)
+
+    await user.click(screen.getByRole("button", { name: "Delete dev" }))
+    await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
+    const confirm = screen.getByRole("button", { name: "Confirm deletion of dev" })
+    expect(confirm).not.toHaveAttribute("title")
+    fireEvent.focus(confirm)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Confirm deletion of dev")
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1)
   })
 
   it("preserves GitHub policy and identity settings when a stable machine is renamed", async () => {

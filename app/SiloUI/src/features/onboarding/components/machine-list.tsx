@@ -46,7 +46,6 @@ function IconAction({ label, destructive = false, children, ...props }: {
           variant={destructive ? "destructive" : "ghost"}
           size="icon-xs"
           aria-label={label}
-          title={label}
           {...props}
         >
           {children}
@@ -353,7 +352,6 @@ export function MachineList({ machines, progress, onMachinesChange }: MachineLis
                             tabIndex={0}
                             draggable={!editor}
                             aria-label={`Reorder ${machine.name}`}
-                            title={`Reorder ${machine.name}`}
                             className="grid size-7 shrink-0 cursor-grab place-items-center rounded-md text-muted-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 active:cursor-grabbing"
                             onKeyDown={(event) => handleReorderKey(event, machine, index)}
                             onDragStart={(event) => {

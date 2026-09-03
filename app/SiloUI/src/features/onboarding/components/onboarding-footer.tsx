@@ -8,14 +8,11 @@ interface OnboardingFooterProps {
   viewModel: OnboardingViewModel
   onBack: () => void
   onContinue: () => void
-  onSkip: () => void
-  continueDisabled?: boolean
 }
 
-export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue, onSkip, continueDisabled = false }: OnboardingFooterProps) {
+export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue }: OnboardingFooterProps) {
   const { workspaceProgress } = viewModel
   const isReview = activeStep === "review"
-  const canSkip = activeStep === "github"
   const dependenciesBlocked = activeStep === "dependencies" && viewModel.dependencyStatus === "failed"
   const statusText = dependenciesBlocked
     ? "Resolve dependency checks to continue"
@@ -35,9 +32,8 @@ export function OnboardingFooter({ activeStep, viewModel, onBack, onContinue, on
         <span className="truncate">{statusText}</span>
       </div>
       <div className="flex shrink-0 gap-2">
-        {canSkip && <Button variant="ghost" onClick={onSkip}>Skip repository access</Button>}
         <Button variant="outline" onClick={onBack} disabled={activeStep === "dependencies"}>Back</Button>
-        <Button onClick={onContinue} disabled={isReview ? !viewModel.finishEnabled : dependenciesBlocked || continueDisabled}>
+        <Button onClick={onContinue} disabled={isReview ? !viewModel.finishEnabled : dependenciesBlocked}>
           {isReview ? "Finish" : "Continue"}
         </Button>
       </div>

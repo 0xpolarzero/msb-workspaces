@@ -8,20 +8,12 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import type {
+  GitHubConnectionState,
+  WorkspaceGitIdentity,
+  WorkspaceRepositorySelection,
+} from "@/features/onboarding/model/onboarding-source"
 import type { WorkspaceView } from "@/features/onboarding/model/onboarding-state"
-
-export type GitHubConnectionState = "disconnected" | "connecting" | "connected"
-
-export interface WorkspaceRepositorySelection {
-  repository: string
-  allowPushes: boolean
-}
-
-export interface WorkspaceGitIdentity {
-  name: string
-  email: string
-  apply: boolean
-}
 
 const repositoryGridColumns = "grid-cols-[minmax(0,1fr)_6.75rem_1.5rem]"
 
@@ -247,19 +239,30 @@ export function GitHubStep({
                       />
                       Apply
                     </label>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      className="shrink-0"
-                      aria-label={`Reset Git identity for ${name}`}
-                      aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
-                      disabled={!currentHostGitIdentity}
-                      title={`Reset Git identity for ${name}`}
-                      onClick={() => onResetWorkspaceIdentity(name)}
-                    >
-                      <RotateCcw aria-hidden="true" className="size-3" />
-                    </Button>
+                    <TooltipProvider delayDuration={150}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            className="inline-flex shrink-0"
+                            tabIndex={currentHostGitIdentity ? undefined : 0}
+                            aria-label={currentHostGitIdentity ? undefined : `Reset Git identity for ${name}`}
+                          >
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              aria-label={`Reset Git identity for ${name}`}
+                              aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
+                              disabled={!currentHostGitIdentity}
+                              onClick={() => onResetWorkspaceIdentity(name)}
+                            >
+                              <RotateCcw aria-hidden="true" className="size-3" />
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>{`Reset Git identity for ${name}`}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
                   {connectionState === "connected" && (
                     <>

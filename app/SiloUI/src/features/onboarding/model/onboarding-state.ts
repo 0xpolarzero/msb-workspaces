@@ -3,7 +3,7 @@ import type {
   SiloPreflightCheck,
   SiloProgressEvent,
 } from "@/contracts/silo"
-import type { OnboardingSource } from "@/features/onboarding/model/onboarding-source"
+import type { GitHubConnectionState, OnboardingSource } from "@/features/onboarding/model/onboarding-source"
 
 export const onboardingSteps = ["dependencies", "workspaces", "github", "review"] as const
 export type OnboardingStep = (typeof onboardingSteps)[number]
@@ -111,9 +111,8 @@ const inventory = [
   },
 ] as const
 
-const queueByStep: Record<Exclude<OnboardingStep, "dependencies">, SetupQueueItemID[]> = {
+const queueByStep: Record<"workspaces" | "review", SetupQueueItemID[]> = {
   workspaces: ["workspaceRun", "workspaceVerify"],
-  github: ["githubRun", "githubVerify", "identityRun", "identityVerify"],
   review: ["completion"],
 }
 
@@ -235,7 +234,7 @@ function projectWorkspaceProgress(source: OnboardingSource, queueItems: ReviewQu
   }
 }
 
-export function projectOnboarding(source: OnboardingSource): OnboardingViewModel {
+export function projectOnboarding(source: OnboardingSource, githubConnectionState: GitHubConnectionState): OnboardingViewModel {
   const checksById = new Map(source.preflightChecks.map((check) => [check.id, check]))
   const dependencies = inventory.map((group): DependencyGroupView => {
     const items = group.items.map(([name, role, checkId]) => ({
@@ -256,7 +255,9 @@ export function projectOnboarding(source: OnboardingSource): OnboardingViewModel
   const stepStatus = {
     dependencies: dependencyStatus,
     workspaces: workspaceProgress.status,
-    github: combineQueueStatus(queueItems.filter(({ id }) => queueByStep.github.includes(id))),
+    github: githubConnectionState === "connected"
+      ? "succeeded"
+      : githubConnectionState === "connecting" ? "running" : "waiting",
     review: combineQueueStatus(queueItems.filter(({ id }) => queueByStep.review.includes(id))),
   } satisfies Record<OnboardingStep, PresentationStatus>
 

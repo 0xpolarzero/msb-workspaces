@@ -12,12 +12,10 @@ interface OnboardingShellProps {
   onStepChange: (step: OnboardingStep) => void
   onBack: () => void
   onContinue: () => void
-  onSkip: () => void
-  continueDisabled?: boolean
   children: ReactNode
 }
 
-export function OnboardingShell({ activeStep, viewModel, onStepChange, onBack, onContinue, onSkip, continueDisabled, children }: OnboardingShellProps) {
+export function OnboardingShell({ activeStep, viewModel, onStepChange, onBack, onContinue, children }: OnboardingShellProps) {
   const usesSidebar = useMediaQuery("(min-width: 48rem)")
 
   return (
@@ -32,7 +30,7 @@ export function OnboardingShell({ activeStep, viewModel, onStepChange, onBack, o
           <StepNavigation status={viewModel.stepStatus} />
           <div className="flex min-h-0 min-w-0 flex-col">
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">{children}</div>
-            <OnboardingFooter activeStep={activeStep} viewModel={viewModel} onBack={onBack} onContinue={onContinue} onSkip={onSkip} continueDisabled={continueDisabled} />
+            <OnboardingFooter activeStep={activeStep} viewModel={viewModel} onBack={onBack} onContinue={onContinue} />
           </div>
         </Tabs>
       </section>
