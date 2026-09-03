@@ -39,7 +39,6 @@ export function GitHubStep({
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
         <h2 id="github-title" className="text-xl font-semibold tracking-tight">GitHub access</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Connect GitHub, then choose repository access for each workspace.</p>
       </div>
 
       {connectionState === "disconnected" && (

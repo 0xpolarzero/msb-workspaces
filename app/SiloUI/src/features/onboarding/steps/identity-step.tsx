@@ -23,7 +23,6 @@ export function IdentityStep({ progress, identity, defaultTarget, onIdentityChan
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
         <h2 id="identity-title" className="text-xl font-semibold tracking-tight">Git identity</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Set the author name and email used for commits inside your workspaces.</p>
       </div>
       <div className="space-y-4 rounded-lg border border-border bg-card p-4">
         <div className="grid gap-4 sm:grid-cols-2">

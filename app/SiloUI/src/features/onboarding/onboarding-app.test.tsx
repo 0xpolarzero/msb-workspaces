@@ -280,7 +280,7 @@ describe("onboarding", () => {
 
     await user.click(screen.getByRole("tab", { name: /Workspaces/ }))
     expect(screen.getByRole("heading", { name: "Workspaces are waiting" })).toBeVisible()
-    expect(screen.getByText("Complete the dependency checks before workspace creation starts.")).toBeVisible()
+    expect(screen.queryByText("Complete the dependency checks before workspace creation starts.")).not.toBeInTheDocument()
   })
 
   it("routes actionable failures through the narrow action seam", async () => {

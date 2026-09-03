@@ -21,7 +21,6 @@ export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgr
           <h2 id="workspaces-title" className="text-xl font-semibold tracking-tight">
             {progress.status === "failed" ? "Workspace setup needs action" : progress.status === "succeeded" ? "Workspaces are ready" : progress.status === "running" ? "Creating your workspaces" : "Workspaces are waiting"}
           </h2>
-          <p className="mt-1 text-sm text-muted-foreground">{progress.status === "failed" ? "Review the recovery details, then resume setup." : progress.status === "waiting" ? "Complete the dependency checks before workspace creation starts." : "You can continue setup while Silo prepares these environments."}</p>
         </div>
         <span className="shrink-0 pt-1 font-mono text-[11px] text-muted-foreground">{formatElapsed(progress.elapsedSeconds)}</span>
       </div>

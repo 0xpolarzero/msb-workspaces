@@ -32,7 +32,6 @@ export function ReviewStep({ progress, queueItems, identitySummary, githubSummar
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
         <h2 id="review-title" className="text-xl font-semibold tracking-tight">Review setup</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Silo completes the retained work in this order.</p>
       </div>
 
       {errorMessage && (
