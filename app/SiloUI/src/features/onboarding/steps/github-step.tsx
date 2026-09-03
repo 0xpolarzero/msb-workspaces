@@ -285,7 +285,7 @@ export function GitHubStep({
                                       <Info aria-hidden="true" className="size-3" />
                                     </Button>
                                   </TooltipTrigger>
-                                  <TooltipContent>Checked: the VM can push. Unchecked: it can’t.</TooltipContent>
+                                  <TooltipContent>Allow pushing to this repo from inside this VM.</TooltipContent>
                                 </Tooltip>
                               </TooltipProvider>
                             </span>

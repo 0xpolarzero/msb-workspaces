@@ -308,7 +308,7 @@ describe("onboarding", () => {
     await user.tab({ shift: true })
 
     expect(tooltipTrigger).toHaveFocus()
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Checked: the VM can push. Unchecked: it can’t.")
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Allow pushing to this repo from inside this VM.")
   })
 
   it("prefills and enables every workspace identity from the optional host identity", async () => {
