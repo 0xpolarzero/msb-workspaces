@@ -73,12 +73,12 @@ describe("onboarding", () => {
 
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     const githubFooter = screen.getByLabelText("Onboarding actions")
-    expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip", "Back", "Continue"])
+    expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip repository access", "Back", "Continue"])
     expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeEnabled()
     expect(screen.queryByText("Skip for now")).not.toBeInTheDocument()
-    await user.click(within(githubFooter).getByRole("button", { name: "Skip" }))
+    await user.click(within(githubFooter).getByRole("button", { name: "Skip repository access" }))
     expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
-    expect(screen.getByText("GitHub skipped")).toBeVisible()
+    expect(screen.getByText("Repository access skipped")).toBeVisible()
     expect(screen.getByText("Taylor Example <taylor@example.com> → all 12 workspaces")).toBeVisible()
   })
 
@@ -150,8 +150,8 @@ describe("onboarding", () => {
     renderScenario("running", "connected")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    expect(screen.getByRole("region", { name: "Workspace repository access" })).toBeVisible()
-    expect(screen.queryByRole("heading", { name: "Workspace repository access" })).not.toBeInTheDocument()
+    expect(screen.getByRole("region", { name: "Workspace Git identity and repository access" })).toBeVisible()
+    expect(screen.queryByRole("heading", { name: "Workspace Git identity and repository access" })).not.toBeInTheDocument()
     expect(screen.queryByText("Selected repositories always allow local writes and commits.")).not.toBeInTheDocument()
     expect(screen.getAllByRole("combobox")).toHaveLength(12)
     expect(screen.queryByText(/read only|read-write/i)).not.toBeInTheDocument()

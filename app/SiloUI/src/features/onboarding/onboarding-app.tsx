@@ -115,7 +115,7 @@ export function OnboardingApp({
   const [githubConnectionState, setGithubConnectionState] = useState<GitHubConnectionState>(
     initialGitHubConnectionState ?? (source.githubPolicies.some(({ repositories }) => repositories.length > 0) ? "connected" : "disconnected"),
   )
-  const [githubSkipped, setGithubSkipped] = useState(false)
+  const [repositoryAccessSkipped, setRepositoryAccessSkipped] = useState(false)
   const [workspaceSelections, setWorkspaceSelections] = useState(() => initialWorkspaceSelections(source))
   const [workspaceIdentities, setWorkspaceIdentities] = useState(() => initialWorkspaceIdentities(source))
   const [finished, setFinished] = useState(false)
@@ -135,13 +135,13 @@ export function OnboardingApp({
 
   function connectGitHub() {
     window.clearTimeout(connectTimer.current)
-    setGithubSkipped(false)
+    setRepositoryAccessSkipped(false)
     setGithubConnectionState("connecting")
     connectTimer.current = window.setTimeout(() => setGithubConnectionState("connected"), 700)
   }
 
   function updateWorkspaceSelections(workspace: string, selections: WorkspaceRepositorySelection[]) {
-    setGithubSkipped(false)
+    setRepositoryAccessSkipped(false)
     setWorkspaceSelections((current) => ({ ...current, [workspace]: uniqueWorkspaceSelections(selections) }))
   }
 
@@ -163,7 +163,7 @@ export function OnboardingApp({
         window.clearTimeout(connectTimer.current)
         setGithubConnectionState("disconnected")
       }
-      setGithubSkipped(true)
+      setRepositoryAccessSkipped(true)
       setActiveStep("review")
     }
   }
@@ -176,7 +176,7 @@ export function OnboardingApp({
       }
       return
     }
-    if (activeStep === "github") setGithubSkipped(false)
+    if (activeStep === "github") setRepositoryAccessSkipped(false)
     move(1)
   }
 
@@ -188,8 +188,8 @@ export function OnboardingApp({
   )
   const repositoryLabel = repositoryCount === 1 ? "repository" : "repositories"
   const pushRepositoryLabel = pushEnabledRepositoryCount === 1 ? "repository" : "repositories"
-  const githubSummary = githubSkipped
-    ? "GitHub skipped"
+  const githubSummary = repositoryAccessSkipped
+    ? "Repository access skipped"
     : githubConnectionState === "connected"
       ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${viewModel.workspaceProgress.workspaces.length} workspaces · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
       : "GitHub not connected"

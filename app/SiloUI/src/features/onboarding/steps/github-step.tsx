@@ -198,7 +198,7 @@ export function GitHubStep({
           </p>
         )}
 
-        <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" role="region" aria-label="Workspace repository access">
+        <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" role="region" aria-label="Workspace Git identity and repository access">
           <div className="divide-y divide-border">
             {progress.workspaces.map(({ name }) => {
               const selections = workspaceSelections[name] ?? []
