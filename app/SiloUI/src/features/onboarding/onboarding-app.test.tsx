@@ -233,7 +233,9 @@ describe("onboarding", () => {
     expect(screen.getByRole("region", { name: "Sandbox Git identity and repository access" })).toBeVisible()
     expect(screen.queryByRole("heading", { name: "Sandbox Git identity and repository access" })).not.toBeInTheDocument()
     expect(screen.queryByText("Selected repositories always allow local writes and commits.")).not.toBeInTheDocument()
-    expect(screen.getAllByRole("combobox")).toHaveLength(3)
+    for (const workspace of ["dev", "playgrounds", "personal"]) {
+      expect(screen.getByLabelText(`Add repository to ${workspace}`)).toHaveAttribute("role", "combobox")
+    }
     expect(screen.queryByText(/read only|read-write/i)).not.toBeInTheDocument()
 
     const picker = screen.getByLabelText("Add repository to playgrounds")
