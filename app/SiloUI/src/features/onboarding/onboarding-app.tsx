@@ -149,12 +149,12 @@ export function OnboardingApp({
   const repositoryLabel = repositoryCount === 1 ? "repository" : "repositories"
   const pushRepositoryLabel = pushEnabledRepositoryCount === 1 ? "repository" : "repositories"
   const githubSummary = githubSkipped
-    ? "GitHub access skipped"
+    ? "GitHub skipped"
     : githubConnectionState === "connected"
       ? `${repositoryCount} ${repositoryLabel} across ${configuredWorkspaceCount} of ${viewModel.workspaceProgress.workspaces.length} workspaces · ${pushEnabledRepositoryCount} push-enabled ${pushRepositoryLabel}`
       : "GitHub not connected"
   const identitySummary = identitySkipped
-    ? "Git identity skipped"
+    ? "Git skipped"
     : `${identity.name || "No name"} · ${identity.email || "No email"} · ${identity.target === null ? "all workspaces" : `${identity.target} only`}`
 
   return (

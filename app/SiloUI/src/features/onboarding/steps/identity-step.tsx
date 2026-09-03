@@ -22,7 +22,7 @@ export function IdentityStep({ progress, identity, defaultTarget, onIdentityChan
     <section aria-labelledby="identity-title" className="mx-auto max-w-3xl">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
-        <h2 id="identity-title" className="text-xl font-semibold tracking-tight">Git identity</h2>
+        <h2 id="identity-title" className="text-xl font-semibold tracking-tight">Git</h2>
       </div>
       <div className="space-y-4 rounded-lg border border-border bg-card p-4">
         <div className="grid gap-4 sm:grid-cols-2">

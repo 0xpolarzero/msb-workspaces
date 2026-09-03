@@ -32,13 +32,13 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }))
     expect(screen.getByRole("heading", { name: "Creating your workspaces" })).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Continue" }))
-    expect(screen.getByRole("heading", { name: "GitHub access" })).toBeVisible()
-    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
-    expect(screen.getByRole("heading", { name: "Git identity" })).toBeVisible()
+    expect(screen.getByRole("heading", { name: "GitHub" })).toBeVisible()
+    await user.click(screen.getByRole("tab", { name: "Git" }))
+    expect(screen.getByRole("heading", { name: "Git" })).toBeVisible()
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Back" }))
-    expect(screen.getByRole("heading", { name: "Git identity" })).toBeVisible()
+    expect(screen.getByRole("heading", { name: "Git" })).toBeVisible()
   })
 
   it("supports arrow-key navigation across the responsive tab list", async () => {
@@ -57,7 +57,7 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     renderScenario()
 
-    for (const step of [/GitHub/, /Git identity/, /Review/]) {
+    for (const step of ["GitHub", "Git", "Review"]) {
       await user.click(screen.getByRole("tab", { name: step }))
       expect(screen.getByLabelText("Workspace progress")).toHaveTextContent("Creating workspaces · 3 of 12 ready")
     }
@@ -76,14 +76,14 @@ describe("onboarding", () => {
     expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeDisabled()
     expect(screen.queryByText("Skip for now")).not.toBeInTheDocument()
     await user.click(within(githubFooter).getByRole("button", { name: "Skip" }))
-    expect(screen.getByRole("heading", { name: "Git identity" })).toBeVisible()
+    expect(screen.getByRole("heading", { name: "Git" })).toBeVisible()
 
     const identityFooter = screen.getByLabelText("Onboarding actions")
     expect(within(identityFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Skip", "Back", "Continue"])
     await user.click(within(identityFooter).getByRole("button", { name: "Skip" }))
     expect(screen.getByRole("heading", { name: "Review setup" })).toBeVisible()
-    expect(screen.getByText("GitHub access skipped")).toBeVisible()
-    expect(screen.getByText("Git identity skipped")).toBeVisible()
+    expect(screen.getByText("GitHub skipped")).toBeVisible()
+    expect(screen.getByText("Git skipped")).toBeVisible()
   })
 
   it("renders stable disconnected, connecting, and connected GitHub states", async () => {
@@ -171,7 +171,7 @@ describe("onboarding", () => {
     await user.click(pushes)
     expect(pushes).toBeChecked()
 
-    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    await user.click(screen.getByRole("tab", { name: "Git" }))
     const name = screen.getByLabelText("Name")
     await user.clear(name)
     await user.type(name, "Morgan Example")
@@ -242,19 +242,19 @@ describe("onboarding", () => {
       actions={{ repairRuntime: vi.fn(), retryWorkspaceSetup: vi.fn(), finishSetup: vi.fn() }}
     />)
 
-    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    await user.click(screen.getByRole("tab", { name: "Git" }))
     const applyToAll = screen.getByRole("checkbox", { name: "Apply identity to all workspaces" })
     expect(applyToAll).not.toBeChecked()
     expect(screen.getByText("Currently limited to personal.")).toBeVisible()
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByText("Taylor Example · taylor@example.com · personal only")).toBeVisible()
 
-    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    await user.click(screen.getByRole("tab", { name: "Git" }))
     await user.click(screen.getByRole("checkbox", { name: "Apply identity to all workspaces" }))
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByText("Taylor Example · taylor@example.com · all workspaces")).toBeVisible()
 
-    await user.click(screen.getByRole("tab", { name: /Git identity/ }))
+    await user.click(screen.getByRole("tab", { name: "Git" }))
     await user.click(screen.getByRole("checkbox", { name: "Apply identity to all workspaces" }))
     await user.click(screen.getByRole("tab", { name: /Review/ }))
     expect(screen.getByText("Taylor Example · taylor@example.com · personal only")).toBeVisible()

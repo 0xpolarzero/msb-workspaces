@@ -8,7 +8,7 @@ const steps: { id: OnboardingStep; label: string }[] = [
   { id: "dependencies", label: "Dependencies" },
   { id: "workspaces", label: "Workspaces" },
   { id: "github", label: "GitHub" },
-  { id: "identity", label: "Git identity" },
+  { id: "identity", label: "Git" },
   { id: "review", label: "Review" },
 ]
 

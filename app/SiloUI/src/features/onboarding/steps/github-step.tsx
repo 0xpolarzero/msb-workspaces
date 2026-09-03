@@ -138,7 +138,7 @@ export function GitHubStep({
     <section aria-labelledby="github-title" className="mx-auto max-w-3xl">
       <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <div className="mb-5">
-        <h2 id="github-title" className="text-xl font-semibold tracking-tight">GitHub access</h2>
+        <h2 id="github-title" className="text-xl font-semibold tracking-tight">GitHub</h2>
       </div>
 
       {connectionState === "disconnected" && (

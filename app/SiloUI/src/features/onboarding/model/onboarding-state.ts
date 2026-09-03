@@ -139,10 +139,10 @@ function workspaceDetail(event: SiloProgressEvent): string {
 const queueLabels: Record<SetupQueueItemID, string> = {
   workspaceRun: "Create workspaces",
   workspaceVerify: "Verify workspaces",
-  githubRun: "Save GitHub access",
-  githubVerify: "Verify GitHub access",
-  identityRun: "Save Git identity",
-  identityVerify: "Verify Git identity",
+  githubRun: "Save GitHub",
+  githubVerify: "Verify GitHub",
+  identityRun: "Save Git",
+  identityVerify: "Verify Git",
   completion: "Finish setup",
 }
 
