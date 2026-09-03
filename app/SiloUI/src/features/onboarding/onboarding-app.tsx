@@ -215,7 +215,7 @@ export function OnboardingApp({
       </TabsContent>
       <TabsContent value="github" className="mt-0 h-full outline-none">
         <GitHubStep
-          progress={viewModel.workspaceProgress}
+          workspaces={viewModel.workspaceProgress.workspaces}
           connectionState={githubConnectionState}
           repositoryOptions={availableRepositories}
           workspaceSelections={workspaceSelections}
@@ -225,18 +225,16 @@ export function OnboardingApp({
           onWorkspaceSelectionsChange={updateWorkspaceSelections}
           onWorkspaceIdentityChange={updateWorkspaceIdentity}
           onResetWorkspaceIdentity={resetWorkspaceIdentity}
-          onViewProgress={() => setActiveStep("workspaces")}
         />
       </TabsContent>
       <TabsContent value="review" className="mt-0 outline-none">
         <ReviewStep
-          progress={viewModel.workspaceProgress}
+          workspaceRetryable={viewModel.workspaceProgress.retryable}
           queueItems={viewModel.queueItems}
           githubSummary={githubSummary}
           identitySummary={identitySummary}
           errorMessage={viewModel.error?.message}
           errorRecovery={viewModel.error?.recovery ?? undefined}
-          onViewProgress={() => setActiveStep("workspaces")}
           onRetryWorkspaceSetup={actions.retryWorkspaceSetup}
         />
         {finished && <p className="mt-3 text-center text-sm font-medium text-emerald-600" role="status">Setup complete</p>}

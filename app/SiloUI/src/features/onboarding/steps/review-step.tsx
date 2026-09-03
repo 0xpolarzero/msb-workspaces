@@ -1,18 +1,16 @@
 import { AlertCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { WorkspaceProgressStrip } from "@/features/onboarding/components/workspace-progress-strip"
 import { StatusIcon } from "@/features/onboarding/components/status-icon"
-import type { ReviewQueueItemView, WorkspaceProgressView } from "@/features/onboarding/model/onboarding-state"
+import type { ReviewQueueItemView } from "@/features/onboarding/model/onboarding-state"
 
 interface ReviewStepProps {
-  progress: WorkspaceProgressView
+  workspaceRetryable: boolean
   queueItems: ReviewQueueItemView[]
   identitySummary: string
   githubSummary: string
   errorMessage?: string
   errorRecovery?: string
-  onViewProgress: () => void
   onRetryWorkspaceSetup: () => void
 }
 
@@ -26,17 +24,16 @@ const detailById: Record<ReviewQueueItemView["id"], string> = {
   completion: "Closes setup after every required verification succeeds",
 }
 
-export function ReviewStep({ progress, queueItems, identitySummary, githubSummary, errorMessage, errorRecovery, onViewProgress, onRetryWorkspaceSetup }: ReviewStepProps) {
+export function ReviewStep({ workspaceRetryable, queueItems, identitySummary, githubSummary, errorMessage, errorRecovery, onRetryWorkspaceSetup }: ReviewStepProps) {
   return (
     <section aria-labelledby="review-title" className="mx-auto max-w-3xl">
-      <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <h2 id="review-title" className="sr-only" data-visual-heading="hidden">Review setup</h2>
 
       {errorMessage && (
         <div className="mb-3 flex gap-2 rounded-lg border border-destructive/25 bg-destructive/8 p-3 text-xs text-destructive" role="alert">
           <AlertCircle className="mt-0.5 size-4 shrink-0" />
           <div className="min-w-0 flex-1 select-text"><div className="font-medium">{errorMessage}</div>{errorRecovery && <div className="mt-1">{errorRecovery}</div>}</div>
-          {progress.retryable && (
+          {workspaceRetryable && (
             <Button type="button" variant="outline" size="xs" className="shrink-0 self-start text-foreground" onClick={onRetryWorkspaceSetup}>
               Retry
             </Button>

@@ -8,8 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { WorkspaceProgressStrip } from "@/features/onboarding/components/workspace-progress-strip"
-import type { WorkspaceProgressView } from "@/features/onboarding/model/onboarding-state"
+import type { WorkspaceView } from "@/features/onboarding/model/onboarding-state"
 
 export type GitHubConnectionState = "disconnected" | "connecting" | "connected"
 
@@ -124,7 +123,7 @@ function RepositoryCombobox({ workspace, repositoryOptions, selectedRepositories
 }
 
 interface GitHubStepProps {
-  progress: WorkspaceProgressView
+  workspaces: WorkspaceView[]
   connectionState: GitHubConnectionState
   repositoryOptions: readonly string[]
   workspaceSelections: Record<string, WorkspaceRepositorySelection[]>
@@ -134,11 +133,10 @@ interface GitHubStepProps {
   onWorkspaceSelectionsChange: (workspace: string, selections: WorkspaceRepositorySelection[]) => void
   onWorkspaceIdentityChange: (workspace: string, identity: WorkspaceGitIdentity) => void
   onResetWorkspaceIdentity: (workspace: string) => void
-  onViewProgress: () => void
 }
 
 export function GitHubStep({
-  progress,
+  workspaces,
   connectionState,
   repositoryOptions,
   workspaceSelections,
@@ -148,11 +146,9 @@ export function GitHubStep({
   onWorkspaceSelectionsChange,
   onWorkspaceIdentityChange,
   onResetWorkspaceIdentity,
-  onViewProgress,
 }: GitHubStepProps) {
   return (
     <section aria-labelledby="github-title" className="mx-auto flex h-full min-h-0 max-w-3xl flex-col">
-      <WorkspaceProgressStrip progress={progress} onView={onViewProgress} />
       <h2 id="github-title" className="sr-only" data-visual-heading="hidden">GitHub</h2>
 
       <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -199,7 +195,7 @@ export function GitHubStep({
 
         <ScrollArea className="min-h-0 flex-1 rounded-md border border-border" role="region" aria-label="Workspace Git identity and repository access">
           <div className="divide-y divide-border">
-            {progress.workspaces.map(({ name }) => {
+            {workspaces.map(({ name }) => {
               const selections = workspaceSelections[name] ?? []
               const identity = workspaceIdentities[name] ?? { name: "", email: "", apply: true }
               return (

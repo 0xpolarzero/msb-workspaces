@@ -75,17 +75,16 @@ describe("onboarding", () => {
     expectHiddenPanelHeading("Creating your workspaces")
   })
 
-  it("keeps background workspace progress visible on later steps and View returns to Workspaces", async () => {
+  it("shows running workspace feedback only in the sidebar outside Workspaces", async () => {
     const user = userEvent.setup()
     renderScenario()
 
     for (const step of ["GitHub", "Review"]) {
       await user.click(screen.getByRole("tab", { name: step }))
-      expect(screen.getByLabelText("Workspace progress")).toHaveTextContent("Creating workspaces · 3 of 12 ready")
+      expect(screen.queryByLabelText("Workspace progress")).not.toBeInTheDocument()
+      expect(screen.queryByText(/Creating workspaces ·/)).not.toBeInTheDocument()
+      expect(within(screen.getByRole("tab", { name: /Workspaces/ })).getByLabelText("In progress")).toBeVisible()
     }
-    expect(screen.getByRole("tab", { name: /Workspaces/ })).toHaveTextContent("Workspaces")
-    await user.click(within(screen.getByLabelText("Workspace progress")).getByRole("button", { name: "View" }))
-    expectHiddenPanelHeading("Creating your workspaces")
   })
 
   it("places contextual Skip before Back and skips only GitHub repository access", async () => {
@@ -360,6 +359,13 @@ describe("onboarding", () => {
     expect(screen.getByText("27 of 36 operations complete")).toBeVisible()
     expect(screen.getByText("3 ready · 1 working · 8 waiting")).toBeVisible()
     const activityControls = screen.getByRole("group", { name: "Live activity controls" })
+    const activityCard = activityControls.parentElement
+    const activitySlot = activityCard?.parentElement
+    expect(activityCard).toHaveAttribute("data-state", "open")
+    expect(activitySlot).toHaveClass("mt-4", "shrink-0")
+    expect(activitySlot?.children).toHaveLength(1)
+    expect(activitySlot?.firstElementChild).toBe(activityCard)
+    const activityContent = activityCard?.children[1]
     const [activityIcon, activityLabel, copyButton, disclosureButton] = [...activityControls.children]
     const activityButtons = within(activityControls).getAllByRole("button")
     expect(activityIcon).toHaveClass("lucide-square-terminal")
@@ -385,6 +391,10 @@ describe("onboarding", () => {
     await user.click(disclosure)
     expect(screen.queryByLabelText("Workspace activity")).not.toBeInTheDocument()
     expect(disclosure).toHaveAttribute("aria-expanded", "false")
+    expect(activityCard).toHaveAttribute("data-state", "closed")
+    expect(activityContent).toHaveAttribute("data-state", "closed")
+    expect(activitySlot?.firstElementChild).toBe(activityCard)
+    expect(activitySlot?.style.minHeight).toBe("")
     const expand = screen.getByRole("button", { name: "Expand activity" })
     await user.click(expand)
     expect(expand).toHaveAttribute("aria-expanded", "true")
