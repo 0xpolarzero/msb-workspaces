@@ -210,7 +210,7 @@ export function OnboardingApp({
       <TabsContent value="dependencies" className="mt-0 outline-none">
         <DependenciesStep groups={viewModel.dependencies} onRepairRuntime={actions.repairRuntime} />
       </TabsContent>
-      <TabsContent value="workspaces" className="mt-0 outline-none">
+      <TabsContent value="workspaces" className="mt-0 h-full min-h-0 overflow-hidden outline-none">
         <WorkspacesStep progress={viewModel.workspaceProgress} onRetry={actions.retryWorkspaceSetup} />
       </TabsContent>
       <TabsContent value="github" className="mt-0 h-full outline-none">

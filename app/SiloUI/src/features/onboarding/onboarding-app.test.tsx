@@ -21,6 +21,12 @@ function expectHiddenPanelHeading(name: string) {
   expect(heading.parentElement?.tagName).toBe("SECTION")
 }
 
+function expectDisclosureIndicator(trigger: HTMLElement) {
+  const indicator = trigger.querySelector("svg.lucide-chevron-down")
+  expect(indicator).not.toBeNull()
+  expect(indicator).toHaveAttribute("aria-hidden", "true")
+}
+
 describe("onboarding", () => {
   it("only applies valid explicit GitHub fixture overrides", () => {
     expect(githubStateFromSearch("")).toBeUndefined()
@@ -329,9 +335,11 @@ describe("onboarding", () => {
     expect(screen.getByText("silo-ssh-proxy")).toBeVisible()
     expect(screen.getByText("Use Repair… to reinstall the bundled Silo runtime.")).toBeVisible()
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled()
-    await user.click(screen.getByRole("button", { name: /Silo tools/ }))
+    const disclosure = screen.getByRole("button", { name: /Silo tools/ })
+    expectDisclosureIndicator(disclosure)
+    await user.click(disclosure)
     expect(screen.queryByText("silo-ssh-proxy")).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: /Silo tools/ }))
+    await user.click(disclosure)
     expect(screen.getByText("silo-ssh-proxy")).toBeVisible()
   })
 
@@ -355,8 +363,12 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Copy activity" }))
     expect(copy).toHaveBeenCalledWith(expect.stringContaining("Verifying 'docs-build'."))
     expect(copy).not.toHaveBeenCalledWith(expect.stringContaining("Internal verification path"))
-    await user.click(screen.getByRole("button", { name: "Collapse activity" }))
+    const disclosure = screen.getByRole("button", { name: "Collapse activity" })
+    expectDisclosureIndicator(disclosure)
+    await user.click(disclosure)
     expect(screen.queryByLabelText("Workspace activity")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: "Expand activity" }))
+    expect(screen.getByLabelText("Workspace activity")).toBeVisible()
   })
 
   it("reports a clipboard denial without an unhandled interaction failure", async () => {

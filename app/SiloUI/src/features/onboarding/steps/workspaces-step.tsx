@@ -14,12 +14,12 @@ function formatElapsed(seconds: number): string {
 
 export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgressView; onRetry: () => void }) {
   return (
-    <section aria-labelledby="workspaces-title" className="mx-auto max-w-4xl">
+    <section aria-labelledby="workspaces-title" className="mx-auto flex h-full min-h-0 max-w-4xl flex-col">
       <h2 id="workspaces-title" className="sr-only" data-visual-heading="hidden">
         {progress.status === "failed" ? "Workspace setup needs action" : progress.status === "succeeded" ? "Workspaces are ready" : progress.status === "running" ? "Creating your workspaces" : "Workspaces are waiting"}
       </h2>
 
-      <div className="mb-4 space-y-4">
+      <div className="shrink-0 space-y-4">
         <div className="grid grid-cols-[auto_1fr] gap-3">
           {progress.status === "failed" ? <AlertCircle className="mt-0.5 size-5 text-destructive" aria-hidden="true" />
             : progress.status === "succeeded" ? <Check className="mt-0.5 size-5 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
@@ -42,13 +42,14 @@ export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgr
             </div>
           </div>
         )}
-        <div className="border-t border-border pt-4">
-          <WorkspaceList progress={progress} />
-        </div>
+      </div>
+
+      <div className="mt-4 min-h-0 flex-1 border-t border-border pt-4">
+        <WorkspaceList progress={progress} />
       </div>
 
       {progress.status === "failed" && (
-        <div className="mb-3 flex items-start justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/8 p-3 text-xs text-destructive" role="alert">
+        <div className="mt-3 flex shrink-0 items-start justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/8 p-3 text-xs text-destructive" role="alert">
           <span className="select-text">{progress.recovery ?? "Resolve the reported workspace issue, then resume Setup."}</span>
           {progress.retryable && (
             <Button type="button" variant="outline" size="xs" className="shrink-0 text-foreground" onClick={onRetry}>
@@ -57,7 +58,9 @@ export function WorkspacesStep({ progress, onRetry }: { progress: WorkspaceProgr
           )}
         </div>
       )}
-      <ActivityOutput events={progress.visibleEvents} />
+      <div className="mt-4 shrink-0">
+        <ActivityOutput events={progress.visibleEvents} />
+      </div>
     </section>
   )
 }

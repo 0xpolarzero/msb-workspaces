@@ -1,20 +1,21 @@
-import { AlertCircle, Check, ChevronDown } from "lucide-react"
+import { AlertCircle, Check } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { DisclosureIndicator, disclosureTriggerStateClass } from "@/features/onboarding/components/disclosure-indicator"
 import type { DependencyGroupView } from "@/features/onboarding/model/onboarding-state"
 
 export function DependencyDisclosure({ group, onRepairRuntime }: { group: DependencyGroupView; onRepairRuntime: () => void }) {
   return (
     <Collapsible defaultOpen={group.status === "failed"} className="group rounded-lg border border-border bg-card">
-      <CollapsibleTrigger className="grid w-full grid-cols-[1.25rem_1fr_1.25rem] items-center px-3 py-3 text-left text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [&[data-state=open]_.disclosure-caret]:rotate-180">
+      <CollapsibleTrigger className={`${disclosureTriggerStateClass} grid w-full grid-cols-[1.25rem_1fr_1.25rem] items-center px-3 py-3 text-left text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}>
         {group.status === "succeeded" ? (
           <Check className="size-4 text-emerald-600 dark:text-emerald-400" aria-label="All checks passed" />
         ) : (
           <AlertCircle className="size-4 text-destructive" aria-label="Needs action" />
         )}
         <span>{group.title}</span>
-        <ChevronDown className="disclosure-caret size-4 justify-self-center text-muted-foreground transition-transform" aria-hidden="true" />
+        <DisclosureIndicator />
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="grid gap-x-5 gap-y-3 border-t border-border px-3 py-3 sm:grid-cols-2">

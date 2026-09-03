@@ -24,6 +24,8 @@ export interface WorkspaceGitIdentity {
   apply: boolean
 }
 
+const repositoryGridColumns = "grid-cols-[minmax(0,1fr)_6.75rem_1.5rem]"
+
 interface RepositoryComboboxProps {
   workspace: string
   repositoryOptions: readonly string[]
@@ -212,7 +214,7 @@ export function GitHubStep({
                     <Input
                       aria-label={`Git name for ${name}`}
                       autoComplete="off"
-                      className="h-7 min-w-0 flex-[0.8] rounded-md px-2 text-xs"
+                      className="h-7 min-w-0 flex-[0.8] rounded-md px-2 text-[11px] md:text-[11px]"
                       placeholder="Name"
                       value={identity.name}
                       onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
@@ -220,7 +222,7 @@ export function GitHubStep({
                     <Input
                       aria-label={`Git email for ${name}`}
                       autoComplete="off"
-                      className="h-7 min-w-0 flex-[1.2] rounded-md px-2 text-xs"
+                      className="h-7 min-w-0 flex-[1.2] rounded-md px-2 text-[11px] md:text-[11px]"
                       inputMode="email"
                       placeholder="Email"
                       type="email"
@@ -238,7 +240,7 @@ export function GitHubStep({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon-sm"
+                      size="icon-xs"
                       className="shrink-0"
                       aria-label={`Reset Git identity for ${name}`}
                       aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
@@ -246,7 +248,7 @@ export function GitHubStep({
                       title={`Reset Git identity for ${name}`}
                       onClick={() => onResetWorkspaceIdentity(name)}
                     >
-                      <RotateCcw aria-hidden="true" />
+                      <RotateCcw aria-hidden="true" className="size-3" />
                     </Button>
                   </div>
                   {connectionState === "connected" && (
@@ -259,9 +261,9 @@ export function GitHubStep({
                       />
                       {selections.length > 0 && (
                         <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
-                          <div role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 bg-muted/50 px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
+                          <div role="row" className={`grid ${repositoryGridColumns} items-center gap-2 bg-muted/50 px-2 py-1.5 text-left text-[11px] font-medium text-muted-foreground`}>
                             <span role="columnheader">Repository</span>
-                            <span role="columnheader" className="flex items-center justify-center gap-0.5 text-center">
+                            <span role="columnheader" className="flex items-center justify-start gap-0.5 text-left">
                               Allow pushes
                               <TooltipProvider delayDuration={150}>
                                 <Tooltip>
@@ -277,9 +279,9 @@ export function GitHubStep({
                             <span role="columnheader" className="sr-only">Remove</span>
                           </div>
                           {selections.map((selection) => (
-                            <div key={selection.repository} role="row" className="grid grid-cols-[minmax(0,1fr)_6.75rem_1.5rem] items-center gap-2 border-t border-border px-2 py-2">
+                            <div key={selection.repository} role="row" className={`grid ${repositoryGridColumns} items-center gap-2 border-t border-border px-2 py-2 text-left`}>
                               <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
-                              <span role="cell" className="flex justify-center">
+                              <span role="cell" className="flex justify-start">
                                 <Checkbox
                                   aria-label={`Allow pushes for ${selection.repository}`}
                                   checked={selection.allowPushes}
@@ -288,7 +290,7 @@ export function GitHubStep({
                                   )))}
                                 />
                               </span>
-                              <span role="cell">
+                              <span role="cell" className="flex justify-start">
                                 <Button
                                   type="button"
                                   variant="ghost"
