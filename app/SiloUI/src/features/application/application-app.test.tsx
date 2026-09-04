@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
@@ -123,6 +123,7 @@ describe("application", () => {
     const repositoryHeader = devRepository.querySelector("[data-repository-header]") as HTMLElement
     const repositoryActions = devRepository.querySelector("[data-repository-actions]") as HTMLElement
     const pushButton = within(repositoryActions).getByRole("button", { name: "Push 2 commits" })
+    expect(pushButton).toHaveClass("h-6")
     expect(repositoryHeader).toContainElement(devBadge)
     expect(repositoryHeader).not.toContainElement(pushButton)
     expect(within(playgroundsRepository).queryByRole("button", { name: /^Push / })).not.toBeInTheDocument()
@@ -130,6 +131,7 @@ describe("application", () => {
     await user.click(pushButton)
     expect(actions.pushRepository).toHaveBeenCalledWith("dev", "acme/silo")
     expect(devRepository).toHaveAttribute("aria-busy", "true")
+    expect(within(devRepository).getByRole("status")).toHaveClass("h-6")
     expect(within(devRepository).getByRole("status")).toHaveTextContent("Pushing 2 commits…")
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
 
@@ -191,6 +193,7 @@ describe("application", () => {
 
     await application.user.click(sandboxSections.getByRole("button", { name: "Files" }))
     const row = within(appPanel("Sandboxes")).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
+    expect(within(row).getByRole("status")).toHaveClass("h-6")
     expect(within(row).getByRole("status")).toHaveTextContent(message)
     if (busy) expect(row).toHaveAttribute("aria-busy", "true")
     else {
@@ -217,6 +220,28 @@ describe("application", () => {
     expect(application.actions.pushRepository).toHaveBeenCalledWith("dev", "acme/silo")
     expect(row).toHaveAttribute("aria-busy", "true")
     expect(within(row).getByRole("status")).toHaveTextContent("Pushing 2 commits…")
+  })
+
+  it("clears repository push success after four seconds", () => {
+    vi.useFakeTimers()
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, undefined, "succeeded")
+    const application = renderApplication("running", source)
+
+    try {
+      const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+      fireEvent.click(sandboxSections.getByRole("button", { name: "Files" }))
+      const row = within(appPanel("Sandboxes")).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
+      expect(within(row).getByRole("status")).toHaveTextContent("Pushed 2 commits.")
+
+      act(() => vi.advanceTimersByTime(4_000))
+
+      expect(within(row).queryByRole("status")).not.toBeInTheDocument()
+      expect(row).toHaveTextContent("main · 0 ahead, 0 behind")
+      expect(within(row).queryByRole("button", { name: /^Push / })).not.toBeInTheDocument()
+    } finally {
+      application.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it.each([

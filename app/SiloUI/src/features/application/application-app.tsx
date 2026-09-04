@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { ApplicationShell } from "@/features/application/components/application-shell"
@@ -106,6 +106,10 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     actions.pushRepository(workspace, repositoryPath)
   }
 
+  const dismissRepositoryPush = useCallback((workspace: string, repositoryPath: string) => {
+    setRepositoryPushOperations((current) => current.filter((operation) => operation.workspace !== workspace || operation.repositoryPath !== repositoryPath))
+  }, [])
+
   return (
     <ApplicationShell
       activeTab={visibleTab}
@@ -129,6 +133,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
             onWorkspaceFilterChange={setExcludedWorkspaceIds}
             onLogQueryChange={setLogQuery}
             onPushRepository={pushRepository}
+            onDismissRepositoryPush={dismissRepositoryPush}
           />
         )}
       </section>

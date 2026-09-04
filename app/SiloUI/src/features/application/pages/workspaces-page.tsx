@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react"
+import { useEffect, useId, useMemo, useState } from "react"
 import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, Copy, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -218,16 +218,26 @@ function commitLabel(count: number) {
 
 function RepositoryPushFeedback({
   operation,
+  workspace,
   repositoryPath,
   onRetry,
+  onDismiss,
 }: {
   operation: RepositoryPushOperation
+  workspace: string
   repositoryPath: string
   onRetry: () => void
+  onDismiss: (workspace: string, repositoryPath: string) => void
 }) {
+  useEffect(() => {
+    if (operation.status !== "succeeded") return
+    const timer = window.setTimeout(() => onDismiss(workspace, repositoryPath), 4_000)
+    return () => window.clearTimeout(timer)
+  }, [operation.status, onDismiss, repositoryPath, workspace])
+
   if (operation.status === "pushing") {
     return (
-      <div className="flex items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">
+      <div className="flex h-6 items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">
         <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
         Pushing {commitLabel(operation.commitCount)}…
       </div>
@@ -235,7 +245,7 @@ function RepositoryPushFeedback({
   }
   if (operation.status === "succeeded") {
     return (
-      <div className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400" role="status" aria-live="polite" aria-atomic="true">
+      <div className="flex h-6 items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400" role="status" aria-live="polite" aria-atomic="true">
         <CircleCheck className="size-3.5" aria-hidden="true" />
         Pushed {commitLabel(operation.commitCount)}.
       </div>
@@ -243,7 +253,7 @@ function RepositoryPushFeedback({
   }
   return (
     <Collapsible className="grid gap-1.5">
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5" role="alert" aria-live="assertive" aria-atomic="true">
+      <div className="flex min-h-6 min-w-0 flex-wrap items-center gap-1.5" role="alert" aria-live="assertive" aria-atomic="true">
         <CircleAlert className="size-3.5 shrink-0 text-destructive" aria-hidden="true" />
         <span className="min-w-40 flex-1 text-xs text-destructive">{operation.message}</span>
         {operation.diagnosticDetails && (
@@ -271,10 +281,12 @@ function Files({
   workspaces,
   repositoryPushOperations,
   onPushRepository,
+  onDismissRepositoryPush,
 }: {
   workspaces: ApplicationWorkspace[]
   repositoryPushOperations: RepositoryPushOperation[]
   onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
+  onDismissRepositoryPush: (workspace: string, repositoryPath: string) => void
 }) {
   if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to browse its files and repositories." />
   const repositories = workspaces.flatMap((workspace) => workspace.repositories.map((repository) => ({ workspace, repository })))
@@ -299,9 +311,9 @@ function Files({
                     </div>
                     <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
                     {(operation || repository.ahead > 0) && (
-                      <div className="mt-2" data-repository-actions>
+                      <div className="mt-2 min-h-6" data-repository-actions>
                         {operation
-                          ? <RepositoryPushFeedback operation={operation} repositoryPath={repository.path} onRetry={push} />
+                          ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
                           : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
                       </div>
                     )}
@@ -444,6 +456,7 @@ export function WorkspacesPage({
   onWorkspaceFilterChange,
   onLogQueryChange,
   onPushRepository,
+  onDismissRepositoryPush,
 }: {
   workspaces: ApplicationWorkspace[]
   excludedWorkspaceIds: ReadonlySet<string>
@@ -453,6 +466,7 @@ export function WorkspacesPage({
   onWorkspaceFilterChange: (excludedWorkspaceIds: Set<string>) => void
   onLogQueryChange: (query: string) => void
   onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
+  onDismissRepositoryPush: (workspace: string, repositoryPath: string) => void
 }) {
   const visibleWorkspaces = useMemo(
     () => workspaces.filter(({ machine }) => !excludedWorkspaceIds.has(machine.id)),
@@ -462,7 +476,7 @@ export function WorkspacesPage({
   return (
     <div className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
       <WorkspaceFilterBar workspaces={workspaces} excludedWorkspaceIds={excludedWorkspaceIds} onChange={onWorkspaceFilterChange} />
-      {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} />}
+      {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} onDismissRepositoryPush={onDismissRepositoryPush} />}
       {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}
       {section === "network" && <Network workspaces={visibleWorkspaces} />}
       {section === "activity" && <ActivityLog workspaces={visibleWorkspaces} />}
