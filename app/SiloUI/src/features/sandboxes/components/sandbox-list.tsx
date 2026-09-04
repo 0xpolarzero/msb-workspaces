@@ -7,6 +7,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { cn } from "@/lib/utils"
 
 export type SandboxIconState = "normal" | "warning" | "error"
+export type SandboxRowTone = "running" | "starting" | "stopped" | "warning" | "error"
 
 export function SandboxList({ label, className, children, ...props }: {
   label: string
@@ -60,6 +61,7 @@ export function SandboxListRow({
   leading,
   actions,
   hoverActions,
+  tone,
 }: {
   name: string
   kind: "vm" | "ssh"
@@ -68,9 +70,21 @@ export function SandboxListRow({
   leading?: ReactNode
   actions?: ReactNode
   hoverActions?: ReactNode
+  tone?: SandboxRowTone
 }) {
   return (
-    <div className="sandbox-row flex min-w-0 items-center gap-1.5 px-2 py-2 transition-colors hover:bg-muted/35 focus-within:bg-muted/35">
+    <div
+      className={cn(
+        "sandbox-row flex min-w-0 items-center gap-1.5 px-2 py-2 transition-colors",
+        !tone && "hover:bg-muted/35 focus-within:bg-muted/35",
+        tone === "running" && "bg-emerald-500/[0.035] hover:bg-emerald-500/[0.07] focus-within:bg-emerald-500/[0.07]",
+        tone === "starting" && "bg-amber-500/[0.035] hover:bg-amber-500/[0.07] focus-within:bg-amber-500/[0.07]",
+        tone === "stopped" && "bg-muted/15 hover:bg-muted/35 focus-within:bg-muted/35",
+        tone === "warning" && "bg-amber-500/[0.04] hover:bg-amber-500/[0.08] focus-within:bg-amber-500/[0.08]",
+        tone === "error" && "bg-destructive/[0.035] hover:bg-destructive/[0.07] focus-within:bg-destructive/[0.07]",
+      )}
+      data-sandbox-row-tone={tone}
+    >
       {leading}
       <SandboxIcon kind={kind} state={iconState} />
       <div className="min-w-0 flex-1">

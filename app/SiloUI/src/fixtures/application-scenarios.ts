@@ -1,8 +1,16 @@
-import type { ApplicationSource, ApplicationWorkspace } from "@/features/application/model/application-source"
+import type { ApplicationSource, ApplicationWorkspace, WorkspaceState } from "@/features/application/model/application-source"
 import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 
 const [devMachine, playgroundsMachine, personalMachine] = productionMachineDefaults
+
+export const workspaceFixtureModes = ["running", "starting", "stopped", "warning", "error"] as const
+export type WorkspaceFixtureMode = (typeof workspaceFixtureModes)[number]
+
+export function workspaceFixtureModeFromSearch(search: string): WorkspaceFixtureMode | undefined {
+  const requested = new URLSearchParams(search).get("sandbox-state")
+  return workspaceFixtureModes.find((mode) => mode === requested)
+}
 
 const baseWorkspaces: ApplicationWorkspace[] = [
   {
@@ -85,10 +93,33 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
   return baseWorkspaces
 }
 
-export function applicationSourceForScenario(scenario: ScenarioName, githubState?: GitHubFixtureState): ApplicationSource {
+const fixtureStateDetails: Record<WorkspaceState, string> = {
+  running: "Running and verified",
+  starting: "Starting services",
+  stopped: "Stopped",
+  failed: "Start failed",
+}
+
+function workspacesForFixtureMode(workspaces: ApplicationWorkspace[], mode?: WorkspaceFixtureMode): ApplicationWorkspace[] {
+  if (!mode) return workspaces
+  const state: WorkspaceState = mode === "error" ? "failed" : mode === "warning" ? "stopped" : mode
+  return workspaces.map((workspace) => ({
+    ...workspace,
+    state,
+    stateDetail: fixtureStateDetails[state],
+    attention: mode === "warning"
+      ? { level: "warning", message: "Storage is almost full." }
+      : mode === "error"
+        ? { level: "error", message: "Candidate networking did not become ready." }
+        : undefined,
+    freshness: mode === "error" ? "stale" : "fresh",
+  }))
+}
+
+export function applicationSourceForScenario(scenario: ScenarioName, githubState?: GitHubFixtureState, workspaceMode?: WorkspaceFixtureMode): ApplicationSource {
   return {
     runtimeRepairRequired: scenario === "dependency-failure",
-    workspaces: workspacesForScenario(scenario),
+    workspaces: workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode),
     github: {
       state: githubState ?? "connected",
       account: githubState === "disconnected" ? undefined : "taylor",

@@ -17,7 +17,7 @@ import {
   validateMachine,
   type MachineValidationErrors,
 } from "@/features/onboarding/model/machine-configuration"
-import { SandboxAction, SandboxList, SandboxListItem, SandboxListRow, type SandboxIconState } from "@/features/sandboxes/components/sandbox-list"
+import { SandboxAction, SandboxList, SandboxListItem, SandboxListRow, type SandboxIconState, type SandboxRowTone } from "@/features/sandboxes/components/sandbox-list"
 import { machineSummary } from "@/features/sandboxes/model/machine-summary"
 
 interface MachineEditorState {
@@ -31,6 +31,7 @@ export interface MachineRowPresentation {
   detail?: ReactNode
   iconState?: SandboxIconState
   actions?: ReactNode
+  tone?: SandboxRowTone
 }
 
 interface MachineListProps {
@@ -363,6 +364,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                       name={machine.name}
                       kind={machine.kind}
                       iconState={presentation?.iconState}
+                      tone={presentation?.tone}
                       detail={presentation?.detail ?? machineSummary(machine)}
                       leading={<span
                         role="button"

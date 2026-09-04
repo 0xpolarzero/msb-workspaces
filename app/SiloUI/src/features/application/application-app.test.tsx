@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest"
 import { ApplicationApp } from "@/features/application/application-app"
 import type { ApplicationActions, ApplicationSource } from "@/features/application/model/application-source"
 import { applicationSourceForScenario } from "@/fixtures/application-scenarios"
+import type { WorkspaceFixtureMode } from "@/fixtures/application-scenarios"
 
 function renderApplication(scenario: Parameters<typeof applicationSourceForScenario>[0] = "running", source?: ApplicationSource) {
   const actions: ApplicationActions = {
@@ -143,6 +144,30 @@ describe("application", () => {
     await user.keyboard("{ArrowDown}")
     expect(screen.getByText("error can only be reordered within its status group.")).toBeInTheDocument()
     expect(actions.saveMachineConfiguration).not.toHaveBeenCalled()
+  })
+
+  it("uses subtle row tones and readable labels for every fixture state", async () => {
+    const cases: Array<{ mode: WorkspaceFixtureMode; state: string; tone: string; labelClass: string; hoverClass: string }> = [
+      { mode: "running", state: "running", tone: "running", labelClass: "text-emerald-700", hoverClass: "hover:bg-emerald-500/[0.07]" },
+      { mode: "starting", state: "starting", tone: "starting", labelClass: "text-amber-700", hoverClass: "hover:bg-amber-500/[0.07]" },
+      { mode: "stopped", state: "stopped", tone: "stopped", labelClass: "text-muted-foreground", hoverClass: "hover:bg-muted/35" },
+      { mode: "warning", state: "stopped", tone: "warning", labelClass: "text-muted-foreground", hoverClass: "hover:bg-amber-500/[0.08]" },
+      { mode: "error", state: "failed", tone: "error", labelClass: "text-destructive", hoverClass: "hover:bg-destructive/[0.07]" },
+    ]
+
+    for (const { mode, state, tone, labelClass, hoverClass } of cases) {
+      const source = applicationSourceForScenario("running", undefined, mode)
+      const application = renderApplication("running", source)
+      const overview = within(appPanel("Sandboxes"))
+      const rows = within(overview.getByRole("list", { name: "Configured sandboxes" })).getAllByRole("listitem")
+      for (const row of rows) {
+        expect(row.querySelector(`[data-sandbox-row-tone="${tone}"]`)).toHaveClass(hoverClass)
+        expect(row.querySelector(`[data-workspace-state="${state}"]`)).toHaveClass(labelClass)
+      }
+      if (mode === "warning") expect(overview.getAllByText(/Storage is almost full/)).toHaveLength(3)
+      if (mode === "error") expect(overview.getAllByText(/Candidate networking did not become ready/)).toHaveLength(3)
+      application.unmount()
+    }
   })
 
   it("uses the onboarding manager with hover actions and a working Add flow", async () => {

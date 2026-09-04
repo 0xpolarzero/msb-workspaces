@@ -33,11 +33,26 @@ const workspaceStateStyles: Record<WorkspaceState, string> = {
   failed: "bg-destructive",
 }
 
+const workspaceStateLabelStyles: Record<WorkspaceState, string> = {
+  running: "text-emerald-700 dark:text-emerald-400",
+  starting: "text-amber-700 dark:text-amber-400",
+  stopped: "text-muted-foreground",
+  failed: "text-destructive",
+}
+
+export function WorkspaceStateLabel({ state }: { state: WorkspaceState }) {
+  return (
+    <span className={cn("font-medium", workspaceStateLabelStyles[state])} data-workspace-state={state}>
+      {state.charAt(0).toUpperCase() + state.slice(1)}
+    </span>
+  )
+}
+
 export function WorkspaceStatus({ state, detail }: { state: WorkspaceState; detail?: string }) {
   return (
     <span className="inline-flex items-center gap-2 text-xs text-muted-foreground" aria-label={detail ?? state}>
       <span className={cn("size-2 rounded-full", workspaceStateStyles[state])} aria-hidden="true" />
-      <span className="capitalize">{state}</span>
+      <WorkspaceStateLabel state={state} />
     </span>
   )
 }

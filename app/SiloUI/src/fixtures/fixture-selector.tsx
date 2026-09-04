@@ -1,11 +1,12 @@
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
+import { workspaceFixtureModes, type WorkspaceFixtureMode } from "@/fixtures/application-scenarios"
 import type { SurfaceName } from "@/fixtures/surfaces"
 import { surfaceNames } from "@/fixtures/surfaces"
 
 import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
-export function FixtureSelector({ surface, scenario, githubState }: { surface: SurfaceName; scenario: ScenarioName; githubState?: GitHubFixtureState }) {
+export function FixtureSelector({ surface, scenario, githubState, workspaceMode }: { surface: SurfaceName; scenario: ScenarioName; githubState?: GitHubFixtureState; workspaceMode?: WorkspaceFixtureMode }) {
   function selectFixture(parameter: string, value: string) {
     const url = new URL(window.location.href)
     if (value === "source") url.searchParams.delete(parameter)
@@ -14,7 +15,7 @@ export function FixtureSelector({ surface, scenario, githubState }: { surface: S
   }
 
   return (
-    <aside className="fixed right-3 bottom-16 z-50 flex items-center gap-3 rounded-md border border-border bg-background/95 px-2 py-1 text-[11px] shadow-lg backdrop-blur sm:bottom-3" aria-label="Development fixtures">
+    <aside className="fixed right-3 bottom-16 z-50 flex max-w-[calc(100vw-1.5rem)] flex-wrap items-center justify-end gap-3 rounded-md border border-border bg-background/95 px-2 py-1 text-[11px] shadow-lg backdrop-blur sm:bottom-3" aria-label="Development fixtures">
       <label className="flex items-center gap-2">
         View
         <select
@@ -26,6 +27,20 @@ export function FixtureSelector({ surface, scenario, githubState }: { surface: S
           {surfaceNames.map((name) => <option key={name} value={name}>{name}</option>)}
         </select>
       </label>
+      {surface === "app" && (
+        <label className="flex items-center gap-2">
+          State
+          <select
+            aria-label="Sandbox state fixture"
+            className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            value={workspaceMode ?? "source"}
+            onChange={(event) => selectFixture("sandbox-state", event.target.value)}
+          >
+            <option value="source">source</option>
+            {workspaceFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+          </select>
+        </label>
+      )}
       <label className="flex items-center gap-2">
         Fixture
         <select

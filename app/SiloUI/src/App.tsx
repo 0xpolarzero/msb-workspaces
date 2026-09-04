@@ -2,7 +2,7 @@ import { useState } from "react"
 
 import { ApplicationApp } from "@/features/application/application-app"
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
-import { applicationSourceForScenario } from "@/fixtures/application-scenarios"
+import { applicationSourceForScenario, workspaceFixtureModeFromSearch } from "@/fixtures/application-scenarios"
 import { FixtureSelector } from "@/fixtures/fixture-selector"
 import { githubStateFromSearch, onboardingScenarios, repositoryFixtures, scenarioFromSearch } from "@/fixtures/scenarios"
 import { surfaceFromSearch } from "@/fixtures/surfaces"
@@ -11,13 +11,14 @@ export default function App() {
   const surface = surfaceFromSearch(window.location.search)
   const scenario = scenarioFromSearch(window.location.search)
   const githubState = import.meta.env.DEV ? githubStateFromSearch(window.location.search) : undefined
+  const workspaceMode = import.meta.env.DEV ? workspaceFixtureModeFromSearch(window.location.search) : undefined
   const [source, setSource] = useState(onboardingScenarios[scenario])
   return (
     <>
       {surface === "app" ? (
         <ApplicationApp
-          key={`${scenario}:${githubState ?? "source"}`}
-          source={applicationSourceForScenario(scenario, githubState)}
+          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}`}
+          source={applicationSourceForScenario(scenario, githubState, workspaceMode)}
           actions={{
             repairRuntime: () => undefined,
             saveMachineConfiguration: (_request) => undefined,
@@ -43,7 +44,7 @@ export default function App() {
           }}
         />
       )}
-      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} />}
+      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} />}
     </>
   )
 }

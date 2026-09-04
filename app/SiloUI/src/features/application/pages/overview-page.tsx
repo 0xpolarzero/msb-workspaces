@@ -2,10 +2,10 @@ import { Pause, Play, RotateCw, Square } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import type { SetupMachineConfiguration } from "@/contracts/silo"
-import { InlineNotice } from "@/features/application/components/application-ui"
+import { InlineNotice, WorkspaceStateLabel } from "@/features/application/components/application-ui"
 import type { ApplicationActions, ApplicationSource, ApplicationWorkspace, WorkspaceState } from "@/features/application/model/application-source"
 import { MachineList } from "@/features/sandboxes/components/machine-list"
-import { SandboxAction, type SandboxIconState } from "@/features/sandboxes/components/sandbox-list"
+import { SandboxAction, type SandboxIconState, type SandboxRowTone } from "@/features/sandboxes/components/sandbox-list"
 
 const attentionPriority: Record<SandboxIconState, number> = {
   error: 0,
@@ -18,8 +18,10 @@ function iconState(workspace?: ApplicationWorkspace): SandboxIconState {
   return workspace?.attention?.level ?? "normal"
 }
 
-function stateLabel(state: WorkspaceState) {
-  return state.charAt(0).toUpperCase() + state.slice(1)
+function rowTone(workspace?: ApplicationWorkspace): SandboxRowTone {
+  if (workspace?.state === "failed" || workspace?.attention?.level === "error") return "error"
+  if (workspace?.attention?.level === "warning") return "warning"
+  return workspace?.state ?? "stopped"
 }
 
 function WorkspaceActions({ machine, state, actions }: { machine: SetupMachineConfiguration; state: WorkspaceState; actions: ApplicationActions }) {
@@ -70,9 +72,10 @@ export function OverviewPage({
           const visualState = iconState(workspace)
           return {
             iconState: visualState,
+            tone: rowTone(workspace),
             detail: (
               <span title={workspace?.attention?.message}>
-                {stateLabel(state)}
+                <WorkspaceStateLabel state={state} />
                 {workspace?.attention && <> · {workspace.attention.message}</>}
               </span>
             ),
