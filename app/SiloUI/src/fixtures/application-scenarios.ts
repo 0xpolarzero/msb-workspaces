@@ -61,6 +61,12 @@ const baseWorkspaces: ApplicationWorkspace[] = [
       { path: "acme/silo", branch: "main", ahead: 2, behind: 0, dirty: true },
       { path: "acme/design-system", branch: "next", ahead: 0, behind: 1, dirty: false },
     ],
+    files: [
+      { name: "projects", kind: "folder" },
+      { name: ".config", kind: "folder" },
+      { name: ".gitconfig", kind: "file" },
+      { name: "README.md", kind: "file" },
+    ],
     ports: [
       { port: 3000, process: "web", url: "https://dev.silo.test", active: true },
       { port: 5173, process: "vite", active: false },
@@ -86,6 +92,11 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     freshness: "fresh",
     host: "playgrounds.silo.test",
     repositories: [{ path: "acme/platform-tools", branch: "main", ahead: 0, behind: 0, dirty: false }],
+    files: [
+      { name: "experiments", kind: "folder" },
+      { name: "scratch", kind: "folder" },
+      { name: "README.md", kind: "file" },
+    ],
     ports: [],
     logs: ["17:02:11  silo  Workspace stopped cleanly"],
     activities: [{ id: "playgrounds-stop", title: "Stop succeeded", detail: "Workspace state was preserved.", time: "Yesterday", tone: "neutral" }],
@@ -100,6 +111,11 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     freshness: "fresh",
     host: "personal.silo.test",
     repositories: [{ path: "taylor/docs-site", branch: "main", ahead: 0, behind: 0, dirty: false }],
+    files: [
+      { name: "docs-site", kind: "folder" },
+      { name: ".config", kind: "folder" },
+      { name: "notes.md", kind: "file" },
+    ],
     ports: [],
     logs: ["09:41:02  silo  Workspace stopped cleanly"],
     activities: [{ id: "personal-backup", title: "Backup completed", detail: "Archive verification passed.", time: "4 days ago", tone: "success" }],

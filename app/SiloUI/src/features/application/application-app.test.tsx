@@ -90,20 +90,55 @@ describe("application", () => {
     expect(within(appPanel("Settings")).getByRole("heading", { name: "Notifications", level: 2 })).toBeVisible()
   })
 
-  it("keeps the selected sandbox and section while navigating", async () => {
+  it("uses one global sandbox filter across Files, Logs, Network, and Activity", async () => {
     const { user } = renderApplication()
     const navigation = within(appNavigation())
-
-    await user.click(within(navigation.getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: "Files" }))
-    await user.click(within(appPanel("Sandboxes")).getByRole("button", { name: /^playgrounds/i }))
-    expect(within(appPanel("Sandboxes")).getByText("acme/platform-tools")).toBeVisible()
-
-    await user.click(navigation.getByRole("button", { name: "GitHub" }))
-    await user.click(navigation.getByRole("button", { name: "Sandboxes" }))
-
     const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
-    expect(sandboxSections.getByRole("button", { name: "Files" })).toHaveAttribute("aria-current", "page")
-    expect(within(appPanel("Sandboxes")).getByText("acme/platform-tools")).toBeVisible()
+
+    await user.click(sandboxSections.getByRole("button", { name: "Files" }))
+    const panel = within(appPanel("Sandboxes"))
+    const filters = within(panel.getByRole("group", { name: "Sandbox filters" }))
+    expect(panel.queryByRole("heading", { name: "Sandboxes" })).not.toBeInTheDocument()
+    expect(panel.queryByText("Inspect state, files, logs, networking, and recent activity.")).not.toBeInTheDocument()
+    expect(filters.getByRole("combobox", { name: "Add sandbox filter" })).toBeVisible()
+    expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
+
+    await user.click(filters.getByRole("button", { name: "Remove dev" }))
+    expect(panel.queryByRole("region", { name: "Repositories for dev" })).not.toBeInTheDocument()
+    expect(panel.getByRole("region", { name: "Repositories for playgrounds" })).toBeVisible()
+    expect(panel.getByRole("region", { name: "Files for personal" })).toBeVisible()
+
+    await user.click(filters.getByRole("combobox", { name: "Add sandbox filter" }))
+    await user.click(screen.getByRole("option", { name: "dev" }))
+    expect(filters.getByRole("button", { name: "Remove dev" })).toBeVisible()
+    expect(panel.getByRole("region", { name: "Repositories for dev" })).toBeVisible()
+
+    await user.click(filters.getByRole("button", { name: "Remove dev" }))
+    await user.click(sandboxSections.getByRole("button", { name: "Logs" }))
+    const logs = panel.getByRole("table", { name: "Logs" })
+    expect(within(logs).queryByText("dev")).not.toBeInTheDocument()
+    expect(within(logs).getByText("playgrounds")).toBeVisible()
+    expect(within(logs).getByText("personal")).toBeVisible()
+
+    await user.click(sandboxSections.getByRole("button", { name: "Network" }))
+    expect(panel.queryByRole("region", { name: "Network for dev" })).not.toBeInTheDocument()
+    expect(panel.getByRole("region", { name: "Network for playgrounds" })).toBeVisible()
+    expect(panel.getByRole("region", { name: "Network for personal" })).toBeVisible()
+
+    await user.click(sandboxSections.getByRole("button", { name: "Activity" }))
+    const activity = panel.getByRole("list", { name: "Recent activity" })
+    expect(within(activity).queryByText("dev")).not.toBeInTheDocument()
+    expect(within(activity).getByText("playgrounds")).toBeVisible()
+    expect(within(activity).getByText("personal")).toBeVisible()
+
+    await user.click(filters.getByRole("button", { name: "Clear" }))
+    expect(panel.getByText("No sandboxes selected")).toBeVisible()
+    expect(filters.getByRole("button", { name: "Clear" })).toBeDisabled()
+
+    await user.click(filters.getByRole("button", { name: "All" }))
+    expect(panel.getByRole("list", { name: "Recent activity" })).toBeVisible()
+    expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
+    expect(filters.getByRole("button", { name: "All" })).toBeDisabled()
   })
 
   it("sorts attention first without letting health order rewrite configuration order", async () => {
@@ -276,7 +311,9 @@ describe("application", () => {
 
     const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
     await user.click(sandboxSections.getByRole("button", { name: "Files" }))
-    expect(within(appPanel("Sandboxes")).getByRole("heading", { name: "dev", level: 3 })).toBeVisible()
+    const files = within(appPanel("Sandboxes"))
+    expect(files.getByRole("region", { name: "Repositories for dev" })).toBeVisible()
+    expect(files.getByText("acme/silo")).toBeVisible()
 
     await user.click(navigation.getByRole("button", { name: "Settings" }))
     const settings = within(appPanel("Settings"))

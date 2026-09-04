@@ -16,7 +16,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
-  const [selectedWorkspace, setSelectedWorkspace] = useState(source.workspaces[0]?.machine.id ?? "")
+  const [excludedWorkspaceIds, setExcludedWorkspaceIds] = useState<Set<string>>(() => new Set())
   const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>("overview")
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
@@ -34,7 +34,11 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     // oxlint-disable-next-line react/set-state-in-effect
     setWorkspaces(source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
     // oxlint-disable-next-line react/set-state-in-effect
-    setSelectedWorkspace((current) => source.workspaces.some(({ machine }) => machine.id === current) ? current : source.workspaces[0]?.machine.id ?? "")
+    setExcludedWorkspaceIds((current) => {
+      const availableIds = new Set(source.workspaces.map(({ machine }) => machine.id))
+      const next = new Set([...current].filter((id) => availableIds.has(id)))
+      return next.size === current.size ? current : next
+    })
     // The native bridge clears or replaces the pending operation alongside its authoritative snapshot.
     // oxlint-disable-next-line react/set-state-in-effect
     setSandboxConfigurationOperation(source.sandboxConfigurationOperation)
@@ -106,10 +110,10 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         ) : (
           <WorkspacesPage
             workspaces={workspaces}
-            selectedWorkspace={selectedWorkspace}
+            excludedWorkspaceIds={excludedWorkspaceIds}
             section={visibleWorkspaceSection}
             logQuery={logQuery}
-            onWorkspaceChange={setSelectedWorkspace}
+            onWorkspaceFilterChange={setExcludedWorkspaceIds}
             onLogQueryChange={setLogQuery}
           />
         )}

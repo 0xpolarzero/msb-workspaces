@@ -53,6 +53,7 @@ function emptyWorkspace(machine: SetupMachineConfiguration): ApplicationWorkspac
     freshness: "fresh",
     host: machine.kind === "ssh" ? machine.host : `${machine.name}.silo.test`,
     repositories: [],
+    files: [],
     ports: [],
     logs: [],
     activities: [],

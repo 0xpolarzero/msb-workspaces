@@ -84,6 +84,11 @@ export interface ApplicationPort {
   active: boolean
 }
 
+export interface ApplicationFileEntry {
+  name: string
+  kind: "folder" | "file"
+}
+
 export interface ApplicationActivity {
   id: string
   title: string
@@ -104,6 +109,7 @@ export interface ApplicationWorkspace {
   freshness: "fresh" | "stale"
   host: string
   repositories: ApplicationRepository[]
+  files: ApplicationFileEntry[]
   ports: ApplicationPort[]
   logs: string[]
   activities: ApplicationActivity[]

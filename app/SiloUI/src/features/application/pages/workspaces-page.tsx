@@ -1,34 +1,206 @@
-import { Activity, Check, Copy, ExternalLink, File, Folder, GitBranch, Search, TriangleAlert } from "lucide-react"
+import { useId, useMemo, useState } from "react"
+import { Activity, Check, Copy, ExternalLink, File, Folder, GitBranch, Search, TriangleAlert, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { DetailCard, PageHeader, WorkspaceStatus } from "@/features/application/components/application-ui"
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
+import { DetailCard, WorkspaceStatus } from "@/features/application/components/application-ui"
 import type { ApplicationWorkspace, WorkspaceDetailSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
-function Files({ workspace }: { workspace: ApplicationWorkspace }) {
+function WorkspaceFilterBar({
+  workspaces,
+  excludedWorkspaceIds,
+  onChange,
+}: {
+  workspaces: ApplicationWorkspace[]
+  excludedWorkspaceIds: ReadonlySet<string>
+  onChange: (excludedWorkspaceIds: Set<string>) => void
+}) {
+  const listboxId = useId()
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const [activeIndex, setActiveIndex] = useState(0)
+  const selectedWorkspaces = workspaces.filter(({ machine }) => !excludedWorkspaceIds.has(machine.id))
+  const results = workspaces.filter(({ machine }) => (
+    excludedWorkspaceIds.has(machine.id)
+    && machine.name.toLowerCase().includes(query.trim().toLowerCase())
+  ))
+
+  function includeWorkspace(id: string) {
+    const next = new Set(excludedWorkspaceIds)
+    next.delete(id)
+    onChange(next)
+    setQuery("")
+    setActiveIndex(0)
+    setOpen(false)
+  }
+
+  function excludeWorkspace(id: string) {
+    const next = new Set(excludedWorkspaceIds)
+    next.add(id)
+    onChange(next)
+  }
+
   return (
-    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-      <DetailCard title="Repositories" description={`${workspace.repositories.length} checked out`}>
-        <div className="divide-y divide-border">
-          {workspace.repositories.map((repository) => (
-            <div key={repository.path} className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
-              <GitBranch className="size-4 text-muted-foreground" />
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{repository.path}</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind{repository.dirty ? " · local changes" : ""}</div>
-              </div>
-              {repository.ahead > 0 && <Button variant="outline" size="xs">Push {repository.ahead}</Button>}
-            </div>
+    <div className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border pb-4" role="group" aria-label="Sandbox filters">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverAnchor asChild>
+          <div className="relative w-48 shrink-0">
+            <Search aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              role="combobox"
+              aria-label="Add sandbox filter"
+              aria-autocomplete="list"
+              aria-expanded={open}
+              aria-controls={listboxId}
+              aria-activedescendant={open && results[activeIndex] ? `${listboxId}-${activeIndex}` : undefined}
+              className="h-8 pl-8 text-xs"
+              placeholder="Add sandbox…"
+              value={query}
+              onFocus={() => setOpen(true)}
+              onClick={() => setOpen(true)}
+              onChange={(event) => {
+                setQuery(event.target.value)
+                setActiveIndex(0)
+                setOpen(true)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault()
+                  setOpen(true)
+                  setActiveIndex((current) => Math.min(current + 1, Math.max(0, results.length - 1)))
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault()
+                  setActiveIndex((current) => Math.max(0, current - 1))
+                } else if (event.key === "Enter" && open && results[activeIndex]) {
+                  event.preventDefault()
+                  includeWorkspace(results[activeIndex].machine.id)
+                } else if (event.key === "Escape") {
+                  setOpen(false)
+                }
+              }}
+            />
+          </div>
+        </PopoverAnchor>
+        <PopoverContent
+          id={listboxId}
+          role="listbox"
+          aria-label="Available sandbox filters"
+          className="max-h-[min(15rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] overflow-y-auto overscroll-contain p-1"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+        >
+          {results.length > 0 ? results.map((workspace, index) => (
+            <button
+              key={workspace.machine.id}
+              id={`${listboxId}-${index}`}
+              type="button"
+              role="option"
+              aria-selected={index === activeIndex}
+              className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent focus:bg-accent aria-selected:bg-accent"
+              onMouseDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => includeWorkspace(workspace.machine.id)}
+            >
+              {workspace.machine.name}
+            </button>
+          )) : (
+            <p className="px-2 py-1.5 text-xs text-muted-foreground">No sandboxes available.</p>
+          )}
+        </PopoverContent>
+      </Popover>
+
+      <div className="flex min-w-0 flex-1 flex-wrap gap-1.5" aria-label="Selected sandboxes">
+        {selectedWorkspaces.map((workspace) => (
+          <span key={workspace.machine.id} className="inline-flex h-8 items-center gap-1 rounded-full border border-border bg-muted/55 pl-2.5 pr-1 text-xs font-medium">
+            {workspace.machine.name}
+            <button
+              type="button"
+              aria-label={`Remove ${workspace.machine.name}`}
+              onClick={() => excludeWorkspace(workspace.machine.id)}
+              className="grid size-6 place-items-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X className="size-3.5" aria-hidden="true" />
+            </button>
+          </span>
+        ))}
+      </div>
+
+      <div className="ml-auto flex items-center gap-1">
+        <Button variant="ghost" size="xs" disabled={selectedWorkspaces.length === 0} onClick={() => onChange(new Set(workspaces.map(({ machine }) => machine.id)))}>Clear</Button>
+        <Button variant="ghost" size="xs" disabled={excludedWorkspaceIds.size === 0} onClick={() => onChange(new Set())}>All</Button>
+      </div>
+    </div>
+  )
+}
+
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="grid min-h-48 place-items-center rounded-lg border border-dashed border-border px-6 text-center">
+      <div>
+        <p className="text-sm font-medium">{title}</p>
+        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+      </div>
+    </div>
+  )
+}
+
+function WorkspaceGroupHeader({ workspace }: { workspace: ApplicationWorkspace }) {
+  return (
+    <div className="mb-2 flex items-center justify-between gap-3">
+      <h4 className="text-sm font-semibold">{workspace.machine.name}</h4>
+      <WorkspaceStatus state={workspace.state} />
+    </div>
+  )
+}
+
+function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
+  if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to browse its files and repositories." />
+
+  return (
+    <div className="grid gap-3 lg:grid-cols-2">
+      <DetailCard title="Repositories">
+        <div className="grid gap-4">
+          {workspaces.map((workspace) => (
+            <section key={workspace.machine.id} aria-label={`Repositories for ${workspace.machine.name}`}>
+              <WorkspaceGroupHeader workspace={workspace} />
+              {workspace.repositories.length > 0 ? (
+                <div className="divide-y divide-border">
+                  {workspace.repositories.map((repository) => (
+                    <div key={`${workspace.machine.id}:${repository.path}`} className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
+                      <GitBranch className="size-4 text-muted-foreground" aria-hidden="true" />
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{repository.path}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
+                      </div>
+                      {repository.ahead > 0 && <Button variant="outline" size="xs">Push {repository.ahead}</Button>}
+                    </div>
+                  ))}
+                </div>
+              ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
+            </section>
           ))}
         </div>
       </DetailCard>
-      <DetailCard title="Files" description="Workspace root">
-        <div className="grid gap-1 font-mono text-xs">
-          {[{ icon: Folder, name: "projects" }, { icon: Folder, name: ".config" }, { icon: File, name: ".gitconfig" }, { icon: File, name: "README.md" }].map(({ icon: Icon, name }) => (
-            <button key={name} type="button" className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              <Icon className="size-4 text-muted-foreground" />{name}
-            </button>
+
+      <DetailCard title="File tree">
+        <div className="grid gap-4">
+          {workspaces.map((workspace) => (
+            <section key={workspace.machine.id} aria-label={`Files for ${workspace.machine.name}`}>
+              <WorkspaceGroupHeader workspace={workspace} />
+              {workspace.files.length > 0 ? (
+                <div className="grid gap-1 font-mono text-xs">
+                  {workspace.files.map((entry) => {
+                    const Icon = entry.kind === "folder" ? Folder : File
+                    return (
+                      <button key={`${workspace.machine.id}:${entry.name}`} type="button" className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                        <Icon className="size-4 text-muted-foreground" aria-hidden="true" />{entry.name}
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : <p className="text-xs text-muted-foreground">File browsing is unavailable.</p>}
+            </section>
           ))}
         </div>
       </DetailCard>
@@ -36,116 +208,145 @@ function Files({ workspace }: { workspace: ApplicationWorkspace }) {
   )
 }
 
-function Logs({ workspace, query, onQueryChange }: { workspace: ApplicationWorkspace; query: string; onQueryChange: (query: string) => void }) {
-  const filteredLogs = workspace.logs.filter((line) => line.toLowerCase().includes(query.toLowerCase()))
+interface LogRow {
+  id: string
+  timestamp: string
+  workspace: string
+  message: string
+}
+
+function logRows(workspaces: ApplicationWorkspace[]): LogRow[] {
+  return workspaces.flatMap((workspace) => workspace.logs.map((line, index) => {
+    const match = /^(\S+)\s{2,}(.*)$/.exec(line)
+    return {
+      id: `${workspace.machine.id}:${index}`,
+      timestamp: match?.[1] ?? "—",
+      workspace: workspace.machine.name,
+      message: match?.[2] ?? line,
+    }
+  }))
+}
+
+function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWorkspace[]; query: string; onQueryChange: (query: string) => void }) {
+  if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to see its logs." />
+  const rows = logRows(workspaces)
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredRows = rows.filter((row) => !normalizedQuery || `${row.timestamp} ${row.workspace} ${row.message}`.toLowerCase().includes(normalizedQuery))
+
   return (
-    <DetailCard title="Logs" description="Latest workspace output">
+    <DetailCard title="Logs" description={`${filteredRows.length} lines`}>
       <div className="mb-3 flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
-          <Search className="pointer-events-none absolute top-2 left-2.5 size-4 text-muted-foreground" />
+          <Search className="pointer-events-none absolute top-2 left-2.5 size-4 text-muted-foreground" aria-hidden="true" />
           <Input aria-label="Search logs" placeholder="Search logs" value={query} onChange={(event) => onQueryChange(event.target.value)} className="pl-8" />
         </div>
-        <Button variant="outline" size="sm"><Copy data-icon="inline-start" />Copy all</Button>
+        <Button variant="outline" size="sm" disabled={filteredRows.length === 0}><Copy data-icon="inline-start" />Copy all</Button>
       </div>
-      <div className="min-h-40 overflow-x-auto rounded-lg bg-muted/55 p-3 font-mono text-xs leading-6">
-        {filteredLogs.length > 0 ? filteredLogs.map((line) => <div key={line} className="whitespace-pre text-foreground/85">{line}</div>) : <div className="text-muted-foreground">No logs match “{query}”.</div>}
-      </div>
+      {filteredRows.length > 0 ? (
+        <div role="table" aria-label="Logs" className="overflow-hidden rounded-lg border border-border text-xs">
+          <div role="row" className="grid grid-cols-[5.5rem_7rem_minmax(0,1fr)] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
+            <span role="columnheader">Timestamp</span>
+            <span role="columnheader">Sandbox</span>
+            <span role="columnheader">Message</span>
+          </div>
+          <div className="max-h-80 divide-y divide-border overflow-y-auto bg-card font-mono">
+            {filteredRows.map((row) => (
+              <div key={row.id} role="row" className="grid grid-cols-[5.5rem_7rem_minmax(0,1fr)] gap-3 px-3 py-2">
+                <span role="cell" className="text-muted-foreground">{row.timestamp}</span>
+                <span role="cell" className="truncate font-medium">{row.workspace}</span>
+                <span role="cell" className="min-w-0 break-words text-foreground/85">{row.message}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : <EmptyState title={normalizedQuery ? "No matching logs" : "No logs yet"} description={normalizedQuery ? `No logs match “${query}”.` : "Logs from the selected sandboxes will appear here."} />}
     </DetailCard>
   )
 }
 
-function Network({ workspace }: { workspace: ApplicationWorkspace }) {
+function Network({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
+  if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to see its network services." />
+
   return (
-    <DetailCard title="Network" description={`Routes for ${workspace.host}`}>
-      {workspace.ports.length > 0 ? (
-        <div className="divide-y divide-border">
-          {workspace.ports.map((port) => (
-            <div key={port.port} className="grid grid-cols-[1rem_4rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
-              <span className={cn("size-2 rounded-full", port.active ? "bg-emerald-500" : "bg-muted-foreground/45")} aria-hidden="true" />
-              <span className="font-mono text-xs">:{port.port}</span>
-              <div className="min-w-0">
-                <div className="text-sm font-medium">{port.process}</div>
-                <div className="truncate text-xs text-muted-foreground">{port.url ?? "Configured, not active"}</div>
+    <div className="grid gap-3">
+      <p className="text-xs text-muted-foreground">Each sandbox has its own .silo.test address, so the same port can be active in multiple sandboxes.</p>
+      {workspaces.map((workspace) => (
+        <section key={workspace.machine.id} aria-label={`Network for ${workspace.machine.name}`}>
+          <DetailCard title={workspace.machine.name} description={workspace.host} action={<WorkspaceStatus state={workspace.state} />}>
+            {workspace.ports.length > 0 ? (
+              <div className="divide-y divide-border">
+                {workspace.ports.map((port) => (
+                  <div key={`${workspace.machine.id}:${port.port}`} className="grid grid-cols-[1rem_4rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
+                    <span className={cn("size-2 rounded-full", port.active ? "bg-emerald-500" : "bg-muted-foreground/45")} aria-hidden="true" />
+                    <span className="font-mono text-xs">:{port.port}</span>
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{port.process}</div>
+                      <div className="truncate text-xs text-muted-foreground">{port.url ?? "Configured, not active"}</div>
+                    </div>
+                    {port.url && <Button variant="ghost" size="icon-sm" aria-label={`Open ${workspace.machine.name} port ${port.port}`}><ExternalLink /></Button>}
+                  </div>
+                ))}
               </div>
-              {port.url && <Button variant="ghost" size="icon-sm" aria-label={`Open port ${port.port}`}><ExternalLink /></Button>}
+            ) : <p className="text-sm text-muted-foreground">No configured ports.</p>}
+          </DetailCard>
+        </section>
+      ))}
+    </div>
+  )
+}
+
+function ActivityLog({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
+  if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to see its activity." />
+  const activities = workspaces.flatMap((workspace) => workspace.activities.map((activity) => ({ ...activity, workspace: workspace.machine.name })))
+
+  return (
+    <DetailCard title="Activity">
+      {activities.length > 0 ? (
+        <div className="divide-y divide-border" role="list" aria-label="Recent activity">
+          {activities.map((item) => (
+            <div key={`${item.workspace}:${item.id}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
+              {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{item.title}</div>
+                <div className="mt-0.5 text-xs font-medium text-muted-foreground">{item.workspace}</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{item.detail}</div>
+              </div>
+              <span className="text-xs text-muted-foreground">{item.time}</span>
             </div>
           ))}
         </div>
-      ) : <p className="text-sm text-muted-foreground">No configured ports for this sandbox.</p>}
-    </DetailCard>
-  )
-}
-
-function ActivityLog({ workspace }: { workspace: ApplicationWorkspace }) {
-  return (
-    <DetailCard title="Activity" description="Latest 50 workspace operations">
-      <div className="divide-y divide-border">
-        {workspace.activities.map((item) => (
-          <div key={item.id} className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
-            {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" />}
-            <div className="min-w-0">
-              <div className="text-sm font-medium">{item.title}</div>
-              <div className="mt-0.5 text-xs text-muted-foreground">{item.detail}</div>
-            </div>
-            <span className="text-xs text-muted-foreground">{item.time}</span>
-          </div>
-        ))}
-      </div>
+      ) : <p className="text-sm text-muted-foreground">No recent activity.</p>}
     </DetailCard>
   )
 }
 
 export function WorkspacesPage({
   workspaces,
-  selectedWorkspace,
+  excludedWorkspaceIds,
   section,
   logQuery,
-  onWorkspaceChange,
+  onWorkspaceFilterChange,
   onLogQueryChange,
 }: {
   workspaces: ApplicationWorkspace[]
-  selectedWorkspace: string
+  excludedWorkspaceIds: ReadonlySet<string>
   section: WorkspaceDetailSection
   logQuery: string
-  onWorkspaceChange: (workspace: string) => void
+  onWorkspaceFilterChange: (excludedWorkspaceIds: Set<string>) => void
   onLogQueryChange: (query: string) => void
 }) {
-  const workspace = workspaces.find((item) => item.machine.id === selectedWorkspace) ?? workspaces[0]
+  const visibleWorkspaces = useMemo(
+    () => workspaces.filter(({ machine }) => !excludedWorkspaceIds.has(machine.id)),
+    [workspaces, excludedWorkspaceIds],
+  )
 
   return (
-    <div className="mx-auto grid w-full max-w-4xl gap-5 px-4 py-5 sm:px-6 sm:py-6">
-      <PageHeader title="Sandboxes" description="Inspect state, files, logs, networking, and recent activity." />
-      <div className="flex min-w-0 gap-2 overflow-x-auto pb-1" aria-label="Choose sandbox">
-        {workspaces.map((item) => (
-          <button
-            key={item.machine.id}
-            type="button"
-            onClick={() => onWorkspaceChange(item.machine.id)}
-            className={cn(
-              "flex min-w-36 items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              item.machine.id === workspace.machine.id ? "border-foreground/20 bg-muted font-medium" : "border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-            )}
-          >
-            {item.machine.name}
-            <WorkspaceStatus state={item.state} />
-          </button>
-        ))}
-      </div>
-      <div>
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <h3 className="text-base font-semibold">{workspace.machine.name}</h3>
-            <p className="mt-1 text-xs text-muted-foreground">{workspace.purpose}</p>
-          </div>
-          <WorkspaceStatus state={workspace.state} detail={workspace.stateDetail} />
-        </div>
-        <div className="mt-4">
-          {section === "files" && <Files workspace={workspace} />}
-          {section === "logs" && <Logs workspace={workspace} query={logQuery} onQueryChange={onLogQueryChange} />}
-          {section === "network" && <Network workspace={workspace} />}
-          {section === "activity" && <ActivityLog workspace={workspace} />}
-        </div>
-      </div>
+    <div className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
+      <WorkspaceFilterBar workspaces={workspaces} excludedWorkspaceIds={excludedWorkspaceIds} onChange={onWorkspaceFilterChange} />
+      {section === "files" && <Files workspaces={visibleWorkspaces} />}
+      {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}
+      {section === "network" && <Network workspaces={visibleWorkspaces} />}
+      {section === "activity" && <ActivityLog workspaces={visibleWorkspaces} />}
     </div>
   )
 }
