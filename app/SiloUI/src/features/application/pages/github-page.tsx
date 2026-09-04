@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState } from "react"
-import { Check, Loader2, TriangleAlert } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Check, Clock3, Loader2, TriangleAlert } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
 import { InlineConfirmation } from "@/components/inline-confirmation"
+import { Button } from "@/components/ui/button"
 import type {
   ApplicationActions,
   ApplicationGitHubConfiguration,
   ApplicationSource,
-  GitHubManagementOperation,
+  GitHubWorkspaceOperation,
 } from "@/features/application/model/application-source"
 import {
   GitHubAccessEditor,
@@ -17,6 +17,7 @@ import {
 
 type WorkspaceSelections = Record<string, GitHubRepositorySelection[]>
 type WorkspaceIdentities = Record<string, GitHubIdentity>
+type WorkspaceOperations = Record<string, GitHubWorkspaceOperation>
 
 interface GitHubDraft {
   selections: WorkspaceSelections
@@ -57,35 +58,6 @@ function copyDraft(draft: GitHubDraft): GitHubDraft {
   }
 }
 
-function draftsAreEqual(left: GitHubDraft, right: GitHubDraft) {
-  const workspaceNames = new Set([
-    ...Object.keys(left.selections),
-    ...Object.keys(right.selections),
-    ...Object.keys(left.identities),
-    ...Object.keys(right.identities),
-  ])
-
-  for (const workspace of workspaceNames) {
-    const leftIdentity = left.identities[workspace]
-    const rightIdentity = right.identities[workspace]
-    if (
-      leftIdentity?.name !== rightIdentity?.name
-      || leftIdentity?.email !== rightIdentity?.email
-      || leftIdentity?.apply !== rightIdentity?.apply
-    ) return false
-
-    const normalizeSelections = (selections: readonly GitHubRepositorySelection[]) => selections
-      .map(({ repository, allowPushes }) => `${repository.toLowerCase()}\0${allowPushes}`)
-      .sort()
-    const leftSelections = normalizeSelections(left.selections[workspace] ?? [])
-    const rightSelections = normalizeSelections(right.selections[workspace] ?? [])
-    if (leftSelections.length !== rightSelections.length) return false
-    if (leftSelections.some((selection, index) => selection !== rightSelections[index])) return false
-  }
-
-  return true
-}
-
 function configurationFromDraft(source: ApplicationSource, draft: GitHubDraft, accessEnabled: boolean): ApplicationGitHubConfiguration {
   return {
     accessEnabled,
@@ -98,136 +70,192 @@ function configurationFromDraft(source: ApplicationSource, draft: GitHubDraft, a
   }
 }
 
-function GitHubOperationFooter({
+function operationsFromSource(operations: readonly GitHubWorkspaceOperation[] | undefined): WorkspaceOperations {
+  return Object.fromEntries((operations ?? []).map((operation) => [operation.workspace, operation]))
+}
+
+function sameIdentity(left: GitHubIdentity | undefined, right: GitHubIdentity) {
+  return left?.name === right.name && left.email === right.email && left.apply === right.apply
+}
+
+function WorkspaceSyncFeedback({
   operation,
-  onSave,
-  onCancel,
   onRetry,
+  onOpenOverview,
 }: {
-  operation: GitHubManagementOperation
-  onSave: () => void
-  onCancel: () => void
+  operation: GitHubWorkspaceOperation
   onRetry: () => void
+  onOpenOverview: () => void
 }) {
-  if (operation.status === "idle") return null
-
-  if (operation.status === "dirty") {
+  if (operation.status === "applying") {
     return (
-      <div className="flex min-h-9 items-center gap-3 rounded-md border border-amber-500/25 bg-amber-500/8 px-3 py-2">
-        <span className="size-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
-        <span className="min-w-0 flex-1 text-xs font-medium">{operation.message}</span>
-        <Button type="button" variant="ghost" size="xs" onClick={onCancel}>Cancel</Button>
-        <Button type="button" size="xs" onClick={onSave}>Save changes</Button>
-      </div>
-    )
-  }
-
-  if (operation.status === "saving") {
-    return (
-      <div className="flex min-h-9 items-center gap-3 rounded-md border border-border px-3 py-2" role="status" aria-live="polite">
+      <div className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-muted/25 px-2.5 py-1.5 text-[11px]" role="status" aria-live="polite">
         <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" />
-        <span className="min-w-0 flex-1 text-xs">{operation.message}</span>
-        {operation.canCancel && <Button type="button" variant="ghost" size="xs" onClick={onCancel}>Cancel</Button>}
+        <span>{operation.message}</span>
       </div>
     )
   }
 
   if (operation.status === "succeeded") {
     return (
-      <div className="flex min-h-9 items-center gap-3 rounded-md border border-emerald-500/20 bg-emerald-500/8 px-3 py-2" role="status" aria-live="polite">
-        <Check className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-        <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400">{operation.message}</span>
+      <div className="flex min-h-8 items-center gap-2 rounded-md border border-emerald-500/20 bg-emerald-500/[0.07] px-2.5 py-1.5 text-[11px] text-emerald-700 dark:text-emerald-400" role="status" aria-live="polite">
+        <Check className="size-3.5 shrink-0" aria-hidden="true" />
+        <span>{operation.message}</span>
       </div>
     )
   }
 
   if (operation.status === "failed") {
     return (
-      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-x-3 gap-y-1 rounded-md border border-destructive/25 bg-destructive/8 px-3 py-2" role="alert">
-        <TriangleAlert className="size-3.5 text-destructive" aria-hidden="true" />
-        <span className="min-w-0 text-xs font-medium text-destructive">{operation.message}</span>
-        {operation.canRetry && <Button type="button" variant="outline" size="xs" onClick={onRetry}>Retry</Button>}
-        {operation.canCancel && <Button type="button" variant="ghost" size="xs" onClick={onCancel}>Cancel</Button>}
-        {operation.diagnosticDetails && <p className="col-start-2 col-span-3 whitespace-pre-wrap text-[11px] leading-4 text-destructive/80">{operation.diagnosticDetails}</p>}
+      <div className="grid min-h-8 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 rounded-md border border-destructive/25 bg-destructive/[0.07] px-2.5 py-1.5 text-[11px]" role="alert">
+        <TriangleAlert className="size-3.5 shrink-0 text-destructive" aria-hidden="true" />
+        <span className="text-destructive">{operation.message}</span>
+        <Button type="button" variant="outline" size="xs" onClick={onRetry}>Retry</Button>
+        {operation.diagnosticDetails && <p className="col-start-2 col-span-2 whitespace-pre-wrap text-[10px] leading-4 text-destructive/80">{operation.diagnosticDetails}</p>}
+      </div>
+    )
+  }
+
+  if (operation.status === "restart-required") {
+    return (
+      <div className="flex min-h-8 items-center gap-2 rounded-md border border-amber-500/25 bg-amber-500/[0.07] px-2.5 py-1.5 text-[11px] text-amber-800 dark:text-amber-300" role="status">
+        <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1">{operation.message}</span>
+        <Button type="button" variant="outline" size="xs" onClick={onOpenOverview}>View overview</Button>
       </div>
     )
   }
 
   return (
-    <div className="flex min-h-9 items-center gap-3 rounded-md border border-border bg-muted/40 px-3 py-2" role="status">
-      <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
-      <span className="text-xs">{operation.message}</span>
+    <div className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-muted/25 px-2.5 py-1.5 text-[11px] text-muted-foreground" role="status">
+      <Clock3 className="size-3.5 shrink-0" aria-hidden="true" />
+      <span>{operation.message}</span>
     </div>
   )
 }
 
-export function GitHubPage({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
+export function GitHubPage({
+  source,
+  actions,
+  onOpenOverview,
+}: {
+  source: ApplicationSource
+  actions: ApplicationActions
+  onOpenOverview: () => void
+}) {
   const sourceDraft = useMemo(
     () => draftFromSource(source.github.workspaces, source.github.hostIdentity, source.workspaces),
     [source.github.hostIdentity, source.github.workspaces, source.workspaces],
   )
-  const [savedDraft, setSavedDraft] = useState(() => copyDraft(sourceDraft))
   const [draft, setDraft] = useState(() => copyDraft(sourceDraft))
   const [connectionState, setConnectionState] = useState(source.github.state)
   const [accessEnabled, setAccessEnabled] = useState(source.github.accessEnabled ?? true)
-  const [operation, setOperation] = useState<GitHubManagementOperation>(source.github.operation ?? { status: "idle" })
+  const [workspaceOperations, setWorkspaceOperations] = useState<WorkspaceOperations>(() => operationsFromSource(source.github.workspaceOperations))
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false)
+  const identityIntent = useRef<WorkspaceIdentities>(copyDraft(sourceDraft).identities)
   const catalogAvailable = source.github.repositoryCatalogStatus?.status !== "unavailable"
-  const editorBusy = operation.status === "saving"
-  const editorDisabled = editorBusy || !accessEnabled
+  const applying = Object.values(workspaceOperations).some((operation) => operation.status === "applying")
 
   useEffect(() => {
-    // The bridge-provided GitHub snapshot becomes the new edit baseline.
-    // oxlint-disable-next-line react/set-state-in-effect
-    setSavedDraft(copyDraft(sourceDraft))
+    // The bridge-provided snapshot is authoritative after a completed mutation.
     // oxlint-disable-next-line react/set-state-in-effect
     setDraft(copyDraft(sourceDraft))
+    identityIntent.current = copyDraft(sourceDraft).identities
+  }, [sourceDraft])
+
+  useEffect(() => {
     // oxlint-disable-next-line react/set-state-in-effect
     setConnectionState(source.github.state)
     // oxlint-disable-next-line react/set-state-in-effect
     setAccessEnabled(source.github.accessEnabled ?? true)
     // oxlint-disable-next-line react/set-state-in-effect
-    setOperation(source.github.operation ?? { status: "idle" })
-    // oxlint-disable-next-line react/set-state-in-effect
     setConfirmingDisconnect(false)
-  }, [source.github.accessEnabled, source.github.operation, source.github.state, sourceDraft])
+  }, [source.github.accessEnabled, source.github.state])
 
-  function markDirty(nextDraft: GitHubDraft) {
+  useEffect(() => {
+    // A native replacement publishes the latest desired-versus-runtime state per workspace.
+    // oxlint-disable-next-line react/set-state-in-effect
+    setWorkspaceOperations(operationsFromSource(source.github.workspaceOperations))
+  }, [source.github.workspaceOperations])
+
+  useEffect(() => {
+    const timers = Object.values(workspaceOperations)
+      .filter((operation) => operation.status === "succeeded")
+      .map((operation) => window.setTimeout(() => {
+        setWorkspaceOperations((current) => {
+          if (current[operation.workspace] !== operation) return current
+          const next = { ...current }
+          delete next[operation.workspace]
+          return next
+        })
+      }, 4_000))
+    return () => timers.forEach((timer) => window.clearTimeout(timer))
+  }, [workspaceOperations])
+
+  function applyWorkspaceDraft(workspace: string, nextDraft: GitHubDraft, message: string) {
     setDraft(nextDraft)
-    setOperation(draftsAreEqual(nextDraft, savedDraft)
-      ? { status: "idle" }
-      : { status: "dirty", message: "GitHub access has unsaved changes.", canCancel: true })
+    setWorkspaceOperations((current) => ({
+      ...current,
+      [workspace]: { workspace, status: "applying", message },
+    }))
+    actions.saveGitHubConfiguration?.(configurationFromDraft(source, nextDraft, accessEnabled))
   }
 
-  function cancelChanges() {
-    setDraft(copyDraft(savedDraft))
-    setOperation({ status: "idle" })
-    actions.cancelGitHubConfiguration?.()
+  function updateSelections(workspace: string, selections: GitHubRepositorySelection[]) {
+    applyWorkspaceDraft(workspace, {
+      ...draft,
+      selections: { ...draft.selections, [workspace]: selections },
+    }, "Applying repository access…")
   }
 
-  function saveChanges() {
-    setOperation({ status: "saving", message: `Applying GitHub access to ${source.workspaces.length} sandboxes…`, canCancel: true })
-    actions.saveGitHubConfiguration?.(configurationFromDraft(source, draft, accessEnabled))
+  function updateIdentity(workspace: string, identity: GitHubIdentity) {
+    const previous = draft.identities[workspace]
+    const nextDraft = {
+      ...draft,
+      identities: { ...draft.identities, [workspace]: identity },
+    }
+    setDraft(nextDraft)
+    if (previous?.apply !== identity.apply) commitIdentity(workspace, identity, nextDraft)
   }
 
-  function retrySave() {
-    setOperation({ status: "saving", message: `Applying GitHub access to ${source.workspaces.length} sandboxes…`, canCancel: true })
-    actions.retryGitHubConfiguration?.()
+  function commitIdentity(workspace: string, identity: GitHubIdentity, currentDraft = draft) {
+    if (!identity.name.trim() || !identity.email.trim() || sameIdentity(identityIntent.current[workspace], identity)) return
+    identityIntent.current = { ...identityIntent.current, [workspace]: { ...identity } }
+    applyWorkspaceDraft(workspace, {
+      ...currentDraft,
+      identities: { ...currentDraft.identities, [workspace]: identity },
+    }, "Applying Git identity…")
+  }
+
+  function resetIdentity(workspace: string) {
+    if (!source.github.hostIdentity) return
+    const identity = { ...source.github.hostIdentity, apply: true }
+    const nextDraft = {
+      ...draft,
+      identities: { ...draft.identities, [workspace]: identity },
+    }
+    identityIntent.current = { ...identityIntent.current, [workspace]: identity }
+    applyWorkspaceDraft(workspace, nextDraft, "Applying Git identity…")
+  }
+
+  function retryWorkspace(workspace: string) {
+    setWorkspaceOperations((current) => ({
+      ...current,
+      [workspace]: { workspace, status: "applying", message: "Retrying GitHub access…" },
+    }))
+    actions.retryGitHubConfiguration?.(workspace)
   }
 
   function toggleAccess() {
     const nextEnabled = !accessEnabled
     setAccessEnabled(nextEnabled)
-    setOperation(nextEnabled
-      ? { status: "idle" }
-      : { status: "disabled", message: "Repository access is disabled. Existing selections are preserved." })
     actions.setGitHubAccessEnabled?.(nextEnabled)
   }
 
   function disconnect() {
     setConfirmingDisconnect(false)
     setConnectionState("disconnected")
-    setOperation({ status: "idle" })
+    setWorkspaceOperations({})
     actions.disconnectGitHub?.()
   }
 
@@ -248,8 +276,8 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
         </>
       ) : (
         <>
-          <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
-          <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => setConfirmingDisconnect(true)}>Disconnect</Button>
+          <Button type="button" variant="outline" size="xs" disabled={applying} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
+          <Button type="button" variant="ghost" size="xs" disabled={applying} onClick={() => setConfirmingDisconnect(true)}>Disconnect</Button>
         </>
       )}
     </InlineConfirmation>
@@ -268,34 +296,26 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
           setConnectionState("connecting")
           actions.connectGitHub?.()
         }}
-        onWorkspaceSelectionsChange={(workspace, selections) => markDirty({
-          ...draft,
-          selections: { ...draft.selections, [workspace]: selections },
-        })}
-        onWorkspaceIdentityChange={(workspace, identity) => markDirty({
-          ...draft,
-          identities: { ...draft.identities, [workspace]: identity },
-        })}
-        onResetWorkspaceIdentity={(workspace) => {
-          if (!source.github.hostIdentity) return
-          markDirty({
-            ...draft,
-            identities: {
-              ...draft.identities,
-              [workspace]: { ...source.github.hostIdentity, apply: true },
-            },
-          })
-        }}
+        onWorkspaceSelectionsChange={updateSelections}
+        onWorkspaceIdentityChange={updateIdentity}
+        onCommitWorkspaceIdentity={commitIdentity}
+        onResetWorkspaceIdentity={resetIdentity}
         connectedTitle={`Connected as @${source.github.account ?? "unknown"}`}
         connectedDetail={accessEnabled
           ? "Repository credentials remain scoped to each workspace."
           : "Repository access is disabled. Existing selections are preserved."}
         connectedActions={connectedActions}
         notice={catalogNotice}
-        footer={<GitHubOperationFooter operation={operation} onSave={saveChanges} onCancel={cancelChanges} onRetry={retrySave} />}
-        disabled={editorDisabled}
+        renderWorkspaceNotice={({ name }) => {
+          const operation = workspaceOperations[name]
+          return operation
+            ? <WorkspaceSyncFeedback operation={operation} onRetry={() => retryWorkspace(name)} onOpenOverview={onOpenOverview} />
+            : undefined
+        }}
+        disabled={!accessEnabled}
         repositoryControlsAvailable={catalogAvailable}
-        busy={editorBusy}
+        confirmRepositoryClear
+        busy={applying}
       />
     </div>
   )

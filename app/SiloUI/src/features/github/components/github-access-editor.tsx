@@ -1,6 +1,7 @@
 import { useId, useMemo, useState, type ReactNode } from "react"
 import { Check, GitBranch, Info, LoaderCircle, RotateCcw, Search, Trash2, X } from "lucide-react"
 
+import { InlineConfirmation } from "@/components/inline-confirmation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -162,15 +163,18 @@ export interface GitHubAccessEditorProps {
   onConnect: () => void
   onWorkspaceSelectionsChange: (workspace: string, selections: GitHubRepositorySelection[]) => void
   onWorkspaceIdentityChange: (workspace: string, identity: GitHubIdentity) => void
+  onCommitWorkspaceIdentity?: (workspace: string, identity: GitHubIdentity) => void
   onResetWorkspaceIdentity: (workspace: string) => void
   connectedTitle?: ReactNode
   connectedDetail?: ReactNode
   connectedActions?: ReactNode
   notice?: ReactNode
   renderWorkspaceActions?: (workspace: GitHubWorkspace) => ReactNode
+  renderWorkspaceNotice?: (workspace: GitHubWorkspace) => ReactNode
   footer?: ReactNode
   disabled?: boolean
   repositoryControlsAvailable?: boolean
+  confirmRepositoryClear?: boolean
   busy?: boolean
 }
 
@@ -184,17 +188,22 @@ export function GitHubAccessEditor({
   onConnect,
   onWorkspaceSelectionsChange,
   onWorkspaceIdentityChange,
+  onCommitWorkspaceIdentity,
   onResetWorkspaceIdentity,
   connectedTitle = "Connected to GitHub",
   connectedDetail = "Repository credentials remain scoped to each workspace.",
   connectedActions,
   notice,
   renderWorkspaceActions,
+  renderWorkspaceNotice,
   footer,
   disabled = false,
   repositoryControlsAvailable = true,
+  confirmRepositoryClear = false,
   busy = false,
 }: GitHubAccessEditorProps) {
+  const [confirmingClearWorkspace, setConfirmingClearWorkspace] = useState<string | null>(null)
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       {connectionState === "disconnected" && (
@@ -248,9 +257,13 @@ export function GitHubAccessEditor({
             const selections = workspaceSelections[name] ?? []
             const identity = workspaceIdentities[name] ?? { name: "", email: "", apply: true }
             const workspaceActions = renderWorkspaceActions?.(workspace)
+            const workspaceNotice = renderWorkspaceNotice?.(workspace)
+            const workspaceDisabled = disabled
+            const clearConfirmationVisible = confirmRepositoryClear && confirmingClearWorkspace === name
             return (
               <WorkspaceDisclosure key={name} name={name} actions={workspaceActions}>
                   <div className="grid gap-3 px-3 pb-3">
+                    {workspaceNotice}
                     <div
                       role="group"
                       aria-label={`Git identity for ${name}`}
@@ -276,9 +289,13 @@ export function GitHubAccessEditor({
                         autoComplete="off"
                         className="h-7 min-w-0 flex-[0.8] rounded-md px-2 text-[11px] md:text-[11px]"
                         placeholder="Name"
-                        disabled={disabled}
+                        disabled={workspaceDisabled}
                         value={identity.name}
                         onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
+                        onBlur={() => onCommitWorkspaceIdentity?.(name, identity)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur()
+                        }}
                       />
                       <Input
                         aria-label={`Git email for ${name}`}
@@ -287,15 +304,19 @@ export function GitHubAccessEditor({
                         inputMode="email"
                         placeholder="Email"
                         type="email"
-                        disabled={disabled}
+                        disabled={workspaceDisabled}
                         value={identity.email}
                         onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, email: event.target.value })}
+                        onBlur={() => onCommitWorkspaceIdentity?.(name, identity)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur()
+                        }}
                       />
                       <label className="flex shrink-0 items-center gap-1 text-[11px]">
                         <Checkbox
                           aria-label={`Apply Git identity to ${name}`}
                           checked={identity.apply}
-                          disabled={disabled}
+                          disabled={workspaceDisabled}
                           onCheckedChange={(checked) => onWorkspaceIdentityChange(name, { ...identity, apply: checked === true })}
                         />
                         Apply
@@ -314,7 +335,7 @@ export function GitHubAccessEditor({
                                 size="icon-xs"
                                 aria-label={`Reset Git identity for ${name}`}
                                 aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
-                                disabled={disabled || !currentHostGitIdentity}
+                                disabled={workspaceDisabled || !currentHostGitIdentity}
                                 onClick={() => onResetWorkspaceIdentity(name)}
                               >
                                 <RotateCcw aria-hidden="true" className="size-3" />
@@ -332,7 +353,7 @@ export function GitHubAccessEditor({
                             workspace={name}
                             repositoryOptions={repositoryOptions}
                             selectedRepositories={selections}
-                            disabled={disabled}
+                            disabled={workspaceDisabled}
                             onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
                           />
                         )}
@@ -354,24 +375,38 @@ export function GitHubAccessEditor({
                                 </TooltipProvider>
                               </span>
                               <span role="columnheader" className="flex justify-start">
-                                <TooltipProvider delayDuration={150}>
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon-xs"
-                                        className="size-5"
-                                        aria-label={`Clear repositories from ${name}`}
-                                        disabled={disabled || !repositoryControlsAvailable}
-                                        onClick={() => onWorkspaceSelectionsChange(name, [])}
-                                      >
-                                        <Trash2 aria-hidden="true" className="size-3" />
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>{`Clear repositories from ${name}`}</TooltipContent>
-                                  </Tooltip>
-                                </TooltipProvider>
+                                <InlineConfirmation
+                                  active={clearConfirmationVisible}
+                                  onDismiss={() => setConfirmingClearWorkspace(null)}
+                                >
+                                  <TooltipProvider delayDuration={150}>
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          type="button"
+                                          variant={clearConfirmationVisible ? "destructive" : "ghost"}
+                                          size="icon-xs"
+                                          className="size-5"
+                                          aria-label={clearConfirmationVisible ? `Confirm clearing repositories from ${name}` : `Clear repositories from ${name}`}
+                                          disabled={workspaceDisabled || !repositoryControlsAvailable}
+                                          onClick={() => {
+                                            if (confirmRepositoryClear && !clearConfirmationVisible) {
+                                              setConfirmingClearWorkspace(name)
+                                              return
+                                            }
+                                            setConfirmingClearWorkspace(null)
+                                            onWorkspaceSelectionsChange(name, [])
+                                          }}
+                                        >
+                                          {clearConfirmationVisible
+                                            ? <Check aria-hidden="true" className="size-3" />
+                                            : <Trash2 aria-hidden="true" className="size-3" />}
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{clearConfirmationVisible ? `Confirm clearing repositories from ${name}` : `Clear repositories from ${name}`}</TooltipContent>
+                                    </Tooltip>
+                                  </TooltipProvider>
+                                </InlineConfirmation>
                               </span>
                             </div>
                             {selections.map((selection) => (
@@ -381,7 +416,7 @@ export function GitHubAccessEditor({
                                   <Checkbox
                                     aria-label={`Allow pushes for ${selection.repository}`}
                                     checked={selection.allowPushes}
-                                    disabled={disabled || !repositoryControlsAvailable}
+                                    disabled={workspaceDisabled || !repositoryControlsAvailable}
                                     onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
                                       item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
                                     )))}
@@ -393,7 +428,7 @@ export function GitHubAccessEditor({
                                     variant="ghost"
                                     size="icon-xs"
                                     aria-label={`Remove ${selection.repository} from ${name}`}
-                                    disabled={disabled || !repositoryControlsAvailable}
+                                    disabled={workspaceDisabled || !repositoryControlsAvailable}
                                     onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
                                   >
                                     <X aria-hidden="true" />

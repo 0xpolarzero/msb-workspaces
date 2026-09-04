@@ -175,13 +175,16 @@ export interface ApplicationGitHubConfiguration {
   workspaces: readonly ApplicationGitHubWorkspacePolicy[]
 }
 
-export type GitHubManagementOperation =
-  | { status: "idle" }
-  | { status: "dirty"; message: string; canCancel: true }
-  | { status: "saving"; message: string; canCancel: true }
-  | { status: "succeeded"; message: string }
-  | { status: "failed"; message: string; canRetry: true; canCancel: true; diagnosticDetails?: string }
-  | { status: "disabled"; message: string }
+export type GitHubWorkspaceOperation = {
+  workspace: string
+  message: string
+} & (
+  | { status: "applying" }
+  | { status: "succeeded" }
+  | { status: "failed"; canRetry: true; diagnosticDetails?: string }
+  | { status: "applies-on-next-start" }
+  | { status: "restart-required" }
+)
 
 export type GitHubRepositoryCatalogStatus =
   | { status: "available" }
@@ -202,7 +205,7 @@ export interface ApplicationSource {
     repositoryCatalogStatus?: GitHubRepositoryCatalogStatus
     hostIdentity?: ApplicationGitIdentity | null
     workspaces?: readonly ApplicationGitHubWorkspacePolicy[]
-    operation?: GitHubManagementOperation
+    workspaceOperations?: readonly GitHubWorkspaceOperation[]
   }
   secrets: ApplicationSecret[]
   backup: {
@@ -234,7 +237,6 @@ export interface ApplicationActions {
   disconnectGitHub?: () => void
   setGitHubAccessEnabled?: (enabled: boolean) => void
   saveGitHubConfiguration?: (configuration: ApplicationGitHubConfiguration) => void
-  cancelGitHubConfiguration?: () => void
-  retryGitHubConfiguration?: () => void
+  retryGitHubConfiguration?: (workspace?: string) => void
   retryGitHubRepositoryCatalog?: () => void
 }

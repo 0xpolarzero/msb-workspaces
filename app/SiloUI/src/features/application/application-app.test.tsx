@@ -23,7 +23,6 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
     disconnectGitHub: vi.fn(),
     setGitHubAccessEnabled: vi.fn(),
     saveGitHubConfiguration: vi.fn(),
-    cancelGitHubConfiguration: vi.fn(),
     retryGitHubConfiguration: vi.fn(),
     retryGitHubRepositoryCatalog: vi.fn(),
   }
@@ -72,6 +71,18 @@ describe("application", () => {
     expect(sandboxList.closest('[data-slot="scroll-area"]')).toHaveClass("max-h-full", "min-h-0")
     expect(sandboxList.closest('[data-slot="scroll-area"]')).not.toHaveClass("flex-1")
     expect(screen.queryByRole("group", { name: "Settings sections" })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ["warning", "Sandbox warning", "lucide-triangle-alert"],
+    ["error", "Sandbox error", "lucide-circle-alert"],
+  ] as const)("marks Overview in the sidebar when a sandbox has a %s", (mode, label, iconClass) => {
+    renderApplication("running", applicationSourceForScenario("running", undefined, mode))
+
+    const overview = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: /Overview/ })
+    const indicator = within(overview).getByRole("img", { name: label })
+    expect(indicator).toBeVisible()
+    expect(indicator.querySelector("svg")).toHaveClass(iconClass)
   })
 
   it("lets each caret expand or collapse without navigating", async () => {
@@ -979,7 +990,7 @@ describe("application", () => {
     expect(github.getByRole("group", { name: "Git identity for playgrounds" })).toBeVisible()
   })
 
-  it("searches and edits GitHub access, exposes dirty actions, and rolls Cancel back", async () => {
+  it("applies repository changes immediately and commits identity fields on blur", async () => {
     const { actions, user } = renderApplication()
     await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
     const github = within(appPanel("GitHub"))
@@ -987,22 +998,17 @@ describe("application", () => {
     const name = github.getByLabelText("Git name for playgrounds")
     await user.clear(name)
     await user.type(name, "Morgan Example")
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    expect(github.getByRole("button", { name: "Cancel" })).toBeVisible()
-    await user.click(within(appNavigation()).getByRole("button", { name: "Backup" }))
-    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
-    expect(name).toHaveValue("Morgan Example")
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    await user.click(github.getByRole("button", { name: "Cancel" }))
-    expect(actions.cancelGitHubConfiguration).toHaveBeenCalledOnce()
-    expect(name).toHaveValue("Taylor Example")
-    expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
+    expect(actions.saveGitHubConfiguration).not.toHaveBeenCalled()
+    await user.tab()
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledOnce()
+    expect(github.getByRole("status")).toHaveTextContent("Applying Git identity…")
 
     const picker = github.getByRole("combobox", { name: "Add repository to playgrounds" })
     await user.type(picker, "design")
     expect(screen.getByRole("option", { name: "acme/design-system" })).toBeVisible()
     expect(screen.queryByRole("option", { name: "acme/platform-tools" })).not.toBeInTheDocument()
     await user.click(screen.getByRole("option", { name: "acme/design-system" }))
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledTimes(2)
     await user.click(picker)
     expect(screen.queryByRole("option", { name: "acme/design-system" })).not.toBeInTheDocument()
 
@@ -1010,12 +1016,11 @@ describe("application", () => {
     const pushes = within(selected).getByRole("checkbox", { name: "Allow pushes for acme/platform-tools" })
     await user.click(pushes)
     expect(pushes).toBeChecked()
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledTimes(3)
     await user.click(within(selected).getByRole("button", { name: "Remove acme/design-system from playgrounds" }))
     expect(within(selected).queryByText("acme/design-system")).not.toBeInTheDocument()
-
-    await user.click(github.getByRole("button", { name: "Save changes" }))
-    expect(actions.saveGitHubConfiguration).toHaveBeenCalledOnce()
-    expect(actions.saveGitHubConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledTimes(4)
+    expect(actions.saveGitHubConfiguration).toHaveBeenLastCalledWith(expect.objectContaining({
       accessEnabled: true,
       workspaces: expect.arrayContaining([
         expect.objectContaining({
@@ -1024,45 +1029,8 @@ describe("application", () => {
         }),
       ]),
     }))
-  })
-
-  it("removes GitHub Save and Cancel when edits return to the saved configuration", async () => {
-    const { user } = renderApplication()
-    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
-    const github = within(appPanel("GitHub"))
-    const expectClean = () => {
-      expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
-      expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
-    }
-
-    const name = github.getByLabelText("Git name for dev")
-    await user.clear(name)
-    await user.type(name, "Morgan Example")
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    await user.clear(name)
-    await user.type(name, "Taylor Example")
-    expectClean()
-
-    const apply = github.getByRole("checkbox", { name: "Apply Git identity to dev" })
-    await user.click(apply)
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    await user.click(apply)
-    expectClean()
-
-    const allowPushes = github.getByRole("checkbox", { name: "Allow pushes for acme/silo" })
-    await user.click(allowPushes)
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    await user.click(allowPushes)
-    expectClean()
-
-    await user.click(github.getByRole("button", { name: "Remove acme/silo from dev" }))
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    const picker = github.getByRole("combobox", { name: "Add repository to dev" })
-    await user.type(picker, "acme/silo")
-    await user.click(screen.getByRole("option", { name: "acme/silo" }))
-    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
-    await user.click(github.getByRole("checkbox", { name: "Allow pushes for acme/silo" }))
-    expectClean()
+    expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
+    expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
   })
 
   it("keeps Git identity editable through disconnected and connecting GitHub states", async () => {
@@ -1121,18 +1089,25 @@ describe("application", () => {
     expect(github.getByRole("status")).toHaveTextContent("Connecting to GitHub…")
   })
 
-  it("supports disabling access and clearing one sandbox's repositories", async () => {
-    const { unmount, user } = renderApplication()
+  it("applies access toggles immediately and confirms clearing one sandbox's repositories", async () => {
+    const { actions, unmount, user } = renderApplication()
     await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
     const github = within(appPanel("GitHub"))
 
     await user.click(github.getByRole("button", { name: "Clear repositories from dev" }))
+    expect(github.getByRole("table", { name: "Selected repositories for dev" })).toBeVisible()
+    expect(github.getByRole("button", { name: "Confirm clearing repositories from dev" })).toBeVisible()
+    await user.keyboard("{Escape}")
+    expect(github.queryByRole("button", { name: "Confirm clearing repositories from dev" })).not.toBeInTheDocument()
+    await user.click(github.getByRole("button", { name: "Clear repositories from dev" }))
+    await user.click(github.getByRole("button", { name: "Confirm clearing repositories from dev" }))
     expect(github.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
     expect(github.getByRole("table", { name: "Selected repositories for playgrounds" })).toBeVisible()
     expect(github.getByRole("table", { name: "Selected repositories for personal" })).toBeVisible()
-    expect(github.getByText("GitHub access has unsaved changes.")).toBeVisible()
-    await user.click(github.getByRole("button", { name: "Cancel" }))
-    expect(github.getByRole("table", { name: "Selected repositories for dev" })).toBeVisible()
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledOnce()
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      workspaces: expect.arrayContaining([expect.objectContaining({ workspace: "dev", repositories: [] })]),
+    }))
     unmount()
 
     const disabled = renderApplication(
@@ -1148,12 +1123,11 @@ describe("application", () => {
     expect(disabled.actions.setGitHubAccessEnabled).toHaveBeenCalledWith(true)
   })
 
-  it("shows concise GitHub save progress, success, and actionable failure fixtures", async () => {
+  it("shows per-sandbox GitHub apply progress, success, and actionable failure fixtures", async () => {
     const states = [
-      { mode: "dirty" as const, role: "status" as const, message: "GitHub access has unsaved changes.", buttons: ["Cancel", "Save changes"] },
-      { mode: "saving" as const, role: "status" as const, message: "Applying GitHub access to 3 sandboxes…", buttons: ["Cancel"] },
-      { mode: "succeeded" as const, role: "status" as const, message: "GitHub access saved.", buttons: [] },
-      { mode: "failed" as const, role: "alert" as const, message: "GitHub access could not be applied to dev.", buttons: ["Retry", "Cancel"] },
+      { mode: "applying" as const, role: "status" as const, message: "Applying repository access…", buttons: [] },
+      { mode: "succeeded" as const, role: "status" as const, message: "Repository access applied.", buttons: [] },
+      { mode: "failed" as const, role: "alert" as const, message: "Repository access could not be applied.", buttons: ["Retry"] },
     ]
 
     for (const state of states) {
@@ -1161,21 +1135,61 @@ describe("application", () => {
       const application = renderApplication("running", source)
       await application.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
       const github = within(appPanel("GitHub"))
-      const feedback = state.mode === "dirty" ? github.getByText(state.message) : github.getByRole(state.role)
+      const feedback = github.getByRole(state.role)
       expect(feedback).toHaveTextContent(state.message)
       for (const name of state.buttons) expect(github.getByRole("button", { name })).toBeVisible()
 
-      if (state.mode === "saving") {
+      if (state.mode === "applying") {
         expect(github.getByRole("region", { name: "Sandbox Git identity and repository access" })).toHaveAttribute("aria-busy", "true")
-        await application.user.click(github.getByRole("button", { name: "Cancel" }))
-        expect(application.actions.cancelGitHubConfiguration).toHaveBeenCalledOnce()
       }
       if (state.mode === "failed") {
         await application.user.click(github.getByRole("button", { name: "Retry" }))
-        expect(application.actions.retryGitHubConfiguration).toHaveBeenCalledOnce()
+        expect(application.actions.retryGitHubConfiguration).toHaveBeenCalledWith("dev")
       }
       application.unmount()
     }
+  })
+
+  it("clears successful GitHub apply feedback after four seconds", () => {
+    vi.useFakeTimers()
+    const source = applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "succeeded")
+    const application = renderApplication("running", source)
+
+    try {
+      fireEvent.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+      const github = within(appPanel("GitHub"))
+      expect(github.getByRole("status")).toHaveTextContent("Repository access applied.")
+
+      act(() => vi.advanceTimersByTime(4_000))
+
+      expect(github.queryByRole("status")).not.toBeInTheDocument()
+    } finally {
+      application.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it("distinguishes deferred local apply from a real restart requirement", async () => {
+    const deferred = renderApplication(
+      "running",
+      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "applies-on-next-start"),
+    )
+    await deferred.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    expect(within(appPanel("GitHub")).getByRole("status")).toHaveTextContent("Saved. Applies when this sandbox next starts.")
+    expect(within(appPanel("GitHub")).queryByRole("button", { name: "View overview" })).not.toBeInTheDocument()
+    deferred.unmount()
+
+    const restart = renderApplication(
+      "running",
+      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "restart-required"),
+    )
+    await restart.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const github = within(appPanel("GitHub"))
+    expect(github.getByRole("status")).toHaveTextContent("Restart this sandbox to finish applying")
+    await restart.user.click(github.getByRole("button", { name: "View overview" }))
+    const overview = within(appPanel("Sandboxes"))
+    expect(overview.getByText(/GitHub changes need a restart/)).toBeVisible()
+    expect(overview.getByRole("button", { name: "Restart dev" })).toBeVisible()
   })
 
   it("explains unavailable identity and repository catalog data without disabling manual identity", async () => {

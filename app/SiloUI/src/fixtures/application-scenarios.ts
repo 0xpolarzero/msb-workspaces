@@ -3,7 +3,7 @@ import type {
   ApplicationGitHubWorkspacePolicy,
   ApplicationSource,
   ApplicationWorkspace,
-  GitHubManagementOperation,
+  GitHubWorkspaceOperation,
   RepositoryPushOperation,
   RuntimeRepairPresentation,
   SandboxConfigurationOperation,
@@ -47,10 +47,11 @@ export type RepositoryPushFixtureMode = (typeof repositoryPushFixtureModes)[numb
 
 export const githubManagementFixtureModes = [
   "idle",
-  "dirty",
-  "saving",
+  "applying",
   "succeeded",
   "failed",
+  "applies-on-next-start",
+  "restart-required",
   "disabled",
   "connected-empty",
   "missing-host-identity",
@@ -363,34 +364,31 @@ const githubWorkspacePolicies: readonly ApplicationGitHubWorkspacePolicy[] = [
   },
 ]
 
-function githubManagementOperationForFixture(mode?: GitHubManagementFixtureMode): GitHubManagementOperation {
-  if (!mode || mode === "idle") return { status: "idle" }
-  if (mode === "dirty") {
-    return { status: "dirty", message: "GitHub access has unsaved changes.", canCancel: true }
-  }
-  if (mode === "saving") {
-    return { status: "saving", message: "Applying GitHub access to 3 sandboxes…", canCancel: true }
+function githubWorkspaceOperationsForFixture(mode?: GitHubManagementFixtureMode): readonly GitHubWorkspaceOperation[] {
+  if (!mode || mode === "idle" || mode === "disabled" || mode === "connected-empty" || mode === "missing-host-identity" || mode === "catalog-unavailable") return []
+  if (mode === "applying") {
+    return [{ workspace: "dev", status: "applying", message: "Applying repository access…" }]
   }
   if (mode === "succeeded") {
-    return { status: "succeeded", message: "GitHub access saved." }
+    return [{ workspace: "dev", status: "succeeded", message: "Repository access applied." }]
   }
   if (mode === "failed") {
-    return {
+    return [{
+      workspace: "dev",
       status: "failed",
-      message: "GitHub access could not be applied to dev.",
+      message: "Repository access could not be applied.",
       canRetry: true,
-      canCancel: true,
       diagnosticDetails: [
         "Sandbox: dev",
         "Repository: acme/silo",
         "The scoped repository grant could not be verified.",
       ].join("\n"),
-    }
+    }]
   }
-  if (mode === "disabled") {
-    return { status: "disabled", message: "Repository access is disabled. Existing selections are preserved." }
+  if (mode === "applies-on-next-start") {
+    return [{ workspace: "playgrounds", status: "applies-on-next-start", message: "Saved. Applies when this sandbox next starts." }]
   }
-  return { status: "idle" }
+  return [{ workspace: "dev", status: "restart-required", message: "Changes are ready. Restart this sandbox to finish applying them." }]
 }
 
 function githubWorkspacePoliciesForFixture(mode?: GitHubManagementFixtureMode): readonly ApplicationGitHubWorkspacePolicy[] {
@@ -418,9 +416,13 @@ export function applicationSourceForScenario(
   githubManagementMode?: GitHubManagementFixtureMode,
 ): ApplicationSource {
   const githubConnectionState = githubState ?? "connected"
-  const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode).map((workspace) => (
+  const workspaces: ApplicationWorkspace[] = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode).map((workspace) => (
     repositoryPushMode === "succeeded" && workspace.machine.name === "dev"
       ? { ...workspace, repositories: workspace.repositories.map((repository) => repository.path === "acme/silo" ? { ...repository, ahead: 0 } : repository) }
+      : githubManagementMode === "restart-required" && workspace.machine.name === "dev"
+        ? { ...workspace, attention: { level: "warning", message: "GitHub changes need a restart." } }
+      : githubManagementMode === "failed" && workspace.machine.name === "dev"
+        ? { ...workspace, attention: { level: "error", message: "GitHub access could not be applied." } }
       : workspace
   ))
   return {
@@ -460,7 +462,7 @@ export function applicationSourceForScenario(
         ? null
         : { name: "Taylor Example", email: "taylor@example.com" },
       workspaces: githubWorkspacePoliciesForFixture(githubManagementMode),
-      operation: githubManagementOperationForFixture(githubManagementMode),
+      workspaceOperations: githubWorkspaceOperationsForFixture(githubManagementMode),
     },
     secrets: [
       { id: "package-token", name: "PACKAGE_TOKEN", workspaces: ["dev", "playgrounds"], allowedDomains: ["registry.npmjs.org"], state: "active" },

@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react"
-import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
+import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal, TriangleAlert } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ActiveRuntimeRepairPresentation, ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
@@ -120,12 +121,14 @@ function SubNavigation<Section extends string>({
   items,
   section,
   active,
+  attention,
   onSelect,
 }: {
   label: string
   items: ReadonlyArray<{ id: Section; label: string; icon: typeof Boxes }>
   section: Section
   active: boolean
+  attention?: { section: Section; level: "warning" | "error" } | null
   onSelect: (section: Section) => void
 }) {
   return (
@@ -142,7 +145,28 @@ function SubNavigation<Section extends string>({
           )}
         >
           <Icon className="size-3.5" />
-          {itemLabel}
+          <span className="md:flex-1 md:text-left">{itemLabel}</span>
+          {attention?.section === id && (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    role="img"
+                    aria-label={attention.level === "error" ? "Sandbox error" : "Sandbox warning"}
+                    className={cn(
+                      "hidden size-5 shrink-0 place-items-center rounded-sm md:grid",
+                      attention.level === "error" ? "text-destructive" : "text-amber-600 dark:text-amber-400",
+                    )}
+                  >
+                    {attention.level === "error"
+                      ? <CircleAlert aria-hidden="true" className="size-3.5" />
+                      : <TriangleAlert aria-hidden="true" className="size-3.5" />}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{attention.level === "error" ? "A sandbox needs attention" : "A sandbox has a warning"}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
         </button>
       ))}
     </div>
@@ -154,6 +178,7 @@ export function ApplicationShell({
   workspaceSection,
   settingsSection,
   systemIssueStatus,
+  workspaceAttention,
   onTabChange,
   onWorkspaceSectionChange,
   onSettingsSectionChange,
@@ -163,6 +188,7 @@ export function ApplicationShell({
   workspaceSection: WorkspaceSection
   settingsSection: SettingsSection
   systemIssueStatus: ActiveRuntimeRepairPresentation["status"] | null
+  workspaceAttention: "warning" | "error" | null
   onTabChange: (tab: ApplicationTab) => void
   onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
@@ -201,6 +227,7 @@ export function ApplicationShell({
                   items={workspaceItems}
                   section={workspaceSection}
                   active={activeTab === "workspaces"}
+                  attention={workspaceAttention ? { section: "overview", level: workspaceAttention } : null}
                   onSelect={(section) => {
                     onWorkspaceSectionChange(section)
                     selectTab("workspaces")

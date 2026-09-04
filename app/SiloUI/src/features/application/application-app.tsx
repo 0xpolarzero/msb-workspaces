@@ -13,6 +13,12 @@ import { SystemIssuePage } from "@/features/application/pages/system-issue-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
 import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
+function workspaceAttentionLevel(workspaces: ApplicationSource["workspaces"]): "warning" | "error" | null {
+  if (workspaces.some((workspace) => workspace.state === "failed" || workspace.attention?.level === "error")) return "error"
+  if (workspaces.some((workspace) => workspace.attention?.level === "warning")) return "warning"
+  return null
+}
+
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
@@ -135,6 +141,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       workspaceSection={visibleWorkspaceSection}
       settingsSection={settingsSection}
       systemIssueStatus={activeRuntimeRepair?.status ?? null}
+      workspaceAttention={workspaceAttentionLevel(workspaces)}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
@@ -158,7 +165,16 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
           />
         )}
       </section>
-      <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"} className="h-full min-h-0 overflow-hidden"><GitHubPage source={applicationSource} actions={actions} /></section>
+      <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"} className="h-full min-h-0 overflow-hidden">
+        <GitHubPage
+          source={applicationSource}
+          actions={actions}
+          onOpenOverview={() => {
+            setWorkspaceSection("overview")
+            setActiveTab("workspaces")
+          }}
+        />
+      </section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={visibleTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
       <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} /></section>
       {activeRuntimeRepair && (
