@@ -62,6 +62,7 @@ export function SandboxListRow({
   leading,
   icon,
   actions,
+  actionsClassName,
   hoverActions,
   tone,
 }: {
@@ -73,6 +74,7 @@ export function SandboxListRow({
   leading?: ReactNode
   icon?: ReactNode
   actions?: ReactNode
+  actionsClassName?: string
   hoverActions?: ReactNode
   tone?: SandboxRowTone
 }) {
@@ -112,7 +114,7 @@ export function SandboxListRow({
           {hoverActions}
         </div>
       )}
-      {actions && <div className="flex shrink-0 items-center gap-0.5" aria-label={`Controls for ${name}`}>{actions}</div>}
+      {actions && <div className={cn("flex shrink-0 items-center gap-0.5", actionsClassName)} aria-label={`Controls for ${name}`}>{actions}</div>}
     </div>
   )
 }

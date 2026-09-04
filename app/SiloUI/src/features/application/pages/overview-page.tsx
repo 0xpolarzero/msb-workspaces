@@ -251,6 +251,7 @@ export function OverviewPage({
               actions: failed && configuration.retryable
                 ? <SandboxAction label={`Retry ${machine.name} configuration`} onClick={() => actions.retryMachineConfiguration(machine.name)}><RotateCw /></SandboxAction>
                 : undefined,
+              actionsClassName: "mt-1 self-start",
             }
           }
           return {

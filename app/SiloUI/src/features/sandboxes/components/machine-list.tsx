@@ -33,6 +33,7 @@ export interface MachineRowPresentation {
   icon?: ReactNode
   iconState?: SandboxIconState
   actions?: ReactNode
+  actionsClassName?: string
   tone?: SandboxRowTone
   busy?: boolean
   suppressInteractions?: boolean
@@ -402,6 +403,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                         <GripVertical className="size-4" aria-hidden="true" />
                       </span>}
                       actions={presentation?.actions}
+                      actionsClassName={presentation?.actionsClassName}
                       hoverActions={presentation?.suppressInteractions ? undefined : <>
                         <SandboxAction label={`Edit ${machine.name}`} disabled={interactionDisabled} onClick={() => startEdit(machine)}><Pencil /></SandboxAction>
                         <SandboxAction label={`Duplicate ${machine.name}`} disabled={interactionDisabled} onClick={() => startDuplicate(machine)}><Copy /></SandboxAction>
