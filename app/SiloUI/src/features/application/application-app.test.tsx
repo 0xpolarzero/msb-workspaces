@@ -419,9 +419,12 @@ describe("application", () => {
   })
 
   it("puts a retryable configuration failure and recovery inside its sandbox", async () => {
-    const { actions, user } = renderApplication("running", applicationSourceForScenario("running", undefined, undefined, "workspace-error"))
+    const { actions, user } = renderApplication("running", applicationSourceForScenario("running", undefined, "warning", "workspace-error"))
     const overview = within(appPanel("Sandboxes"))
-    const row = overview.getByText("scratch").closest("li") as HTMLElement
+    const list = overview.getByRole("list", { name: "Configured sandboxes" })
+    const rows = within(list).getAllByRole("listitem")
+    expect(rows.map((item) => item.getAttribute("data-sandbox-name"))).toEqual(["scratch", "dev", "playgrounds", "personal"])
+    const row = rows[0]
 
     expect(row).not.toHaveAttribute("aria-busy")
     expect(within(row).getByRole("alert")).toHaveTextContent("Networking failed")

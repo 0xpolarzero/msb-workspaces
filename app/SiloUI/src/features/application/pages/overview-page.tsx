@@ -238,7 +238,13 @@ export function OverviewPage({
         onMachinesChange={onMachinesChange}
         interactionDisabled={configurationLocked}
         summary={configurationOperation ? <>{source.workspaces.length} configured · Applying sandbox changes</> : undefined}
-        sortPriority={(machine) => attentionPriority[iconState(workspaces.get(machine.id))]}
+        sortPriority={(machine) => {
+          const workspace = workspaces.get(machine.id)
+          const configuration = workspace && configurationOperation
+            ? configurationRowView(workspace, committedWorkspaces.get(machine.id), configurationOperation)
+            : undefined
+          return attentionPriority[configuration?.status === "failed" ? "error" : iconState(workspace)]
+        }}
         getRowPresentation={(machine) => {
           const workspace = workspaces.get(machine.id)
           const state = workspace?.state ?? "stopped"
