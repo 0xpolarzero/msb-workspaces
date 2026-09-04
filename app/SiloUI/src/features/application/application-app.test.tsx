@@ -74,15 +74,13 @@ describe("application", () => {
   })
 
   it.each([
-    ["warning", "Sandbox warning", "lucide-triangle-alert"],
-    ["error", "Sandbox error", "lucide-circle-alert"],
-  ] as const)("marks Overview in the sidebar when a sandbox has a %s", (mode, label, iconClass) => {
+    ["warning", "3 sandbox warnings", "3"],
+    ["error", "3 sandbox errors", "3"],
+  ] as const)("counts %s sandboxes next to Overview", (mode, label, count) => {
     renderApplication("running", applicationSourceForScenario("running", undefined, mode))
 
     const overview = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: /Overview/ })
-    const indicator = within(overview).getByRole("img", { name: label })
-    expect(indicator).toBeVisible()
-    expect(indicator.querySelector("svg")).toHaveClass(iconClass)
+    expect(within(overview).getByRole("status", { name: label })).toHaveTextContent(count)
   })
 
   it("lets each caret expand or collapse without navigating", async () => {
@@ -582,6 +580,10 @@ describe("application", () => {
     expect(within(rows[1]).getByText(/Storage is almost full/)).toBeVisible()
     expect(overview.queryByLabelText("Sandbox attention")).not.toBeInTheDocument()
     expect(overview.queryByText(/needs attention/i)).not.toBeInTheDocument()
+
+    const overviewNavigation = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: /Overview/ })
+    expect(within(overviewNavigation).getByRole("status", { name: "1 sandbox error" })).toHaveTextContent("1")
+    expect(within(overviewNavigation).getByRole("status", { name: "1 sandbox warning" })).toHaveTextContent("1")
 
     await user.click(within(rows[0]).getByRole("button", { name: "Duplicate error" }))
     expect(within(list).getAllByRole("listitem").map((row) => row.getAttribute("data-sandbox-name"))).toEqual(["error", "error-copy", "warning", "normal"])
@@ -1167,29 +1169,6 @@ describe("application", () => {
       application.unmount()
       vi.useRealTimers()
     }
-  })
-
-  it("distinguishes deferred local apply from a real restart requirement", async () => {
-    const deferred = renderApplication(
-      "running",
-      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "applies-on-next-start"),
-    )
-    await deferred.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
-    expect(within(appPanel("GitHub")).getByRole("status")).toHaveTextContent("Saved. Applies when this sandbox next starts.")
-    expect(within(appPanel("GitHub")).queryByRole("button", { name: "View overview" })).not.toBeInTheDocument()
-    deferred.unmount()
-
-    const restart = renderApplication(
-      "running",
-      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "restart-required"),
-    )
-    await restart.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
-    const github = within(appPanel("GitHub"))
-    expect(github.getByRole("status")).toHaveTextContent("Restart this sandbox to finish applying")
-    await restart.user.click(github.getByRole("button", { name: "View overview" }))
-    const overview = within(appPanel("Sandboxes"))
-    expect(overview.getByText(/GitHub changes need a restart/)).toBeVisible()
-    expect(overview.getByRole("button", { name: "Restart dev" })).toBeVisible()
   })
 
   it("explains unavailable identity and repository catalog data without disabling manual identity", async () => {

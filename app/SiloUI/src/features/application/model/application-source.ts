@@ -182,8 +182,6 @@ export type GitHubWorkspaceOperation = {
   | { status: "applying" }
   | { status: "succeeded" }
   | { status: "failed"; canRetry: true; diagnosticDetails?: string }
-  | { status: "applies-on-next-start" }
-  | { status: "restart-required" }
 )
 
 export type GitHubRepositoryCatalogStatus =

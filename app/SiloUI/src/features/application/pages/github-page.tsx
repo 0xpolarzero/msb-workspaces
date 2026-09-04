@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Check, Clock3, Loader2, TriangleAlert } from "lucide-react"
+import { Check, Loader2, TriangleAlert } from "lucide-react"
 
 import { InlineConfirmation } from "@/components/inline-confirmation"
 import { Button } from "@/components/ui/button"
@@ -81,11 +81,9 @@ function sameIdentity(left: GitHubIdentity | undefined, right: GitHubIdentity) {
 function WorkspaceSyncFeedback({
   operation,
   onRetry,
-  onOpenOverview,
 }: {
   operation: GitHubWorkspaceOperation
   onRetry: () => void
-  onOpenOverview: () => void
 }) {
   if (operation.status === "applying") {
     return (
@@ -115,33 +113,14 @@ function WorkspaceSyncFeedback({
       </div>
     )
   }
-
-  if (operation.status === "restart-required") {
-    return (
-      <div className="flex min-h-8 items-center gap-2 rounded-md border border-amber-500/25 bg-amber-500/[0.07] px-2.5 py-1.5 text-[11px] text-amber-800 dark:text-amber-300" role="status">
-        <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
-        <span className="min-w-0 flex-1">{operation.message}</span>
-        <Button type="button" variant="outline" size="xs" onClick={onOpenOverview}>View overview</Button>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex min-h-8 items-center gap-2 rounded-md border border-border bg-muted/25 px-2.5 py-1.5 text-[11px] text-muted-foreground" role="status">
-      <Clock3 className="size-3.5 shrink-0" aria-hidden="true" />
-      <span>{operation.message}</span>
-    </div>
-  )
 }
 
 export function GitHubPage({
   source,
   actions,
-  onOpenOverview,
 }: {
   source: ApplicationSource
   actions: ApplicationActions
-  onOpenOverview: () => void
 }) {
   const sourceDraft = useMemo(
     () => draftFromSource(source.github.workspaces, source.github.hostIdentity, source.workspaces),
@@ -309,7 +288,7 @@ export function GitHubPage({
         renderWorkspaceNotice={({ name }) => {
           const operation = workspaceOperations[name]
           return operation
-            ? <WorkspaceSyncFeedback operation={operation} onRetry={() => retryWorkspace(name)} onOpenOverview={onOpenOverview} />
+            ? <WorkspaceSyncFeedback operation={operation} onRetry={() => retryWorkspace(name)} />
             : undefined
         }}
         disabled={!accessEnabled}

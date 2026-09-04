@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal, TriangleAlert } from "lucide-react"
+import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
@@ -128,7 +128,7 @@ function SubNavigation<Section extends string>({
   items: ReadonlyArray<{ id: Section; label: string; icon: typeof Boxes }>
   section: Section
   active: boolean
-  attention?: { section: Section; level: "warning" | "error" } | null
+  attention?: { section: Section; errors: number; warnings: number } | null
   onSelect: (section: Section) => void
 }) {
   return (
@@ -147,25 +147,38 @@ function SubNavigation<Section extends string>({
           <Icon className="size-3.5" />
           <span className="md:flex-1 md:text-left">{itemLabel}</span>
           {attention?.section === id && (
-            <TooltipProvider delayDuration={150}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span
-                    role="img"
-                    aria-label={attention.level === "error" ? "Sandbox error" : "Sandbox warning"}
-                    className={cn(
-                      "hidden size-5 shrink-0 place-items-center rounded-sm md:grid",
-                      attention.level === "error" ? "text-destructive" : "text-amber-600 dark:text-amber-400",
-                    )}
-                  >
-                    {attention.level === "error"
-                      ? <CircleAlert aria-hidden="true" className="size-3.5" />
-                      : <TriangleAlert aria-hidden="true" className="size-3.5" />}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>{attention.level === "error" ? "A sandbox needs attention" : "A sandbox has a warning"}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <span className="flex shrink-0 items-center gap-1">
+              <TooltipProvider delayDuration={150}>
+                {attention.errors > 0 && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        role="status"
+                        aria-label={`${attention.errors} sandbox ${attention.errors === 1 ? "error" : "errors"}`}
+                        className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-destructive/20 bg-destructive/10 px-1 text-[10px] leading-none font-semibold tabular-nums text-destructive"
+                      >
+                        {attention.errors}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>{attention.errors} sandbox {attention.errors === 1 ? "needs" : "need"} attention</TooltipContent>
+                  </Tooltip>
+                )}
+                {attention.warnings > 0 && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        role="status"
+                        aria-label={`${attention.warnings} sandbox ${attention.warnings === 1 ? "warning" : "warnings"}`}
+                        className="inline-flex h-5 min-w-5 items-center justify-center rounded-full border border-amber-500/20 bg-amber-500/10 px-1 text-[10px] leading-none font-semibold tabular-nums text-amber-700 dark:text-amber-400"
+                      >
+                        {attention.warnings}
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>{attention.warnings} sandbox {attention.warnings === 1 ? "has" : "have"} a warning</TooltipContent>
+                  </Tooltip>
+                )}
+              </TooltipProvider>
+            </span>
           )}
         </button>
       ))}
@@ -188,7 +201,7 @@ export function ApplicationShell({
   workspaceSection: WorkspaceSection
   settingsSection: SettingsSection
   systemIssueStatus: ActiveRuntimeRepairPresentation["status"] | null
-  workspaceAttention: "warning" | "error" | null
+  workspaceAttention: { errors: number; warnings: number }
   onTabChange: (tab: ApplicationTab) => void
   onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
@@ -227,7 +240,9 @@ export function ApplicationShell({
                   items={workspaceItems}
                   section={workspaceSection}
                   active={activeTab === "workspaces"}
-                  attention={workspaceAttention ? { section: "overview", level: workspaceAttention } : null}
+                  attention={workspaceAttention.errors > 0 || workspaceAttention.warnings > 0
+                    ? { section: "overview", ...workspaceAttention }
+                    : null}
                   onSelect={(section) => {
                     onWorkspaceSectionChange(section)
                     selectTab("workspaces")

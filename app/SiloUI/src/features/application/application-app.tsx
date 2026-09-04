@@ -13,10 +13,12 @@ import { SystemIssuePage } from "@/features/application/pages/system-issue-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
 import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
-function workspaceAttentionLevel(workspaces: ApplicationSource["workspaces"]): "warning" | "error" | null {
-  if (workspaces.some((workspace) => workspace.state === "failed" || workspace.attention?.level === "error")) return "error"
-  if (workspaces.some((workspace) => workspace.attention?.level === "warning")) return "warning"
-  return null
+function workspaceAttentionCounts(workspaces: ApplicationSource["workspaces"]): { errors: number; warnings: number } {
+  return workspaces.reduce((counts, workspace) => {
+    if (workspace.state === "failed" || workspace.attention?.level === "error") counts.errors += 1
+    else if (workspace.attention?.level === "warning") counts.warnings += 1
+    return counts
+  }, { errors: 0, warnings: 0 })
 }
 
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
@@ -141,7 +143,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       workspaceSection={visibleWorkspaceSection}
       settingsSection={settingsSection}
       systemIssueStatus={activeRuntimeRepair?.status ?? null}
-      workspaceAttention={workspaceAttentionLevel(workspaces)}
+      workspaceAttention={workspaceAttentionCounts(workspaces)}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
@@ -166,14 +168,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         )}
       </section>
       <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"} className="h-full min-h-0 overflow-hidden">
-        <GitHubPage
-          source={applicationSource}
-          actions={actions}
-          onOpenOverview={() => {
-            setWorkspaceSection("overview")
-            setActiveTab("workspaces")
-          }}
-        />
+        <GitHubPage source={applicationSource} actions={actions} />
       </section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={visibleTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
       <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} /></section>

@@ -50,8 +50,6 @@ export const githubManagementFixtureModes = [
   "applying",
   "succeeded",
   "failed",
-  "applies-on-next-start",
-  "restart-required",
   "disabled",
   "connected-empty",
   "missing-host-identity",
@@ -385,10 +383,7 @@ function githubWorkspaceOperationsForFixture(mode?: GitHubManagementFixtureMode)
       ].join("\n"),
     }]
   }
-  if (mode === "applies-on-next-start") {
-    return [{ workspace: "playgrounds", status: "applies-on-next-start", message: "Saved. Applies when this sandbox next starts." }]
-  }
-  return [{ workspace: "dev", status: "restart-required", message: "Changes are ready. Restart this sandbox to finish applying them." }]
+  return []
 }
 
 function githubWorkspacePoliciesForFixture(mode?: GitHubManagementFixtureMode): readonly ApplicationGitHubWorkspacePolicy[] {
@@ -419,8 +414,6 @@ export function applicationSourceForScenario(
   const workspaces: ApplicationWorkspace[] = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode).map((workspace) => (
     repositoryPushMode === "succeeded" && workspace.machine.name === "dev"
       ? { ...workspace, repositories: workspace.repositories.map((repository) => repository.path === "acme/silo" ? { ...repository, ahead: 0 } : repository) }
-      : githubManagementMode === "restart-required" && workspace.machine.name === "dev"
-        ? { ...workspace, attention: { level: "warning", message: "GitHub changes need a restart." } }
       : githubManagementMode === "failed" && workspace.machine.name === "dev"
         ? { ...workspace, attention: { level: "error", message: "GitHub access could not be applied." } }
       : workspace
