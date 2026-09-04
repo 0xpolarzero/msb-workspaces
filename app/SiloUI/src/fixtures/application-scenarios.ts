@@ -9,6 +9,11 @@ import type {
 } from "@/features/application/model/application-source"
 import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
+import {
+  applicationActivitiesForFixture,
+  defaultApplicationActivities,
+  type ActivityFixtureMode,
+} from "@/fixtures/application-activity"
 
 const [devMachine, playgroundsMachine, personalMachine] = productionMachineDefaults
 
@@ -92,10 +97,6 @@ const baseWorkspaces: ApplicationWorkspace[] = [
       { line: "19:18:40  postgres  Database system is ready", occurredAt: "2026-09-04T19:18:40Z" },
       { line: "19:18:37  worker    Connected to queue", occurredAt: "2026-09-04T19:18:37Z" },
     ],
-    activities: [
-      { id: "dev-start", category: "lifecycle", title: "Start succeeded", detail: "Workspace services passed verification.", occurredAt: "2026-09-04T12:00:00Z", time: "2h ago", tone: "success" },
-      { id: "dev-push", category: "git", title: "Push completed", detail: "Pushed 3 commits from acme/silo.", occurredAt: "2026-09-03T16:00:00Z", time: "Yesterday", tone: "neutral" },
-    ],
     githubRepositories: ["acme/silo", "acme/design-system"],
     secretNames: ["PACKAGE_TOKEN", "DATABASE_URL"],
   },
@@ -114,7 +115,6 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     ],
     ports: [],
     logs: [{ line: "17:02:11  silo  Workspace stopped cleanly", occurredAt: "2026-09-03T17:02:11Z" }],
-    activities: [{ id: "playgrounds-stop", category: "lifecycle", title: "Stop succeeded", detail: "Workspace state was preserved.", occurredAt: "2026-09-03T17:02:11Z", time: "Yesterday", tone: "neutral" }],
     githubRepositories: ["acme/platform-tools"],
     secretNames: ["PACKAGE_TOKEN"],
   },
@@ -133,7 +133,6 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     ],
     ports: [],
     logs: [{ line: "09:41:02  silo  Workspace stopped cleanly", occurredAt: "2026-08-31T09:41:02Z" }],
-    activities: [{ id: "personal-backup", category: "backup", title: "Backup completed", detail: "Archive verification passed.", occurredAt: "2026-08-31T09:41:02Z", time: "4 days ago", tone: "success" }],
     githubRepositories: ["taylor/docs-site"],
     secretNames: [],
   },
@@ -155,7 +154,6 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
       stateDetail: "Start failed 3m ago",
       attention: { level: "error", message: "Candidate networking did not become ready." },
       freshness: "stale",
-      activities: [{ id: "dev-failure", category: "lifecycle", title: "Start failed", detail: "Candidate networking did not become ready.", occurredAt: "2026-09-04T13:57:00Z", time: "3m ago", tone: "danger" }, ...workspace.activities],
     } : workspace)
   }
   return baseWorkspaces
@@ -331,6 +329,8 @@ export function applicationSourceForScenario(
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode,
   systemIssueMode?: SystemIssueFixtureMode,
   repositoryPushMode?: RepositoryPushFixtureMode,
+  activityMode?: ActivityFixtureMode,
+  activityStep = 0,
 ): ApplicationSource {
   const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode).map((workspace) => (
     repositoryPushMode === "succeeded" && workspace.machine.name === "dev"
@@ -340,6 +340,26 @@ export function applicationSourceForScenario(
   return {
     runtimeRepair: runtimeRepairForFixture(scenario, systemIssueMode),
     workspaces,
+    activities: applicationActivitiesForFixture(
+      activityMode,
+      activityStep,
+      scenario === "bootstrap-failure"
+        ? [
+            {
+              id: "dev-failure",
+              category: "sandbox",
+              title: "Start failed",
+              detail: "Candidate networking did not become ready.",
+              occurredAt: "2026-09-04T15:59:00.000Z",
+              time: "3m ago",
+              tone: "danger",
+              status: "completed",
+              workspace: "dev",
+            },
+            ...defaultApplicationActivities,
+          ]
+        : defaultApplicationActivities,
+    ),
     sandboxConfigurationOperation: configurationOperationForFixture(workspaces, sandboxConfigurationMode),
     repositoryPushOperations: repositoryPushOperationsForFixture(repositoryPushMode),
     github: {

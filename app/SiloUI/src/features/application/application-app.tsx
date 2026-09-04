@@ -145,6 +145,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         ) : (
           <WorkspacesPage
             workspaces={workspaces}
+            activities={source.activities}
             selectedWorkspaceIds={selectedWorkspaceIds}
             section={visibleWorkspaceSection}
             logQuery={logQuery}

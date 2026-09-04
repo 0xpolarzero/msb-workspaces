@@ -104,7 +104,9 @@ export interface ApplicationFileEntry {
   children?: ApplicationFileEntry[]
 }
 
-export type ApplicationActivityCategory = "lifecycle" | "git" | "backup"
+export type ApplicationActivityCategory = "sandbox" | "git" | "backup" | "secrets" | "github" | "system"
+
+export type ApplicationActivityStatus = "running" | "completed"
 
 export interface ApplicationActivity {
   id: string
@@ -113,7 +115,11 @@ export interface ApplicationActivity {
   detail: string
   occurredAt: string
   time: string
-  tone: "success" | "neutral" | "danger"
+  tone: "success" | "neutral" | "warning" | "danger"
+  status: ApplicationActivityStatus
+  workspace?: string
+  progress?: number
+  progressLabel?: string
 }
 
 export interface ApplicationWorkspace {
@@ -131,7 +137,6 @@ export interface ApplicationWorkspace {
   files: ApplicationFileEntry[]
   ports: ApplicationPort[]
   logs: ApplicationLog[]
-  activities: ApplicationActivity[]
   githubRepositories: string[]
   secretNames: string[]
 }
@@ -147,6 +152,7 @@ export interface ApplicationSecret {
 export interface ApplicationSource {
   runtimeRepair: RuntimeRepairPresentation | null
   workspaces: ApplicationWorkspace[]
+  activities: ApplicationActivity[]
   sandboxConfigurationOperation: SandboxConfigurationOperation | null
   repositoryPushOperations: RepositoryPushOperation[]
   github: {

@@ -56,7 +56,6 @@ function emptyWorkspace(machine: SetupMachineConfiguration): ApplicationWorkspac
     files: [],
     ports: [],
     logs: [],
-    activities: [],
     githubRepositories: [],
     secretNames: [],
   }

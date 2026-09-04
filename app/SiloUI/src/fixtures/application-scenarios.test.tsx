@@ -13,6 +13,13 @@ import {
   workspaceFixtureModes,
 } from "@/fixtures/application-scenarios"
 import { FixtureSelector } from "@/fixtures/fixture-selector"
+import {
+  activityCatalog,
+  activityFixtureModeFromSearch,
+  activityFixtureModes,
+  activityFixtureStepCount,
+  applicationActivitiesForFixture,
+} from "@/fixtures/application-activity"
 
 describe("application state fixtures", () => {
   it("parses and applies every sandbox state mode", () => {
@@ -27,7 +34,7 @@ describe("application state fixtures", () => {
   })
 
   it("shows every state mode only for the application fixture", () => {
-    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" systemIssueMode="verifying" repositoryPushMode="pushing" />)
+    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" systemIssueMode="verifying" repositoryPushMode="pushing" activityMode="backup-live" />)
     const controls = screen.getByLabelText("Development fixtures")
     expect(controls).toHaveClass("max-w-[calc(100vw-1.5rem)]", "flex-wrap")
     expect(within(screen.getByRole("combobox", { name: "Sandbox state fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
@@ -50,6 +57,10 @@ describe("application state fixtures", () => {
       "source",
       ...repositoryPushFixtureModes,
     ])
+    expect(within(screen.getByRole("combobox", { name: "Activity fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
+      "source",
+      ...activityFixtureModes,
+    ])
     app.unmount()
 
     render(<FixtureSelector surface="onboarding" scenario="running" />)
@@ -57,6 +68,7 @@ describe("application state fixtures", () => {
     expect(screen.queryByRole("combobox", { name: "Sandbox change fixture" })).not.toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "System issue fixture" })).not.toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "Repository push fixture" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("combobox", { name: "Activity fixture" })).not.toBeInTheDocument()
   })
 
   it("parses every sandbox configuration fixture independently from runtime state", () => {
@@ -91,5 +103,39 @@ describe("application state fixtures", () => {
     expect(repositoryPushFixtureModeFromSearch("?repository-push=unknown")).toBeUndefined()
     expect(applicationSourceForScenario("running").repositoryPushOperations).toEqual([])
     expect(applicationSourceForScenario("running", undefined, undefined, undefined, undefined, "succeeded").workspaces[0].repositories[0].ahead).toBe(0)
+  })
+
+  it("covers every activity category and presentation state", () => {
+    expect(new Set(activityCatalog.map(({ category }) => category))).toEqual(new Set([
+      "sandbox",
+      "git",
+      "backup",
+      "secrets",
+      "github",
+      "system",
+    ]))
+    expect(new Set(activityCatalog.map(({ tone }) => tone))).toEqual(new Set([
+      "neutral",
+      "success",
+      "danger",
+      "warning",
+    ]))
+    expect(activityCatalog.every(({ status }) => status === "completed")).toBe(true)
+  })
+
+  it("parses every activity fixture and keeps one stable live row while it updates", () => {
+    for (const mode of activityFixtureModes) {
+      expect(activityFixtureModeFromSearch(`?activity=${mode}`)).toBe(mode)
+      expect(applicationSourceForScenario("running", undefined, undefined, undefined, undefined, undefined, mode).activities.length).toBeGreaterThan(0)
+    }
+    expect(activityFixtureModeFromSearch("?activity=unknown")).toBeUndefined()
+
+    for (const mode of activityFixtureModes.filter((candidate) => candidate !== "catalog")) {
+      const first = applicationActivitiesForFixture(mode, 0, [])
+      const final = applicationActivitiesForFixture(mode, activityFixtureStepCount(mode) - 1, [])
+      expect(first[0].id).toBe(final[0].id)
+      expect(first[0].status).toBe("running")
+      expect(final[0].status).toBe("completed")
+    }
   })
 })

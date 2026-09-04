@@ -205,12 +205,12 @@ describe("application", () => {
     expect(panel.queryByRole("heading", { name: "Activity" })).not.toBeInTheDocument()
     expect(within(activity).queryByText("dev")).not.toBeInTheDocument()
     expect(within(activity).getByText("playgrounds")).toBeVisible()
-    expect(within(activity).getByText("personal")).toBeVisible()
+    expect(within(activity).getByText("Backup completed")).toBeVisible()
     const activityRows = within(activity).getAllByRole("listitem")
     expect(activityRows).toHaveLength(2)
-    expect(activityRows[0]).toHaveTextContent("Stop succeededWorkspace state was preserved.playgroundsYesterday")
+    expect(activityRows[0]).toHaveTextContent("Stop verifiedSandboxA fresh observation confirmed that the sandbox is stopped.playgrounds2m ago")
     expect(within(activityRows[0]).getByLabelText("playgrounds, Stopped")).toBeVisible()
-    expect(activityRows[0].querySelector('[data-activity-content]')).toHaveClass("grid", "gap-0.5")
+    expect(activityRows[0].querySelector('[data-activity-content]')).toHaveClass("grid", "gap-1")
     expect(activityRows[0].querySelector('[data-activity-meta]')).toHaveClass("items-end")
 
     const categoryFilters = within(panel.getByRole("group", { name: "Activity category filters" }))
@@ -218,6 +218,7 @@ describe("application", () => {
     expect(categoryCombobox).toHaveClass("h-7", "w-36")
     expect(categoryFilters.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument()
     expect(categoryFilters.getByRole("button", { name: "Clear" })).toBeDisabled()
+    expect(categoryFilters.getByRole("button", { name: "Clear" })).toBe(categoryFilters.getByRole("button", { name: "Clear" }).parentElement?.lastElementChild)
     expect(categoryFilters.queryByRole("button", { name: "All" })).not.toBeInTheDocument()
 
     await user.click(categoryCombobox)
@@ -227,11 +228,11 @@ describe("application", () => {
     expect(within(activity).getByText("Backup completed")).toBeVisible()
 
     await user.click(categoryCombobox)
-    await user.click(screen.getByRole("option", { name: "Lifecycle" }))
+    await user.click(screen.getByRole("option", { name: "Sandbox" }))
     expect(within(activity).getAllByRole("listitem")).toHaveLength(2)
     await user.click(categoryFilters.getByRole("button", { name: "Remove Backup" }))
     expect(within(activity).getAllByRole("listitem")).toHaveLength(1)
-    expect(within(activity).getByText("Stop succeeded")).toBeVisible()
+    expect(within(activity).getByText("Stop verified")).toBeVisible()
     await user.click(categoryFilters.getByRole("button", { name: "Clear" }))
     expect(within(activity).getAllByRole("listitem")).toHaveLength(2)
 
@@ -241,8 +242,8 @@ describe("application", () => {
     const allActivity = panel.getByRole("list", { name: "Recent activity" })
     expect(allActivity).toBeVisible()
     expect(within(allActivity).getAllByRole("listitem").map((row) => row.textContent)).toEqual([
-      expect.stringContaining("Start succeeded"),
-      expect.stringContaining("Stop succeeded"),
+      expect.stringContaining("Start verified"),
+      expect.stringContaining("Stop verified"),
       expect.stringContaining("Push completed"),
       expect.stringContaining("Backup completed"),
     ])
@@ -317,9 +318,80 @@ describe("application", () => {
 
     const activity = within(appPanel("Sandboxes")).getByRole("list", { name: "Recent activity" })
     const firstRow = within(activity).getAllByRole("listitem")[0]
-    expect(firstRow).toHaveTextContent("Start failedCandidate networking did not become ready.dev3m ago")
-    expect(firstRow.querySelector("svg")).toHaveClass("lucide-triangle-alert", "text-destructive")
+    expect(firstRow).toHaveTextContent("Start failedSandboxCandidate networking did not become ready.dev3m ago")
+    expect(firstRow.querySelector("svg")).toHaveClass("lucide-circle-alert", "text-destructive")
     expect(within(firstRow).getByLabelText("dev, Failed")).toBeVisible()
+  })
+
+  it("shows all six production-backed activity categories", async () => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, undefined, undefined, "catalog")
+    const application = renderApplication("running", source)
+    const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Activity" }))
+
+    const panel = within(appPanel("Sandboxes"))
+    const filters = within(panel.getByRole("group", { name: "Activity category filters" }))
+    await application.user.click(filters.getByRole("combobox", { name: "Add category filter" }))
+    expect(screen.getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
+      "Sandbox",
+      "Git",
+      "Backup",
+      "Secrets",
+      "GitHub",
+      "System",
+    ])
+
+    const activity = panel.getByRole("list", { name: "Recent activity" })
+    for (const category of ["Sandbox", "Git", "Backup", "Secrets", "GitHub", "System"]) {
+      expect(within(activity).getAllByLabelText(`Category: ${category}`).length).toBeGreaterThan(0)
+    }
+    expect(within(activity).getByText("Restart outcome unknown")).toBeVisible()
+    expect(within(activity).getByText("Push failed")).toBeVisible()
+    expect(within(activity).getByText("Backup completed · restart required")).toBeVisible()
+    expect(within(activity).getByText("Secret verification failed")).toBeVisible()
+    expect(within(activity).getByText("Grant quarantined")).toBeVisible()
+    expect(within(activity).getByText("Deep check failed")).toBeVisible()
+  })
+
+  it("updates a live activity in place through progress and completion", async () => {
+    const sourceAt = (step: number) => applicationSourceForScenario(
+      "running",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "backup-live",
+      step,
+    )
+    const application = renderApplication("running", sourceAt(0))
+    const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Activity" }))
+
+    const panel = within(appPanel("Sandboxes"))
+    const firstRow = panel.getByRole("list", { name: "Recent activity" }).querySelector<HTMLElement>('[data-activity-id="live-backup"]')
+    expect(firstRow).not.toBeNull()
+    expect(firstRow).toHaveAttribute("aria-busy", "true")
+    expect(firstRow).toHaveTextContent("Preparing backup")
+    expect(within(firstRow!).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "10")
+
+    application.rerender(<ApplicationApp source={sourceAt(2)} actions={application.actions} />)
+    const progressingRow = panel.getByRole("list", { name: "Recent activity" }).querySelector<HTMLElement>('[data-activity-id="live-backup"]')
+    expect(progressingRow).toBe(firstRow)
+    expect(progressingRow).toHaveTextContent("Checksumming archive")
+    expect(within(progressingRow!).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "75")
+
+    application.rerender(<ApplicationApp source={sourceAt(4)} actions={application.actions} />)
+    const completedRow = panel.getByRole("list", { name: "Recent activity" }).querySelector<HTMLElement>('[data-activity-id="live-backup"]')
+    expect(completedRow).toBe(firstRow)
+    expect(completedRow).not.toHaveAttribute("aria-busy")
+    expect(completedRow).toHaveTextContent("Backup completed")
+    expect(completedRow?.querySelector("svg")).toHaveClass("lucide-check")
+    expect(within(completedRow!).queryByRole("progressbar")).not.toBeInTheDocument()
+    expect(panel.getByRole("list", { name: "Recent activity" }).querySelectorAll('[data-activity-id="live-backup"]')).toHaveLength(1)
+    expect(within(panel.getByRole("list", { name: "Recent activity" })).getAllByText("Backup completed")).toHaveLength(1)
   })
 
   it.each([

@@ -156,7 +156,7 @@ export function FilterCombobox<Value extends string>({
         ))}
       </div>
 
-      <Button variant="ghost" size="xs" disabled={selectedValues.size === 0} onClick={() => onChange(new Set())}>Clear</Button>
+      <Button className="order-last ml-auto" variant="ghost" size="xs" disabled={selectedValues.size === 0} onClick={() => onChange(new Set())}>Clear</Button>
     </div>
   )
 }

@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from "react"
-import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert } from "lucide-react"
+import { Activity, Archive, Box, Check, ChevronRight, CircleAlert, CircleCheck, Cloud, ExternalLink, File, Folder, GitBranch, KeyRound, Loader2, RotateCw, Search, TriangleAlert, Wrench } from "lucide-react"
 
 import { CopyButton } from "@/components/copy-button"
 import { FilterCombobox, type FilterOption } from "@/components/filter-combobox"
+import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
+import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { WorkspaceBadge } from "@/features/application/components/application-ui"
-import type { ApplicationActivityCategory, ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection } from "@/features/application/model/application-source"
+import type { ApplicationActivity, ApplicationActivityCategory, ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 function WorkspaceFilterBar({
@@ -378,21 +380,34 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
 }
 
 const activityCategoryOptions: ReadonlyArray<FilterOption<ApplicationActivityCategory>> = [
-  { value: "lifecycle", label: "Lifecycle" },
+  { value: "sandbox", label: "Sandbox" },
   { value: "git", label: "Git" },
   { value: "backup", label: "Backup" },
+  { value: "secrets", label: "Secrets" },
+  { value: "github", label: "GitHub" },
+  { value: "system", label: "System" },
 ]
 
-function ActivityLog({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
+const activityCategoryPresentation = {
+  sandbox: { label: "Sandbox", icon: Box },
+  git: { label: "Git", icon: GitBranch },
+  backup: { label: "Backup", icon: Archive },
+  secrets: { label: "Secrets", icon: KeyRound },
+  github: { label: "GitHub", icon: Cloud },
+  system: { label: "System", icon: Wrench },
+} as const
+
+function ActivityLog({ workspaces, sourceActivities }: { workspaces: ApplicationWorkspace[]; sourceActivities: ApplicationActivity[] }) {
   const [selectedCategories, setSelectedCategories] = useState<Set<ApplicationActivityCategory>>(() => new Set())
-  const allActivities = workspaces
-    .flatMap((workspace) => workspace.activities.map((activity) => ({ ...activity, workspace: workspace.machine.name, workspaceState: workspace.state })))
+  const workspacesByName = new Map(workspaces.map((workspace) => [workspace.machine.name, workspace]))
+  const allActivities = [...sourceActivities]
+    .filter(({ workspace }) => !workspace || workspacesByName.has(workspace))
     .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
   const activities = selectedCategories.size === 0
     ? allActivities
     : allActivities.filter(({ category }) => selectedCategories.has(category))
 
-  if (workspaces.length === 0) return <EmptyState title="No sandboxes available" description="Add a sandbox to see its activity." />
+  if (workspaces.length === 0 && allActivities.length === 0) return <EmptyState title="No recent activity" description="Sandbox and system activity will appear here." />
 
   return (
     <div className="grid gap-3">
@@ -407,23 +422,58 @@ function ActivityLog({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
         selectedLabel="Selected activity categories"
         emptyMessage="No categories available."
         compact
+        className="w-full"
       />
 
       {activities.length > 0 ? (
         <div className="divide-y divide-border overflow-hidden rounded-lg border border-border" role="list" aria-label="Recent activity">
-          {activities.map((item) => (
-            <div key={`${item.workspace}:${item.id}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 bg-card px-3 py-2.5">
-              {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
-              <div className="grid min-w-0 gap-0.5" data-activity-content>
-                <div className="text-sm font-medium">{item.title}</div>
-                <div className="text-xs text-muted-foreground">{item.detail}</div>
+          {activities.map((item) => {
+            const category = activityCategoryPresentation[item.category]
+            const CategoryIcon = category.icon
+            const workspace = item.workspace ? workspacesByName.get(item.workspace) : undefined
+            return (
+              <div
+                key={item.id}
+                role="listitem"
+                aria-busy={item.status === "running" || undefined}
+                data-activity-id={item.id}
+                data-activity-status={item.status}
+                className={cn(
+                  "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 bg-card px-3 py-2.5 transition-colors hover:bg-muted/35",
+                  item.status === "running" && "bg-primary/[0.025]",
+                  item.tone === "warning" && "bg-amber-500/[0.035]",
+                  item.tone === "danger" && "bg-destructive/[0.025]",
+                )}
+              >
+                {item.status === "running"
+                  ? <Loader2 className="mt-0.5 size-4 animate-spin text-primary" aria-hidden="true" />
+                  : item.tone === "danger"
+                    ? <CircleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" />
+                    : item.tone === "warning"
+                      ? <TriangleAlert className="mt-0.5 size-4 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                      : item.tone === "success"
+                        ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                        : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
+                <div className="grid min-w-0 gap-1" data-activity-content>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <div className="text-sm font-medium">{item.title}</div>
+                    <StatusBadge indicator={<CategoryIcon className="size-2.5" />} aria-label={`Category: ${category.label}`}>{category.label}</StatusBadge>
+                  </div>
+                  <div className="text-xs text-muted-foreground">{item.detail}</div>
+                  {item.status === "running" && item.progress !== undefined && (
+                    <div className="mt-0.5 flex max-w-sm items-center gap-2">
+                      <Progress value={item.progress * 100} aria-label={item.progressLabel ?? `${item.title} progress`} />
+                      <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(item.progress * 100)}%</span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
+                  {item.workspace && workspace && <WorkspaceBadge name={item.workspace} state={workspace.state} />}
+                  <span className="text-xs text-muted-foreground">{item.time}</span>
+                </div>
               </div>
-              <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
-                <WorkspaceBadge name={item.workspace} state={item.workspaceState} />
-                <span className="text-xs text-muted-foreground">{item.time}</span>
-              </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       ) : (
         <EmptyState
@@ -437,6 +487,7 @@ function ActivityLog({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
 
 export function WorkspacesPage({
   workspaces,
+  activities,
   selectedWorkspaceIds,
   section,
   logQuery,
@@ -448,6 +499,7 @@ export function WorkspacesPage({
   onDismissRepositoryPush,
 }: {
   workspaces: ApplicationWorkspace[]
+  activities: ApplicationActivity[]
   selectedWorkspaceIds: ReadonlySet<string>
   section: WorkspaceDetailSection
   logQuery: string
@@ -469,7 +521,7 @@ export function WorkspacesPage({
       {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} onDismissRepositoryPush={onDismissRepositoryPush} />}
       {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}
       {section === "network" && <Network workspaces={visibleWorkspaces} browser={browser} />}
-      {section === "activity" && <ActivityLog workspaces={visibleWorkspaces} />}
+      {section === "activity" && <ActivityLog workspaces={visibleWorkspaces} sourceActivities={activities} />}
     </div>
   )
 }

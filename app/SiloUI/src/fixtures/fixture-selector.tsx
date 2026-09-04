@@ -1,5 +1,6 @@
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
+import { activityFixtureModes, type ActivityFixtureMode } from "@/fixtures/application-activity"
 import {
   sandboxConfigurationFixtureModes,
   repositoryPushFixtureModes,
@@ -15,7 +16,7 @@ import { surfaceNames } from "@/fixtures/surfaces"
 
 import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
-export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode }: {
+export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode }: {
   surface: SurfaceName
   scenario: ScenarioName
   githubState?: GitHubFixtureState
@@ -23,6 +24,7 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode
   systemIssueMode?: SystemIssueFixtureMode
   repositoryPushMode?: RepositoryPushFixtureMode
+  activityMode?: ActivityFixtureMode
 }) {
   function selectFixture(parameter: string, value: string) {
     const url = new URL(window.location.href)
@@ -92,6 +94,18 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
             >
               <option value="source">source</option>
               {repositoryPushFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            Activity
+            <select
+              aria-label="Activity fixture"
+              className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={activityMode ?? "source"}
+              onChange={(event) => selectFixture("activity", event.target.value)}
+            >
+              <option value="source">source</option>
+              {activityFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
             </select>
           </label>
         </>
