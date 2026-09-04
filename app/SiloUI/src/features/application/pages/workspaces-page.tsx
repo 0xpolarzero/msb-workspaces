@@ -217,8 +217,9 @@ function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
   const repositories = workspaces.flatMap((workspace) => workspace.repositories.map((repository) => ({ workspace, repository })))
 
   return (
-    <div className="grid gap-3 lg:grid-cols-2">
-      <DetailCard title="Repositories">
+    <div className="grid gap-6 lg:grid-cols-2 lg:gap-0">
+      <section className="min-w-0 lg:pr-5" aria-labelledby="files-repositories-heading">
+        <h3 id="files-repositories-heading" className="mb-3 font-heading text-sm font-medium">Repositories</h3>
         {repositories.length > 0 ? (
           <div className="divide-y divide-border" role="list" aria-label="Repositories">
             {repositories.map(({ workspace, repository }) => (
@@ -240,13 +241,14 @@ function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
             ))}
           </div>
         ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
-      </DetailCard>
+      </section>
 
-      <DetailCard title="File tree">
+      <section className="min-w-0 lg:border-l lg:border-border lg:pl-5" aria-labelledby="files-tree-heading">
+        <h3 id="files-tree-heading" className="mb-3 font-heading text-sm font-medium">File tree</h3>
         <ul className="grid gap-0.5" aria-label="File tree">
           {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}
         </ul>
-      </DetailCard>
+      </section>
     </div>
   )
 }

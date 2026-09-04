@@ -105,6 +105,12 @@ describe("application", () => {
 
     const repositories = panel.getByRole("list", { name: "Repositories" })
     const fileTree = panel.getByRole("list", { name: "File tree" })
+    const repositoriesSection = panel.getByRole("region", { name: "Repositories" })
+    const fileTreeSection = panel.getByRole("region", { name: "File tree" })
+    expect(repositoriesSection.closest('[data-slot="card"]')).toBeNull()
+    expect(fileTreeSection.closest('[data-slot="card"]')).toBeNull()
+    expect(fileTreeSection).toHaveClass("lg:border-l", "lg:pl-5")
+    expect(fileTreeSection).not.toHaveClass("border-l")
     const devRepository = within(repositories).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
     const playgroundsRepository = within(repositories).getByText("acme/platform-tools").closest('[role="listitem"]') as HTMLElement
     const devBadge = within(devRepository).getByLabelText("dev, Running")
