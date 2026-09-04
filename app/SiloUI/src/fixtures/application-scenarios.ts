@@ -255,7 +255,7 @@ function runtimeRepairForFixture(
       status: "failed",
       phase: "verifying",
       summary: "The activated runtime did not pass verification.",
-      recovery: "Show technical details, then retry the repair.",
+      recovery: "Retry the repair. If it fails again, open a GitHub issue and paste the technical details below.",
       diagnosticDetails: [
         "Installing bundled Silo tools",
         "Installing default configuration",

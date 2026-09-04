@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { AlertCircle, Check, Circle, CircleAlert, CircleCheck, Copy, Loader2, RotateCw } from "lucide-react"
+import { AlertCircle, Check, Circle, CircleAlert, CircleCheck, Copy, ExternalLink, Loader2, RotateCw } from "lucide-react"
 
 import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import { Button } from "@/components/ui/button"
@@ -15,11 +15,7 @@ const repairSteps: ReadonlyArray<{ phase: RuntimeRepairPhase; label: string }> =
   { phase: "verifying", label: "Installation verification" },
 ]
 
-const repairPhaseDescription: Record<RuntimeRepairPhase, string> = {
-  "installing-runtime": "Installing bundled Silo tools…",
-  "installing-configuration": "Checking default configuration…",
-  verifying: "Verifying the installation…",
-}
+const siloIssuesURL = "https://github.com/0xpolarzero/silo/issues"
 
 type StepState = "complete" | "active" | "failed" | "waiting"
 
@@ -106,15 +102,16 @@ function TechnicalDetails({ details }: { details: string }) {
           <Button
             type="button"
             variant="ghost"
-            size="icon-xs"
+            size="xs"
             className="absolute top-2 right-2 text-zinc-400 hover:bg-white/10 hover:text-white"
             onClick={copyDetails}
             aria-label={copyLabel}
             aria-live="polite"
           >
             {copyStatus === "copied" ? <Check aria-hidden="true" /> : copyStatus === "failed" ? <AlertCircle aria-hidden="true" /> : <Copy aria-hidden="true" />}
+            {copyStatus === "copied" ? "Copied" : copyStatus === "failed" ? "Copy failed" : "Copy"}
           </Button>
-          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 pr-10 font-mono text-[11px] leading-5 select-text">{details}</pre>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 pr-20 font-mono text-[11px] leading-5 select-text">{details}</pre>
         </div>
       </CollapsibleContent>
     </Collapsible>
@@ -126,7 +123,7 @@ function issueHeader(issue: RuntimeRepairPresentation) {
     return {
       icon: Loader2,
       title: "Repairing installation",
-      description: repairPhaseDescription[issue.phase],
+      description: undefined,
       tone: "warning" as const,
     }
   }
@@ -146,7 +143,7 @@ export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresen
   const header = issueHeader(issue)
   const Icon = header.icon
   const showsProgress = issue.status === "repairing" || issue.status === "succeeded" || (issue.status === "failed" && issue.phase !== undefined)
-  const showsContent = issue.status === "needed" || issue.status === "failed" || showsProgress
+  const showsContent = issue.status === "failed" || showsProgress
   const footerNote = issue.status === "unavailable"
     ? issue.recovery
     : issue.status === "succeeded"
@@ -169,7 +166,8 @@ export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresen
       >
         <CardHeader className="grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3">
           <span className={cn(
-            "row-span-2 grid size-8 place-items-center rounded-lg",
+            "grid size-8 place-items-center rounded-lg",
+            header.description && "row-span-2",
             header.tone === "danger" && "bg-destructive/10 text-destructive",
             header.tone === "warning" && "bg-amber-500/10 text-amber-700 dark:text-amber-400",
             header.tone === "success" && "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
@@ -177,14 +175,11 @@ export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresen
             <Icon className={cn("size-4", issue.status === "repairing" && "animate-spin")} aria-hidden="true" />
           </span>
           <CardTitle><h3>{header.title}</h3></CardTitle>
-          <CardDescription>{header.description}</CardDescription>
+          {header.description && <CardDescription>{header.description}</CardDescription>}
         </CardHeader>
 
         {showsContent && (
           <CardContent className="grid gap-4 border-t border-border pt-3">
-            {issue.status === "needed" && (
-              <p className="text-sm text-muted-foreground">Repair reinstalls Silo’s bundled tools, checks the default configuration, then verifies the result.</p>
-            )}
             {showsProgress && <RepairProgress issue={issue} />}
             {issue.status === "repairing" && (
               <p className="text-xs text-muted-foreground">Step {issue.completedSteps + 1} of {issue.totalSteps}</p>
@@ -203,7 +198,17 @@ export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresen
             {footerNote && <p className="min-w-0 flex-1 text-xs text-muted-foreground">{footerNote}</p>}
             {issue.status === "needed" && <Button onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Repair Installation</Button>}
             {issue.status === "repairing" && <Button variant="outline" disabled aria-label="Repair in progress"><Loader2 className="animate-spin" aria-hidden="true" />Repairing…</Button>}
-            {issue.status === "failed" && <Button onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Retry Repair</Button>}
+            {issue.status === "failed" && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" asChild>
+                  <a href={siloIssuesURL} target="_blank" rel="noreferrer">
+                    <ExternalLink aria-hidden="true" />
+                    Open GitHub Issues
+                  </a>
+                </Button>
+                <Button onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Retry Repair</Button>
+              </div>
+            )}
           </CardFooter>
         )}
       </Card>

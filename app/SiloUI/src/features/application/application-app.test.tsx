@@ -359,6 +359,7 @@ describe("application", () => {
     expect(systemIssue.getByRole("heading", { name: "System issue", level: 2 })).toBeVisible()
     expect(systemIssue.getByRole("heading", { name: "Silo installation needs repair", level: 3 })).toBeVisible()
     expect(systemIssue.getByText("Silo could not verify the bundled runtime used to manage sandboxes.")).toBeVisible()
+    expect(systemIssue.queryByText(/Repair reinstalls Silo/)).not.toBeInTheDocument()
     expect(systemIssue.getByText("Sandbox data, host integration, and GitHub access are not changed.")).toBeVisible()
 
     await failed.user.click(systemIssue.getByRole("button", { name: "Repair Installation" }))
@@ -385,10 +386,10 @@ describe("application", () => {
   })
 
   it.each([
-    ["installing", "Bundled Silo tools", "Installing bundled Silo tools…", "Step 1 of 3"],
-    ["configuring", "Default configuration", "Checking default configuration…", "Step 2 of 3"],
-    ["verifying", "Installation verification", "Verifying the installation…", "Step 3 of 3"],
-  ] as const)("shows concise %s repair progress", async (mode, phase, currentAction, step) => {
+    ["installing", "Bundled Silo tools", "Step 1 of 3", "Installing bundled Silo tools…"],
+    ["configuring", "Default configuration", "Step 2 of 3", "Checking default configuration…"],
+    ["verifying", "Installation verification", "Step 3 of 3", "Verifying the installation…"],
+  ] as const)("shows concise %s repair progress", async (mode, phase, step, omittedCaption) => {
     const source = applicationSourceForScenario("running", undefined, undefined, undefined, mode)
     const application = renderApplication("running", source)
     const navigation = within(appNavigation())
@@ -397,7 +398,7 @@ describe("application", () => {
     expect(navigation.getByRole("button", { name: "System issue" })).toHaveAttribute("data-navigation-tone", "warning")
     const page = within(appPanel("System issue"))
     expect(page.getByRole("heading", { name: "Repairing installation", level: 3 })).toBeVisible()
-    expect(page.getByText(currentAction)).toBeVisible()
+    expect(page.queryByText(omittedCaption)).not.toBeInTheDocument()
     expect(page.getByText(step)).toBeVisible()
     const progress = page.getByRole("list", { name: "Repair progress" })
     expect(within(progress).getAllByRole("listitem")).toHaveLength(3)
@@ -414,7 +415,9 @@ describe("application", () => {
     const page = within(appPanel("System issue"))
     expect(page.getByRole("heading", { name: "Repair couldn’t finish", level: 3 })).toBeVisible()
     expect(page.getByText("The activated runtime did not pass verification.")).toBeVisible()
-    expect(page.getByText("Show technical details, then retry the repair.")).toBeVisible()
+    expect(page.getByText("Retry the repair. If it fails again, open a GitHub issue and paste the technical details below.")).toBeVisible()
+    expect(page.getByRole("link", { name: "Open GitHub Issues" })).toHaveAttribute("href", "https://github.com/0xpolarzero/silo/issues")
+    expect(page.getByRole("link", { name: "Open GitHub Issues" })).toHaveAttribute("target", "_blank")
     expect(page.queryByText(/version handshake/)).not.toBeInTheDocument()
 
     await application.user.click(page.getByRole("button", { name: "Show technical details" }))
