@@ -422,11 +422,11 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="overflow-x-auto rounded-lg border border-border">
-        <div role="table" aria-label="Network" className="min-w-[42rem] text-xs">
-          <div role="row" className="grid grid-cols-[5rem_minmax(14rem,1fr)_7rem_7rem_3.5rem] items-center gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
+      <div className="overflow-hidden rounded-lg border border-border">
+        <div role="table" aria-label="Network" className="w-full text-xs">
+          <div role="row" className="grid grid-cols-[3.5rem_6rem_minmax(0,1fr)_3.5rem] items-center gap-2 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground sm:grid-cols-[4rem_minmax(0,1fr)_6.5rem_7rem_3.5rem] sm:gap-3">
             <span role="columnheader">Port</span>
-            <span role="columnheader">URL</span>
+            <span role="columnheader" className="hidden sm:block">URL</span>
             <span role="columnheader">State</span>
             <span role="columnheader">Sandbox</span>
             <span role="columnheader" className="sr-only">Actions</span>
@@ -436,15 +436,15 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
               const url = `http://${workspace.host}:${port.port}`
               const state = port.listening === true ? "Listening" : port.listening === false ? "Configured" : "Unknown"
               return (
-                <div key={`${workspace.machine.id}:${port.port}`} role="row" className="group/network-row grid grid-cols-[5rem_minmax(14rem,1fr)_7rem_7rem_3.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
+                <div key={`${workspace.machine.id}:${port.port}`} role="row" className="grid grid-cols-[3.5rem_6rem_minmax(0,1fr)_3.5rem] items-center gap-2 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55 sm:grid-cols-[4rem_minmax(0,1fr)_6.5rem_7rem_3.5rem] sm:gap-3">
                   <span role="cell" className="font-mono font-medium">{port.port}</span>
-                  <span role="cell" className="truncate font-mono text-muted-foreground">{url}</span>
+                  <span role="cell" className="hidden truncate font-mono text-muted-foreground sm:block">{url}</span>
                   <span role="cell" className="inline-flex items-center gap-1.5">
                     <span className={cn("size-2 rounded-full", port.listening === true ? "bg-emerald-500" : port.listening === null ? "bg-amber-500" : "bg-muted-foreground/45")} aria-hidden="true" />
                     <span className={port.listening === true ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>{state}</span>
                   </span>
                   <span role="cell"><WorkspaceBadge name={workspace.machine.name} state={workspace.state} /></span>
-                  <span role="cell" className="flex justify-end gap-1 opacity-0 transition-opacity group-hover/network-row:opacity-100 group-focus-within/network-row:opacity-100">
+                  <span role="cell" className="flex justify-end gap-1">
                     {port.listening === true && (
                       <Tooltip>
                         <TooltipTrigger asChild>

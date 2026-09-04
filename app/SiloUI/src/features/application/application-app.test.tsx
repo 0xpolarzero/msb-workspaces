@@ -210,6 +210,8 @@ describe("application", () => {
     const panel = within(appPanel("Sandboxes"))
     const network = panel.getByRole("table", { name: "Network" })
     expect(network.closest('[data-slot="card"]')).toBeNull()
+    expect(network).not.toHaveClass("min-w-[42rem]")
+    expect(network.parentElement).not.toHaveClass("overflow-x-auto")
     expect(panel.queryByRole("heading", { name: "Network" })).not.toBeInTheDocument()
     expect(panel.queryByText("Each sandbox has its own .silo.test address, so the same port can be active in multiple sandboxes.")).not.toBeInTheDocument()
     expect(within(network).queryByText(/^(web|vite|api)$/)).not.toBeInTheDocument()
@@ -225,7 +227,8 @@ describe("application", () => {
     expect(rows[0]).toHaveClass("hover:bg-muted/55", "focus-within:bg-muted/55")
     const open = within(rows[0]).getByRole("button", { name: "Open http://dev.silo.test:3000 in Firefox" })
     const actions = open.closest('[role="cell"]') as HTMLElement
-    expect(actions).toHaveClass("opacity-0", "group-hover/network-row:opacity-100", "group-focus-within/network-row:opacity-100")
+    expect(actions).not.toHaveClass("opacity-0", "group-hover/network-row:opacity-100", "group-focus-within/network-row:opacity-100")
+    expect(within(rows[1]).getByRole("button", { name: "Copy http://dev.silo.test:5173" })).toBeVisible()
     await application.user.hover(open)
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Open in Firefox")
     await application.user.unhover(open)
