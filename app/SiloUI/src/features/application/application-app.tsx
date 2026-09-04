@@ -33,8 +33,8 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     setSandboxConfigurationOperation(source.sandboxConfigurationOperation)
     // The destination only exists while the global issue remains active.
     // oxlint-disable-next-line react/set-state-in-effect
-    setActiveTab((current) => current === "system" && !source.runtimeRepairRequired ? "workspaces" : current)
-  }, [source.workspaces, source.sandboxConfigurationOperation, source.runtimeRepairRequired])
+    setActiveTab((current) => current === "system" && !source.runtimeRepair ? "workspaces" : current)
+  }, [source.workspaces, source.sandboxConfigurationOperation, source.runtimeRepair])
 
   function updateMachines(machines: SetupMachineConfiguration[]) {
     const candidate = { schemaVersion: 1 as const, machines }
@@ -54,7 +54,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       activeTab={activeTab}
       workspaceSection={workspaceSection}
       settingsSection={settingsSection}
-      showSystemIssue={source.runtimeRepairRequired}
+      systemIssueStatus={source.runtimeRepair?.status ?? null}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
@@ -76,9 +76,9 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={activeTab !== "github"}><GitHubPage source={applicationSource} /></section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={activeTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
       <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={activeTab !== "backup"}><BackupPage source={applicationSource} /></section>
-      {source.runtimeRepairRequired && (
+      {source.runtimeRepair && (
         <section id="application-panel-system" role="region" aria-labelledby="application-nav-system" hidden={activeTab !== "system"}>
-          <SystemIssuePage actions={actions} />
+          <SystemIssuePage issue={source.runtimeRepair} actions={actions} />
         </section>
       )}
       <section id="application-panel-settings" role="region" aria-labelledby="application-nav-settings" hidden={activeTab !== "settings"}>

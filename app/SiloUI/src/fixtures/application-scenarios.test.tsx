@@ -5,6 +5,8 @@ import {
   applicationSourceForScenario,
   sandboxConfigurationFixtureModeFromSearch,
   sandboxConfigurationFixtureModes,
+  systemIssueFixtureModeFromSearch,
+  systemIssueFixtureModes,
   workspaceFixtureModeFromSearch,
   workspaceFixtureModes,
 } from "@/fixtures/application-scenarios"
@@ -23,7 +25,7 @@ describe("application state fixtures", () => {
   })
 
   it("shows every state mode only for the application fixture", () => {
-    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" />)
+    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" systemIssueMode="verifying" />)
     const controls = screen.getByLabelText("Development fixtures")
     expect(controls).toHaveClass("max-w-[calc(100vw-1.5rem)]", "flex-wrap")
     expect(within(screen.getByRole("combobox", { name: "Sandbox state fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
@@ -38,11 +40,16 @@ describe("application state fixtures", () => {
       "source",
       ...sandboxConfigurationFixtureModes,
     ])
+    expect(within(screen.getByRole("combobox", { name: "System issue fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
+      "source",
+      ...systemIssueFixtureModes,
+    ])
     app.unmount()
 
     render(<FixtureSelector surface="onboarding" scenario="running" />)
     expect(screen.queryByRole("combobox", { name: "Sandbox state fixture" })).not.toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "Sandbox change fixture" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("combobox", { name: "System issue fixture" })).not.toBeInTheDocument()
   })
 
   it("parses every sandbox configuration fixture independently from runtime state", () => {
@@ -51,5 +58,15 @@ describe("application state fixtures", () => {
       expect(applicationSourceForScenario("running", undefined, undefined, mode).sandboxConfigurationOperation).not.toBeNull()
     }
     expect(sandboxConfigurationFixtureModeFromSearch("?sandbox-change=unknown")).toBeUndefined()
+  })
+
+  it("parses and applies every system issue state independently", () => {
+    for (const mode of systemIssueFixtureModes) {
+      expect(systemIssueFixtureModeFromSearch(`?system-issue=${mode}`)).toBe(mode)
+      expect(applicationSourceForScenario("running", undefined, undefined, undefined, mode).runtimeRepair).not.toBeNull()
+    }
+    expect(systemIssueFixtureModeFromSearch("?system-issue=unknown")).toBeUndefined()
+    expect(applicationSourceForScenario("running").runtimeRepair).toBeNull()
+    expect(applicationSourceForScenario("dependency-failure").runtimeRepair?.status).toBe("needed")
   })
 })

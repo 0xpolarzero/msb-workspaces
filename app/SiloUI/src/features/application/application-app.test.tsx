@@ -358,8 +358,8 @@ describe("application", () => {
     const systemIssue = within(appPanel("System issue"))
     expect(systemIssue.getByRole("heading", { name: "System issue", level: 2 })).toBeVisible()
     expect(systemIssue.getByRole("heading", { name: "Silo installation needs repair", level: 3 })).toBeVisible()
-    expect(systemIssue.getByText("Reinstall the bundled Silo runtime and verify its exact command identity.")).toBeVisible()
-    expect(systemIssue.getByText("Sandbox configuration, host integration, and GitHub setup are not changed.")).toBeVisible()
+    expect(systemIssue.getByText("Silo could not verify the bundled runtime used to manage sandboxes.")).toBeVisible()
+    expect(systemIssue.getByText("Sandbox data, host integration, and GitHub access are not changed.")).toBeVisible()
 
     await failed.user.click(systemIssue.getByRole("button", { name: "Repair Installation" }))
     expect(failed.actions.repairRuntime).toHaveBeenCalledOnce()
@@ -375,13 +375,82 @@ describe("application", () => {
 
     application.rerender(
       <ApplicationApp
-        source={{ ...source, runtimeRepairRequired: false }}
+        source={{ ...source, runtimeRepair: null }}
         actions={application.actions}
       />,
     )
 
     expect(navigation.queryByRole("button", { name: "System issue" })).not.toBeInTheDocument()
     expect(within(appPanel("Sandboxes")).getByRole("list", { name: "Configured sandboxes" })).toBeVisible()
+  })
+
+  it.each([
+    ["installing", "Bundled Silo tools", "Installing bundled Silo tools…", "Step 1 of 3"],
+    ["configuring", "Default configuration", "Checking default configuration…", "Step 2 of 3"],
+    ["verifying", "Installation verification", "Verifying the installation…", "Step 3 of 3"],
+  ] as const)("shows concise %s repair progress", async (mode, phase, currentAction, step) => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, mode)
+    const application = renderApplication("running", source)
+    const navigation = within(appNavigation())
+
+    await application.user.click(navigation.getByRole("button", { name: "System issue" }))
+    expect(navigation.getByRole("button", { name: "System issue" })).toHaveAttribute("data-navigation-tone", "warning")
+    const page = within(appPanel("System issue"))
+    expect(page.getByRole("heading", { name: "Repairing installation", level: 3 })).toBeVisible()
+    expect(page.getByText(currentAction)).toBeVisible()
+    expect(page.getByText(step)).toBeVisible()
+    const progress = page.getByRole("list", { name: "Repair progress" })
+    expect(within(progress).getAllByRole("listitem")).toHaveLength(3)
+    expect(within(progress).getByText(phase).closest("li")).toHaveAttribute("data-step-state", "active")
+    expect(page.getByRole("button", { name: "Repair in progress" })).toBeDisabled()
+  })
+
+  it("shows retry and optional technical details after repair fails", async () => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, "failed")
+    const application = renderApplication("running", source)
+    const navigation = within(appNavigation())
+
+    await application.user.click(navigation.getByRole("button", { name: "System issue" }))
+    const page = within(appPanel("System issue"))
+    expect(page.getByRole("heading", { name: "Repair couldn’t finish", level: 3 })).toBeVisible()
+    expect(page.getByText("The activated runtime did not pass verification.")).toBeVisible()
+    expect(page.getByText("Show technical details, then retry the repair.")).toBeVisible()
+    expect(page.queryByText(/version handshake/)).not.toBeInTheDocument()
+
+    await application.user.click(page.getByRole("button", { name: "Show technical details" }))
+    expect(page.getByText(/version handshake/)).toBeVisible()
+    const copy = vi.spyOn(navigator.clipboard, "writeText")
+    await application.user.click(page.getByRole("button", { name: "Copy technical details" }))
+    expect(copy).toHaveBeenCalledWith(expect.stringContaining("version handshake"))
+    expect(page.getByRole("button", { name: "Technical details copied" })).toBeVisible()
+    await application.user.click(page.getByRole("button", { name: "Retry Repair" }))
+    expect(application.actions.repairRuntime).toHaveBeenCalledOnce()
+  })
+
+  it("confirms a verified repair and returns to Sandboxes", async () => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, "succeeded")
+    const application = renderApplication("running", source)
+    const navigation = within(appNavigation())
+
+    await application.user.click(navigation.getByRole("button", { name: "System issue" }))
+    expect(navigation.getByRole("button", { name: "System issue" })).toHaveAttribute("data-navigation-tone", "success")
+    const page = within(appPanel("System issue"))
+    expect(page.getByRole("heading", { name: "Installation repaired", level: 3 })).toBeVisible()
+    expect(page.getByText("The bundled runtime passed verification.")).toBeVisible()
+    expect(page.queryByRole("button", { name: /repair/i })).not.toBeInTheDocument()
+    expect(within(page.getByRole("list", { name: "Repair progress" })).getAllByText("Complete")).toHaveLength(3)
+  })
+
+  it("gives reinstall guidance when the bundled runtime is unavailable", async () => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, "runtime-missing")
+    const application = renderApplication("running", source)
+
+    await application.user.click(within(appNavigation()).getByRole("button", { name: "System issue" }))
+    const page = within(appPanel("System issue"))
+    expect(page.getByRole("heading", { name: "Silo runtime is unavailable", level: 3 })).toBeVisible()
+    expect(page.getByText("This app build is missing its bundled Silo runtime.")).toBeVisible()
+    expect(page.getByText("Reinstall Silo from a complete app bundle.")).toBeVisible()
+    expect(page.queryByRole("button", { name: /repair/i })).not.toBeInTheDocument()
   })
 
   it("renders the native app domains in the polished Silo shell", async () => {

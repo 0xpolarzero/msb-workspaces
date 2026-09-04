@@ -3,7 +3,7 @@ import { useMemo, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { DisclosureIndicator, disclosureTriggerStateClass } from "@/features/onboarding/components/disclosure-indicator"
+import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import type { SiloProgressEvent } from "@/contracts/silo"
 
 function eventLine(event: SiloProgressEvent): string {

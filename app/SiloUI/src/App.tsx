@@ -5,6 +5,7 @@ import { OnboardingApp } from "@/features/onboarding/onboarding-app"
 import {
   applicationSourceForScenario,
   sandboxConfigurationFixtureModeFromSearch,
+  systemIssueFixtureModeFromSearch,
   workspaceFixtureModeFromSearch,
 } from "@/fixtures/application-scenarios"
 import { FixtureSelector } from "@/fixtures/fixture-selector"
@@ -17,13 +18,14 @@ export default function App() {
   const githubState = import.meta.env.DEV ? githubStateFromSearch(window.location.search) : undefined
   const workspaceMode = import.meta.env.DEV ? workspaceFixtureModeFromSearch(window.location.search) : undefined
   const sandboxConfigurationMode = import.meta.env.DEV ? sandboxConfigurationFixtureModeFromSearch(window.location.search) : undefined
+  const systemIssueMode = import.meta.env.DEV ? systemIssueFixtureModeFromSearch(window.location.search) : undefined
   const [source, setSource] = useState(onboardingScenarios[scenario])
   return (
     <>
       {surface === "app" ? (
         <ApplicationApp
-          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}`}
-          source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode)}
+          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}:${systemIssueMode ?? "source"}`}
+          source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode)}
           actions={{
             repairRuntime: () => undefined,
             saveMachineConfiguration: (_request) => undefined,
@@ -50,7 +52,7 @@ export default function App() {
           }}
         />
       )}
-      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} />}
+      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} systemIssueMode={systemIssueMode} />}
     </>
   )
 }

@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from "react"
-import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
+import { Activity, Bell, Boxes, ChevronRight, CircleAlert, CircleCheck, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
-import type { ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ApplicationTab, RuntimeRepairPresentation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 const primaryItems = [
@@ -31,6 +31,7 @@ function NavigationButton({
   icon: Icon,
   active,
   tone = "default",
+  iconClassName,
   reserveDisclosure = false,
   onClick,
 }: {
@@ -38,7 +39,8 @@ function NavigationButton({
   label: string
   icon: typeof Boxes
   active: boolean
-  tone?: "default" | "danger"
+  tone?: "default" | "danger" | "warning" | "success"
+  iconClassName?: string
   reserveDisclosure?: boolean
   onClick: () => void
 }) {
@@ -55,14 +57,22 @@ function NavigationButton({
         "flex h-10 min-w-fit flex-none items-center justify-center gap-2 rounded-md px-3 py-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]",
         tone === "danger"
           ? "text-destructive hover:bg-destructive/[0.07] hover:text-destructive"
+          : tone === "warning"
+            ? "text-amber-700 hover:bg-amber-500/[0.08] hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-400"
+            : tone === "success"
+              ? "text-emerald-700 hover:bg-emerald-500/[0.07] hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-400"
           : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
         active && (tone === "danger"
           ? "bg-destructive/10 font-medium text-destructive"
+          : tone === "warning"
+            ? "bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
+            : tone === "success"
+              ? "bg-emerald-500/10 font-medium text-emerald-800 dark:text-emerald-300"
           : "bg-sidebar-accent font-medium text-sidebar-accent-foreground"),
         reserveDisclosure && "pr-10",
       )}
     >
-      <Icon className="size-4" />
+      <Icon className={cn("size-4", iconClassName)} />
       <span className="md:flex-1 md:text-left">{label}</span>
     </button>
   )
@@ -147,7 +157,7 @@ export function ApplicationShell({
   activeTab,
   workspaceSection,
   settingsSection,
-  showSystemIssue,
+  systemIssueStatus,
   onTabChange,
   onWorkspaceSectionChange,
   onSettingsSectionChange,
@@ -156,7 +166,7 @@ export function ApplicationShell({
   activeTab: ApplicationTab
   workspaceSection: WorkspaceSection
   settingsSection: SettingsSection
-  showSystemIssue: boolean
+  systemIssueStatus: RuntimeRepairPresentation["status"] | null
   onTabChange: (tab: ApplicationTab) => void
   onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
@@ -207,13 +217,14 @@ export function ApplicationShell({
             </div>
             <div className="flex gap-1 md:mt-auto md:grid md:w-full">
               <div className="mx-3 my-2 hidden border-t border-border md:block" aria-hidden="true" />
-              {showSystemIssue && (
+              {systemIssueStatus && (
                 <NavigationButton
                   id="system"
                   label="System issue"
-                  icon={CircleAlert}
+                  icon={systemIssueStatus === "repairing" ? Loader2 : systemIssueStatus === "succeeded" ? CircleCheck : CircleAlert}
+                  iconClassName={systemIssueStatus === "repairing" ? "animate-spin" : undefined}
                   active={activeTab === "system"}
-                  tone="danger"
+                  tone={systemIssueStatus === "repairing" ? "warning" : systemIssueStatus === "succeeded" ? "success" : "danger"}
                   onClick={() => selectTab("system")}
                 />
               )}

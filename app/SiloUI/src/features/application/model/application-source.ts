@@ -12,6 +12,35 @@ export type WorkspaceSection = "overview" | "files" | "logs" | "network" | "acti
 export type WorkspaceDetailSection = Exclude<WorkspaceSection, "overview">
 export type WorkspaceState = "running" | "starting" | "stopped" | "failed"
 
+export type RuntimeRepairPhase = "installing-runtime" | "installing-configuration" | "verifying"
+
+export type RuntimeRepairPresentation =
+  | {
+      status: "needed"
+      reason: string
+    }
+  | {
+      status: "repairing"
+      phase: RuntimeRepairPhase
+      completedSteps: 0 | 1 | 2
+      totalSteps: 3
+    }
+  | {
+      status: "failed"
+      phase?: RuntimeRepairPhase
+      summary: string
+      recovery: string
+      diagnosticDetails?: string
+    }
+  | {
+      status: "succeeded"
+    }
+  | {
+      status: "unavailable"
+      reason: string
+      recovery: string
+    }
+
 export type SandboxConfigurationOperation =
   | {
       id: string
@@ -89,7 +118,7 @@ export interface ApplicationSecret {
 }
 
 export interface ApplicationSource {
-  runtimeRepairRequired: boolean
+  runtimeRepair: RuntimeRepairPresentation | null
   workspaces: ApplicationWorkspace[]
   sandboxConfigurationOperation: SandboxConfigurationOperation | null
   github: {

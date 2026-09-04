@@ -2,7 +2,7 @@ import { AlertCircle, Check } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { DisclosureIndicator, disclosureTriggerStateClass } from "@/features/onboarding/components/disclosure-indicator"
+import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import type { DependencyGroupView } from "@/features/onboarding/model/onboarding-state"
 
 export function DependencyDisclosure({ group, onRepairRuntime }: { group: DependencyGroupView; onRepairRuntime: () => void }) {

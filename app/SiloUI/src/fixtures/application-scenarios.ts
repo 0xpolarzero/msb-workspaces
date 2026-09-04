@@ -2,6 +2,7 @@ import type { SetupVirtualMachineConfiguration, SiloProgressEvent } from "@/cont
 import type {
   ApplicationSource,
   ApplicationWorkspace,
+  RuntimeRepairPresentation,
   SandboxConfigurationOperation,
   WorkspaceState,
 } from "@/features/application/model/application-source"
@@ -22,6 +23,17 @@ export const sandboxConfigurationFixtureModes = [
 ] as const
 export type SandboxConfigurationFixtureMode = (typeof sandboxConfigurationFixtureModes)[number]
 
+export const systemIssueFixtureModes = [
+  "needed",
+  "installing",
+  "configuring",
+  "verifying",
+  "failed",
+  "succeeded",
+  "runtime-missing",
+] as const
+export type SystemIssueFixtureMode = (typeof systemIssueFixtureModes)[number]
+
 export function workspaceFixtureModeFromSearch(search: string): WorkspaceFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("sandbox-state")
   return workspaceFixtureModes.find((mode) => mode === requested)
@@ -30,6 +42,11 @@ export function workspaceFixtureModeFromSearch(search: string): WorkspaceFixture
 export function sandboxConfigurationFixtureModeFromSearch(search: string): SandboxConfigurationFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("sandbox-change")
   return sandboxConfigurationFixtureModes.find((mode) => mode === requested)
+}
+
+export function systemIssueFixtureModeFromSearch(search: string): SystemIssueFixtureMode | undefined {
+  const requested = new URLSearchParams(search).get("system-issue")
+  return systemIssueFixtureModes.find((mode) => mode === requested)
 }
 
 const baseWorkspaces: ApplicationWorkspace[] = [
@@ -213,15 +230,58 @@ function configurationOperationForFixture(
   }
 }
 
+const neededRuntimeRepair: RuntimeRepairPresentation = {
+  status: "needed",
+  reason: "Silo could not verify the bundled runtime used to manage sandboxes.",
+}
+
+function runtimeRepairForFixture(
+  scenario: ScenarioName,
+  mode?: SystemIssueFixtureMode,
+): RuntimeRepairPresentation | null {
+  if (!mode) return scenario === "dependency-failure" ? neededRuntimeRepair : null
+  if (mode === "needed") return neededRuntimeRepair
+  if (mode === "installing") {
+    return { status: "repairing", phase: "installing-runtime", completedSteps: 0, totalSteps: 3 }
+  }
+  if (mode === "configuring") {
+    return { status: "repairing", phase: "installing-configuration", completedSteps: 1, totalSteps: 3 }
+  }
+  if (mode === "verifying") {
+    return { status: "repairing", phase: "verifying", completedSteps: 2, totalSteps: 3 }
+  }
+  if (mode === "failed") {
+    return {
+      status: "failed",
+      phase: "verifying",
+      summary: "The activated runtime did not pass verification.",
+      recovery: "Show technical details, then retry the repair.",
+      diagnosticDetails: [
+        "Installing bundled Silo tools",
+        "Installing default configuration",
+        "Verifying activated command identity",
+        "Final error: bundled Silo command failed its version handshake.",
+      ].join("\n"),
+    }
+  }
+  if (mode === "succeeded") return { status: "succeeded" }
+  return {
+    status: "unavailable",
+    reason: "This app build is missing its bundled Silo runtime.",
+    recovery: "Reinstall Silo from a complete app bundle.",
+  }
+}
+
 export function applicationSourceForScenario(
   scenario: ScenarioName,
   githubState?: GitHubFixtureState,
   workspaceMode?: WorkspaceFixtureMode,
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode,
+  systemIssueMode?: SystemIssueFixtureMode,
 ): ApplicationSource {
   const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode)
   return {
-    runtimeRepairRequired: scenario === "dependency-failure",
+    runtimeRepair: runtimeRepairForFixture(scenario, systemIssueMode),
     workspaces,
     sandboxConfigurationOperation: configurationOperationForFixture(workspaces, sandboxConfigurationMode),
     github: {

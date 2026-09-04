@@ -2,8 +2,10 @@ import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
 import {
   sandboxConfigurationFixtureModes,
+  systemIssueFixtureModes,
   workspaceFixtureModes,
   type SandboxConfigurationFixtureMode,
+  type SystemIssueFixtureMode,
   type WorkspaceFixtureMode,
 } from "@/fixtures/application-scenarios"
 import type { SurfaceName } from "@/fixtures/surfaces"
@@ -11,12 +13,13 @@ import { surfaceNames } from "@/fixtures/surfaces"
 
 import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
-export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode }: {
+export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode }: {
   surface: SurfaceName
   scenario: ScenarioName
   githubState?: GitHubFixtureState
   workspaceMode?: WorkspaceFixtureMode
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode
+  systemIssueMode?: SystemIssueFixtureMode
 }) {
   function selectFixture(parameter: string, value: string) {
     const url = new URL(window.location.href)
@@ -62,6 +65,18 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
             >
               <option value="source">source</option>
               {sandboxConfigurationFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            System
+            <select
+              aria-label="System issue fixture"
+              className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={systemIssueMode ?? "source"}
+              onChange={(event) => selectFixture("system-issue", event.target.value)}
+            >
+              <option value="source">source</option>
+              {systemIssueFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
             </select>
           </label>
         </>
