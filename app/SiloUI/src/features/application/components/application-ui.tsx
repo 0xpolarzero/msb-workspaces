@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { AlertTriangle } from "lucide-react"
 
+import { StatusBadge } from "@/components/status-badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import type { WorkspaceState } from "@/features/application/model/application-source"
@@ -35,6 +36,18 @@ const workspaceStateStyles: Record<WorkspaceState, string> = {
 
 export function WorkspaceStateDot({ state, className }: { state: WorkspaceState; className?: string }) {
   return <span className={cn("size-2 rounded-full", workspaceStateStyles[state], className)} data-workspace-state-dot={state} aria-hidden="true" />
+}
+
+export function WorkspaceBadge({ name, state }: { name: string; state: WorkspaceState }) {
+  const stateLabel = state.charAt(0).toUpperCase() + state.slice(1)
+  return (
+    <StatusBadge
+      indicator={<WorkspaceStateDot state={state} className="size-1.5" />}
+      aria-label={`${name}, ${stateLabel}`}
+    >
+      {name}
+    </StatusBadge>
+  )
 }
 
 const workspaceStateLabelStyles: Record<WorkspaceState, string> = {

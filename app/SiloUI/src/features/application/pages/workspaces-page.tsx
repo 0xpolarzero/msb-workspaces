@@ -7,8 +7,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { DetailCard, WorkspaceStateDot } from "@/features/application/components/application-ui"
-import type { ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection, WorkspaceState } from "@/features/application/model/application-source"
+import { DetailCard, WorkspaceBadge } from "@/features/application/components/application-ui"
+import type { ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 function WorkspaceFilterBar({
@@ -145,16 +145,6 @@ function EmptyState({ title, description }: { title: string; description: string
         <p className="mt-1 text-xs text-muted-foreground">{description}</p>
       </div>
     </div>
-  )
-}
-
-function WorkspaceBadge({ name, state }: { name: string; state: WorkspaceState }) {
-  const stateLabel = state.charAt(0).toUpperCase() + state.slice(1)
-  return (
-    <span className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/45 px-1.5 text-[10px] font-medium text-muted-foreground" aria-label={`${name}, ${stateLabel}`}>
-      <WorkspaceStateDot state={state} className="size-1.5" />
-      {name}
-    </span>
   )
 }
 
