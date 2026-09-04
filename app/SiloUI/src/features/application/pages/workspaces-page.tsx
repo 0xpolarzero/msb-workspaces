@@ -199,8 +199,8 @@ function Files({
         <section
           aria-label="Repositories"
           className={cn(
-            "collapsible-motion flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:max-h-none lg:pr-5",
-            repositoriesOpen ? fileTreeOpen ? "max-h-[50%] shrink-0" : "flex-1" : "shrink-0",
+            "collapsible-motion flex min-h-0 min-w-0 max-h-full flex-col overflow-hidden transition-[max-height] duration-200 ease-out lg:h-full lg:max-h-none lg:pr-5 lg:transition-none",
+            repositoriesOpen ? fileTreeOpen ? "max-h-[50%] shrink-0" : "flex-1" : "max-h-8 shrink-0",
           )}
           data-files-pane="repositories"
           data-pane-position="top"
@@ -214,7 +214,7 @@ function Files({
               <DisclosureIndicator />
             </CollapsibleTrigger>
           </div>
-          <CollapsibleContent className="collapsible-content-motion min-h-0 flex-1" data-files-pane-content="repositories">
+          <CollapsibleContent className="file-pane-content-motion min-h-0 flex-1" data-files-pane-content="repositories">
             <div className="h-full overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="repositories">
               {repositories.length > 0 ? (
                 <div className="divide-y divide-border" role="list" aria-label="Repositories">
@@ -256,8 +256,8 @@ function Files({
         <section
           aria-label="File tree"
           className={cn(
-            "collapsible-motion flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:border-l lg:border-border lg:pl-5",
-            fileTreeOpen ? "flex-1" : "shrink-0",
+            "collapsible-motion flex min-h-0 min-w-0 max-h-full flex-1 flex-col overflow-hidden transition-[max-height] duration-200 ease-out lg:h-full lg:max-h-none lg:border-l lg:border-border lg:pl-5 lg:transition-none",
+            !fileTreeOpen && "max-h-8",
           )}
           data-files-pane="file-tree"
           data-pane-position="bottom"
@@ -271,7 +271,7 @@ function Files({
               <DisclosureIndicator />
             </CollapsibleTrigger>
           </div>
-          <CollapsibleContent className="collapsible-content-motion min-h-0 flex-1" data-files-pane-content="file-tree">
+          <CollapsibleContent className="file-pane-content-motion min-h-0 flex-1" data-files-pane-content="file-tree">
             <div className="h-full overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="file-tree">
               <ul className="grid gap-0.5" aria-label="File tree">
                 {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}

@@ -129,15 +129,15 @@ describe("application", () => {
     expect(fileTreePane).toHaveClass("flex-1")
     expect(repositoriesPane).toHaveClass("collapsible-motion")
     expect(fileTreePane).toHaveClass("collapsible-motion")
-    expect(repositoriesPane.querySelector('[data-files-pane-content="repositories"]')).toHaveClass("collapsible-content-motion", "min-h-0", "flex-1")
-    expect(fileTreePane.querySelector('[data-files-pane-content="file-tree"]')).toHaveClass("collapsible-content-motion", "min-h-0", "flex-1")
+    expect(repositoriesPane.querySelector('[data-files-pane-content="repositories"]')).toHaveClass("file-pane-content-motion", "min-h-0", "flex-1")
+    expect(fileTreePane.querySelector('[data-files-pane-content="file-tree"]')).toHaveClass("file-pane-content-motion", "min-h-0", "flex-1")
     expect(repositoriesPane.querySelector('[data-files-pane-scroll="repositories"]')).toHaveClass("h-full", "overflow-y-auto")
     expect(fileTreePane.querySelector('[data-files-pane-scroll="file-tree"]')).toHaveClass("h-full", "overflow-y-auto")
 
     await user.click(panel.getByRole("button", { name: "Collapse repositories" }))
     expect(panel.getByRole("button", { name: "Expand repositories" })).toHaveAttribute("aria-expanded", "false")
     expect(panel.queryByRole("list", { name: "Repositories" })).not.toBeInTheDocument()
-    expect(repositoriesPane).toHaveClass("shrink-0")
+    expect(repositoriesPane).toHaveClass("max-h-8", "shrink-0", "transition-[max-height]")
     expect(fileTreePane).toHaveClass("flex-1")
     await user.click(panel.getByRole("button", { name: "Expand repositories" }))
 
@@ -145,7 +145,7 @@ describe("application", () => {
     expect(panel.getByRole("button", { name: "Expand file tree" })).toHaveAttribute("aria-expanded", "false")
     expect(panel.queryByRole("list", { name: "File tree" })).not.toBeInTheDocument()
     expect(repositoriesPane).toHaveClass("flex-1")
-    expect(fileTreePane).toHaveClass("shrink-0")
+    expect(fileTreePane).toHaveClass("max-h-8", "flex-1", "transition-[max-height]")
     await user.click(panel.getByRole("button", { name: "Expand file tree" }))
 
     const repositories = panel.getByRole("list", { name: "Repositories" })

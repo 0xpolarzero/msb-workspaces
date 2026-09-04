@@ -175,6 +175,14 @@ html.dark {
   animation: collapsible-content-collapse 180ms ease-in;
 }
 
+.file-pane-content-motion[data-state="open"] {
+  animation: file-pane-content-reveal 180ms ease-out;
+}
+
+.file-pane-content-motion[data-state="closed"] {
+  animation: file-pane-content-collapse 140ms ease-in;
+}
+
 @keyframes collapsible-content-reveal {
   from { height: 0; }
   to { height: var(--radix-collapsible-content-height); }
@@ -185,12 +193,43 @@ html.dark {
   to { height: 0; }
 }
 
+@keyframes file-pane-content-reveal {
+  from {
+    opacity: 0;
+    clip-path: inset(0 0 0.5rem 0);
+    transform: translateY(-0.25rem);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(0);
+    transform: translateY(0);
+  }
+}
+
+@keyframes file-pane-content-collapse {
+  from {
+    opacity: 1;
+    clip-path: inset(0);
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    clip-path: inset(0 0 0.5rem 0);
+    transform: translateY(-0.25rem);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .collapsible-content-motion {
+  .collapsible-content-motion,
+  .file-pane-content-motion {
     animation: none !important;
   }
 
   .collapsible-motion .disclosure-caret {
+    transition-duration: 0s;
+  }
+
+  .collapsible-motion[data-files-pane] {
     transition-duration: 0s;
   }
 }
