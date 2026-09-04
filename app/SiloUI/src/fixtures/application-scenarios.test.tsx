@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   applicationSourceForScenario,
+  sandboxConfigurationFixtureModeFromSearch,
+  sandboxConfigurationFixtureModes,
   workspaceFixtureModeFromSearch,
   workspaceFixtureModes,
 } from "@/fixtures/application-scenarios"
@@ -21,7 +23,7 @@ describe("application state fixtures", () => {
   })
 
   it("shows every state mode only for the application fixture", () => {
-    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" />)
+    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" />)
     const controls = screen.getByLabelText("Development fixtures")
     expect(controls).toHaveClass("max-w-[calc(100vw-1.5rem)]", "flex-wrap")
     expect(within(screen.getByRole("combobox", { name: "Sandbox state fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
@@ -32,9 +34,22 @@ describe("application state fixtures", () => {
       "warning",
       "error",
     ])
+    expect(within(screen.getByRole("combobox", { name: "Sandbox change fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
+      "source",
+      ...sandboxConfigurationFixtureModes,
+    ])
     app.unmount()
 
     render(<FixtureSelector surface="onboarding" scenario="running" />)
     expect(screen.queryByRole("combobox", { name: "Sandbox state fixture" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("combobox", { name: "Sandbox change fixture" })).not.toBeInTheDocument()
+  })
+
+  it("parses every sandbox configuration fixture independently from runtime state", () => {
+    for (const mode of sandboxConfigurationFixtureModes) {
+      expect(sandboxConfigurationFixtureModeFromSearch(`?sandbox-change=${mode}`)).toBe(mode)
+      expect(applicationSourceForScenario("running", undefined, undefined, mode).sandboxConfigurationOperation).not.toBeNull()
+    }
+    expect(sandboxConfigurationFixtureModeFromSearch("?sandbox-change=unknown")).toBeUndefined()
   })
 })

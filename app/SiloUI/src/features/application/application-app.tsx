@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { ApplicationShell } from "@/features/application/components/application-shell"
-import type { ApplicationActions, ApplicationSource, ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ApplicationActions, ApplicationSource, ApplicationTab, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { BackupPage } from "@/features/application/pages/backup-page"
 import { GeneralPage } from "@/features/application/pages/general-page"
 import { GitHubPage } from "@/features/application/pages/github-page"
@@ -11,23 +11,6 @@ import { OverviewPage } from "@/features/application/pages/overview-page"
 import { SecretsPage } from "@/features/application/pages/secrets-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
 
-function newApplicationWorkspace(machine: SetupMachineConfiguration): ApplicationSource["workspaces"][number] {
-  return {
-    machine,
-    purpose: machine.kind === "ssh" ? "Remote sandbox" : "New sandbox",
-    state: "stopped",
-    stateDetail: "Stopped",
-    freshness: "fresh",
-    host: machine.kind === "ssh" ? machine.host : `${machine.name}.silo.test`,
-    repositories: [],
-    ports: [],
-    logs: [],
-    activities: [],
-    githubRepositories: [],
-    secretNames: [],
-  }
-}
-
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
@@ -35,7 +18,8 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>("overview")
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
-  const applicationSource = { ...source, workspaces }
+  const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
+  const applicationSource = { ...source, workspaces, sandboxConfigurationOperation }
 
   useEffect(() => {
     // The source is the authoritative snapshot when the native bridge publishes a replacement.
@@ -43,18 +27,22 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     setWorkspaces(source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
     // oxlint-disable-next-line react/set-state-in-effect
     setSelectedWorkspace((current) => source.workspaces.some(({ machine }) => machine.id === current) ? current : source.workspaces[0]?.machine.id ?? "")
-  }, [source.workspaces])
+    // The native bridge clears or replaces the pending operation alongside its authoritative snapshot.
+    // oxlint-disable-next-line react/set-state-in-effect
+    setSandboxConfigurationOperation(source.sandboxConfigurationOperation)
+  }, [source.workspaces, source.sandboxConfigurationOperation])
 
   function updateMachines(machines: SetupMachineConfiguration[]) {
-    setWorkspaces((current) => {
-      const byID = new Map(current.map((workspace) => [workspace.machine.id, workspace]))
-      return machines.map((machine) => {
-        const workspace = byID.get(machine.id)
-        return workspace ? { ...workspace, machine } : newApplicationWorkspace(machine)
-      })
+    const candidate = { schemaVersion: 1 as const, machines }
+    setSandboxConfigurationOperation({
+      id: "local-sandbox-configuration",
+      status: "applying",
+      candidate,
+      progressEvents: [],
+      result: null,
+      error: null,
     })
-    setSelectedWorkspace((current) => machines.some(({ id }) => id === current) ? current : machines[0]?.id ?? "")
-    actions.saveMachineConfiguration({ schemaVersion: 1, machines })
+    actions.saveMachineConfiguration(candidate)
   }
 
   return (

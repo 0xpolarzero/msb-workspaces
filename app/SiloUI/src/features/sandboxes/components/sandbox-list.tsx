@@ -58,7 +58,9 @@ export function SandboxListRow({
   kind,
   iconState = "normal",
   detail,
+  detailClassName,
   leading,
+  icon,
   actions,
   hoverActions,
   tone,
@@ -67,7 +69,9 @@ export function SandboxListRow({
   kind: "vm" | "ssh"
   iconState?: SandboxIconState
   detail: ReactNode
+  detailClassName?: string
   leading?: ReactNode
+  icon?: ReactNode
   actions?: ReactNode
   hoverActions?: ReactNode
   tone?: SandboxRowTone
@@ -86,7 +90,7 @@ export function SandboxListRow({
       data-sandbox-row-tone={tone}
     >
       {leading}
-      <SandboxIcon kind={kind} state={iconState} />
+      {icon ?? <SandboxIcon kind={kind} state={iconState} />}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-xs font-medium" title={name}>{name}</span>
@@ -96,6 +100,7 @@ export function SandboxListRow({
           "truncate text-[10px] text-muted-foreground",
           iconState === "warning" && "text-amber-700 dark:text-amber-400",
           iconState === "error" && "text-destructive",
+          detailClassName,
         )}>{detail}</div>
       </div>
       {hoverActions && (

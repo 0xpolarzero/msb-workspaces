@@ -1,10 +1,42 @@
-import type { SetupMachineConfiguration, SetupMachineConfigurationRequest } from "@/contracts/silo"
+import type {
+  SetupMachineConfiguration,
+  SetupMachineConfigurationRequest,
+  SiloBootstrapResult,
+  SiloProgressEvent,
+  SiloProtocolError,
+} from "@/contracts/silo"
 
 export type ApplicationTab = "workspaces" | "github" | "secrets" | "backup" | "settings"
 export type SettingsSection = "general" | "notifications"
 export type WorkspaceSection = "overview" | "files" | "logs" | "network" | "activity"
 export type WorkspaceDetailSection = Exclude<WorkspaceSection, "overview">
 export type WorkspaceState = "running" | "starting" | "stopped" | "failed"
+
+export type SandboxConfigurationOperation =
+  | {
+      id: string
+      status: "applying"
+      candidate: SetupMachineConfigurationRequest
+      progressEvents: readonly SiloProgressEvent[]
+      result: null
+      error: null
+    }
+  | {
+      id: string
+      status: "awaiting-approval"
+      candidate: SetupMachineConfigurationRequest
+      progressEvents: readonly SiloProgressEvent[]
+      result: SiloBootstrapResult
+      error: null
+    }
+  | {
+      id: string
+      status: "failed"
+      candidate: SetupMachineConfigurationRequest
+      progressEvents: readonly SiloProgressEvent[]
+      result: null
+      error: SiloProtocolError
+    }
 
 export interface ApplicationRepository {
   path: string
@@ -59,6 +91,7 @@ export interface ApplicationSecret {
 export interface ApplicationSource {
   runtimeRepairRequired: boolean
   workspaces: ApplicationWorkspace[]
+  sandboxConfigurationOperation: SandboxConfigurationOperation | null
   github: {
     state: "disconnected" | "connecting" | "connected"
     account?: string
@@ -83,6 +116,7 @@ export interface ApplicationSource {
 export interface ApplicationActions {
   repairRuntime: () => void
   saveMachineConfiguration: (request: SetupMachineConfigurationRequest) => void
+  retryMachineConfiguration: (workspace: string) => void
   startWorkspace: (workspace: string) => void
   pauseWorkspace: (workspace: string) => void
   stopWorkspace: (workspace: string) => void

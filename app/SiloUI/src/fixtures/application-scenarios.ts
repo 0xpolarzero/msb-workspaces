@@ -1,4 +1,10 @@
-import type { ApplicationSource, ApplicationWorkspace, WorkspaceState } from "@/features/application/model/application-source"
+import type { SetupVirtualMachineConfiguration, SiloProgressEvent } from "@/contracts/silo"
+import type {
+  ApplicationSource,
+  ApplicationWorkspace,
+  SandboxConfigurationOperation,
+  WorkspaceState,
+} from "@/features/application/model/application-source"
 import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 
@@ -7,9 +13,23 @@ const [devMachine, playgroundsMachine, personalMachine] = productionMachineDefau
 export const workspaceFixtureModes = ["running", "starting", "stopped", "warning", "error"] as const
 export type WorkspaceFixtureMode = (typeof workspaceFixtureModes)[number]
 
+export const sandboxConfigurationFixtureModes = [
+  "add-configuring",
+  "add-networking",
+  "add-verifying",
+  "remove-pending",
+  "workspace-error",
+] as const
+export type SandboxConfigurationFixtureMode = (typeof sandboxConfigurationFixtureModes)[number]
+
 export function workspaceFixtureModeFromSearch(search: string): WorkspaceFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("sandbox-state")
   return workspaceFixtureModes.find((mode) => mode === requested)
+}
+
+export function sandboxConfigurationFixtureModeFromSearch(search: string): SandboxConfigurationFixtureMode | undefined {
+  const requested = new URLSearchParams(search).get("sandbox-change")
+  return sandboxConfigurationFixtureModes.find((mode) => mode === requested)
 }
 
 const baseWorkspaces: ApplicationWorkspace[] = [
@@ -116,10 +136,94 @@ function workspacesForFixtureMode(workspaces: ApplicationWorkspace[], mode?: Wor
   }))
 }
 
-export function applicationSourceForScenario(scenario: ScenarioName, githubState?: GitHubFixtureState, workspaceMode?: WorkspaceFixtureMode): ApplicationSource {
+const scratchMachine: SetupVirtualMachineConfiguration = {
+  ...devMachine,
+  id: "00000000-0000-4000-8000-000000000004",
+  name: "scratch",
+  cpus: 4,
+  memoryGiB: 16,
+  workspaceStorageGiB: 60,
+  runtimeStorageGiB: 60,
+}
+
+const fixtureRevision = "a".repeat(64)
+
+function progressEvent(step: string, workspace: string, fraction: 0 | 1, message: string): SiloProgressEvent {
+  return {
+    schemaVersion: 1,
+    type: "progress",
+    requestId: "fixture-sandbox-configuration",
+    phase: step === "workspace-verification" ? "verification" : "workspaces",
+    step,
+    workspace,
+    revision: fixtureRevision,
+    fraction,
+    message,
+    safeForDisplay: true,
+  }
+}
+
+function configurationOperationForFixture(
+  workspaces: ApplicationWorkspace[],
+  mode?: SandboxConfigurationFixtureMode,
+): SandboxConfigurationOperation | null {
+  if (!mode) return null
+  const machines = workspaces.map(({ machine }) => machine)
+  const candidate = {
+    schemaVersion: 1 as const,
+    machines: mode === "remove-pending"
+      ? machines.filter(({ name }) => name !== "playgrounds")
+      : [...machines, scratchMachine],
+  }
+  const configured = progressEvent("workspace-configuration", "scratch", 1, "Workspace 'scratch' is configured.")
+  const networkReady = progressEvent("workspace-networking", "scratch", 1, "Candidate networking is ready for 'scratch'.")
+
+  if (mode === "workspace-error") {
+    return {
+      id: "fixture-sandbox-configuration",
+      status: "failed",
+      candidate,
+      progressEvents: [configured, progressEvent("workspace-networking", "scratch", 0, "Candidate networking failed for 'scratch'.")],
+      result: null,
+      error: {
+        code: "SILO_CANDIDATE_NETWORKING_FAILED",
+        message: "Networking failed for 'scratch'.",
+        recovery: "Repair workspace startup or SSH forwarding, then retry.",
+        workspace: "scratch",
+        retryable: true,
+      },
+    }
+  }
+
+  const progressEvents = mode === "add-configuring"
+    ? [progressEvent("workspace-configuration", "scratch", 0, "Configuring workspace 'scratch'.")]
+    : mode === "add-networking"
+      ? [configured, progressEvent("workspace-networking", "scratch", 0, "Starting candidate networking for 'scratch'.")]
+      : mode === "add-verifying"
+        ? [configured, networkReady, progressEvent("workspace-verification", "scratch", 0, "Verifying 'scratch'.")]
+        : []
+
+  return {
+    id: "fixture-sandbox-configuration",
+    status: "applying",
+    candidate,
+    progressEvents,
+    result: null,
+    error: null,
+  }
+}
+
+export function applicationSourceForScenario(
+  scenario: ScenarioName,
+  githubState?: GitHubFixtureState,
+  workspaceMode?: WorkspaceFixtureMode,
+  sandboxConfigurationMode?: SandboxConfigurationFixtureMode,
+): ApplicationSource {
+  const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode)
   return {
     runtimeRepairRequired: scenario === "dependency-failure",
-    workspaces: workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode),
+    workspaces,
+    sandboxConfigurationOperation: configurationOperationForFixture(workspaces, sandboxConfigurationMode),
     github: {
       state: githubState ?? "connected",
       account: githubState === "disconnected" ? undefined : "taylor",

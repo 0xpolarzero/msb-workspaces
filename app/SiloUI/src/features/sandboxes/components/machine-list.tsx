@@ -29,9 +29,13 @@ interface MachineEditorState {
 
 export interface MachineRowPresentation {
   detail?: ReactNode
+  detailClassName?: string
+  icon?: ReactNode
   iconState?: SandboxIconState
   actions?: ReactNode
   tone?: SandboxRowTone
+  busy?: boolean
+  suppressInteractions?: boolean
 }
 
 interface MachineListProps {
@@ -39,6 +43,8 @@ interface MachineListProps {
   onMachinesChange: (machines: SetupMachineConfiguration[]) => void
   getRowPresentation?: (machine: SetupMachineConfiguration) => MachineRowPresentation
   sortPriority?: (machine: SetupMachineConfiguration) => number
+  interactionDisabled?: boolean
+  summary?: ReactNode
   footer?: ReactNode
 }
 
@@ -170,7 +176,7 @@ function MachineEditor({ editor, machines, onCancel, onSave }: {
   )
 }
 
-export function MachineList({ machines, onMachinesChange, getRowPresentation, sortPriority, footer }: MachineListProps) {
+export function MachineList({ machines, onMachinesChange, getRowPresentation, sortPriority, interactionDisabled = false, summary, footer }: MachineListProps) {
   const [addOpen, setAddOpen] = useState(false)
   const [editor, setEditor] = useState<MachineEditorState | null>(null)
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -221,6 +227,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   }
 
   function startEdit(machine: SetupMachineConfiguration) {
+    if (interactionDisabled) return
     beginOperation()
     setEditor({
       draft: structuredClone(machine),
@@ -230,6 +237,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   }
 
   function startAdd(kind: SetupMachineConfiguration["kind"]) {
+    if (interactionDisabled) return
     beginOperation()
     setAddOpen(false)
     setEditor({
@@ -239,12 +247,14 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   }
 
   function startDuplicate(machine: SetupMachineConfiguration) {
+    if (interactionDisabled) return
     beginOperation()
     const sourceIndex = machines.findIndex(({ id }) => id === machine.id)
     setEditor({ draft: duplicateMachine(machine, machines), insertAt: sourceIndex + 1, displayAfterID: machine.id })
   }
 
   function save(machine: SetupMachineConfiguration) {
+    if (interactionDisabled) return
     const updated = [...machines]
     if (editor?.originalID) {
       const index = updated.findIndex(({ id }) => id === editor.originalID)
@@ -258,6 +268,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   }
 
   function remove(machine: SetupMachineConfiguration) {
+    if (interactionDisabled) return
     if (pendingDelete !== machine.id) {
       beginOperation()
       setPendingDelete(machine.id)
@@ -273,6 +284,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   }
 
   function reorder(id: string, targetIndex: number) {
+    if (interactionDisabled) return
     const displayed = displayMachines.filter((machine) => machines.some(({ id: configuredID }) => configuredID === machine.id))
     const from = displayed.findIndex((machine) => machine.id === id)
     const boundedTarget = Math.max(0, Math.min(targetIndex, displayed.length - 1))
@@ -309,6 +321,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   }
 
   function handleReorderKey(event: KeyboardEvent<HTMLElement>, machine: SetupMachineConfiguration, index: number) {
+    if (interactionDisabled) return
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return
     event.preventDefault()
     reorder(machine.id, index + (event.key === "ArrowUp" ? -1 : 1))
@@ -316,6 +329,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
 
   function drop(event: DragEvent, targetIndex: number) {
     event.preventDefault()
+    if (interactionDisabled) return
     const id = draggedID || event.dataTransfer.getData("text/plain")
     if (id) reorder(id, targetIndex)
     setDraggedID(null)
@@ -327,11 +341,11 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
         <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs">
           <div className="min-w-0">
             <h3 id="machine-list-heading" className="font-medium">Sandboxes</h3>
-            <p className="text-[11px] text-muted-foreground">{machines.length} configured · {machines.filter(({ kind }) => kind === "vm").length} VM · {machines.filter(({ kind }) => kind === "ssh").length} SSH</p>
+            <p className="text-[11px] text-muted-foreground">{summary ?? <>{machines.length} configured · {machines.filter(({ kind }) => kind === "vm").length} VM · {machines.filter(({ kind }) => kind === "ssh").length} SSH</>}</p>
           </div>
           <Popover open={addOpen} onOpenChange={setAddOpen}>
             <PopoverTrigger asChild>
-              <Button type="button" variant="outline" size="sm" aria-haspopup="menu" onClick={beginOperation}>
+              <Button type="button" variant="outline" size="sm" aria-haspopup="menu" disabled={interactionDisabled} onClick={beginOperation}>
                 <Plus aria-hidden="true" data-icon="inline-start" /> Add
               </Button>
             </PopoverTrigger>
@@ -353,6 +367,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                   data-machine-id={machine.id}
                   data-sandbox-name={machine.name}
                   data-pending-delete-row={deleteArmed ? machine.id : undefined}
+                  aria-busy={presentation?.busy || undefined}
                   className="min-w-0 bg-background"
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={(event) => drop(event, index)}
@@ -364,14 +379,17 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                       name={machine.name}
                       kind={machine.kind}
                       iconState={presentation?.iconState}
+                      icon={presentation?.icon}
                       tone={presentation?.tone}
                       detail={presentation?.detail ?? machineSummary(machine)}
-                      leading={<span
+                      detailClassName={presentation?.detailClassName}
+                      leading={presentation?.suppressInteractions ? undefined : <span
                         role="button"
-                        tabIndex={0}
-                        draggable={!editor}
+                        tabIndex={interactionDisabled ? -1 : 0}
+                        draggable={!editor && !interactionDisabled}
                         aria-label={`Reorder ${machine.name}`}
-                        className="grid size-7 shrink-0 cursor-grab place-items-center rounded-md text-muted-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 active:cursor-grabbing"
+                        aria-disabled={interactionDisabled || undefined}
+                        className="grid size-7 shrink-0 cursor-grab place-items-center rounded-md text-muted-foreground outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 active:cursor-grabbing aria-disabled:cursor-default aria-disabled:opacity-40"
                         onKeyDown={(event) => handleReorderKey(event, machine, index)}
                         onDragStart={(event) => {
                           beginOperation()
@@ -384,12 +402,13 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                         <GripVertical className="size-4" aria-hidden="true" />
                       </span>}
                       actions={presentation?.actions}
-                      hoverActions={<>
-                        <SandboxAction label={`Edit ${machine.name}`} onClick={() => startEdit(machine)}><Pencil /></SandboxAction>
-                        <SandboxAction label={`Duplicate ${machine.name}`} onClick={() => startDuplicate(machine)}><Copy /></SandboxAction>
+                      hoverActions={presentation?.suppressInteractions ? undefined : <>
+                        <SandboxAction label={`Edit ${machine.name}`} disabled={interactionDisabled} onClick={() => startEdit(machine)}><Pencil /></SandboxAction>
+                        <SandboxAction label={`Duplicate ${machine.name}`} disabled={interactionDisabled} onClick={() => startDuplicate(machine)}><Copy /></SandboxAction>
                         <SandboxAction
                           label={deleteArmed ? `Confirm deletion of ${machine.name}` : `Delete ${machine.name}`}
                           destructive={deleteArmed}
+                          disabled={interactionDisabled}
                           onClick={() => remove(machine)}
                         >
                           {deleteArmed ? <Check /> : <Trash2 />}

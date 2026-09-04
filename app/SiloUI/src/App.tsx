@@ -2,7 +2,11 @@ import { useState } from "react"
 
 import { ApplicationApp } from "@/features/application/application-app"
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
-import { applicationSourceForScenario, workspaceFixtureModeFromSearch } from "@/fixtures/application-scenarios"
+import {
+  applicationSourceForScenario,
+  sandboxConfigurationFixtureModeFromSearch,
+  workspaceFixtureModeFromSearch,
+} from "@/fixtures/application-scenarios"
 import { FixtureSelector } from "@/fixtures/fixture-selector"
 import { githubStateFromSearch, onboardingScenarios, repositoryFixtures, scenarioFromSearch } from "@/fixtures/scenarios"
 import { surfaceFromSearch } from "@/fixtures/surfaces"
@@ -12,16 +16,18 @@ export default function App() {
   const scenario = scenarioFromSearch(window.location.search)
   const githubState = import.meta.env.DEV ? githubStateFromSearch(window.location.search) : undefined
   const workspaceMode = import.meta.env.DEV ? workspaceFixtureModeFromSearch(window.location.search) : undefined
+  const sandboxConfigurationMode = import.meta.env.DEV ? sandboxConfigurationFixtureModeFromSearch(window.location.search) : undefined
   const [source, setSource] = useState(onboardingScenarios[scenario])
   return (
     <>
       {surface === "app" ? (
         <ApplicationApp
-          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}`}
-          source={applicationSourceForScenario(scenario, githubState, workspaceMode)}
+          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}`}
+          source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode)}
           actions={{
             repairRuntime: () => undefined,
             saveMachineConfiguration: (_request) => undefined,
+            retryMachineConfiguration: (_workspace) => undefined,
             startWorkspace: (_workspace) => undefined,
             pauseWorkspace: (_workspace) => undefined,
             stopWorkspace: (_workspace) => undefined,
@@ -44,7 +50,7 @@ export default function App() {
           }}
         />
       )}
-      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} />}
+      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} />}
     </>
   )
 }

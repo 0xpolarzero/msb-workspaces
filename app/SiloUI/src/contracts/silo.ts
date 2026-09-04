@@ -165,6 +165,7 @@ export type SetupMachineConfigurationRequest = z.infer<typeof setupMachineConfig
 export type SetupSSHMachineConfiguration = z.infer<typeof setupSSHMachineConfigurationSchema>
 export type SetupVirtualMachineConfiguration = z.infer<typeof setupVirtualMachineConfigurationSchema>
 export type SiloProgressEvent = z.infer<typeof siloProgressEventSchema>
+export type SiloBootstrapResult = z.infer<typeof siloBootstrapResultSchema>
 export type SiloProtocolError = z.infer<typeof siloProtocolErrorSchema>
 export type GitHubWorkspacePolicy = z.infer<typeof githubWorkspacePolicySchema>
 export type SetupQueueItemID = z.infer<typeof setupQueueItemIdSchema>
