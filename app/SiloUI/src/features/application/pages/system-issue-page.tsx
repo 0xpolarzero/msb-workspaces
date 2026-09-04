@@ -1,6 +1,7 @@
 import { useState } from "react"
-import { AlertCircle, Check, Circle, CircleAlert, Copy, ExternalLink, Loader2, RotateCw } from "lucide-react"
+import { AlertCircle, Check, Circle, CircleAlert, ExternalLink, Loader2, RotateCw } from "lucide-react"
 
+import { CopyButton } from "@/components/copy-button"
 import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -74,18 +75,6 @@ function RepairProgress({ issue }: { issue: ActiveRuntimeRepairPresentation }) {
 
 function TechnicalDetails({ details }: { details: string }) {
   const [open, setOpen] = useState(false)
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle")
-  const copyLabel = copyStatus === "copied" ? "Technical details copied" : copyStatus === "failed" ? "Copy technical details failed" : "Copy technical details"
-
-  async function copyDetails() {
-    try {
-      await navigator.clipboard.writeText(details)
-      setCopyStatus("copied")
-    } catch {
-      setCopyStatus("failed")
-    }
-    window.setTimeout(() => setCopyStatus("idle"), 1200)
-  }
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="group rounded-lg border border-border">
@@ -98,18 +87,14 @@ function TechnicalDetails({ details }: { details: string }) {
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="relative border-t border-border bg-zinc-950 text-zinc-200 dark:bg-black">
-          <Button
-            type="button"
+          <CopyButton
             variant="ghost"
             size="xs"
             className="absolute top-2 right-2 text-zinc-400 hover:bg-white/10 hover:text-white"
-            onClick={copyDetails}
-            aria-label={copyLabel}
-            aria-live="polite"
-          >
-            {copyStatus === "copied" ? <Check aria-hidden="true" /> : copyStatus === "failed" ? <AlertCircle aria-hidden="true" /> : <Copy aria-hidden="true" />}
-            {copyStatus === "copied" ? "Copied" : copyStatus === "failed" ? "Copy failed" : "Copy"}
-          </Button>
+            value={details}
+            labels={{ idle: "Copy technical details", copied: "Technical details copied", failed: "Copy technical details failed" }}
+            text={{ idle: "Copy", copied: "Copied", failed: "Copy failed" }}
+          />
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 pr-20 font-mono text-[11px] leading-5 select-text">{details}</pre>
         </div>
       </CollapsibleContent>

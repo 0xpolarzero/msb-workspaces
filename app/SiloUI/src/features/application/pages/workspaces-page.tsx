@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useState } from "react"
-import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, Copy, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert, X } from "lucide-react"
+import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert, X } from "lucide-react"
 
+import { CopyButton } from "@/components/copy-button"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
@@ -370,7 +371,14 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
           <Search className="pointer-events-none absolute top-2 left-2.5 size-4 text-muted-foreground" aria-hidden="true" />
           <Input aria-label="Search logs" placeholder="Search logs" value={query} onChange={(event) => onQueryChange(event.target.value)} className="pl-8" />
         </div>
-        <Button variant="outline" size="sm" disabled={filteredRows.length === 0}><Copy data-icon="inline-start" />Copy all</Button>
+        <CopyButton
+          variant="outline"
+          size="sm"
+          value={filteredRows.map(({ raw }) => raw).join("\n")}
+          disabled={filteredRows.length === 0}
+          labels={{ idle: "Copy all logs", copied: "All logs copied", failed: "Copy all logs failed" }}
+          text={{ idle: "Copy all", copied: "Copied", failed: "Copy failed" }}
+        />
       </div>
       {filteredRows.length > 0 ? (
         <div role="table" aria-label="Logs" className="overflow-hidden rounded-lg border border-border text-xs">
@@ -387,15 +395,13 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
                 <span role="cell" className="truncate font-medium">{row.workspace}</span>
                 <span role="cell" className="min-w-0 break-words text-foreground/85">{row.message}</span>
                 <span role="cell">
-                  <Button
+                  <CopyButton
                     variant="ghost"
                     size="icon-xs"
-                    aria-label={`Copy log line from ${row.workspace} at ${row.timestamp}`}
                     className="opacity-0 transition-opacity group-hover/log-row:opacity-100 group-focus-within/log-row:opacity-100 focus-visible:opacity-100"
-                    onClick={() => void navigator.clipboard.writeText(row.raw)}
-                  >
-                    <Copy aria-hidden="true" />
-                  </Button>
+                    value={row.raw}
+                    labels={{ idle: `Copy log line from ${row.workspace} at ${row.timestamp}`, copied: "Log line copied", failed: "Copy log line failed" }}
+                  />
                 </span>
               </div>
             ))}
@@ -457,14 +463,12 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
                     )}
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <Button
+                        <CopyButton
                           variant="ghost"
                           size="icon-xs"
-                          aria-label={`Copy ${url}`}
-                          onClick={() => void navigator.clipboard.writeText(url).catch(() => undefined)}
-                        >
-                          <Copy aria-hidden="true" />
-                        </Button>
+                          value={url}
+                          labels={{ idle: `Copy ${url}`, copied: "URL copied", failed: "Copy URL failed" }}
+                        />
                       </TooltipTrigger>
                       <TooltipContent>Copy URL</TooltipContent>
                     </Tooltip>

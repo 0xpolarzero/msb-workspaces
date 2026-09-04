@@ -172,6 +172,15 @@ describe("application", () => {
     const copy = vi.spyOn(navigator.clipboard, "writeText")
     await user.click(copyLine)
     expect(copy).toHaveBeenCalledWith("17:02:11  silo  Workspace stopped cleanly")
+    const copiedLine = within(playgroundsRow).getByRole("button", { name: "Log line copied" })
+    expect(copiedLine).toHaveAttribute("data-copy-status", "copied")
+    expect(copiedLine.querySelector("svg")).toHaveClass("lucide-check")
+
+    await user.click(panel.getByRole("button", { name: "Copy all logs" }))
+    expect(copy).toHaveBeenLastCalledWith("17:02:11  silo  Workspace stopped cleanly\n09:41:02  silo  Workspace stopped cleanly")
+    const copiedLogs = panel.getByRole("button", { name: "All logs copied" })
+    expect(copiedLogs).toHaveTextContent("Copied")
+    expect(copiedLogs.querySelector("svg")).toHaveClass("lucide-check")
 
     await user.click(sandboxSections.getByRole("button", { name: "Network" }))
     expect(panel.queryByRole("region", { name: "Network for dev" })).not.toBeInTheDocument()
@@ -236,6 +245,9 @@ describe("application", () => {
     const copy = vi.spyOn(navigator.clipboard, "writeText")
     await application.user.click(within(rows[0]).getByRole("button", { name: "Copy http://dev.silo.test:3000" }))
     expect(copy).toHaveBeenCalledWith("http://dev.silo.test:3000")
+    const copiedURL = within(rows[0]).getByRole("button", { name: "URL copied" })
+    expect(copiedURL).toHaveAttribute("data-copy-status", "copied")
+    expect(copiedURL.querySelector("svg")).toHaveClass("lucide-check")
   })
 
   it.each([
@@ -641,7 +653,10 @@ describe("application", () => {
     const copy = vi.spyOn(navigator.clipboard, "writeText")
     await application.user.click(page.getByRole("button", { name: "Copy technical details" }))
     expect(copy).toHaveBeenCalledWith(expect.stringContaining("version handshake"))
-    expect(page.getByRole("button", { name: "Technical details copied" })).toBeVisible()
+    const copiedDetails = page.getByRole("button", { name: "Technical details copied" })
+    expect(copiedDetails).toBeVisible()
+    expect(copiedDetails).toHaveTextContent("Copied")
+    expect(copiedDetails.querySelector("svg")).toHaveClass("lucide-check")
     await application.user.click(page.getByRole("button", { name: "Retry Repair" }))
     expect(application.actions.repairRuntime).toHaveBeenCalledOnce()
   })

@@ -516,7 +516,9 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Copy activity" }))
     expect(copy).toHaveBeenCalledWith(expect.stringContaining("Verifying 'docs-build'."))
     expect(copy).not.toHaveBeenCalledWith(expect.stringContaining("Internal verification path"))
-    expect(screen.getByRole("button", { name: "Activity copied" })).toBeInTheDocument()
+    const copiedActivity = screen.getByRole("button", { name: "Activity copied" })
+    expect(copiedActivity).toHaveAttribute("data-copy-status", "copied")
+    expect(copiedActivity.querySelector("svg")).toHaveClass("lucide-check")
     expect(activityButtons[0].textContent).toBe("")
     expect(activityButtons[0].querySelector("svg")).not.toBeNull()
     expect(within(activityControls).queryByText(/^(Copy|Copied|Copy failed)$/)).not.toBeInTheDocument()
@@ -549,8 +551,9 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Copy activity" }))
 
     const failedCopy = screen.getByRole("button", { name: "Copy activity failed" })
+    expect(failedCopy).toHaveAttribute("data-copy-status", "failed")
     expect(failedCopy.textContent).toBe("")
-    expect(failedCopy.querySelector("svg")).not.toBeNull()
+    expect(failedCopy.querySelector("svg")).toHaveClass("lucide-circle-alert")
     expect(screen.queryByText("Copy failed")).not.toBeInTheDocument()
   })
 
