@@ -38,14 +38,25 @@ function WorkspaceActions({ machine, state, actions }: { machine: SetupMachineCo
     return (
       <>
         <SandboxAction label={`Stop ${machine.name}`} onClick={() => actions.stopWorkspace(machine.name)}><Square /></SandboxAction>
-        <SandboxAction label={`Restart ${machine.name}`} onClick={() => actions.restartWorkspace(machine.name)}><RotateCw /></SandboxAction>
+        <SandboxAction label={`Restart ${machine.name}`} disabled onClick={() => actions.restartWorkspace(machine.name)}><RotateCw /></SandboxAction>
       </>
     )
   }
   if (state === "failed") {
-    return <SandboxAction label={`Restart ${machine.name}`} onClick={() => actions.restartWorkspace(machine.name)}><RotateCw /></SandboxAction>
+    return (
+      <>
+        <SandboxAction label={`Stop ${machine.name}`} disabled onClick={() => actions.stopWorkspace(machine.name)}><Square /></SandboxAction>
+        <SandboxAction label={`Restart ${machine.name}`} onClick={() => actions.restartWorkspace(machine.name)}><RotateCw /></SandboxAction>
+      </>
+    )
   }
-  return <SandboxAction label={`Start ${machine.name}`} onClick={() => actions.startWorkspace(machine.name)}><Play /></SandboxAction>
+  return (
+    <>
+      <SandboxAction label={`Start ${machine.name}`} onClick={() => actions.startWorkspace(machine.name)}><Play /></SandboxAction>
+      <SandboxAction label={`Stop ${machine.name}`} disabled onClick={() => actions.stopWorkspace(machine.name)}><Square /></SandboxAction>
+      <SandboxAction label={`Restart ${machine.name}`} disabled onClick={() => actions.restartWorkspace(machine.name)}><RotateCw /></SandboxAction>
+    </>
+  )
 }
 
 export function OverviewPage({

@@ -147,15 +147,15 @@ describe("application", () => {
   })
 
   it("uses subtle row tones and readable labels for every fixture state", async () => {
-    const cases: Array<{ mode: WorkspaceFixtureMode; state: string; tone: string; labelClass: string; hoverClass: string }> = [
-      { mode: "running", state: "running", tone: "running", labelClass: "text-emerald-700", hoverClass: "hover:bg-emerald-500/[0.07]" },
-      { mode: "starting", state: "starting", tone: "starting", labelClass: "text-amber-700", hoverClass: "hover:bg-amber-500/[0.07]" },
-      { mode: "stopped", state: "stopped", tone: "stopped", labelClass: "text-muted-foreground", hoverClass: "hover:bg-muted/35" },
-      { mode: "warning", state: "stopped", tone: "warning", labelClass: "text-muted-foreground", hoverClass: "hover:bg-amber-500/[0.08]" },
-      { mode: "error", state: "failed", tone: "error", labelClass: "text-destructive", hoverClass: "hover:bg-destructive/[0.07]" },
+    const cases: Array<{ mode: WorkspaceFixtureMode; state: string; tone: string; labelClass: string; hoverClass: string; stopEnabled: boolean; restartEnabled: boolean }> = [
+      { mode: "running", state: "running", tone: "running", labelClass: "text-emerald-700", hoverClass: "hover:bg-emerald-500/[0.07]", stopEnabled: true, restartEnabled: true },
+      { mode: "starting", state: "starting", tone: "starting", labelClass: "text-amber-700", hoverClass: "hover:bg-amber-500/[0.07]", stopEnabled: true, restartEnabled: false },
+      { mode: "stopped", state: "stopped", tone: "stopped", labelClass: "text-muted-foreground", hoverClass: "hover:bg-muted/35", stopEnabled: false, restartEnabled: false },
+      { mode: "warning", state: "stopped", tone: "warning", labelClass: "text-muted-foreground", hoverClass: "hover:bg-amber-500/[0.08]", stopEnabled: false, restartEnabled: false },
+      { mode: "error", state: "failed", tone: "error", labelClass: "text-destructive", hoverClass: "hover:bg-destructive/[0.07]", stopEnabled: false, restartEnabled: true },
     ]
 
-    for (const { mode, state, tone, labelClass, hoverClass } of cases) {
+    for (const { mode, state, tone, labelClass, hoverClass, stopEnabled, restartEnabled } of cases) {
       const source = applicationSourceForScenario("running", undefined, mode)
       const application = renderApplication("running", source)
       const overview = within(appPanel("Sandboxes"))
@@ -166,6 +166,14 @@ describe("application", () => {
       }
       if (mode === "warning") expect(overview.getAllByText(/Storage is almost full/)).toHaveLength(3)
       if (mode === "error") expect(overview.getAllByText(/Candidate networking did not become ready/)).toHaveLength(3)
+      const devRow = rows.find((row) => row.getAttribute("data-sandbox-name") === "dev") as HTMLElement
+      const controls = within(devRow).getByLabelText("Controls for dev")
+      const stop = within(controls).getByRole("button", { name: "Stop dev" })
+      const restart = within(controls).getByRole("button", { name: "Restart dev" })
+      if (stopEnabled) expect(stop).toBeEnabled()
+      else expect(stop).toBeDisabled()
+      if (restartEnabled) expect(restart).toBeEnabled()
+      else expect(restart).toBeDisabled()
       application.unmount()
     }
   })
@@ -246,6 +254,7 @@ describe("application", () => {
     const devRow = within(list).getByText("dev").closest("li") as HTMLElement
     const devControls = within(devRow).getByLabelText("Controls for dev")
     const playgroundsRow = within(list).getByText("playgrounds").closest("li") as HTMLElement
+    const playgroundsControls = within(playgroundsRow).getByLabelText("Controls for playgrounds")
 
     expect(overview.queryByText("Silo is ready")).not.toBeInTheDocument()
     expect(overview.queryByText(/items? need attention/)).not.toBeInTheDocument()
@@ -255,8 +264,18 @@ describe("application", () => {
     expect(running.actions.stopWorkspace).toHaveBeenCalledWith("dev")
     await running.user.click(within(devControls).getByRole("button", { name: "Restart dev" }))
     expect(running.actions.restartWorkspace).toHaveBeenCalledWith("dev")
-    await running.user.click(within(within(playgroundsRow).getByLabelText("Controls for playgrounds")).getByRole("button", { name: "Start playgrounds" }))
+    const startPlaygrounds = within(playgroundsControls).getByRole("button", { name: "Start playgrounds" })
+    const stopPlaygrounds = within(playgroundsControls).getByRole("button", { name: "Stop playgrounds" })
+    const restartPlaygrounds = within(playgroundsControls).getByRole("button", { name: "Restart playgrounds" })
+    expect(startPlaygrounds).toBeEnabled()
+    expect(stopPlaygrounds).toBeDisabled()
+    expect(restartPlaygrounds).toBeDisabled()
+    await running.user.click(startPlaygrounds)
+    await running.user.click(stopPlaygrounds)
+    await running.user.click(restartPlaygrounds)
     expect(running.actions.startWorkspace).toHaveBeenCalledWith("playgrounds")
+    expect(running.actions.stopWorkspace).not.toHaveBeenCalledWith("playgrounds")
+    expect(running.actions.restartWorkspace).not.toHaveBeenCalledWith("playgrounds")
     running.unmount()
 
     const failed = renderApplication("dependency-failure")
