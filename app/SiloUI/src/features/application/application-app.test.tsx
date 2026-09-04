@@ -159,9 +159,19 @@ describe("application", () => {
     await user.click(filters.getByRole("button", { name: "Remove dev" }))
     await user.click(sandboxSections.getByRole("button", { name: "Logs" }))
     const logs = panel.getByRole("table", { name: "Logs" })
+    expect(logs.closest('[data-slot="card"]')).toBeNull()
+    expect(panel.queryByRole("heading", { name: "Logs" })).not.toBeInTheDocument()
     expect(within(logs).queryByText("dev")).not.toBeInTheDocument()
     expect(within(logs).getByText("playgrounds")).toBeVisible()
     expect(within(logs).getByText("personal")).toBeVisible()
+
+    const playgroundsRow = within(logs).getByText("playgrounds").closest('[role="row"]') as HTMLElement
+    expect(playgroundsRow).toHaveClass("hover:bg-muted/55", "focus-within:bg-muted/55")
+    const copyLine = within(playgroundsRow).getByRole("button", { name: "Copy log line from playgrounds at 17:02:11" })
+    expect(copyLine).toHaveClass("opacity-0", "group-hover/log-row:opacity-100", "group-focus-within/log-row:opacity-100")
+    const copy = vi.spyOn(navigator.clipboard, "writeText")
+    await user.click(copyLine)
+    expect(copy).toHaveBeenCalledWith("17:02:11  silo  Workspace stopped cleanly")
 
     await user.click(sandboxSections.getByRole("button", { name: "Network" }))
     expect(panel.queryByRole("region", { name: "Network for dev" })).not.toBeInTheDocument()

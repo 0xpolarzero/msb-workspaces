@@ -337,6 +337,7 @@ function Files({
 
 interface LogRow {
   id: string
+  raw: string
   timestamp: string
   workspace: string
   message: string
@@ -347,6 +348,7 @@ function logRows(workspaces: ApplicationWorkspace[]): LogRow[] {
     const match = /^(\S+)\s{2,}(.*)$/.exec(line)
     return {
       id: `${workspace.machine.id}:${index}`,
+      raw: line,
       timestamp: match?.[1] ?? "—",
       workspace: workspace.machine.name,
       message: match?.[2] ?? line,
@@ -361,7 +363,7 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
   const filteredRows = rows.filter((row) => !normalizedQuery || `${row.timestamp} ${row.workspace} ${row.message}`.toLowerCase().includes(normalizedQuery))
 
   return (
-    <DetailCard title="Logs" description={`${filteredRows.length} lines`}>
+    <div>
       <div className="mb-3 flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute top-2 left-2.5 size-4 text-muted-foreground" aria-hidden="true" />
@@ -371,23 +373,35 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
       </div>
       {filteredRows.length > 0 ? (
         <div role="table" aria-label="Logs" className="overflow-hidden rounded-lg border border-border text-xs">
-          <div role="row" className="grid grid-cols-[5.5rem_7rem_minmax(0,1fr)] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
+          <div role="row" className="grid grid-cols-[5.5rem_7rem_minmax(0,1fr)_1.5rem] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
             <span role="columnheader">Timestamp</span>
             <span role="columnheader">Sandbox</span>
             <span role="columnheader">Message</span>
+            <span role="columnheader" className="sr-only">Actions</span>
           </div>
           <div className="max-h-80 divide-y divide-border overflow-y-auto bg-card font-mono">
             {filteredRows.map((row) => (
-              <div key={row.id} role="row" className="grid grid-cols-[5.5rem_7rem_minmax(0,1fr)] gap-3 px-3 py-2">
+              <div key={row.id} role="row" className="group/log-row grid grid-cols-[5.5rem_7rem_minmax(0,1fr)_1.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
                 <span role="cell" className="text-muted-foreground">{row.timestamp}</span>
                 <span role="cell" className="truncate font-medium">{row.workspace}</span>
                 <span role="cell" className="min-w-0 break-words text-foreground/85">{row.message}</span>
+                <span role="cell">
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Copy log line from ${row.workspace} at ${row.timestamp}`}
+                    className="opacity-0 transition-opacity group-hover/log-row:opacity-100 group-focus-within/log-row:opacity-100 focus-visible:opacity-100"
+                    onClick={() => void navigator.clipboard.writeText(row.raw)}
+                  >
+                    <Copy aria-hidden="true" />
+                  </Button>
+                </span>
               </div>
             ))}
           </div>
         </div>
       ) : <EmptyState title={normalizedQuery ? "No matching logs" : "No logs yet"} description={normalizedQuery ? `No logs match “${query}”.` : "Logs from the selected sandboxes will appear here."} />}
-    </DetailCard>
+    </div>
   )
 }
 
