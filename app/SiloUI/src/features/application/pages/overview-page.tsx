@@ -140,8 +140,8 @@ function configurationRowView(
 function ConfigurationIcon({ failed }: { failed: boolean }) {
   return (
     <span className={failed
-      ? "grid size-7 shrink-0 place-items-center rounded-md bg-destructive/10 text-destructive"
-      : "grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"}
+      ? "mt-1 grid size-7 shrink-0 self-start place-items-center rounded-md bg-destructive/10 text-destructive"
+      : "mt-1 grid size-7 shrink-0 self-start place-items-center rounded-md bg-muted text-muted-foreground"}
     >
       {failed
         ? <CircleAlert className="size-3.5" aria-hidden="true" />
