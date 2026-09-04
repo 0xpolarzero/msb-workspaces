@@ -190,7 +190,7 @@ function Files({
   const pushOperations = new Map(repositoryPushOperations.map((operation) => [`${operation.workspace}:${operation.repositoryPath}`, operation]))
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-2 lg:grid-rows-1 lg:content-stretch lg:gap-0", !repositoriesOpen && !fileTreeOpen && "justify-between")} data-files-layout>
+    <div className="flex h-full min-h-0 flex-col justify-between gap-3 lg:grid lg:grid-cols-2 lg:grid-rows-1 lg:content-stretch lg:gap-0" data-files-layout data-file-tree-state={fileTreeOpen ? "open" : "closed"}>
       <Collapsible
         asChild
         open={repositoriesOpen}

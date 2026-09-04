@@ -114,7 +114,8 @@ describe("application", () => {
     const filesLayout = panel.getByRole("button", { name: "Collapse repositories" }).closest("[data-files-layout]") as HTMLElement
     const repositoriesPane = panel.getByRole("button", { name: "Collapse repositories" }).closest('[data-files-pane="repositories"]') as HTMLElement
     const fileTreePane = panel.getByRole("button", { name: "Collapse file tree" }).closest('[data-files-pane="file-tree"]') as HTMLElement
-    expect(filesLayout).toHaveClass("h-full", "min-h-0", "flex-col", "lg:grid", "lg:grid-cols-2", "lg:grid-rows-1")
+    expect(filesLayout).toHaveClass("h-full", "min-h-0", "flex-col", "justify-between", "lg:grid", "lg:grid-cols-2", "lg:grid-rows-1")
+    expect(filesLayout).toHaveAttribute("data-file-tree-state", "open")
     expect(repositoriesPane).toHaveAttribute("data-pane-position", "top")
     expect(fileTreePane).toHaveAttribute("data-pane-position", "bottom")
     const repositoryPaneControls = within(repositoriesPane).getByRole("group", { name: "Repository pane controls" })
@@ -143,6 +144,7 @@ describe("application", () => {
 
     await user.click(panel.getByRole("button", { name: "Collapse file tree" }))
     expect(panel.getByRole("button", { name: "Expand file tree" })).toHaveAttribute("aria-expanded", "false")
+    expect(filesLayout).toHaveAttribute("data-file-tree-state", "closed")
     expect(panel.queryByRole("list", { name: "File tree" })).not.toBeInTheDocument()
     expect(repositoriesPane).toHaveClass("flex-1")
     expect(fileTreePane).toHaveClass("max-h-8", "flex-1", "transition-[max-height]")

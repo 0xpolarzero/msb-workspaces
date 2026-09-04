@@ -183,6 +183,14 @@ html.dark {
   animation: file-pane-content-collapse 140ms ease-in;
 }
 
+[data-files-layout][data-file-tree-state="open"] [data-files-pane-scroll="repositories"] {
+  animation: suppress-repository-overflow-after-tree-expand 200ms;
+}
+
+[data-files-layout][data-file-tree-state="closed"] [data-files-pane-scroll="repositories"] {
+  animation: suppress-repository-overflow-after-tree-collapse 200ms;
+}
+
 @keyframes collapsible-content-reveal {
   from { height: 0; }
   to { height: var(--radix-collapsible-content-height); }
@@ -219,6 +227,14 @@ html.dark {
   }
 }
 
+@keyframes suppress-repository-overflow-after-tree-expand {
+  from, to { overflow-y: hidden; }
+}
+
+@keyframes suppress-repository-overflow-after-tree-collapse {
+  from, to { overflow-y: hidden; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .collapsible-content-motion,
   .file-pane-content-motion {
@@ -231,5 +247,9 @@ html.dark {
 
   .collapsible-motion[data-files-pane] {
     transition-duration: 0s;
+  }
+
+  [data-files-pane-scroll="repositories"] {
+    animation: none !important;
   }
 }
