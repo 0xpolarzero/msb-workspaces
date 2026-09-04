@@ -87,6 +87,7 @@ export interface ApplicationPort {
 export interface ApplicationFileEntry {
   name: string
   kind: "folder" | "file"
+  children?: ApplicationFileEntry[]
 }
 
 export interface ApplicationActivity {

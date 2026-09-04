@@ -1,11 +1,12 @@
 import { useId, useMemo, useState } from "react"
-import { Activity, Check, Copy, ExternalLink, File, Folder, GitBranch, Search, TriangleAlert, X } from "lucide-react"
+import { Activity, Check, ChevronRight, Copy, ExternalLink, File, Folder, GitBranch, Search, TriangleAlert, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
-import { DetailCard, WorkspaceStatus } from "@/features/application/components/application-ui"
-import type { ApplicationWorkspace, WorkspaceDetailSection } from "@/features/application/model/application-source"
+import { DetailCard, WorkspaceStateDot, WorkspaceStatus } from "@/features/application/components/application-ui"
+import type { ApplicationFileEntry, ApplicationWorkspace, WorkspaceDetailSection, WorkspaceState } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 function WorkspaceFilterBar({
@@ -145,64 +146,102 @@ function EmptyState({ title, description }: { title: string; description: string
   )
 }
 
-function WorkspaceGroupHeader({ workspace }: { workspace: ApplicationWorkspace }) {
+function WorkspaceBadge({ name, state }: { name: string; state: WorkspaceState }) {
+  const stateLabel = state.charAt(0).toUpperCase() + state.slice(1)
   return (
-    <div className="mb-2 flex items-center justify-between gap-3">
-      <h4 className="text-sm font-semibold">{workspace.machine.name}</h4>
-      <WorkspaceStatus state={workspace.state} />
-    </div>
+    <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/45 px-2 text-[11px] font-medium text-muted-foreground" aria-label={`${name}, ${stateLabel}`}>
+      <WorkspaceStateDot state={state} />
+      {name}
+    </span>
+  )
+}
+
+function FileTreeEntries({ entries, label }: { entries: ApplicationFileEntry[]; label: string }) {
+  return (
+    <ul className="grid gap-0.5 border-l border-border pl-3" aria-label={label}>
+      {entries.map((entry) => {
+        const hasChildren = entry.kind === "folder" && entry.children && entry.children.length > 0
+        if (!hasChildren) {
+          const Icon = entry.kind === "folder" ? Folder : File
+          return (
+            <li key={entry.name}>
+              <button type="button" className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left font-mono text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <span className="size-3.5 shrink-0" aria-hidden="true" />
+                <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="truncate">{entry.name}</span>
+              </button>
+            </li>
+          )
+        }
+
+        return (
+          <li key={entry.name}>
+            <Collapsible>
+              <CollapsibleTrigger className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left font-mono text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&[data-state=open]_.tree-caret]:rotate-90">
+                <ChevronRight className="tree-caret size-3.5 shrink-0 text-muted-foreground transition-transform" aria-hidden="true" />
+                <Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="truncate">{entry.name}</span>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="ml-4">
+                <FileTreeEntries entries={entry.children ?? []} label={`${entry.name} contents`} />
+              </CollapsibleContent>
+            </Collapsible>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function WorkspaceFileTree({ workspace }: { workspace: ApplicationWorkspace }) {
+  return (
+    <li>
+      <Collapsible defaultOpen>
+        <CollapsibleTrigger className="flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&[data-state=open]_.tree-caret]:rotate-90">
+          <ChevronRight className="tree-caret size-3.5 shrink-0 text-muted-foreground transition-transform" aria-hidden="true" />
+          <Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <span className="truncate">{workspace.machine.name}</span>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="ml-4">
+          {workspace.files.length > 0
+            ? <FileTreeEntries entries={workspace.files} label={`Files in ${workspace.machine.name}`} />
+            : <p className="border-l border-border py-1 pl-5 text-xs text-muted-foreground">File browsing is unavailable.</p>}
+        </CollapsibleContent>
+      </Collapsible>
+    </li>
   )
 }
 
 function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
   if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to browse its files and repositories." />
+  const repositories = workspaces.flatMap((workspace) => workspace.repositories.map((repository) => ({ workspace, repository })))
 
   return (
     <div className="grid gap-3 lg:grid-cols-2">
       <DetailCard title="Repositories">
-        <div className="grid gap-4">
-          {workspaces.map((workspace) => (
-            <section key={workspace.machine.id} aria-label={`Repositories for ${workspace.machine.name}`}>
-              <WorkspaceGroupHeader workspace={workspace} />
-              {workspace.repositories.length > 0 ? (
-                <div className="divide-y divide-border">
-                  {workspace.repositories.map((repository) => (
-                    <div key={`${workspace.machine.id}:${repository.path}`} className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
-                      <GitBranch className="size-4 text-muted-foreground" aria-hidden="true" />
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{repository.path}</div>
-                        <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
-                      </div>
-                      {repository.ahead > 0 && <Button variant="outline" size="xs">Push {repository.ahead}</Button>}
-                    </div>
-                  ))}
+        {repositories.length > 0 ? (
+          <div className="divide-y divide-border" role="list" aria-label="Repositories">
+            {repositories.map(({ workspace, repository }) => (
+              <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
+                <GitBranch className="size-4 text-muted-foreground" aria-hidden="true" />
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{repository.path}</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
                 </div>
-              ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
-            </section>
-          ))}
-        </div>
+                <div className="flex items-center gap-2">
+                  <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
+                  {repository.ahead > 0 && <Button variant="outline" size="xs">Push {repository.ahead}</Button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
       </DetailCard>
 
       <DetailCard title="File tree">
-        <div className="grid gap-4">
-          {workspaces.map((workspace) => (
-            <section key={workspace.machine.id} aria-label={`Files for ${workspace.machine.name}`}>
-              <WorkspaceGroupHeader workspace={workspace} />
-              {workspace.files.length > 0 ? (
-                <div className="grid gap-1 font-mono text-xs">
-                  {workspace.files.map((entry) => {
-                    const Icon = entry.kind === "folder" ? Folder : File
-                    return (
-                      <button key={`${workspace.machine.id}:${entry.name}`} type="button" className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                        <Icon className="size-4 text-muted-foreground" aria-hidden="true" />{entry.name}
-                      </button>
-                    )
-                  })}
-                </div>
-              ) : <p className="text-xs text-muted-foreground">File browsing is unavailable.</p>}
-            </section>
-          ))}
-        </div>
+        <ul className="grid gap-0.5" aria-label="File tree">
+          {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}
+        </ul>
       </DetailCard>
     </div>
   )

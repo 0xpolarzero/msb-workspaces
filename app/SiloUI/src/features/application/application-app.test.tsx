@@ -103,15 +103,34 @@ describe("application", () => {
     expect(filters.getByRole("combobox", { name: "Add sandbox filter" })).toBeVisible()
     expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
 
+    const repositories = panel.getByRole("list", { name: "Repositories" })
+    const fileTree = panel.getByRole("list", { name: "File tree" })
+    const devRepository = within(repositories).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
+    const playgroundsRepository = within(repositories).getByText("acme/platform-tools").closest('[role="listitem"]') as HTMLElement
+    expect(within(devRepository).getByLabelText("dev, Running")).toBeVisible()
+    expect(devRepository.querySelector('[data-workspace-state-dot="running"]')).toHaveClass("bg-emerald-500")
+    expect(within(playgroundsRepository).getByLabelText("playgrounds, Stopped")).toBeVisible()
+    expect(playgroundsRepository.querySelector('[data-workspace-state-dot="stopped"]')).toHaveClass("bg-muted-foreground/55")
+
+    const devFolder = within(fileTree).getByRole("button", { name: "dev" })
+    expect(devFolder).toHaveAttribute("aria-expanded", "true")
+    expect(panel.getByRole("list", { name: "Files in dev" })).toBeVisible()
+    await user.click(devFolder)
+    expect(devFolder).toHaveAttribute("aria-expanded", "false")
+    expect(panel.queryByRole("list", { name: "Files in dev" })).not.toBeInTheDocument()
+    await user.click(devFolder)
+
     await user.click(filters.getByRole("button", { name: "Remove dev" }))
-    expect(panel.queryByRole("region", { name: "Repositories for dev" })).not.toBeInTheDocument()
-    expect(panel.getByRole("region", { name: "Repositories for playgrounds" })).toBeVisible()
-    expect(panel.getByRole("region", { name: "Files for personal" })).toBeVisible()
+    expect(within(repositories).queryByText("acme/silo")).not.toBeInTheDocument()
+    expect(within(repositories).getByText("acme/platform-tools")).toBeVisible()
+    expect(within(fileTree).queryByRole("button", { name: "dev" })).not.toBeInTheDocument()
+    expect(within(fileTree).getByRole("button", { name: "personal" })).toBeVisible()
 
     await user.click(filters.getByRole("combobox", { name: "Add sandbox filter" }))
     await user.click(screen.getByRole("option", { name: "dev" }))
     expect(filters.getByRole("button", { name: "Remove dev" })).toBeVisible()
-    expect(panel.getByRole("region", { name: "Repositories for dev" })).toBeVisible()
+    expect(within(repositories).getByText("acme/silo")).toBeVisible()
+    expect(within(fileTree).getByRole("button", { name: "dev" })).toBeVisible()
 
     await user.click(filters.getByRole("button", { name: "Remove dev" }))
     await user.click(sandboxSections.getByRole("button", { name: "Logs" }))
@@ -139,6 +158,23 @@ describe("application", () => {
     expect(panel.getByRole("list", { name: "Recent activity" })).toBeVisible()
     expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
     expect(filters.getByRole("button", { name: "All" })).toBeDisabled()
+  })
+
+  it.each([
+    ["running", "Running", "running", "bg-emerald-500"],
+    ["starting", "Starting", "starting", "bg-amber-500"],
+    ["stopped", "Stopped", "stopped", "bg-muted-foreground/55"],
+    ["error", "Failed", "failed", "bg-destructive"],
+  ] as const)("colors repository VM badges for the %s fixture", async (mode, label, state, className) => {
+    const application = renderApplication("running", applicationSourceForScenario("running", undefined, mode satisfies WorkspaceFixtureMode))
+    const navigation = within(appNavigation())
+    const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Files" }))
+    const repositories = within(appPanel("Sandboxes")).getByRole("list", { name: "Repositories" })
+    const badge = within(repositories).getAllByLabelText(`dev, ${label}`)[0]
+    expect(badge.querySelector(`[data-workspace-state-dot="${state}"]`)).toHaveClass(className)
+    application.unmount()
   })
 
   it("sorts attention first without letting health order rewrite configuration order", async () => {
@@ -312,8 +348,9 @@ describe("application", () => {
     const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
     await user.click(sandboxSections.getByRole("button", { name: "Files" }))
     const files = within(appPanel("Sandboxes"))
-    expect(files.getByRole("region", { name: "Repositories for dev" })).toBeVisible()
-    expect(files.getByText("acme/silo")).toBeVisible()
+    const repositories = files.getByRole("list", { name: "Repositories" })
+    expect(within(repositories).getByText("acme/silo")).toBeVisible()
+    expect(within(repositories).getAllByLabelText("dev, Running")[0]).toBeVisible()
 
     await user.click(navigation.getByRole("button", { name: "Settings" }))
     const settings = within(appPanel("Settings"))

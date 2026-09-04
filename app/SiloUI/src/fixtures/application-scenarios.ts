@@ -62,10 +62,16 @@ const baseWorkspaces: ApplicationWorkspace[] = [
       { path: "acme/design-system", branch: "next", ahead: 0, behind: 1, dirty: false },
     ],
     files: [
-      { name: "projects", kind: "folder" },
-      { name: ".config", kind: "folder" },
+      {
+        name: "projects",
+        kind: "folder",
+        children: [
+          { name: "silo", kind: "folder", children: [{ name: "src", kind: "folder" }, { name: "README.md", kind: "file" }] },
+          { name: "design-system", kind: "folder" },
+        ],
+      },
+      { name: ".config", kind: "folder", children: [{ name: "git", kind: "folder" }] },
       { name: ".gitconfig", kind: "file" },
-      { name: "README.md", kind: "file" },
     ],
     ports: [
       { port: 3000, process: "web", url: "https://dev.silo.test", active: true },
@@ -93,8 +99,8 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     host: "playgrounds.silo.test",
     repositories: [{ path: "acme/platform-tools", branch: "main", ahead: 0, behind: 0, dirty: false }],
     files: [
-      { name: "experiments", kind: "folder" },
-      { name: "scratch", kind: "folder" },
+      { name: "experiments", kind: "folder", children: [{ name: "typescript", kind: "folder" }, { name: "rust", kind: "folder" }] },
+      { name: "scratch", kind: "folder", children: [{ name: "notes.md", kind: "file" }] },
       { name: "README.md", kind: "file" },
     ],
     ports: [],
@@ -112,8 +118,8 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     host: "personal.silo.test",
     repositories: [{ path: "taylor/docs-site", branch: "main", ahead: 0, behind: 0, dirty: false }],
     files: [
-      { name: "docs-site", kind: "folder" },
-      { name: ".config", kind: "folder" },
+      { name: "docs-site", kind: "folder", children: [{ name: "content", kind: "folder" }, { name: "public", kind: "folder" }] },
+      { name: ".config", kind: "folder", children: [{ name: "silo", kind: "folder" }] },
       { name: "notes.md", kind: "file" },
     ],
     ports: [],
