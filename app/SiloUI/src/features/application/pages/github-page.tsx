@@ -302,7 +302,7 @@ export function GitHubPage({
         onResetWorkspaceIdentity={resetIdentity}
         connectedTitle={`Connected as @${source.github.account ?? "unknown"}`}
         connectedDetail={accessEnabled
-          ? "Repository credentials remain scoped to each workspace."
+          ? "Repository credentials are scoped to each workspace."
           : "Repository access is disabled. Existing selections are preserved."}
         connectedActions={connectedActions}
         notice={catalogNotice}

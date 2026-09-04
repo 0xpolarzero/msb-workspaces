@@ -191,7 +191,7 @@ export function GitHubAccessEditor({
   onCommitWorkspaceIdentity,
   onResetWorkspaceIdentity,
   connectedTitle = "Connected to GitHub",
-  connectedDetail = "Repository credentials remain scoped to each workspace.",
+  connectedDetail = "Repository credentials are scoped to each workspace.",
   connectedActions,
   notice,
   renderWorkspaceActions,
