@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Check, Loader2, RotateCcw, TriangleAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type {
   ApplicationActions,
   ApplicationGitHubConfiguration,
@@ -212,17 +213,22 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
 
   const connectedActions = confirmingClear ? (
     <>
-      <span className="text-xs text-muted-foreground">Clear repositories from every sandbox?</span>
       <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingClear(false)}>Cancel</Button>
       <Button type="button" variant="destructive" size="xs" onClick={confirmClear}>Clear repositories</Button>
     </>
   ) : (
     <>
       <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
-      <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => setConfirmingClear(true)}>
-        <RotateCcw className="size-3" aria-hidden="true" />
-        Clear repositories…
-      </Button>
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button type="button" variant="ghost" size="icon-xs" aria-label="Clear repositories" disabled={editorBusy} onClick={() => setConfirmingClear(true)}>
+              <RotateCcw className="size-3" aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Clear repositories from every sandbox</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </>
   )
 

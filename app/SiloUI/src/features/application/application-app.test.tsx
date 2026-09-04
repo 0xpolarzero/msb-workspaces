@@ -934,7 +934,11 @@ describe("application", () => {
     expect(github.queryByRole("heading", { name: "Repository access" })).not.toBeInTheDocument()
     expect(github.getByText("Connected as @taylor")).toBeVisible()
     expect(github.getByRole("button", { name: "Disable access" })).toBeVisible()
-    expect(github.getByRole("button", { name: "Clear repositories…" })).toBeVisible()
+    const clearRepositories = github.getByRole("button", { name: "Clear repositories" })
+    expect(clearRepositories).toBeVisible()
+    await user.hover(clearRepositories)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Clear repositories from every sandbox")
+    await user.unhover(clearRepositories)
     expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
     expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
 
@@ -1039,8 +1043,8 @@ describe("application", () => {
     await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
     const github = within(appPanel("GitHub"))
 
-    await user.click(github.getByRole("button", { name: "Clear repositories…" }))
-    expect(github.getByText("Clear repositories from every sandbox?")).toBeVisible()
+    await user.click(github.getByRole("button", { name: "Clear repositories" }))
+    expect(github.queryByText("Clear repositories from every sandbox?")).not.toBeInTheDocument()
     await user.click(github.getByRole("button", { name: "Clear repositories" }))
     expect(actions.clearGitHubRepositoryAccess).toHaveBeenCalledOnce()
     expect(github.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
