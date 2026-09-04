@@ -149,6 +149,44 @@ export interface ApplicationSecret {
   state: "active" | "restart-required"
 }
 
+export interface ApplicationGitIdentity {
+  name: string
+  email: string
+}
+
+export interface ApplicationWorkspaceGitIdentity extends ApplicationGitIdentity {
+  apply: boolean
+}
+
+export interface ApplicationGitHubRepositoryPolicy {
+  repository: string
+  allowPushes: boolean
+}
+
+export interface ApplicationGitHubWorkspacePolicy {
+  workspace: string
+  identity: ApplicationWorkspaceGitIdentity
+  repositories: readonly ApplicationGitHubRepositoryPolicy[]
+}
+
+export interface ApplicationGitHubConfiguration {
+  accessEnabled: boolean
+  hostIdentity: ApplicationGitIdentity | null
+  workspaces: readonly ApplicationGitHubWorkspacePolicy[]
+}
+
+export type GitHubManagementOperation =
+  | { status: "idle" }
+  | { status: "dirty"; message: string; canCancel: true }
+  | { status: "saving"; message: string; canCancel: true }
+  | { status: "succeeded"; message: string }
+  | { status: "failed"; message: string; canRetry: true; canCancel: true; diagnosticDetails?: string }
+  | { status: "disabled"; message: string }
+
+export type GitHubRepositoryCatalogStatus =
+  | { status: "available" }
+  | { status: "unavailable"; message: string; canRetry: true }
+
 export interface ApplicationSource {
   runtimeRepair: RuntimeRepairPresentation | null
   workspaces: ApplicationWorkspace[]
@@ -158,6 +196,13 @@ export interface ApplicationSource {
   github: {
     state: "disconnected" | "connecting" | "connected"
     account?: string
+    /** Optional until every native source publishes the richer management snapshot. */
+    accessEnabled?: boolean
+    repositoryCatalog?: readonly string[]
+    repositoryCatalogStatus?: GitHubRepositoryCatalogStatus
+    hostIdentity?: ApplicationGitIdentity | null
+    workspaces?: readonly ApplicationGitHubWorkspacePolicy[]
+    operation?: GitHubManagementOperation
   }
   secrets: ApplicationSecret[]
   backup: {
@@ -185,4 +230,11 @@ export interface ApplicationActions {
   restartWorkspace: (workspace: string) => void
   openTerminal: (workspace: string) => void
   openEditor: (workspace: string) => void
+  connectGitHub?: () => void
+  setGitHubAccessEnabled?: (enabled: boolean) => void
+  saveGitHubConfiguration?: (configuration: ApplicationGitHubConfiguration) => void
+  cancelGitHubConfiguration?: () => void
+  resetGitHubAccess?: () => void
+  retryGitHubConfiguration?: () => void
+  retryGitHubRepositoryCatalog?: () => void
 }

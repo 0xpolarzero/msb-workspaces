@@ -2,10 +2,12 @@ import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
 import { activityFixtureModes, type ActivityFixtureMode } from "@/fixtures/application-activity"
 import {
+  githubManagementFixtureModes,
   sandboxConfigurationFixtureModes,
   repositoryPushFixtureModes,
   systemIssueFixtureModes,
   workspaceFixtureModes,
+  type GitHubManagementFixtureMode,
   type SandboxConfigurationFixtureMode,
   type RepositoryPushFixtureMode,
   type SystemIssueFixtureMode,
@@ -16,7 +18,7 @@ import { surfaceNames } from "@/fixtures/surfaces"
 
 import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
-export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode }: {
+export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, githubManagementMode, activityMode }: {
   surface: SurfaceName
   scenario: ScenarioName
   githubState?: GitHubFixtureState
@@ -24,6 +26,7 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode
   systemIssueMode?: SystemIssueFixtureMode
   repositoryPushMode?: RepositoryPushFixtureMode
+  githubManagementMode?: GitHubManagementFixtureMode
   activityMode?: ActivityFixtureMode
 }) {
   function selectFixture(parameter: string, value: string) {
@@ -106,6 +109,18 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
             >
               <option value="source">source</option>
               {activityFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            GitHub op
+            <select
+              aria-label="GitHub management fixture"
+              className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={githubManagementMode ?? "source"}
+              onChange={(event) => selectFixture("github-operation", event.target.value)}
+            >
+              <option value="source">source</option>
+              {githubManagementFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
             </select>
           </label>
         </>

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest"
 
 import {
   applicationSourceForScenario,
+  githubManagementFixtureModeFromSearch,
+  githubManagementFixtureModes,
   repositoryPushFixtureModeFromSearch,
   repositoryPushFixtureModes,
   sandboxConfigurationFixtureModeFromSearch,
@@ -34,7 +36,7 @@ describe("application state fixtures", () => {
   })
 
   it("shows every state mode only for the application fixture", () => {
-    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" systemIssueMode="verifying" repositoryPushMode="pushing" activityMode="backup-live" />)
+    const app = render(<FixtureSelector surface="app" scenario="running" workspaceMode="starting" sandboxConfigurationMode="add-verifying" systemIssueMode="verifying" repositoryPushMode="pushing" githubManagementMode="failed" activityMode="backup-live" />)
     const controls = screen.getByLabelText("Development fixtures")
     expect(controls).toHaveClass("max-w-[calc(100vw-1.5rem)]", "flex-wrap")
     expect(within(screen.getByRole("combobox", { name: "Sandbox state fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
@@ -61,6 +63,10 @@ describe("application state fixtures", () => {
       "source",
       ...activityFixtureModes,
     ])
+    expect(within(screen.getByRole("combobox", { name: "GitHub management fixture" })).getAllByRole("option").map(({ textContent }) => textContent)).toEqual([
+      "source",
+      ...githubManagementFixtureModes,
+    ])
     app.unmount()
 
     render(<FixtureSelector surface="onboarding" scenario="running" />)
@@ -69,6 +75,7 @@ describe("application state fixtures", () => {
     expect(screen.queryByRole("combobox", { name: "System issue fixture" })).not.toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "Repository push fixture" })).not.toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "Activity fixture" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("combobox", { name: "GitHub management fixture" })).not.toBeInTheDocument()
   })
 
   it("parses every sandbox configuration fixture independently from runtime state", () => {
@@ -103,6 +110,20 @@ describe("application state fixtures", () => {
     expect(repositoryPushFixtureModeFromSearch("?repository-push=unknown")).toBeUndefined()
     expect(applicationSourceForScenario("running").repositoryPushOperations).toEqual([])
     expect(applicationSourceForScenario("running", undefined, undefined, undefined, undefined, "succeeded").workspaces[0].repositories[0].ahead).toBe(0)
+  })
+
+  it("parses and applies every GitHub management fixture independently", () => {
+    for (const mode of githubManagementFixtureModes) {
+      expect(githubManagementFixtureModeFromSearch(`?github-operation=${mode}`)).toBe(mode)
+      const source = applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, mode)
+      expect(source.github.workspaces).toHaveLength(3)
+    }
+
+    expect(githubManagementFixtureModeFromSearch("?github-operation=unknown")).toBeUndefined()
+    expect(applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "disabled").github.accessEnabled).toBe(false)
+    expect(applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "connected-empty").github.workspaces?.every(({ repositories }) => repositories.length === 0)).toBe(true)
+    expect(applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "missing-host-identity").github.hostIdentity).toBeNull()
+    expect(applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "catalog-unavailable").github.repositoryCatalogStatus?.status).toBe("unavailable")
   })
 
   it("covers every activity category and presentation state", () => {

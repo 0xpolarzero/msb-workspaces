@@ -4,6 +4,7 @@ import { ApplicationApp } from "@/features/application/application-app"
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
 import {
   applicationSourceForScenario,
+  githubManagementFixtureModeFromSearch,
   repositoryPushFixtureModeFromSearch,
   sandboxConfigurationFixtureModeFromSearch,
   systemIssueFixtureModeFromSearch,
@@ -22,6 +23,7 @@ export default function App() {
   const sandboxConfigurationMode = import.meta.env.DEV ? sandboxConfigurationFixtureModeFromSearch(window.location.search) : undefined
   const systemIssueMode = import.meta.env.DEV ? systemIssueFixtureModeFromSearch(window.location.search) : undefined
   const repositoryPushMode = import.meta.env.DEV ? repositoryPushFixtureModeFromSearch(window.location.search) : undefined
+  const githubManagementMode = import.meta.env.DEV ? githubManagementFixtureModeFromSearch(window.location.search) : undefined
   const activityMode = import.meta.env.DEV ? activityFixtureModeFromSearch(window.location.search) : undefined
   const [activityStep, setActivityStep] = useState(0)
   const [source, setSource] = useState(onboardingScenarios[scenario])
@@ -44,8 +46,8 @@ export default function App() {
     <>
       {surface === "app" ? (
         <ApplicationApp
-          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}:${systemIssueMode ?? "source"}:${repositoryPushMode ?? "source"}:${activityMode ?? "source"}`}
-          source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode, activityStep)}
+          key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}:${systemIssueMode ?? "source"}:${repositoryPushMode ?? "source"}:${activityMode ?? "source"}:${githubManagementMode ?? "source"}`}
+          source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode, activityStep, githubManagementMode)}
           actions={{
             repairRuntime: () => undefined,
             saveMachineConfiguration: (_request) => undefined,
@@ -57,6 +59,7 @@ export default function App() {
             restartWorkspace: (_workspace) => undefined,
             openTerminal: (_workspace) => undefined,
             openEditor: (_workspace) => undefined,
+            resetGitHubAccess: () => undefined,
           }}
         />
       ) : (
@@ -73,7 +76,7 @@ export default function App() {
           }}
         />
       )}
-      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} systemIssueMode={systemIssueMode} repositoryPushMode={repositoryPushMode} activityMode={activityMode} />}
+      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} systemIssueMode={systemIssueMode} repositoryPushMode={repositoryPushMode} githubManagementMode={githubManagementMode} activityMode={activityMode} />}
     </>
   )
 }

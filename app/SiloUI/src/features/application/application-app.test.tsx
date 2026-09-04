@@ -19,6 +19,13 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
     restartWorkspace: vi.fn(),
     openTerminal: vi.fn(),
     openEditor: vi.fn(),
+    connectGitHub: vi.fn(),
+    setGitHubAccessEnabled: vi.fn(),
+    saveGitHubConfiguration: vi.fn(),
+    cancelGitHubConfiguration: vi.fn(),
+    resetGitHubAccess: vi.fn(),
+    retryGitHubConfiguration: vi.fn(),
+    retryGitHubRepositoryCatalog: vi.fn(),
   }
 
   return {
@@ -917,6 +924,207 @@ describe("application", () => {
     expect(page.queryByRole("button", { name: /repair/i })).not.toBeInTheDocument()
   })
 
+  it("reuses the compact onboarding GitHub editor without redundant page framing", async () => {
+    const { user } = renderApplication()
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+
+    const github = within(appPanel("GitHub"))
+    expect(github.queryByRole("heading", { name: "GitHub" })).not.toBeInTheDocument()
+    expect(github.queryByText("Manage the account and repository access available inside each sandbox.")).not.toBeInTheDocument()
+    expect(github.queryByRole("heading", { name: "Repository access" })).not.toBeInTheDocument()
+    expect(github.getByText("Connected as @taylor")).toBeVisible()
+    expect(github.getByRole("button", { name: "Disable access" })).toBeVisible()
+    expect(github.getByRole("button", { name: "Reset…" })).toBeVisible()
+    expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
+    expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+
+    const editor = github.getByRole("region", { name: "Sandbox Git identity and repository access" })
+    expect(editor).toBeVisible()
+    expect(editor).toHaveClass("min-h-0", "flex-1")
+    expect(editor.querySelector(".divide-y")).not.toBeNull()
+
+    for (const workspace of ["dev", "playgrounds", "personal"]) {
+      const identity = github.getByRole("group", { name: `Git identity for ${workspace}` })
+      expect(identity.closest('[data-slot="card"]')).toBeNull()
+      expect(github.getByLabelText(`Git name for ${workspace}`)).toBeVisible()
+      expect(github.getByLabelText(`Git email for ${workspace}`)).toBeVisible()
+      expect(github.getByRole("checkbox", { name: `Apply Git identity to ${workspace}` })).toBeVisible()
+      expect(github.getByRole("button", { name: `Reset Git identity for ${workspace}` })).toBeVisible()
+      expect(github.getByRole("combobox", { name: `Add repository to ${workspace}` })).toBeVisible()
+    }
+
+    expect(github.getByLabelText("Git name for dev")).toHaveValue("Taylor Example")
+    expect(github.getByLabelText("Git email for dev")).toHaveValue("taylor@example.com")
+    expect(github.getByRole("checkbox", { name: "Apply Git identity to dev" })).toBeChecked()
+    const repositories = github.getByRole("table", { name: "Selected repositories for dev" })
+    expect(within(repositories).getAllByRole("columnheader").map(({ textContent }) => textContent)).toEqual([
+      "Repository",
+      "Allow pushes",
+      "Remove",
+    ])
+    expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/silo" })).toBeChecked()
+    expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/design-system" })).not.toBeChecked()
+    expect(within(repositories).getByRole("button", { name: "Remove acme/silo from dev" })).toBeVisible()
+  })
+
+  it("searches and edits GitHub access, exposes dirty actions, and rolls Cancel back", async () => {
+    const { actions, user } = renderApplication()
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const github = within(appPanel("GitHub"))
+
+    const name = github.getByLabelText("Git name for playgrounds")
+    await user.clear(name)
+    await user.type(name, "Morgan Example")
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    expect(github.getByRole("button", { name: "Cancel" })).toBeVisible()
+    await user.click(within(appNavigation()).getByRole("button", { name: "Backup" }))
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    expect(name).toHaveValue("Morgan Example")
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    await user.click(github.getByRole("button", { name: "Cancel" }))
+    expect(actions.cancelGitHubConfiguration).toHaveBeenCalledOnce()
+    expect(name).toHaveValue("Taylor Example")
+    expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
+
+    const picker = github.getByRole("combobox", { name: "Add repository to playgrounds" })
+    await user.type(picker, "design")
+    expect(screen.getByRole("option", { name: "acme/design-system" })).toBeVisible()
+    expect(screen.queryByRole("option", { name: "acme/platform-tools" })).not.toBeInTheDocument()
+    await user.click(screen.getByRole("option", { name: "acme/design-system" }))
+    await user.click(picker)
+    expect(screen.queryByRole("option", { name: "acme/design-system" })).not.toBeInTheDocument()
+
+    const selected = github.getByRole("table", { name: "Selected repositories for playgrounds" })
+    const pushes = within(selected).getByRole("checkbox", { name: "Allow pushes for acme/platform-tools" })
+    await user.click(pushes)
+    expect(pushes).toBeChecked()
+    await user.click(within(selected).getByRole("button", { name: "Remove acme/design-system from playgrounds" }))
+    expect(within(selected).queryByText("acme/design-system")).not.toBeInTheDocument()
+
+    await user.click(github.getByRole("button", { name: "Save changes" }))
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledOnce()
+    expect(actions.saveGitHubConfiguration).toHaveBeenCalledWith(expect.objectContaining({
+      accessEnabled: true,
+      workspaces: expect.arrayContaining([
+        expect.objectContaining({
+          workspace: "playgrounds",
+          repositories: [{ repository: "acme/platform-tools", allowPushes: true }],
+        }),
+      ]),
+    }))
+  })
+
+  it("keeps Git identity editable through disconnected and connecting GitHub states", async () => {
+    const disconnectedSource = applicationSourceForScenario("running", "disconnected")
+    const disconnected = renderApplication("running", disconnectedSource)
+    await disconnected.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    let github = within(appPanel("GitHub"))
+    expect(github.getByRole("heading", { name: "Not connected" })).toBeVisible()
+    expect(github.getByLabelText("Git name for dev")).toBeEnabled()
+    expect(github.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
+    await disconnected.user.click(github.getByRole("button", { name: "Connect GitHub" }))
+    expect(disconnected.actions.connectGitHub).toHaveBeenCalledOnce()
+    disconnected.unmount()
+
+    const connecting = renderApplication("running", applicationSourceForScenario("running", "connecting"))
+    await connecting.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    github = within(appPanel("GitHub"))
+    expect(github.getByRole("status")).toHaveTextContent("Connecting to GitHub…")
+    expect(github.getByLabelText("Git name for dev")).toBeEnabled()
+    expect(github.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
+  })
+
+  it("supports disabling and removing all GitHub access without hiding disabled selections", async () => {
+    const { actions, unmount, user } = renderApplication()
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const github = within(appPanel("GitHub"))
+
+    await user.click(github.getByRole("button", { name: "Reset…" }))
+    expect(github.getByText("Remove all access?")).toBeVisible()
+    await user.click(github.getByRole("button", { name: "Remove all" }))
+    expect(actions.resetGitHubAccess).toHaveBeenCalledOnce()
+    expect(github.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
+    expect(github.queryByRole("table", { name: "Selected repositories for playgrounds" })).not.toBeInTheDocument()
+    expect(github.queryByRole("table", { name: "Selected repositories for personal" })).not.toBeInTheDocument()
+    expect(github.getByRole("status")).toHaveTextContent("Removing all GitHub access…")
+    unmount()
+
+    const disabled = renderApplication(
+      "running",
+      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "disabled"),
+    )
+    await disabled.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const disabledPanel = within(appPanel("GitHub"))
+    expect(disabledPanel.getByRole("button", { name: "Enable access" })).toBeVisible()
+    expect(disabledPanel.getByRole("table", { name: "Selected repositories for dev" })).toBeVisible()
+    await disabled.user.click(disabledPanel.getByRole("button", { name: "Enable access" }))
+    expect(disabled.actions.setGitHubAccessEnabled).toHaveBeenCalledWith(true)
+  })
+
+  it("shows concise GitHub save progress, success, and actionable failure fixtures", async () => {
+    const states = [
+      { mode: "dirty" as const, role: "status" as const, message: "GitHub access has unsaved changes.", buttons: ["Cancel", "Save changes"] },
+      { mode: "saving" as const, role: "status" as const, message: "Applying GitHub access to 3 sandboxes…", buttons: ["Cancel"] },
+      { mode: "succeeded" as const, role: "status" as const, message: "GitHub access saved.", buttons: [] },
+      { mode: "failed" as const, role: "alert" as const, message: "GitHub access could not be applied to dev.", buttons: ["Retry", "Cancel"] },
+    ]
+
+    for (const state of states) {
+      const source = applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, state.mode)
+      const application = renderApplication("running", source)
+      await application.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+      const github = within(appPanel("GitHub"))
+      const feedback = state.mode === "dirty" ? github.getByText(state.message) : github.getByRole(state.role)
+      expect(feedback).toHaveTextContent(state.message)
+      for (const name of state.buttons) expect(github.getByRole("button", { name })).toBeVisible()
+
+      if (state.mode === "saving") {
+        expect(github.getByRole("region", { name: "Sandbox Git identity and repository access" })).toHaveAttribute("aria-busy", "true")
+        await application.user.click(github.getByRole("button", { name: "Cancel" }))
+        expect(application.actions.cancelGitHubConfiguration).toHaveBeenCalledOnce()
+      }
+      if (state.mode === "failed") {
+        await application.user.click(github.getByRole("button", { name: "Retry" }))
+        expect(application.actions.retryGitHubConfiguration).toHaveBeenCalledOnce()
+      }
+      application.unmount()
+    }
+  })
+
+  it("explains unavailable identity and repository catalog data without disabling manual identity", async () => {
+    const source = applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "missing-host-identity")
+    const { unmount, user } = renderApplication("running", source)
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const github = within(appPanel("GitHub"))
+
+    expect(github.getByText("No host Git identity is available. Enter values manually; Reset is unavailable.")).toBeVisible()
+    expect(github.getByRole("button", { name: "Reset Git identity for dev" })).toBeDisabled()
+    expect(github.getByLabelText("Git name for dev")).toBeEnabled()
+    expect(github.getByLabelText("Git name for dev")).toHaveValue("")
+    unmount()
+
+    const connectedEmpty = renderApplication(
+      "running",
+      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "connected-empty"),
+    )
+    await connectedEmpty.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const emptyPanel = within(appPanel("GitHub"))
+    expect(emptyPanel.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
+    expect(emptyPanel.getByRole("combobox", { name: "Add repository to dev" })).toBeVisible()
+    connectedEmpty.unmount()
+
+    const catalogUnavailable = renderApplication(
+      "running",
+      applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "catalog-unavailable"),
+    )
+    await catalogUnavailable.user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const unavailablePanel = within(appPanel("GitHub"))
+    expect(unavailablePanel.getByRole("alert")).toHaveTextContent("GitHub repositories could not be loaded.")
+    expect(unavailablePanel.queryByRole("combobox", { name: "Add repository to dev" })).not.toBeInTheDocument()
+    await catalogUnavailable.user.click(unavailablePanel.getByRole("button", { name: "Retry repositories" }))
+    expect(catalogUnavailable.actions.retryGitHubRepositoryCatalog).toHaveBeenCalledOnce()
+  })
+
   it("renders the native app domains in the polished Silo shell", async () => {
     const { user } = renderApplication()
     const navigation = within(appNavigation())
@@ -924,9 +1132,7 @@ describe("application", () => {
     await user.click(navigation.getByRole("button", { name: "GitHub" }))
     const github = within(appPanel("GitHub"))
     expect(github.getByText("Connected as @taylor")).toBeVisible()
-    await user.click(github.getByRole("button", { name: "Edit access" }))
-    expect(github.getAllByRole("checkbox")).toHaveLength(4)
-    await user.click(github.getByRole("button", { name: "Save changes" }))
+    expect(github.getByRole("region", { name: "Sandbox Git identity and repository access" })).toBeVisible()
 
     await user.click(navigation.getByRole("button", { name: "Secrets" }))
     const secrets = within(appPanel("Secrets"))

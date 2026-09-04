@@ -158,7 +158,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
           />
         )}
       </section>
-      <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"}><GitHubPage source={applicationSource} /></section>
+      <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"} className="h-full min-h-0 overflow-hidden"><GitHubPage source={applicationSource} actions={actions} /></section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={visibleTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
       <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} /></section>
       {activeRuntimeRepair && (

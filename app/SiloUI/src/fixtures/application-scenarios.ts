@@ -1,14 +1,16 @@
 import type { SetupVirtualMachineConfiguration, SiloProgressEvent } from "@/contracts/silo"
 import type {
+  ApplicationGitHubWorkspacePolicy,
   ApplicationSource,
   ApplicationWorkspace,
+  GitHubManagementOperation,
   RepositoryPushOperation,
   RuntimeRepairPresentation,
   SandboxConfigurationOperation,
   WorkspaceState,
 } from "@/features/application/model/application-source"
 import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
-import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
+import { repositoryFixtures, type GitHubFixtureState, type ScenarioName } from "@/fixtures/scenarios"
 import {
   applicationActivitiesForFixture,
   defaultApplicationActivities,
@@ -43,6 +45,19 @@ export type SystemIssueFixtureMode = (typeof systemIssueFixtureModes)[number]
 export const repositoryPushFixtureModes = ["pushing", "succeeded", "failed"] as const
 export type RepositoryPushFixtureMode = (typeof repositoryPushFixtureModes)[number]
 
+export const githubManagementFixtureModes = [
+  "idle",
+  "dirty",
+  "saving",
+  "succeeded",
+  "failed",
+  "disabled",
+  "connected-empty",
+  "missing-host-identity",
+  "catalog-unavailable",
+] as const
+export type GitHubManagementFixtureMode = (typeof githubManagementFixtureModes)[number]
+
 export function workspaceFixtureModeFromSearch(search: string): WorkspaceFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("sandbox-state")
   return workspaceFixtureModes.find((mode) => mode === requested)
@@ -61,6 +76,11 @@ export function systemIssueFixtureModeFromSearch(search: string): SystemIssueFix
 export function repositoryPushFixtureModeFromSearch(search: string): RepositoryPushFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("repository-push")
   return repositoryPushFixtureModes.find((mode) => mode === requested)
+}
+
+export function githubManagementFixtureModeFromSearch(search: string): GitHubManagementFixtureMode | undefined {
+  const requested = new URLSearchParams(search).get("github-operation")
+  return githubManagementFixtureModes.find((mode) => mode === requested)
 }
 
 const baseWorkspaces: ApplicationWorkspace[] = [
@@ -322,6 +342,70 @@ function repositoryPushOperationsForFixture(mode?: RepositoryPushFixtureMode): R
   }]
 }
 
+const githubWorkspacePolicies: readonly ApplicationGitHubWorkspacePolicy[] = [
+  {
+    workspace: "dev",
+    identity: { name: "Taylor Example", email: "taylor@example.com", apply: true },
+    repositories: [
+      { repository: "acme/silo", allowPushes: true },
+      { repository: "acme/design-system", allowPushes: false },
+    ],
+  },
+  {
+    workspace: "playgrounds",
+    identity: { name: "Taylor Example", email: "taylor@example.com", apply: false },
+    repositories: [{ repository: "acme/platform-tools", allowPushes: false }],
+  },
+  {
+    workspace: "personal",
+    identity: { name: "Taylor Example", email: "taylor@personal.dev", apply: true },
+    repositories: [{ repository: "taylor/docs-site", allowPushes: true }],
+  },
+]
+
+function githubManagementOperationForFixture(mode?: GitHubManagementFixtureMode): GitHubManagementOperation {
+  if (!mode || mode === "idle") return { status: "idle" }
+  if (mode === "dirty") {
+    return { status: "dirty", message: "GitHub access has unsaved changes.", canCancel: true }
+  }
+  if (mode === "saving") {
+    return { status: "saving", message: "Applying GitHub access to 3 sandboxes…", canCancel: true }
+  }
+  if (mode === "succeeded") {
+    return { status: "succeeded", message: "GitHub access saved." }
+  }
+  if (mode === "failed") {
+    return {
+      status: "failed",
+      message: "GitHub access could not be applied to dev.",
+      canRetry: true,
+      canCancel: true,
+      diagnosticDetails: [
+        "Sandbox: dev",
+        "Repository: acme/silo",
+        "The scoped repository grant could not be verified.",
+      ].join("\n"),
+    }
+  }
+  if (mode === "disabled") {
+    return { status: "disabled", message: "Repository access is disabled. Existing selections are preserved." }
+  }
+  return { status: "idle" }
+}
+
+function githubWorkspacePoliciesForFixture(mode?: GitHubManagementFixtureMode): readonly ApplicationGitHubWorkspacePolicy[] {
+  if (mode === "connected-empty") {
+    return githubWorkspacePolicies.map((policy) => ({ ...policy, repositories: [] }))
+  }
+  if (mode === "missing-host-identity") {
+    return githubWorkspacePolicies.map((policy) => ({
+      ...policy,
+      identity: { name: "", email: "", apply: false },
+    }))
+  }
+  return githubWorkspacePolicies
+}
+
 export function applicationSourceForScenario(
   scenario: ScenarioName,
   githubState?: GitHubFixtureState,
@@ -331,7 +415,9 @@ export function applicationSourceForScenario(
   repositoryPushMode?: RepositoryPushFixtureMode,
   activityMode?: ActivityFixtureMode,
   activityStep = 0,
+  githubManagementMode?: GitHubManagementFixtureMode,
 ): ApplicationSource {
+  const githubConnectionState = githubState ?? "connected"
   const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode).map((workspace) => (
     repositoryPushMode === "succeeded" && workspace.machine.name === "dev"
       ? { ...workspace, repositories: workspace.repositories.map((repository) => repository.path === "acme/silo" ? { ...repository, ahead: 0 } : repository) }
@@ -363,8 +449,18 @@ export function applicationSourceForScenario(
     sandboxConfigurationOperation: configurationOperationForFixture(workspaces, sandboxConfigurationMode),
     repositoryPushOperations: repositoryPushOperationsForFixture(repositoryPushMode),
     github: {
-      state: githubState ?? "connected",
-      account: githubState === "disconnected" ? undefined : "taylor",
+      state: githubConnectionState,
+      account: githubConnectionState === "connected" ? "taylor" : undefined,
+      accessEnabled: githubManagementMode !== "disabled",
+      repositoryCatalog: githubManagementMode === "catalog-unavailable" ? [] : repositoryFixtures,
+      repositoryCatalogStatus: githubManagementMode === "catalog-unavailable"
+        ? { status: "unavailable", message: "GitHub repositories could not be loaded.", canRetry: true }
+        : { status: "available" },
+      hostIdentity: githubManagementMode === "missing-host-identity"
+        ? null
+        : { name: "Taylor Example", email: "taylor@example.com" },
+      workspaces: githubWorkspacePoliciesForFixture(githubManagementMode),
+      operation: githubManagementOperationForFixture(githubManagementMode),
     },
     secrets: [
       { id: "package-token", name: "PACKAGE_TOKEN", workspaces: ["dev", "playgrounds"], allowedDomains: ["registry.npmjs.org"], state: "active" },
