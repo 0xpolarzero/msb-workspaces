@@ -149,8 +149,8 @@ function EmptyState({ title, description }: { title: string; description: string
 function WorkspaceBadge({ name, state }: { name: string; state: WorkspaceState }) {
   const stateLabel = state.charAt(0).toUpperCase() + state.slice(1)
   return (
-    <span className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/45 px-2 text-[11px] font-medium text-muted-foreground" aria-label={`${name}, ${stateLabel}`}>
-      <WorkspaceStateDot state={state} />
+    <span className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/45 px-1.5 text-[10px] font-medium text-muted-foreground" aria-label={`${name}, ${stateLabel}`}>
+      <WorkspaceStateDot state={state} className="size-1.5" />
       {name}
     </span>
   )
@@ -222,15 +222,19 @@ function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
         {repositories.length > 0 ? (
           <div className="divide-y divide-border" role="list" aria-label="Repositories">
             {repositories.map(({ workspace, repository }) => (
-              <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
-                <GitBranch className="size-4 text-muted-foreground" aria-hidden="true" />
+              <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
+                <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{repository.path}</div>
+                  <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
+                    <div className="truncate text-sm font-medium">{repository.path}</div>
+                    <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
+                  </div>
                   <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
-                  {repository.ahead > 0 && <Button variant="outline" size="xs">Push {repository.ahead}</Button>}
+                  {repository.ahead > 0 && (
+                    <div className="mt-2" data-repository-actions>
+                      <Button variant="outline" size="xs">Push {repository.ahead} {repository.ahead === 1 ? "commit" : "commits"}</Button>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}

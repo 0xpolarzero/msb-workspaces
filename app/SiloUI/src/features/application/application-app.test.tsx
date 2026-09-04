@@ -107,10 +107,18 @@ describe("application", () => {
     const fileTree = panel.getByRole("list", { name: "File tree" })
     const devRepository = within(repositories).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
     const playgroundsRepository = within(repositories).getByText("acme/platform-tools").closest('[role="listitem"]') as HTMLElement
-    expect(within(devRepository).getByLabelText("dev, Running")).toBeVisible()
+    const devBadge = within(devRepository).getByLabelText("dev, Running")
+    expect(devBadge).toBeVisible()
+    expect(devBadge).toHaveClass("h-5", "text-[10px]")
     expect(devRepository.querySelector('[data-workspace-state-dot="running"]')).toHaveClass("bg-emerald-500")
     expect(within(playgroundsRepository).getByLabelText("playgrounds, Stopped")).toBeVisible()
     expect(playgroundsRepository.querySelector('[data-workspace-state-dot="stopped"]')).toHaveClass("bg-muted-foreground/55")
+    const repositoryHeader = devRepository.querySelector("[data-repository-header]") as HTMLElement
+    const repositoryActions = devRepository.querySelector("[data-repository-actions]") as HTMLElement
+    const pushButton = within(repositoryActions).getByRole("button", { name: "Push 2 commits" })
+    expect(repositoryHeader).toContainElement(devBadge)
+    expect(repositoryHeader).not.toContainElement(pushButton)
+    expect(within(playgroundsRepository).queryByRole("button", { name: /^Push / })).not.toBeInTheDocument()
 
     const devFolder = within(fileTree).getByRole("button", { name: "dev" })
     expect(devFolder).toHaveAttribute("aria-expanded", "true")

@@ -33,8 +33,8 @@ const workspaceStateStyles: Record<WorkspaceState, string> = {
   failed: "bg-destructive",
 }
 
-export function WorkspaceStateDot({ state }: { state: WorkspaceState }) {
-  return <span className={cn("size-2 rounded-full", workspaceStateStyles[state])} data-workspace-state-dot={state} aria-hidden="true" />
+export function WorkspaceStateDot({ state, className }: { state: WorkspaceState; className?: string }) {
+  return <span className={cn("size-2 rounded-full", workspaceStateStyles[state], className)} data-workspace-state-dot={state} aria-hidden="true" />
 }
 
 const workspaceStateLabelStyles: Record<WorkspaceState, string> = {
