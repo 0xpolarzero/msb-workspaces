@@ -139,7 +139,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
     >
-      <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={visibleTab !== "workspaces"}>
+      <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={visibleTab !== "workspaces"} className="h-full min-h-0 overflow-hidden">
         {visibleWorkspaceSection === "overview" ? (
           <OverviewPage source={applicationSource} actions={actions} onMachinesChange={updateMachines} repairCompleted={repairConfirmationVisible} />
         ) : (

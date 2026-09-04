@@ -339,7 +339,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
   return (
     <>
       <div aria-labelledby="machine-list-heading" className="flex h-full min-h-0 flex-col">
-        <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="mb-2 flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-2 text-xs">
           <div className="min-w-0">
             <h3 id="machine-list-heading" className="font-medium">Sandboxes</h3>
             <p className="text-[11px] text-muted-foreground">{summary ?? <>{machines.length} configured · {machines.filter(({ kind }) => kind === "vm").length} VM · {machines.filter(({ kind }) => kind === "ssh").length} SSH</>}</p>

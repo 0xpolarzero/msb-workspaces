@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Activity, Archive, Box, Check, ChevronRight, CircleAlert, CircleCheck, Cloud, ExternalLink, File, Folder, GitBranch, KeyRound, Loader2, RotateCw, Search, TriangleAlert, Wrench } from "lucide-react"
 
 import { CopyButton } from "@/components/copy-button"
+import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import { FilterCombobox, type FilterOption } from "@/components/filter-combobox"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
@@ -182,49 +183,101 @@ function Files({
   onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
   onDismissRepositoryPush: (workspace: string, repositoryPath: string) => void
 }) {
+  const [repositoriesOpen, setRepositoriesOpen] = useState(true)
+  const [fileTreeOpen, setFileTreeOpen] = useState(true)
   if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to browse its files and repositories." />
   const repositories = workspaces.flatMap((workspace) => workspace.repositories.map((repository) => ({ workspace, repository })))
   const pushOperations = new Map(repositoryPushOperations.map((operation) => [`${operation.workspace}:${operation.repositoryPath}`, operation]))
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2 lg:gap-0">
-      <section className="min-w-0 lg:pr-5" aria-labelledby="files-repositories-heading">
-        <h3 id="files-repositories-heading" className="mb-3 font-heading text-sm font-medium">Repositories</h3>
-        {repositories.length > 0 ? (
-          <div className="divide-y divide-border" role="list" aria-label="Repositories">
-            {repositories.map(({ workspace, repository }) => {
-              const operation = pushOperations.get(`${workspace.machine.name}:${repository.path}`)
-              const push = () => onPushRepository(workspace.machine.name, repository.path, operation?.commitCount ?? repository.ahead)
-              return (
-                <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
-                  <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
-                      <div className="truncate text-sm font-medium">{repository.path}</div>
-                      <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
-                    </div>
-                    <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
-                    {(operation || repository.ahead > 0) && (
-                      <div className="mt-2 flex min-h-6 items-start" data-repository-actions>
-                        {operation
-                          ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
-                          : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
+    <div className={cn("flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-2 lg:grid-rows-1 lg:content-stretch lg:gap-0", !repositoriesOpen && !fileTreeOpen && "justify-between")} data-files-layout>
+      <Collapsible
+        asChild
+        open={repositoriesOpen}
+        onOpenChange={setRepositoriesOpen}
+      >
+        <section
+          aria-label="Repositories"
+          className={cn(
+            "flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:max-h-none lg:pr-5",
+            repositoriesOpen ? fileTreeOpen ? "max-h-[50%] shrink-0" : "flex-1" : "shrink-0",
+          )}
+          data-files-pane="repositories"
+          data-pane-position="top"
+        >
+          <div className="grid h-8 shrink-0 grid-cols-[1rem_minmax(0,1fr)_1.5rem] items-center gap-2 px-2" role="group" aria-label="Repository pane controls">
+            <GitBranch className="size-4 text-muted-foreground" aria-hidden="true" />
+            <span className="text-sm font-medium">Repositories</span>
+            <CollapsibleTrigger
+              aria-label={`${repositoriesOpen ? "Collapse" : "Expand"} repositories`}
+              className={`${disclosureTriggerStateClass} grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}
+            >
+              <DisclosureIndicator />
+            </CollapsibleTrigger>
           </div>
-        ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
-      </section>
+          <CollapsibleContent className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="repositories">
+            {repositories.length > 0 ? (
+              <div className="divide-y divide-border" role="list" aria-label="Repositories">
+                {repositories.map(({ workspace, repository }) => {
+                  const operation = pushOperations.get(`${workspace.machine.name}:${repository.path}`)
+                  const push = () => onPushRepository(workspace.machine.name, repository.path, operation?.commitCount ?? repository.ahead)
+                  return (
+                    <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
+                      <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
+                          <div className="truncate text-sm font-medium">{repository.path}</div>
+                          <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
+                        </div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
+                        {(operation || repository.ahead > 0) && (
+                          <div className="mt-2 flex min-h-6 items-start" data-repository-actions>
+                            {operation
+                              ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
+                              : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
+          </CollapsibleContent>
+        </section>
+      </Collapsible>
 
-      <section className="min-w-0 lg:border-l lg:border-border lg:pl-5" aria-labelledby="files-tree-heading">
-        <h3 id="files-tree-heading" className="mb-3 font-heading text-sm font-medium">File tree</h3>
-        <ul className="grid gap-0.5" aria-label="File tree">
-          {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}
-        </ul>
-      </section>
+      <Collapsible
+        asChild
+        open={fileTreeOpen}
+        onOpenChange={setFileTreeOpen}
+      >
+        <section
+          aria-label="File tree"
+          className={cn(
+            "flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:border-l lg:border-border lg:pl-5",
+            fileTreeOpen ? "flex-1" : "shrink-0",
+          )}
+          data-files-pane="file-tree"
+          data-pane-position="bottom"
+        >
+          <div className="grid h-8 shrink-0 grid-cols-[1rem_minmax(0,1fr)_1.5rem] items-center gap-2 px-2" role="group" aria-label="File tree pane controls">
+            <Folder className="size-4 text-muted-foreground" aria-hidden="true" />
+            <span className="text-sm font-medium">File tree</span>
+            <CollapsibleTrigger
+              aria-label={`${fileTreeOpen ? "Collapse" : "Expand"} file tree`}
+              className={`${disclosureTriggerStateClass} grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}
+            >
+              <DisclosureIndicator />
+            </CollapsibleTrigger>
+          </div>
+          <CollapsibleContent className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="file-tree">
+            <ul className="grid gap-0.5" aria-label="File tree">
+              {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}
+            </ul>
+          </CollapsibleContent>
+        </section>
+      </Collapsible>
     </div>
   )
 }
@@ -261,8 +314,8 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
   const filteredRows = rows.filter((row) => !normalizedQuery || `${row.timestamp} ${row.workspace} ${row.message}`.toLowerCase().includes(normalizedQuery))
 
   return (
-    <div>
-      <div className="mb-3 flex items-center gap-2">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="mb-3 flex shrink-0 items-center gap-2">
         <div className="relative min-w-0 flex-1">
           <Search className="pointer-events-none absolute top-2 left-2.5 size-4 text-muted-foreground" aria-hidden="true" />
           <Input aria-label="Search logs" placeholder="Search logs" value={query} onChange={(event) => onQueryChange(event.target.value)} className="pl-8" />
@@ -277,14 +330,14 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
         />
       </div>
       {filteredRows.length > 0 ? (
-        <div role="table" aria-label="Logs" className="overflow-hidden rounded-lg border border-border text-xs">
-          <div role="row" className="grid grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
+        <div role="table" aria-label="Logs" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border text-xs">
+          <div role="row" className="grid shrink-0 grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
             <span role="columnheader">Time</span>
             <span role="columnheader">Message</span>
             <span role="columnheader">Sandbox</span>
             <span role="columnheader" className="sr-only">Actions</span>
           </div>
-          <div className="max-h-80 divide-y divide-border overflow-y-auto bg-card">
+          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain bg-card" data-table-scroll="logs">
             {filteredRows.map((row) => (
               <div key={row.id} role="row" className="group/log-row grid grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
                 <span role="cell" className="font-mono text-muted-foreground">{row.timestamp}</span>
@@ -324,16 +377,16 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="overflow-hidden rounded-lg border border-border">
-        <div role="table" aria-label="Network" className="w-full text-xs">
-          <div role="row" className="grid grid-cols-[3.5rem_6rem_minmax(0,1fr)_3.5rem] items-center gap-2 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground sm:grid-cols-[4rem_minmax(0,1fr)_6.5rem_7rem_3.5rem] sm:gap-3">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border">
+        <div role="table" aria-label="Network" className="flex min-h-0 w-full flex-1 flex-col text-xs">
+          <div role="row" className="grid shrink-0 grid-cols-[3.5rem_6rem_minmax(0,1fr)_3.5rem] items-center gap-2 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground sm:grid-cols-[4rem_minmax(0,1fr)_6.5rem_7rem_3.5rem] sm:gap-3">
             <span role="columnheader">Port</span>
             <span role="columnheader" className="hidden sm:block">URL</span>
             <span role="columnheader">State</span>
             <span role="columnheader">Sandbox</span>
             <span role="columnheader" className="sr-only">Actions</span>
           </div>
-          <div className="divide-y divide-border bg-card">
+          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain bg-card" data-table-scroll="network">
             {rows.map(({ workspace, port }) => {
               const url = `http://${workspace.host}:${port.port}`
               const state = port.listening === true ? "Listening" : port.listening === false ? "Configured" : "Unknown"
@@ -410,7 +463,7 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
   if (workspaces.length === 0 && allActivities.length === 0) return <EmptyState title="No recent activity" description="Sandbox and system activity will appear here." />
 
   return (
-    <div className="grid gap-3">
+    <div className="flex h-full min-h-0 flex-col gap-3">
       <FilterCombobox
         options={activityCategoryOptions}
         selectedValues={selectedCategories}
@@ -422,11 +475,11 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
         selectedLabel="Selected activity categories"
         emptyMessage="No categories available."
         compact
-        className="w-full"
+        className="w-full shrink-0"
       />
 
       {activities.length > 0 ? (
-        <div className="divide-y divide-border overflow-hidden rounded-lg border border-border" role="list" aria-label="Recent activity">
+        <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain rounded-lg border border-border" role="list" aria-label="Recent activity">
           {activities.map((item) => {
             const category = activityCategoryPresentation[item.category]
             const CategoryIcon = category.icon
@@ -516,7 +569,7 @@ export function WorkspacesPage({
   )
 
   return (
-    <div className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
+    <div className="mx-auto grid h-full min-h-0 w-full max-w-5xl grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden px-4 py-5 sm:px-6 sm:py-6">
       <WorkspaceFilterBar workspaces={workspaces} selectedWorkspaceIds={selectedWorkspaceIds} onChange={onWorkspaceFilterChange} />
       {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} onDismissRepositoryPush={onDismissRepositoryPush} />}
       {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}

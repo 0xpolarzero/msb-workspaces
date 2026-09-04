@@ -247,7 +247,7 @@ export function ApplicationShell({
             </div>
           </div>
         </nav>
-        <div className="min-h-0 min-w-0 overflow-y-auto">{children}</div>
+        <div className={cn("min-h-0 min-w-0", activeTab === "workspaces" ? "overflow-hidden" : "overflow-y-auto")}>{children}</div>
       </div>
     </SiloWindow>
   )

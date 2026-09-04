@@ -225,61 +225,63 @@ export function OverviewPage({
   const configurationLocked = configurationOperation !== null
 
   return (
-    <div className="mx-auto h-full w-full max-w-4xl px-4 py-5 sm:px-6 sm:py-6">
+    <div className="mx-auto flex h-full min-h-0 w-full max-w-4xl flex-col px-4 py-5 sm:px-6 sm:py-6">
       {repairCompleted && (
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.07] px-3 py-2 text-sm font-medium text-emerald-700 dark:text-emerald-400" role="status" aria-live="polite" aria-atomic="true">
           <CircleCheck className="size-4 shrink-0" aria-hidden="true" />
           Installation repaired
         </div>
       )}
-      <MachineList
-        machines={machines}
-        onMachinesChange={onMachinesChange}
-        interactionDisabled={configurationLocked}
-        summary={configurationOperation ? <>{source.workspaces.length} configured · Applying sandbox changes</> : undefined}
-        sortPriority={(machine) => {
-          const workspace = workspaces.get(machine.id)
-          const configuration = workspace && configurationOperation
-            ? configurationRowView(workspace, committedWorkspaces.get(machine.id), configurationOperation)
-            : undefined
-          return attentionPriority[configuration?.status === "failed" ? "error" : iconState(workspace)]
-        }}
-        getRowPresentation={(machine) => {
-          const workspace = workspaces.get(machine.id)
-          const state = workspace?.state ?? "stopped"
-          const visualState = iconState(workspace)
-          const configuration = workspace && configurationOperation
-            ? configurationRowView(workspace, committedWorkspaces.get(machine.id), configurationOperation)
-            : undefined
-          if (configuration) {
-            const failed = configuration.status === "failed"
-            return {
-              busy: !failed,
-              suppressInteractions: true,
-              icon: <ConfigurationIcon failed={failed} />,
-              iconState: failed ? "error" as const : "normal" as const,
-              tone: failed ? "error" as const : "starting" as const,
-              detailClassName: "overflow-visible whitespace-normal text-xs",
-              detail: <ConfigurationDetail view={configuration} />,
-              actions: failed && configuration.retryable
-                ? <SandboxAction label={`Retry ${machine.name} configuration`} onClick={() => actions.retryMachineConfiguration(machine.name)}><RotateCw /></SandboxAction>
-                : undefined,
-              actionsClassName: "mt-1 self-start",
+      <div className="min-h-0 flex-1">
+        <MachineList
+          machines={machines}
+          onMachinesChange={onMachinesChange}
+          interactionDisabled={configurationLocked}
+          summary={configurationOperation ? <>{source.workspaces.length} configured · Applying sandbox changes</> : undefined}
+          sortPriority={(machine) => {
+            const workspace = workspaces.get(machine.id)
+            const configuration = workspace && configurationOperation
+              ? configurationRowView(workspace, committedWorkspaces.get(machine.id), configurationOperation)
+              : undefined
+            return attentionPriority[configuration?.status === "failed" ? "error" : iconState(workspace)]
+          }}
+          getRowPresentation={(machine) => {
+            const workspace = workspaces.get(machine.id)
+            const state = workspace?.state ?? "stopped"
+            const visualState = iconState(workspace)
+            const configuration = workspace && configurationOperation
+              ? configurationRowView(workspace, committedWorkspaces.get(machine.id), configurationOperation)
+              : undefined
+            if (configuration) {
+              const failed = configuration.status === "failed"
+              return {
+                busy: !failed,
+                suppressInteractions: true,
+                icon: <ConfigurationIcon failed={failed} />,
+                iconState: failed ? "error" as const : "normal" as const,
+                tone: failed ? "error" as const : "starting" as const,
+                detailClassName: "overflow-visible whitespace-normal text-xs",
+                detail: <ConfigurationDetail view={configuration} />,
+                actions: failed && configuration.retryable
+                  ? <SandboxAction label={`Retry ${machine.name} configuration`} onClick={() => actions.retryMachineConfiguration(machine.name)}><RotateCw /></SandboxAction>
+                  : undefined,
+                actionsClassName: "mt-1 self-start",
+              }
             }
-          }
-          return {
-            iconState: visualState,
-            tone: rowTone(workspace),
-            detail: (
-              <span title={workspace?.attention?.message}>
-                <WorkspaceStateLabel state={state} />
-                {workspace?.attention && <> · {workspace.attention.message}</>}
-              </span>
-            ),
-            actions: <WorkspaceActions machine={machine} state={state} actions={actions} disabled={configurationLocked} />,
-          }
-        }}
-      />
+            return {
+              iconState: visualState,
+              tone: rowTone(workspace),
+              detail: (
+                <span title={workspace?.attention?.message}>
+                  <WorkspaceStateLabel state={state} />
+                  {workspace?.attention && <> · {workspace.attention.message}</>}
+                </span>
+              ),
+              actions: <WorkspaceActions machine={machine} state={state} actions={actions} disabled={configurationLocked} />,
+            }
+          }}
+        />
+      </div>
     </div>
   )
 }
