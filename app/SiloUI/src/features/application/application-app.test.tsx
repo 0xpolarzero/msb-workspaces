@@ -24,7 +24,6 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
     setGitHubAccessEnabled: vi.fn(),
     saveGitHubConfiguration: vi.fn(),
     cancelGitHubConfiguration: vi.fn(),
-    clearGitHubRepositoryAccess: vi.fn(),
     retryGitHubConfiguration: vi.fn(),
     retryGitHubRepositoryCatalog: vi.fn(),
   }
@@ -936,11 +935,12 @@ describe("application", () => {
     expect(github.getByText("Connected as @taylor")).toBeVisible()
     expect(github.getByRole("button", { name: "Disable access" })).toBeVisible()
     expect(github.getByRole("button", { name: "Disconnect" })).toBeVisible()
-    const clearRepositories = github.getByRole("button", { name: "Clear repositories" })
-    expect(clearRepositories).toBeVisible()
-    await user.hover(clearRepositories)
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Clear repositories from every sandbox")
-    await user.unhover(clearRepositories)
+    expect(github.queryByRole("button", { name: "Clear repositories" })).not.toBeInTheDocument()
+    const clearDevRepositories = github.getByRole("button", { name: "Clear repositories from dev" })
+    expect(clearDevRepositories).toBeVisible()
+    await user.hover(clearDevRepositories)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Clear repositories from dev")
+    await user.unhover(clearDevRepositories)
     expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
     expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
 
@@ -966,7 +966,7 @@ describe("application", () => {
     expect(within(repositories).getAllByRole("columnheader").map(({ textContent }) => textContent)).toEqual([
       "Repository",
       "Allow pushes",
-      "Remove",
+      "",
     ])
     expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/silo" })).toBeChecked()
     expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/design-system" })).not.toBeChecked()
@@ -1072,19 +1072,18 @@ describe("application", () => {
     expect(github.getByRole("status")).toHaveTextContent("Connecting to GitHub…")
   })
 
-  it("supports disabling access and clearing repositories without hiding disabled selections", async () => {
-    const { actions, unmount, user } = renderApplication()
+  it("supports disabling access and clearing one sandbox's repositories", async () => {
+    const { unmount, user } = renderApplication()
     await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
     const github = within(appPanel("GitHub"))
 
-    await user.click(github.getByRole("button", { name: "Clear repositories" }))
-    expect(github.queryByText("Clear repositories from every sandbox?")).not.toBeInTheDocument()
-    await user.click(github.getByRole("button", { name: "Clear repositories" }))
-    expect(actions.clearGitHubRepositoryAccess).toHaveBeenCalledOnce()
+    await user.click(github.getByRole("button", { name: "Clear repositories from dev" }))
     expect(github.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
-    expect(github.queryByRole("table", { name: "Selected repositories for playgrounds" })).not.toBeInTheDocument()
-    expect(github.queryByRole("table", { name: "Selected repositories for personal" })).not.toBeInTheDocument()
-    expect(github.getByRole("status")).toHaveTextContent("Clearing repository access…")
+    expect(github.getByRole("table", { name: "Selected repositories for playgrounds" })).toBeVisible()
+    expect(github.getByRole("table", { name: "Selected repositories for personal" })).toBeVisible()
+    expect(github.getByText("GitHub access has unsaved changes.")).toBeVisible()
+    await user.click(github.getByRole("button", { name: "Cancel" }))
+    expect(github.getByRole("table", { name: "Selected repositories for dev" })).toBeVisible()
     unmount()
 
     const disabled = renderApplication(
@@ -1095,6 +1094,7 @@ describe("application", () => {
     const disabledPanel = within(appPanel("GitHub"))
     expect(disabledPanel.getByRole("button", { name: "Enable access" })).toBeVisible()
     expect(disabledPanel.getByRole("table", { name: "Selected repositories for dev" })).toBeVisible()
+    expect(disabledPanel.getByRole("button", { name: "Clear repositories from dev" })).toBeDisabled()
     await disabled.user.click(disabledPanel.getByRole("button", { name: "Enable access" }))
     expect(disabled.actions.setGitHubAccessEnabled).toHaveBeenCalledWith(true)
   })

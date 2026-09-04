@@ -42,6 +42,7 @@ describe("GitHubAccessEditor", () => {
     expect(within(editor).getByRole("button", { name: "Reset Git identity for dev" })).toBeDisabled()
     expect(within(editor).getByRole("combobox", { name: "Add repository to dev" })).toBeDisabled()
     expect(within(editor).getByRole("checkbox", { name: "Allow pushes for acme/silo" })).toBeDisabled()
+    expect(within(editor).getByRole("button", { name: "Clear repositories from dev" })).toBeDisabled()
     expect(within(editor).getByRole("button", { name: "Remove acme/silo from dev" })).toBeDisabled()
   })
 

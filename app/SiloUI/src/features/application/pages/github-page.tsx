@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
-import { Check, Loader2, RotateCcw, TriangleAlert } from "lucide-react"
+import { Check, Loader2, TriangleAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type {
   ApplicationActions,
   ApplicationGitHubConfiguration,
@@ -142,7 +141,6 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
   const [connectionState, setConnectionState] = useState(source.github.state)
   const [accessEnabled, setAccessEnabled] = useState(source.github.accessEnabled ?? true)
   const [operation, setOperation] = useState<GitHubManagementOperation>(source.github.operation ?? { status: "idle" })
-  const [confirmingClear, setConfirmingClear] = useState(false)
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false)
   const catalogAvailable = source.github.repositoryCatalogStatus?.status !== "unavailable"
   const editorBusy = operation.status === "saving"
@@ -160,8 +158,6 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
     setAccessEnabled(source.github.accessEnabled ?? true)
     // oxlint-disable-next-line react/set-state-in-effect
     setOperation(source.github.operation ?? { status: "idle" })
-    // oxlint-disable-next-line react/set-state-in-effect
-    setConfirmingClear(false)
     // oxlint-disable-next-line react/set-state-in-effect
     setConfirmingDisconnect(false)
   }, [source.github.accessEnabled, source.github.operation, source.github.state, sourceDraft])
@@ -197,21 +193,10 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
   }
 
   function disconnect() {
-    setConfirmingClear(false)
     setConfirmingDisconnect(false)
     setConnectionState("disconnected")
     setOperation({ status: "idle" })
     actions.disconnectGitHub?.()
-  }
-
-  function confirmClear() {
-    setConfirmingClear(false)
-    setDraft((current) => ({
-      ...current,
-      selections: Object.fromEntries(source.workspaces.map(({ machine }) => [machine.name, []])),
-    }))
-    setOperation({ status: "saving", message: "Clearing repository access…", canCancel: true })
-    actions.clearGitHubRepositoryAccess?.()
   }
 
   const catalogNotice = source.github.repositoryCatalogStatus?.status === "unavailable" ? (
@@ -227,31 +212,12 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
       <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingDisconnect(false)}>Cancel</Button>
       <Button type="button" variant="destructive" size="xs" onClick={disconnect}>Disconnect</Button>
     </>
-  ) : confirmingClear ? (
-    <>
-      <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingClear(false)}>Cancel</Button>
-      <Button type="button" variant="destructive" size="xs" onClick={confirmClear}>Clear repositories</Button>
-    </>
   ) : (
     <>
       <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
       <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => {
-        setConfirmingClear(false)
         setConfirmingDisconnect(true)
       }}>Disconnect</Button>
-      <TooltipProvider delayDuration={150}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button type="button" variant="ghost" size="icon-xs" aria-label="Clear repositories" disabled={editorBusy} onClick={() => {
-              setConfirmingDisconnect(false)
-              setConfirmingClear(true)
-            }}>
-              <RotateCcw className="size-3" aria-hidden="true" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Clear repositories from every sandbox</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
     </>
   )
 

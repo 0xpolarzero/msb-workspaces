@@ -1,5 +1,5 @@
 import { useId, useMemo, useState, type ReactNode } from "react"
-import { Check, GitBranch, Info, LoaderCircle, RotateCcw, Search, X } from "lucide-react"
+import { Check, GitBranch, Info, LoaderCircle, RotateCcw, Search, Trash2, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -353,7 +353,26 @@ export function GitHubAccessEditor({
                                   </Tooltip>
                                 </TooltipProvider>
                               </span>
-                              <span role="columnheader" className="sr-only">Remove</span>
+                              <span role="columnheader" className="flex justify-start">
+                                <TooltipProvider delayDuration={150}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon-xs"
+                                        className="size-5"
+                                        aria-label={`Clear repositories from ${name}`}
+                                        disabled={disabled || !repositoryControlsAvailable}
+                                        onClick={() => onWorkspaceSelectionsChange(name, [])}
+                                      >
+                                        <Trash2 aria-hidden="true" className="size-3" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>{`Clear repositories from ${name}`}</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </span>
                             </div>
                             {selections.map((selection) => (
                               <div key={selection.repository} role="row" className={`grid ${repositoryGridColumns} items-center gap-2 border-t border-border px-2 py-2 text-left`}>

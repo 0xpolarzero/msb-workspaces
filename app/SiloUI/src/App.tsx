@@ -60,7 +60,6 @@ export default function App() {
             openTerminal: (_workspace) => undefined,
             openEditor: (_workspace) => undefined,
             disconnectGitHub: () => undefined,
-            clearGitHubRepositoryAccess: () => undefined,
           }}
         />
       ) : (

@@ -339,6 +339,8 @@ describe("onboarding", () => {
     const tooltipTrigger = screen.getByRole("button", { name: "About Allow pushes" })
     screen.getByRole("checkbox", { name: "Allow pushes for acme/silo" }).focus()
     await user.tab({ shift: true })
+    expect(screen.getByRole("button", { name: "Clear repositories from dev" })).toHaveFocus()
+    await user.tab({ shift: true })
 
     expect(tooltipTrigger).toHaveFocus()
     expect(await screen.findByRole("tooltip")).toHaveTextContent("Allow pushing to this repo from inside this VM.")
