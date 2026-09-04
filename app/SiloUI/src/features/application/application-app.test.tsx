@@ -972,7 +972,7 @@ describe("application", () => {
     expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/design-system" })).not.toBeChecked()
     expect(within(repositories).getByRole("button", { name: "Remove acme/silo from dev" })).toBeVisible()
 
-    const devDisclosure = github.getByRole("button", { name: "dev" })
+    const devDisclosure = github.getByRole("button", { name: "Collapse dev" })
     await user.click(devDisclosure)
     expect(devDisclosure).toHaveAttribute("aria-expanded", "false")
     expect(github.queryByRole("group", { name: "Git identity for dev" })).not.toBeInTheDocument()

@@ -291,7 +291,7 @@ describe("onboarding", () => {
     renderScenario("running", "connected")
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
 
-    const devDisclosure = screen.getByRole("button", { name: "dev" })
+    const devDisclosure = screen.getByRole("button", { name: "Collapse dev" })
     await user.click(devDisclosure)
     expect(devDisclosure).toHaveAttribute("aria-expanded", "false")
     expect(screen.queryByRole("group", { name: "Git identity for dev" })).not.toBeInTheDocument()

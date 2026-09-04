@@ -65,13 +65,14 @@ describe("GitHubAccessEditor", () => {
       />,
     )
 
-    const devDisclosure = screen.getByRole("button", { name: "dev" })
-    const playgroundsDisclosure = screen.getByRole("button", { name: "playgrounds" })
+    const devDisclosure = screen.getByRole("button", { name: "Collapse dev" })
+    const playgroundsDisclosure = screen.getByRole("button", { name: "Collapse playgrounds" })
     expect(devDisclosure).toHaveAttribute("aria-expanded", "true")
     expect(playgroundsDisclosure).toHaveAttribute("aria-expanded", "true")
 
     await user.click(devDisclosure)
     expect(devDisclosure).toHaveAttribute("aria-expanded", "false")
+    expect(devDisclosure).toHaveAccessibleName("Expand dev")
     expect(screen.queryByRole("group", { name: "Git identity for dev" })).not.toBeInTheDocument()
     expect(screen.getByRole("group", { name: "Git identity for playgrounds" })).toBeVisible()
 

@@ -36,6 +36,28 @@ interface RepositoryComboboxProps {
   onAdd: (repository: string) => void
 }
 
+function WorkspaceDisclosure({ name, actions, children }: { name: string; actions?: ReactNode; children: ReactNode }) {
+  const [open, setOpen] = useState(true)
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="collapsible-motion">
+      <div className="flex h-10 min-w-0 items-center gap-2 px-3">
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={name}>{name}</span>
+        {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
+        <CollapsibleTrigger
+          aria-label={`${open ? "Collapse" : "Expand"} ${name}`}
+          className={`${disclosureTriggerStateClass} grid size-6 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}
+        >
+          <DisclosureIndicator />
+        </CollapsibleTrigger>
+      </div>
+      <CollapsibleContent className="collapsible-content-motion">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
 const repositoryGridColumns = "grid-cols-[minmax(0,1fr)_6.75rem_1.5rem]"
 
 function RepositoryCombobox({ workspace, repositoryOptions, selectedRepositories, disabled = false, onAdd }: RepositoryComboboxProps) {
@@ -227,16 +249,8 @@ export function GitHubAccessEditor({
             const identity = workspaceIdentities[name] ?? { name: "", email: "", apply: true }
             const workspaceActions = renderWorkspaceActions?.(workspace)
             return (
-              <Collapsible key={name} defaultOpen className="collapsible-motion">
-                <div className="flex min-w-0 items-center gap-1 p-1">
-                  <CollapsibleTrigger className={`${disclosureTriggerStateClass} flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}>
-                    <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={name}>{name}</span>
-                    <DisclosureIndicator />
-                  </CollapsibleTrigger>
-                  {workspaceActions && <div className="flex shrink-0 items-center gap-1.5">{workspaceActions}</div>}
-                </div>
-                <CollapsibleContent className="collapsible-content-motion">
-                  <div className="grid gap-3 px-3 pt-1 pb-3">
+              <WorkspaceDisclosure key={name} name={name} actions={workspaceActions}>
+                  <div className="grid gap-3 px-3 pb-3">
                     <div
                       role="group"
                       aria-label={`Git identity for ${name}`}
@@ -373,8 +387,7 @@ export function GitHubAccessEditor({
                       </>
                     )}
                   </div>
-                </CollapsibleContent>
-              </Collapsible>
+              </WorkspaceDisclosure>
             )
           })}
         </div>
