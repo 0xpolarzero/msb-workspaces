@@ -75,6 +75,22 @@ describe("onboarding", () => {
     expectHiddenPanelHeading("GitHub")
   })
 
+  it("shares the application choices in onboarding and keeps the selected browser", async () => {
+    const user = userEvent.setup()
+    renderScenario()
+
+    expect(screen.getByRole("combobox", { name: "Terminal" })).toHaveTextContent("Terminal")
+    expect(screen.getByRole("combobox", { name: "Code editor" })).toHaveTextContent("Visual Studio Code")
+    const browser = screen.getByRole("combobox", { name: "Browser" })
+    expect(browser).toHaveTextContent("Safari")
+
+    await user.click(browser)
+    await user.click(screen.getByRole("option", { name: "Firefox" }))
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
+    await user.click(screen.getByRole("tab", { name: /Dependencies/ }))
+    expect(screen.getByRole("combobox", { name: "Browser" })).toHaveTextContent("Firefox")
+  })
+
   it("renders four borderless setup navigation items", () => {
     renderScenario()
 
@@ -560,6 +576,11 @@ describe("onboarding", () => {
       machineConfiguration: {
         schemaVersion: 1,
         machines: onboardingScenarios.complete.machineConfigurations,
+      },
+      applications: {
+        terminal: "Terminal",
+        editor: "Visual Studio Code",
+        browser: "Safari",
       },
       github: {
         connectionState: "connected",

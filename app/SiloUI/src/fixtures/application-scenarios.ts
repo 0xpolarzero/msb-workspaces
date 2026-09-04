@@ -362,6 +362,7 @@ export function applicationSourceForScenario(
       pollingCadence: "30",
       terminal: "Terminal",
       editor: "Visual Studio Code",
+      browser: "Safari",
       reduceMotion: false,
     },
   }

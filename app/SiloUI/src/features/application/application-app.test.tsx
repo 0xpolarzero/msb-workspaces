@@ -685,10 +685,15 @@ describe("application", () => {
     const playgrounds = settings.getByRole("checkbox", { name: "playgrounds" })
     await user.click(playgrounds)
     expect(playgrounds).toBeChecked()
+    const browser = settings.getByRole("combobox", { name: "Browser" })
+    expect(browser).toHaveTextContent("Safari")
+    await user.click(browser)
+    await user.click(screen.getByRole("option", { name: "Firefox" }))
 
     await user.click(navigation.getByRole("button", { name: "GitHub" }))
     await user.click(navigation.getByRole("button", { name: "Settings" }))
     expect(settings.getByRole("checkbox", { name: "playgrounds" })).toBeChecked()
+    expect(settings.getByRole("combobox", { name: "Browser" })).toHaveTextContent("Firefox")
 
     await user.click(settingsNavigation.getByRole("button", { name: "Notifications" }))
     expect(settings.getByRole("switch", { name: "Enable notifications" })).not.toBeChecked()

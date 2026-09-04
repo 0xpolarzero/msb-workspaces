@@ -11,6 +11,7 @@ import { OverviewPage } from "@/features/application/pages/overview-page"
 import { SecretsPage } from "@/features/application/pages/secrets-page"
 import { SystemIssuePage } from "@/features/application/pages/system-issue-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
+import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
@@ -23,12 +24,23 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
   const [repositoryPushOperations, setRepositoryPushOperations] = useState<RepositoryPushOperation[]>(source.repositoryPushOperations)
   const [repairConfirmationVisible, setRepairConfirmationVisible] = useState(source.runtimeRepair?.status === "succeeded")
+  const [applicationPreferences, setApplicationPreferences] = useState<ApplicationPreferenceSelection>(() => ({
+    terminal: source.preferences.terminal,
+    editor: source.preferences.editor,
+    browser: source.preferences.browser,
+  }))
   const previousRuntimeRepairStatus = useRef<RuntimeRepairPresentation["status"] | undefined>(undefined)
   const repairConfirmationTimer = useRef<number | null>(null)
   const resolvedSystemSelection = activeTab === "system" && !activeRuntimeRepair
   const visibleTab = resolvedSystemSelection ? "workspaces" : activeTab
   const visibleWorkspaceSection = resolvedSystemSelection && source.runtimeRepair?.status === "succeeded" ? "overview" : workspaceSection
-  const applicationSource = { ...source, workspaces, sandboxConfigurationOperation, repositoryPushOperations }
+  const applicationSource = {
+    ...source,
+    workspaces,
+    sandboxConfigurationOperation,
+    repositoryPushOperations,
+    preferences: { ...source.preferences, ...applicationPreferences },
+  }
 
   useEffect(() => {
     // The source is the authoritative snapshot when the native bridge publishes a replacement.
@@ -46,10 +58,17 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     // The native bridge replaces local push progress with its authoritative operation result.
     // oxlint-disable-next-line react/set-state-in-effect
     setRepositoryPushOperations(source.repositoryPushOperations)
+    // Keep local application choices aligned with a replacement native snapshot.
+    // oxlint-disable-next-line react/set-state-in-effect
+    setApplicationPreferences({
+      terminal: source.preferences.terminal,
+      editor: source.preferences.editor,
+      browser: source.preferences.browser,
+    })
     // The destination only exists while the global issue remains active.
     // oxlint-disable-next-line react/set-state-in-effect
     setActiveTab((current) => current === "system" && !activeRuntimeRepair ? "workspaces" : current)
-  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, activeRuntimeRepair])
+  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, source.preferences.terminal, source.preferences.editor, source.preferences.browser, activeRuntimeRepair])
 
   useEffect(() => {
     const status = source.runtimeRepair?.status
@@ -146,7 +165,9 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         </section>
       )}
       <section id="application-panel-settings" role="region" aria-labelledby="application-nav-settings" hidden={visibleTab !== "settings"}>
-        <div hidden={settingsSection !== "general"}><GeneralPage source={applicationSource} /></div>
+        <div hidden={settingsSection !== "general"}>
+          <GeneralPage source={applicationSource} applicationPreferences={applicationPreferences} onApplicationPreferencesChange={setApplicationPreferences} />
+        </div>
         <div hidden={settingsSection !== "notifications"}><NotificationsPage /></div>
       </section>
     </ApplicationShell>

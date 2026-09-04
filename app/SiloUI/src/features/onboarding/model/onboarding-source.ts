@@ -11,6 +11,7 @@ import {
   setupMachineConfigurationRequestSchema,
 } from "@/contracts/silo"
 import type { SetupMachineConfigurationRequest } from "@/contracts/silo"
+import { applicationPreferenceSelectionSchema, type ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
 // This is the frontend's narrow input seam, not a Silo wire object. Each field
 // remains an unmodified current protocol or app-state shape so a future bridge
@@ -26,6 +27,7 @@ export const onboardingSourceSchema = z.object({
     name: z.string(),
     email: z.string(),
   }).strict().nullable(),
+  applicationPreferences: applicationPreferenceSelectionSchema,
   bootstrapResult: siloBootstrapResultSchema.nullable(),
   error: siloProtocolErrorSchema.nullable(),
 }).strict().superRefine((source, context) => {
@@ -57,6 +59,7 @@ export interface WorkspaceGitIdentity {
 
 export interface OnboardingCompletionRequest {
   machineConfiguration: SetupMachineConfigurationRequest
+  applications: ApplicationPreferenceSelection
   github: {
     connectionState: GitHubConnectionState
     workspaces: Array<{

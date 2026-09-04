@@ -121,6 +121,7 @@ export function OnboardingApp({
   const [workspaceSelections, setWorkspaceSelections] = useState(() => initialWorkspaceSelections(source))
   const [workspaceIdentities, setWorkspaceIdentities] = useState(() => initialWorkspaceIdentities(source))
   const [machines, setMachines] = useState<SetupMachineConfiguration[]>(() => source.machineConfigurations.map((machine) => ({ ...machine })))
+  const [applicationPreferences, setApplicationPreferences] = useState(() => ({ ...source.applicationPreferences }))
   const [finished, setFinished] = useState(false)
   const connectTimer = useRef<number | undefined>(undefined)
   const availableRepositories = useMemo(
@@ -179,6 +180,7 @@ export function OnboardingApp({
       if (viewModel.finishEnabled) {
         actions.finishSetup({
           machineConfiguration: configurationRequest(machines),
+          applications: applicationPreferences,
           github: {
             connectionState: githubConnectionState,
             workspaces: machines.map(({ name }) => ({
@@ -224,7 +226,12 @@ export function OnboardingApp({
       onContinue={continueSetup}
     >
       <TabsContent value="dependencies" className="mt-0 outline-none">
-        <DependenciesStep groups={viewModel.dependencies} onRepairRuntime={actions.repairRuntime} />
+        <DependenciesStep
+          groups={viewModel.dependencies}
+          applicationPreferences={applicationPreferences}
+          onApplicationPreferencesChange={setApplicationPreferences}
+          onRepairRuntime={actions.repairRuntime}
+        />
       </TabsContent>
       <TabsContent value="workspaces" className="mt-0 h-full min-h-0 overflow-hidden outline-none">
         <WorkspacesStep key={activeStep} machines={machines} progress={viewModel.workspaceProgress} onMachinesChange={saveMachines} onRetry={actions.retryWorkspaceSetup} />

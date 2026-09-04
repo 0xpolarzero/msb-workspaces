@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Accessibility, AppWindow, Eye, Power } from "lucide-react"
+import { Accessibility, Eye, Power } from "lucide-react"
 
 import { Checkbox } from "@/components/ui/checkbox"
 import { Card, CardContent } from "@/components/ui/card"
@@ -7,6 +7,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { PageHeader, SectionHeader } from "@/features/application/components/application-ui"
 import type { ApplicationSource } from "@/features/application/model/application-source"
+import { ApplicationPreferenceFields } from "@/features/preferences/components/application-preference-fields"
+import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
 function SettingRow({ icon: Icon, title, description, control }: { icon: typeof Power; title: string; description: string; control: React.ReactNode }) {
   return (
@@ -18,7 +20,15 @@ function SettingRow({ icon: Icon, title, description, control }: { icon: typeof 
   )
 }
 
-export function GeneralPage({ source }: { source: ApplicationSource }) {
+export function GeneralPage({
+  source,
+  applicationPreferences,
+  onApplicationPreferencesChange,
+}: {
+  source: ApplicationSource
+  applicationPreferences: ApplicationPreferenceSelection
+  onApplicationPreferencesChange: (preferences: ApplicationPreferenceSelection) => void
+}) {
   const [launchAtLogin, setLaunchAtLogin] = useState(source.preferences.launchAtLogin)
   const [startAtLaunch, setStartAtLaunch] = useState(source.preferences.startWorkspacesAtLaunch)
   const [startupWorkspaces, setStartupWorkspaces] = useState<Set<string>>(() => {
@@ -26,8 +36,6 @@ export function GeneralPage({ source }: { source: ApplicationSource }) {
     return new Set(initial ? [initial.machine.id] : [])
   })
   const [pollingCadence, setPollingCadence] = useState(source.preferences.pollingCadence)
-  const [terminal, setTerminal] = useState(source.preferences.terminal)
-  const [editor, setEditor] = useState(source.preferences.editor)
   const [reduceMotion, setReduceMotion] = useState(source.preferences.reduceMotion)
 
   function toggleStartupWorkspace(workspaceID: string, checked: boolean) {
@@ -66,8 +74,7 @@ export function GeneralPage({ source }: { source: ApplicationSource }) {
         <SectionHeader title="Applications" />
         <Card size="sm">
           <CardContent className="divide-y divide-border">
-            <SettingRow icon={AppWindow} title="Terminal" description="Used by sandbox terminal shortcuts." control={<Select value={terminal} onValueChange={setTerminal}><SelectTrigger aria-label="Terminal"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="Terminal">Terminal</SelectItem><SelectItem value="iTerm">iTerm</SelectItem><SelectItem value="Warp">Warp</SelectItem></SelectContent></Select>} />
-            <SettingRow icon={AppWindow} title="Code editor" description="Used when opening workspace files." control={<Select value={editor} onValueChange={setEditor}><SelectTrigger aria-label="Code editor"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="Visual Studio Code">Visual Studio Code</SelectItem><SelectItem value="Cursor">Cursor</SelectItem><SelectItem value="Zed">Zed</SelectItem></SelectContent></Select>} />
+            <ApplicationPreferenceFields value={applicationPreferences} onChange={onApplicationPreferencesChange} />
           </CardContent>
         </Card>
       </section>

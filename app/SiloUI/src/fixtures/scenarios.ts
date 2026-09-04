@@ -133,6 +133,11 @@ const runningSource = {
     name: "Taylor Example",
     email: "taylor@example.com",
   },
+  applicationPreferences: {
+    terminal: "Terminal",
+    editor: "Visual Studio Code",
+    browser: "Safari",
+  },
   bootstrapResult: null,
   error: null,
 } satisfies OnboardingSource

@@ -5,6 +5,7 @@ import type {
   SiloProgressEvent,
   SiloProtocolError,
 } from "@/contracts/silo"
+import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
 export type ApplicationTab = "workspaces" | "github" | "secrets" | "backup" | "system" | "settings"
 export type SettingsSection = "general" | "notifications"
@@ -152,12 +153,10 @@ export interface ApplicationSource {
     compressedSize: string
     destination: string
   }
-  preferences: {
+  preferences: ApplicationPreferenceSelection & {
     launchAtLogin: boolean
     startWorkspacesAtLaunch: boolean
     pollingCadence: "15" | "30" | "60"
-    terminal: string
-    editor: string
     reduceMotion: boolean
   }
 }
