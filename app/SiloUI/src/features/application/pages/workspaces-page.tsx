@@ -1,138 +1,38 @@
-import { useEffect, useId, useMemo, useState } from "react"
-import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert, X } from "lucide-react"
+import { useEffect, useMemo, useState } from "react"
+import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert } from "lucide-react"
 
 import { CopyButton } from "@/components/copy-button"
+import { FilterCombobox, type FilterOption } from "@/components/filter-combobox"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
-import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { WorkspaceBadge } from "@/features/application/components/application-ui"
-import type { ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection } from "@/features/application/model/application-source"
+import type { ApplicationActivityCategory, ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 function WorkspaceFilterBar({
   workspaces,
-  excludedWorkspaceIds,
+  selectedWorkspaceIds,
   onChange,
 }: {
   workspaces: ApplicationWorkspace[]
-  excludedWorkspaceIds: ReadonlySet<string>
-  onChange: (excludedWorkspaceIds: Set<string>) => void
+  selectedWorkspaceIds: ReadonlySet<string>
+  onChange: (selectedWorkspaceIds: Set<string>) => void
 }) {
-  const listboxId = useId()
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState("")
-  const [activeIndex, setActiveIndex] = useState(0)
-  const selectedWorkspaces = workspaces.filter(({ machine }) => !excludedWorkspaceIds.has(machine.id))
-  const results = workspaces.filter(({ machine }) => (
-    excludedWorkspaceIds.has(machine.id)
-    && machine.name.toLowerCase().includes(query.trim().toLowerCase())
-  ))
-
-  function includeWorkspace(id: string) {
-    const next = new Set(excludedWorkspaceIds)
-    next.delete(id)
-    onChange(next)
-    setQuery("")
-    setActiveIndex(0)
-    setOpen(false)
-  }
-
-  function excludeWorkspace(id: string) {
-    const next = new Set(excludedWorkspaceIds)
-    next.add(id)
-    onChange(next)
-  }
-
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border pb-4" role="group" aria-label="Sandbox filters">
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverAnchor asChild>
-          <div className="relative w-48 shrink-0">
-            <Search aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              role="combobox"
-              aria-label="Add sandbox filter"
-              aria-autocomplete="list"
-              aria-expanded={open}
-              aria-controls={listboxId}
-              aria-activedescendant={open && results[activeIndex] ? `${listboxId}-${activeIndex}` : undefined}
-              className="h-8 pl-8 text-xs"
-              placeholder="Add sandbox…"
-              value={query}
-              onFocus={() => setOpen(true)}
-              onClick={() => setOpen(true)}
-              onChange={(event) => {
-                setQuery(event.target.value)
-                setActiveIndex(0)
-                setOpen(true)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault()
-                  setOpen(true)
-                  setActiveIndex((current) => Math.min(current + 1, Math.max(0, results.length - 1)))
-                } else if (event.key === "ArrowUp") {
-                  event.preventDefault()
-                  setActiveIndex((current) => Math.max(0, current - 1))
-                } else if (event.key === "Enter" && open && results[activeIndex]) {
-                  event.preventDefault()
-                  includeWorkspace(results[activeIndex].machine.id)
-                } else if (event.key === "Escape") {
-                  setOpen(false)
-                }
-              }}
-            />
-          </div>
-        </PopoverAnchor>
-        <PopoverContent
-          id={listboxId}
-          role="listbox"
-          aria-label="Available sandbox filters"
-          className="max-h-[min(15rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] overflow-y-auto overscroll-contain p-1"
-          onOpenAutoFocus={(event) => event.preventDefault()}
-        >
-          {results.length > 0 ? results.map((workspace, index) => (
-            <button
-              key={workspace.machine.id}
-              id={`${listboxId}-${index}`}
-              type="button"
-              role="option"
-              aria-selected={index === activeIndex}
-              className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent focus:bg-accent aria-selected:bg-accent"
-              onMouseDown={(event) => event.preventDefault()}
-              onMouseEnter={() => setActiveIndex(index)}
-              onClick={() => includeWorkspace(workspace.machine.id)}
-            >
-              {workspace.machine.name}
-            </button>
-          )) : (
-            <p className="px-2 py-1.5 text-xs text-muted-foreground">No sandboxes available.</p>
-          )}
-        </PopoverContent>
-      </Popover>
-
-      <div className="flex min-w-0 flex-1 flex-wrap gap-1.5" aria-label="Selected sandboxes">
-        {selectedWorkspaces.map((workspace) => (
-          <span key={workspace.machine.id} className="inline-flex h-8 items-center gap-1 rounded-full border border-border bg-muted/55 pl-2.5 pr-1 text-xs font-medium">
-            {workspace.machine.name}
-            <button
-              type="button"
-              aria-label={`Remove ${workspace.machine.name}`}
-              onClick={() => excludeWorkspace(workspace.machine.id)}
-              className="grid size-6 place-items-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <X className="size-3.5" aria-hidden="true" />
-            </button>
-          </span>
-        ))}
-      </div>
-
-      <div className="ml-auto flex items-center gap-1">
-        <Button variant="ghost" size="xs" disabled={selectedWorkspaces.length === 0} onClick={() => onChange(new Set(workspaces.map(({ machine }) => machine.id)))}>Clear</Button>
-        <Button variant="ghost" size="xs" disabled={excludedWorkspaceIds.size === 0} onClick={() => onChange(new Set())}>All</Button>
-      </div>
+    <div className="border-b border-border pb-4">
+      <FilterCombobox
+        options={workspaces.map(({ machine }) => ({ value: machine.id, label: machine.name }))}
+        selectedValues={selectedWorkspaceIds}
+        onChange={onChange}
+        label="Sandbox filters"
+        inputLabel="Add sandbox filter"
+        placeholder="Add sandbox…"
+        listLabel="Available sandbox filters"
+        selectedLabel="Selected sandboxes"
+        emptyMessage="No sandboxes available."
+      />
     </div>
   )
 }
@@ -473,36 +373,67 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
   )
 }
 
+const activityCategoryOptions: ReadonlyArray<FilterOption<ApplicationActivityCategory>> = [
+  { value: "lifecycle", label: "Lifecycle" },
+  { value: "git", label: "Git" },
+  { value: "backup", label: "Backup" },
+]
+
 function ActivityLog({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
-  if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to see its activity." />
-  const activities = workspaces
+  const [selectedCategories, setSelectedCategories] = useState<Set<ApplicationActivityCategory>>(() => new Set())
+  const allActivities = workspaces
     .flatMap((workspace) => workspace.activities.map((activity) => ({ ...activity, workspace: workspace.machine.name, workspaceState: workspace.state })))
     .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+  const activities = selectedCategories.size === 0
+    ? allActivities
+    : allActivities.filter(({ category }) => selectedCategories.has(category))
 
-  if (activities.length === 0) return <EmptyState title="No recent activity" description="Activity from the selected sandboxes will appear here." />
+  if (workspaces.length === 0) return <EmptyState title="No sandboxes available" description="Add a sandbox to see its activity." />
 
   return (
-    <div className="divide-y divide-border overflow-hidden rounded-lg border border-border" role="list" aria-label="Recent activity">
-      {activities.map((item) => (
-        <div key={`${item.workspace}:${item.id}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 bg-card px-3 py-2.5">
-          {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
-          <div className="grid min-w-0 gap-0.5" data-activity-content>
-            <div className="text-sm font-medium">{item.title}</div>
-            <div className="text-xs text-muted-foreground">{item.detail}</div>
-          </div>
-          <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
-            <WorkspaceBadge name={item.workspace} state={item.workspaceState} />
-            <span className="text-xs text-muted-foreground">{item.time}</span>
-          </div>
+    <div className="grid gap-3">
+      <FilterCombobox
+        options={activityCategoryOptions}
+        selectedValues={selectedCategories}
+        onChange={setSelectedCategories}
+        label="Activity category filters"
+        inputLabel="Add category filter"
+        placeholder="Add category…"
+        listLabel="Available activity categories"
+        selectedLabel="Selected activity categories"
+        emptyMessage="No categories available."
+        compact
+      />
+
+      {activities.length > 0 ? (
+        <div className="divide-y divide-border overflow-hidden rounded-lg border border-border" role="list" aria-label="Recent activity">
+          {activities.map((item) => (
+            <div key={`${item.workspace}:${item.id}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 bg-card px-3 py-2.5">
+              {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
+              <div className="grid min-w-0 gap-0.5" data-activity-content>
+                <div className="text-sm font-medium">{item.title}</div>
+                <div className="text-xs text-muted-foreground">{item.detail}</div>
+              </div>
+              <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
+                <WorkspaceBadge name={item.workspace} state={item.workspaceState} />
+                <span className="text-xs text-muted-foreground">{item.time}</span>
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      ) : (
+        <EmptyState
+          title={allActivities.length === 0 ? "No recent activity" : "No matching activity"}
+          description={allActivities.length === 0 ? "Activity from these sandboxes will appear here." : "Clear the category filters to show all activity."}
+        />
+      )}
     </div>
   )
 }
 
 export function WorkspacesPage({
   workspaces,
-  excludedWorkspaceIds,
+  selectedWorkspaceIds,
   section,
   logQuery,
   repositoryPushOperations,
@@ -513,24 +444,24 @@ export function WorkspacesPage({
   onDismissRepositoryPush,
 }: {
   workspaces: ApplicationWorkspace[]
-  excludedWorkspaceIds: ReadonlySet<string>
+  selectedWorkspaceIds: ReadonlySet<string>
   section: WorkspaceDetailSection
   logQuery: string
   repositoryPushOperations: RepositoryPushOperation[]
   browser: string
-  onWorkspaceFilterChange: (excludedWorkspaceIds: Set<string>) => void
+  onWorkspaceFilterChange: (selectedWorkspaceIds: Set<string>) => void
   onLogQueryChange: (query: string) => void
   onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
   onDismissRepositoryPush: (workspace: string, repositoryPath: string) => void
 }) {
   const visibleWorkspaces = useMemo(
-    () => workspaces.filter(({ machine }) => !excludedWorkspaceIds.has(machine.id)),
-    [workspaces, excludedWorkspaceIds],
+    () => selectedWorkspaceIds.size === 0 ? workspaces : workspaces.filter(({ machine }) => selectedWorkspaceIds.has(machine.id)),
+    [workspaces, selectedWorkspaceIds],
   )
 
   return (
     <div className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
-      <WorkspaceFilterBar workspaces={workspaces} excludedWorkspaceIds={excludedWorkspaceIds} onChange={onWorkspaceFilterChange} />
+      <WorkspaceFilterBar workspaces={workspaces} selectedWorkspaceIds={selectedWorkspaceIds} onChange={onWorkspaceFilterChange} />
       {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} onDismissRepositoryPush={onDismissRepositoryPush} />}
       {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}
       {section === "network" && <Network workspaces={visibleWorkspaces} browser={browser} />}

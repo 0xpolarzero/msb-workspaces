@@ -102,7 +102,9 @@ describe("application", () => {
     expect(panel.queryByRole("heading", { name: "Sandboxes" })).not.toBeInTheDocument()
     expect(panel.queryByText("Inspect state, files, logs, networking, and recent activity.")).not.toBeInTheDocument()
     expect(filters.getByRole("combobox", { name: "Add sandbox filter" })).toBeVisible()
-    expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
+    expect(filters.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument()
+    expect(filters.getByRole("button", { name: "Clear" })).toBeDisabled()
+    expect(filters.queryByRole("button", { name: "All" })).not.toBeInTheDocument()
 
     const repositories = panel.getByRole("list", { name: "Repositories" })
     const fileTree = panel.getByRole("list", { name: "File tree" })
@@ -147,19 +149,22 @@ describe("application", () => {
     expect(panel.queryByRole("list", { name: "Files in dev" })).not.toBeInTheDocument()
     await user.click(devFolder)
 
-    await user.click(filters.getByRole("button", { name: "Remove dev" }))
-    expect(within(repositories).queryByText("acme/silo")).not.toBeInTheDocument()
-    expect(within(repositories).getByText("acme/platform-tools")).toBeVisible()
-    expect(within(fileTree).queryByRole("button", { name: "dev" })).not.toBeInTheDocument()
-    expect(within(fileTree).getByRole("button", { name: "personal" })).toBeVisible()
-
     await user.click(filters.getByRole("combobox", { name: "Add sandbox filter" }))
     await user.click(screen.getByRole("option", { name: "dev" }))
     expect(filters.getByRole("button", { name: "Remove dev" })).toBeVisible()
     expect(within(repositories).getByText("acme/silo")).toBeVisible()
     expect(within(fileTree).getByRole("button", { name: "dev" })).toBeVisible()
+    expect(within(repositories).queryByText("acme/platform-tools")).not.toBeInTheDocument()
+    expect(within(fileTree).queryByRole("button", { name: "personal" })).not.toBeInTheDocument()
 
     await user.click(filters.getByRole("button", { name: "Remove dev" }))
+    expect(within(repositories).getByText("acme/platform-tools")).toBeVisible()
+    expect(within(fileTree).getByRole("button", { name: "personal" })).toBeVisible()
+
+    await user.click(filters.getByRole("combobox", { name: "Add sandbox filter" }))
+    await user.click(screen.getByRole("option", { name: "playgrounds" }))
+    await user.click(filters.getByRole("combobox", { name: "Add sandbox filter" }))
+    await user.click(screen.getByRole("option", { name: "personal" }))
     await user.click(sandboxSections.getByRole("button", { name: "Logs" }))
     const logs = panel.getByRole("table", { name: "Logs" })
     expect(logs.closest('[data-slot="card"]')).toBeNull()
@@ -203,11 +208,31 @@ describe("application", () => {
     expect(activityRows[0].querySelector('[data-activity-content]')).toHaveClass("grid", "gap-0.5")
     expect(activityRows[0].querySelector('[data-activity-meta]')).toHaveClass("items-end")
 
-    await user.click(filters.getByRole("button", { name: "Clear" }))
-    expect(panel.getByText("No sandboxes selected")).toBeVisible()
-    expect(filters.getByRole("button", { name: "Clear" })).toBeDisabled()
+    const categoryFilters = within(panel.getByRole("group", { name: "Activity category filters" }))
+    const categoryCombobox = categoryFilters.getByRole("combobox", { name: "Add category filter" })
+    expect(categoryCombobox).toHaveClass("h-7", "w-36")
+    expect(categoryFilters.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument()
+    expect(categoryFilters.getByRole("button", { name: "Clear" })).toBeDisabled()
+    expect(categoryFilters.queryByRole("button", { name: "All" })).not.toBeInTheDocument()
 
-    await user.click(filters.getByRole("button", { name: "All" }))
+    await user.click(categoryCombobox)
+    await user.click(screen.getByRole("option", { name: "Backup" }))
+    expect(categoryFilters.getByRole("button", { name: "Remove Backup" })).toBeVisible()
+    expect(within(activity).getAllByRole("listitem")).toHaveLength(1)
+    expect(within(activity).getByText("Backup completed")).toBeVisible()
+
+    await user.click(categoryCombobox)
+    await user.click(screen.getByRole("option", { name: "Lifecycle" }))
+    expect(within(activity).getAllByRole("listitem")).toHaveLength(2)
+    await user.click(categoryFilters.getByRole("button", { name: "Remove Backup" }))
+    expect(within(activity).getAllByRole("listitem")).toHaveLength(1)
+    expect(within(activity).getByText("Stop succeeded")).toBeVisible()
+    await user.click(categoryFilters.getByRole("button", { name: "Clear" }))
+    expect(within(activity).getAllByRole("listitem")).toHaveLength(2)
+
+    await user.click(filters.getByRole("button", { name: "Clear" }))
+    expect(filters.getByRole("button", { name: "Clear" })).toBeDisabled()
+    expect(filters.queryByRole("button", { name: /^Remove / })).not.toBeInTheDocument()
     const allActivity = panel.getByRole("list", { name: "Recent activity" })
     expect(allActivity).toBeVisible()
     expect(within(allActivity).getAllByRole("listitem").map((row) => row.textContent)).toEqual([
@@ -216,8 +241,7 @@ describe("application", () => {
       expect.stringContaining("Push completed"),
       expect.stringContaining("Backup completed"),
     ])
-    expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
-    expect(filters.getByRole("button", { name: "All" })).toBeDisabled()
+    expect(filters.queryByRole("button", { name: "All" })).not.toBeInTheDocument()
   })
 
   it("shows one truthful network table and uses the selected browser for opening ports", async () => {

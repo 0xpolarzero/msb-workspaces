@@ -99,8 +99,11 @@ export interface ApplicationFileEntry {
   children?: ApplicationFileEntry[]
 }
 
+export type ApplicationActivityCategory = "lifecycle" | "git" | "backup"
+
 export interface ApplicationActivity {
   id: string
+  category: ApplicationActivityCategory
   title: string
   detail: string
   occurredAt: string

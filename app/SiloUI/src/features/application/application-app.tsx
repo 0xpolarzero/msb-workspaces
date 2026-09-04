@@ -17,7 +17,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
-  const [excludedWorkspaceIds, setExcludedWorkspaceIds] = useState<Set<string>>(() => new Set())
+  const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState<Set<string>>(() => new Set())
   const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>("overview")
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
@@ -47,7 +47,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     // oxlint-disable-next-line react/set-state-in-effect
     setWorkspaces(source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
     // oxlint-disable-next-line react/set-state-in-effect
-    setExcludedWorkspaceIds((current) => {
+    setSelectedWorkspaceIds((current) => {
       const availableIds = new Set(source.workspaces.map(({ machine }) => machine.id))
       const next = new Set([...current].filter((id) => availableIds.has(id)))
       return next.size === current.size ? current : next
@@ -145,12 +145,12 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         ) : (
           <WorkspacesPage
             workspaces={workspaces}
-            excludedWorkspaceIds={excludedWorkspaceIds}
+            selectedWorkspaceIds={selectedWorkspaceIds}
             section={visibleWorkspaceSection}
             logQuery={logQuery}
             repositoryPushOperations={repositoryPushOperations}
             browser={applicationPreferences.browser}
-            onWorkspaceFilterChange={setExcludedWorkspaceIds}
+            onWorkspaceFilterChange={setSelectedWorkspaceIds}
             onLogQueryChange={setLogQuery}
             onPushRepository={pushRepository}
             onDismissRepositoryPush={dismissRepositoryPush}
