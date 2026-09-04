@@ -457,7 +457,7 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
                 <div className="grid min-w-0 gap-1" data-activity-content>
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <div className="text-sm font-medium">{item.title}</div>
-                    <StatusBadge indicator={<CategoryIcon className="size-2.5" />} aria-label={`Category: ${category.label}`}>{category.label}</StatusBadge>
+                    <span className="text-xs text-muted-foreground">{item.time}</span>
                   </div>
                   <div className="text-xs text-muted-foreground">{item.detail}</div>
                   {item.status === "running" && item.progress !== undefined && (
@@ -469,7 +469,7 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
                 </div>
                 <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
                   {item.workspace && workspace && <WorkspaceBadge name={item.workspace} state={workspace.state} />}
-                  <span className="text-xs text-muted-foreground">{item.time}</span>
+                  <StatusBadge indicator={<CategoryIcon className="size-2.5" />} aria-label={`Category: ${category.label}`}>{category.label}</StatusBadge>
                 </div>
               </div>
             )

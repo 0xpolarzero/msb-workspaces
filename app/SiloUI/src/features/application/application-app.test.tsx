@@ -208,10 +208,15 @@ describe("application", () => {
     expect(within(activity).getByText("Backup completed")).toBeVisible()
     const activityRows = within(activity).getAllByRole("listitem")
     expect(activityRows).toHaveLength(2)
-    expect(activityRows[0]).toHaveTextContent("Stop verifiedSandboxA fresh observation confirmed that the sandbox is stopped.playgrounds2m ago")
+    expect(activityRows[0]).toHaveTextContent("Stop verified2m agoA fresh observation confirmed that the sandbox is stopped.playgroundsSandbox")
     expect(within(activityRows[0]).getByLabelText("playgrounds, Stopped")).toBeVisible()
-    expect(activityRows[0].querySelector('[data-activity-content]')).toHaveClass("grid", "gap-1")
-    expect(activityRows[0].querySelector('[data-activity-meta]')).toHaveClass("items-end")
+    const activityContent = activityRows[0].querySelector('[data-activity-content]') as HTMLElement
+    const activityMeta = activityRows[0].querySelector('[data-activity-meta]') as HTMLElement
+    expect(activityContent).toHaveClass("grid", "gap-1")
+    expect(activityContent).toHaveTextContent("2m ago")
+    expect(activityContent).not.toContainElement(within(activityRows[0]).getByLabelText("Category: Sandbox"))
+    expect(activityMeta).toHaveClass("items-end")
+    expect(activityMeta).toContainElement(within(activityRows[0]).getByLabelText("Category: Sandbox"))
 
     const categoryFilters = within(panel.getByRole("group", { name: "Activity category filters" }))
     const categoryCombobox = categoryFilters.getByRole("combobox", { name: "Add category filter" })
@@ -318,7 +323,7 @@ describe("application", () => {
 
     const activity = within(appPanel("Sandboxes")).getByRole("list", { name: "Recent activity" })
     const firstRow = within(activity).getAllByRole("listitem")[0]
-    expect(firstRow).toHaveTextContent("Start failedSandboxCandidate networking did not become ready.dev3m ago")
+    expect(firstRow).toHaveTextContent("Start failed3m agoCandidate networking did not become ready.devSandbox")
     expect(firstRow.querySelector("svg")).toHaveClass("lucide-circle-alert", "text-destructive")
     expect(within(firstRow).getByLabelText("dev, Failed")).toBeVisible()
   })
