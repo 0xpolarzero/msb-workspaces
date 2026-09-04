@@ -119,7 +119,7 @@ describe("application", () => {
     expect(devBadge).toHaveAttribute("data-slot", "status-badge")
     expect(devBadge).toHaveClass("h-5", "items-center", "justify-center", "text-[10px]", "leading-none")
     expect(devBadge.querySelector('[data-slot="status-badge-indicator"]')).toHaveClass("grid", "size-2", "place-items-center")
-    expect(devBadge.querySelector('[data-slot="status-badge-label"]')).toHaveClass("leading-none")
+    expect(devBadge.querySelector('[data-slot="status-badge-label"]')).toHaveClass("-translate-y-px", "leading-none")
     expect(devRepository.querySelector('[data-workspace-state-dot="running"]')).toHaveClass("bg-emerald-500")
     expect(within(playgroundsRepository).getByLabelText("playgrounds, Stopped")).toBeVisible()
     expect(playgroundsRepository.querySelector('[data-workspace-state-dot="stopped"]')).toHaveClass("bg-muted-foreground/55")
