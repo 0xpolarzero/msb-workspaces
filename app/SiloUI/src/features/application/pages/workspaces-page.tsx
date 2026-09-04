@@ -252,7 +252,7 @@ function RepositoryPushFeedback({
     )
   }
   return (
-    <Collapsible className="grid gap-1.5">
+    <Collapsible className="grid w-full gap-1.5">
       <div className="flex min-h-6 min-w-0 flex-wrap items-center gap-1.5" role="alert" aria-live="assertive" aria-atomic="true">
         <CircleAlert className="size-3.5 shrink-0 text-destructive" aria-hidden="true" />
         <span className="min-w-40 flex-1 text-xs text-destructive">{operation.message}</span>
@@ -311,7 +311,7 @@ function Files({
                     </div>
                     <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
                     {(operation || repository.ahead > 0) && (
-                      <div className="mt-2 min-h-6" data-repository-actions>
+                      <div className="mt-2 flex min-h-6 items-start" data-repository-actions>
                         {operation
                           ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
                           : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
