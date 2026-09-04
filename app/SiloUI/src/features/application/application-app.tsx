@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { ApplicationShell } from "@/features/application/components/application-shell"
-import type { ApplicationActions, ApplicationSource, ApplicationTab, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ApplicationActions, ApplicationSource, ApplicationTab, RuntimeRepairPresentation, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { BackupPage } from "@/features/application/pages/backup-page"
 import { GeneralPage } from "@/features/application/pages/general-page"
 import { GitHubPage } from "@/features/application/pages/github-page"
@@ -13,6 +13,7 @@ import { SystemIssuePage } from "@/features/application/pages/system-issue-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
 
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
+  const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
   const [selectedWorkspace, setSelectedWorkspace] = useState(source.workspaces[0]?.machine.id ?? "")
@@ -20,6 +21,12 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
+  const [repairConfirmationVisible, setRepairConfirmationVisible] = useState(source.runtimeRepair?.status === "succeeded")
+  const previousRuntimeRepairStatus = useRef<RuntimeRepairPresentation["status"] | undefined>(undefined)
+  const repairConfirmationTimer = useRef<number | null>(null)
+  const resolvedSystemSelection = activeTab === "system" && !activeRuntimeRepair
+  const visibleTab = resolvedSystemSelection ? "workspaces" : activeTab
+  const visibleWorkspaceSection = resolvedSystemSelection && source.runtimeRepair?.status === "succeeded" ? "overview" : workspaceSection
   const applicationSource = { ...source, workspaces, sandboxConfigurationOperation }
 
   useEffect(() => {
@@ -33,8 +40,42 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     setSandboxConfigurationOperation(source.sandboxConfigurationOperation)
     // The destination only exists while the global issue remains active.
     // oxlint-disable-next-line react/set-state-in-effect
-    setActiveTab((current) => current === "system" && !source.runtimeRepair ? "workspaces" : current)
-  }, [source.workspaces, source.sandboxConfigurationOperation, source.runtimeRepair])
+    setActiveTab((current) => current === "system" && !activeRuntimeRepair ? "workspaces" : current)
+  }, [source.workspaces, source.sandboxConfigurationOperation, activeRuntimeRepair])
+
+  useEffect(() => {
+    const status = source.runtimeRepair?.status
+    const previousStatus = previousRuntimeRepairStatus.current
+    previousRuntimeRepairStatus.current = status
+
+    if (status && status !== "succeeded") {
+      if (repairConfirmationTimer.current !== null) {
+        window.clearTimeout(repairConfirmationTimer.current)
+        repairConfirmationTimer.current = null
+      }
+      // oxlint-disable-next-line react/set-state-in-effect
+      setRepairConfirmationVisible(false)
+      return
+    }
+    if (status !== "succeeded" || previousStatus === "succeeded") return
+
+    // A successful repair is a transient result, not a navigation destination.
+    if (activeTab === "system") {
+      // oxlint-disable-next-line react/set-state-in-effect
+      setWorkspaceSection("overview")
+    }
+    // oxlint-disable-next-line react/set-state-in-effect
+    setRepairConfirmationVisible(true)
+    if (repairConfirmationTimer.current !== null) window.clearTimeout(repairConfirmationTimer.current)
+    repairConfirmationTimer.current = window.setTimeout(() => {
+      setRepairConfirmationVisible(false)
+      repairConfirmationTimer.current = null
+    }, 4_000)
+  }, [source.runtimeRepair?.status, activeTab])
+
+  useEffect(() => () => {
+    if (repairConfirmationTimer.current !== null) window.clearTimeout(repairConfirmationTimer.current)
+  }, [])
 
   function updateMachines(machines: SetupMachineConfiguration[]) {
     const candidate = { schemaVersion: 1 as const, machines }
@@ -51,37 +92,37 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
 
   return (
     <ApplicationShell
-      activeTab={activeTab}
-      workspaceSection={workspaceSection}
+      activeTab={visibleTab}
+      workspaceSection={visibleWorkspaceSection}
       settingsSection={settingsSection}
-      systemIssueStatus={source.runtimeRepair?.status ?? null}
+      systemIssueStatus={activeRuntimeRepair?.status ?? null}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
     >
-      <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={activeTab !== "workspaces"}>
-        {workspaceSection === "overview" ? (
-          <OverviewPage source={applicationSource} actions={actions} onMachinesChange={updateMachines} />
+      <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={visibleTab !== "workspaces"}>
+        {visibleWorkspaceSection === "overview" ? (
+          <OverviewPage source={applicationSource} actions={actions} onMachinesChange={updateMachines} repairCompleted={repairConfirmationVisible} />
         ) : (
           <WorkspacesPage
             workspaces={workspaces}
             selectedWorkspace={selectedWorkspace}
-            section={workspaceSection}
+            section={visibleWorkspaceSection}
             logQuery={logQuery}
             onWorkspaceChange={setSelectedWorkspace}
             onLogQueryChange={setLogQuery}
           />
         )}
       </section>
-      <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={activeTab !== "github"}><GitHubPage source={applicationSource} /></section>
-      <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={activeTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
-      <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={activeTab !== "backup"}><BackupPage source={applicationSource} /></section>
-      {source.runtimeRepair && (
-        <section id="application-panel-system" role="region" aria-labelledby="application-nav-system" hidden={activeTab !== "system"}>
-          <SystemIssuePage issue={source.runtimeRepair} actions={actions} />
+      <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"}><GitHubPage source={applicationSource} /></section>
+      <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={visibleTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
+      <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} /></section>
+      {activeRuntimeRepair && (
+        <section id="application-panel-system" role="region" aria-labelledby="application-nav-system" hidden={visibleTab !== "system"}>
+          <SystemIssuePage issue={activeRuntimeRepair} actions={actions} />
         </section>
       )}
-      <section id="application-panel-settings" role="region" aria-labelledby="application-nav-settings" hidden={activeTab !== "settings"}>
+      <section id="application-panel-settings" role="region" aria-labelledby="application-nav-settings" hidden={visibleTab !== "settings"}>
         <div hidden={settingsSection !== "general"}><GeneralPage source={applicationSource} /></div>
         <div hidden={settingsSection !== "notifications"}><NotificationsPage /></div>
       </section>

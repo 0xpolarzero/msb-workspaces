@@ -1,9 +1,9 @@
 import { useState, type ReactNode } from "react"
-import { Activity, Bell, Boxes, ChevronRight, CircleAlert, CircleCheck, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
+import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Loader2, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
-import type { ApplicationTab, RuntimeRepairPresentation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ActiveRuntimeRepairPresentation, ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 const primaryItems = [
@@ -39,7 +39,7 @@ function NavigationButton({
   label: string
   icon: typeof Boxes
   active: boolean
-  tone?: "default" | "danger" | "warning" | "success"
+  tone?: "default" | "danger" | "warning"
   iconClassName?: string
   reserveDisclosure?: boolean
   onClick: () => void
@@ -59,15 +59,11 @@ function NavigationButton({
           ? "text-destructive hover:bg-destructive/[0.07] hover:text-destructive"
           : tone === "warning"
             ? "text-amber-700 hover:bg-amber-500/[0.08] hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-400"
-            : tone === "success"
-              ? "text-emerald-700 hover:bg-emerald-500/[0.07] hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-400"
           : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
         active && (tone === "danger"
           ? "bg-destructive/10 font-medium text-destructive"
           : tone === "warning"
             ? "bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
-            : tone === "success"
-              ? "bg-emerald-500/10 font-medium text-emerald-800 dark:text-emerald-300"
           : "bg-sidebar-accent font-medium text-sidebar-accent-foreground"),
         reserveDisclosure && "pr-10",
       )}
@@ -166,7 +162,7 @@ export function ApplicationShell({
   activeTab: ApplicationTab
   workspaceSection: WorkspaceSection
   settingsSection: SettingsSection
-  systemIssueStatus: RuntimeRepairPresentation["status"] | null
+  systemIssueStatus: ActiveRuntimeRepairPresentation["status"] | null
   onTabChange: (tab: ApplicationTab) => void
   onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
@@ -221,10 +217,10 @@ export function ApplicationShell({
                 <NavigationButton
                   id="system"
                   label="System issue"
-                  icon={systemIssueStatus === "repairing" ? Loader2 : systemIssueStatus === "succeeded" ? CircleCheck : CircleAlert}
+                  icon={systemIssueStatus === "repairing" ? Loader2 : CircleAlert}
                   iconClassName={systemIssueStatus === "repairing" ? "animate-spin" : undefined}
                   active={activeTab === "system"}
-                  tone={systemIssueStatus === "repairing" ? "warning" : systemIssueStatus === "succeeded" ? "success" : "danger"}
+                  tone={systemIssueStatus === "repairing" ? "warning" : "danger"}
                   onClick={() => selectTab("system")}
                 />
               )}

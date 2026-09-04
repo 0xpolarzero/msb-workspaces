@@ -1,4 +1,4 @@
-import { CircleAlert, Loader2, Pause, Play, RotateCw, Square } from "lucide-react"
+import { CircleAlert, CircleCheck, Loader2, Pause, Play, RotateCw, Square } from "lucide-react"
 
 import { Progress } from "@/components/ui/progress"
 import type { SetupMachineConfiguration, SiloProgressEvent } from "@/contracts/silo"
@@ -210,10 +210,12 @@ export function OverviewPage({
   source,
   actions,
   onMachinesChange,
+  repairCompleted = false,
 }: {
   source: ApplicationSource
   actions: ApplicationActions
   onMachinesChange: (machines: SetupMachineConfiguration[]) => void
+  repairCompleted?: boolean
 }) {
   const visibleWorkspaces = displayWorkspaces(source)
   const workspaces = new Map(visibleWorkspaces.map((workspace) => [workspace.machine.id, workspace]))
@@ -224,6 +226,12 @@ export function OverviewPage({
 
   return (
     <div className="mx-auto h-full w-full max-w-4xl px-4 py-5 sm:px-6 sm:py-6">
+      {repairCompleted && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/[0.07] px-3 py-2 text-sm font-medium text-emerald-700 dark:text-emerald-400" role="status" aria-live="polite" aria-atomic="true">
+          <CircleCheck className="size-4 shrink-0" aria-hidden="true" />
+          Installation repaired
+        </div>
+      )}
       <MachineList
         machines={machines}
         onMachinesChange={onMachinesChange}

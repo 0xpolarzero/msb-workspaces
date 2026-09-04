@@ -41,6 +41,8 @@ export type RuntimeRepairPresentation =
       recovery: string
     }
 
+export type ActiveRuntimeRepairPresentation = Exclude<RuntimeRepairPresentation, { status: "succeeded" }>
+
 export type SandboxConfigurationOperation =
   | {
       id: string

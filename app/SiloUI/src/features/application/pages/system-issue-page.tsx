@@ -1,12 +1,12 @@
 import { useState } from "react"
-import { AlertCircle, Check, Circle, CircleAlert, CircleCheck, Copy, ExternalLink, Loader2, RotateCw } from "lucide-react"
+import { AlertCircle, Check, Circle, CircleAlert, Copy, ExternalLink, Loader2, RotateCw } from "lucide-react"
 
 import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { PageHeader } from "@/features/application/components/application-ui"
-import type { ApplicationActions, RuntimeRepairPhase, RuntimeRepairPresentation } from "@/features/application/model/application-source"
+import type { ActiveRuntimeRepairPresentation, ApplicationActions, RuntimeRepairPhase } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 const repairSteps: ReadonlyArray<{ phase: RuntimeRepairPhase; label: string }> = [
@@ -19,8 +19,7 @@ const siloIssuesURL = "https://github.com/0xpolarzero/silo/issues"
 
 type StepState = "complete" | "active" | "failed" | "waiting"
 
-function stepState(issue: RuntimeRepairPresentation, index: number): StepState {
-  if (issue.status === "succeeded") return "complete"
+function stepState(issue: ActiveRuntimeRepairPresentation, index: number): StepState {
   if (issue.status !== "repairing" && issue.status !== "failed") return "waiting"
   const activeIndex = repairSteps.findIndex(({ phase }) => phase === issue.phase)
   if (index < activeIndex) return "complete"
@@ -42,7 +41,7 @@ function StepIcon({ state }: { state: StepState }) {
   return <Circle className="size-3" aria-hidden="true" />
 }
 
-function RepairProgress({ issue }: { issue: RuntimeRepairPresentation }) {
+function RepairProgress({ issue }: { issue: ActiveRuntimeRepairPresentation }) {
   return (
     <ol className="grid gap-2" aria-label="Repair progress">
       {repairSteps.map((step, index) => {
@@ -118,7 +117,7 @@ function TechnicalDetails({ details }: { details: string }) {
   )
 }
 
-function issueHeader(issue: RuntimeRepairPresentation) {
+function issueHeader(issue: ActiveRuntimeRepairPresentation) {
   if (issue.status === "repairing") {
     return {
       icon: Loader2,
@@ -130,25 +129,20 @@ function issueHeader(issue: RuntimeRepairPresentation) {
   if (issue.status === "failed") {
     return { icon: CircleAlert, title: "Repair couldn’t finish", description: issue.summary, tone: "danger" as const }
   }
-  if (issue.status === "succeeded") {
-    return { icon: CircleCheck, title: "Installation repaired", description: "The bundled runtime passed verification.", tone: "success" as const }
-  }
   if (issue.status === "unavailable") {
     return { icon: CircleAlert, title: "Silo runtime is unavailable", description: issue.reason, tone: "danger" as const }
   }
   return { icon: CircleAlert, title: "Silo installation needs repair", description: issue.reason, tone: "danger" as const }
 }
 
-export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresentation; actions: ApplicationActions }) {
+export function SystemIssuePage({ issue, actions }: { issue: ActiveRuntimeRepairPresentation; actions: ApplicationActions }) {
   const header = issueHeader(issue)
   const Icon = header.icon
-  const showsProgress = issue.status === "repairing" || issue.status === "succeeded" || (issue.status === "failed" && issue.phase !== undefined)
+  const showsProgress = issue.status === "repairing" || (issue.status === "failed" && issue.phase !== undefined)
   const showsContent = issue.status === "failed" || showsProgress
   const footerNote = issue.status === "unavailable"
     ? issue.recovery
-    : issue.status === "succeeded"
-      ? undefined
-      : "Sandbox data, host integration, and GitHub access are not changed."
+    : "Sandbox data, host integration, and GitHub access are not changed."
 
   return (
     <div className="mx-auto grid w-full max-w-2xl gap-6 px-4 py-5 sm:px-6 sm:py-6">
@@ -159,7 +153,6 @@ export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresen
         className={cn(
           header.tone === "danger" && "ring-destructive/25",
           header.tone === "warning" && "ring-amber-500/25",
-          header.tone === "success" && "ring-emerald-500/25",
         )}
         role={header.tone === "danger" ? "alert" : "status"}
         aria-live="polite"
@@ -170,7 +163,6 @@ export function SystemIssuePage({ issue, actions }: { issue: RuntimeRepairPresen
             header.description && "row-span-2",
             header.tone === "danger" && "bg-destructive/10 text-destructive",
             header.tone === "warning" && "bg-amber-500/10 text-amber-700 dark:text-amber-400",
-            header.tone === "success" && "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
           )}>
             <Icon className={cn("size-4", issue.status === "repairing" && "animate-spin")} aria-hidden="true" />
           </span>

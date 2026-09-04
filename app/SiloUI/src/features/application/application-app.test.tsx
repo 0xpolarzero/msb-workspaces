@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { act, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
@@ -430,18 +430,42 @@ describe("application", () => {
     expect(application.actions.repairRuntime).toHaveBeenCalledOnce()
   })
 
-  it("confirms a verified repair and returns to Sandboxes", async () => {
-    const source = applicationSourceForScenario("running", undefined, undefined, undefined, "succeeded")
+  it("removes a repaired issue, returns to Sandbox Overview, and confirms success there", async () => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, "verifying")
     const application = renderApplication("running", source)
     const navigation = within(appNavigation())
 
+    await application.user.click(within(navigation.getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: "Files" }))
     await application.user.click(navigation.getByRole("button", { name: "System issue" }))
-    expect(navigation.getByRole("button", { name: "System issue" })).toHaveAttribute("data-navigation-tone", "success")
-    const page = within(appPanel("System issue"))
-    expect(page.getByRole("heading", { name: "Installation repaired", level: 3 })).toBeVisible()
-    expect(page.getByText("The bundled runtime passed verification.")).toBeVisible()
-    expect(page.queryByRole("button", { name: /repair/i })).not.toBeInTheDocument()
-    expect(within(page.getByRole("list", { name: "Repair progress" })).getAllByText("Complete")).toHaveLength(3)
+    expect(appPanel("System issue")).toBeVisible()
+
+    application.rerender(
+      <ApplicationApp
+        source={applicationSourceForScenario("running", undefined, undefined, undefined, "succeeded")}
+        actions={application.actions}
+      />,
+    )
+
+    expect(navigation.queryByRole("button", { name: "System issue" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("region", { name: "System issue" })).not.toBeInTheDocument()
+    const sandboxes = within(appPanel("Sandboxes"))
+    expect(within(navigation.getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page")
+    expect(sandboxes.getByRole("status")).toHaveTextContent("Installation repaired")
+    expect(sandboxes.getByRole("list", { name: "Configured sandboxes" })).toBeVisible()
+  })
+
+  it("removes the repair confirmation after four seconds", () => {
+    vi.useFakeTimers()
+    const application = renderApplication("running", applicationSourceForScenario("running", undefined, undefined, undefined, "succeeded"))
+
+    try {
+      expect(within(appPanel("Sandboxes")).getByRole("status")).toHaveTextContent("Installation repaired")
+      act(() => vi.advanceTimersByTime(4_000))
+      expect(within(appPanel("Sandboxes")).queryByRole("status")).not.toBeInTheDocument()
+    } finally {
+      application.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it("gives reinstall guidance when the bundled runtime is unavailable", async () => {
