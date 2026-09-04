@@ -27,8 +27,8 @@ function WorkspaceFilterBar({
         selectedValues={selectedWorkspaceIds}
         onChange={onChange}
         label="Sandbox filters"
-        inputLabel="Add sandbox filter"
-        placeholder="Add sandbox…"
+        inputLabel="Filter sandboxes"
+        placeholder="Filter sandboxes…"
         listLabel="Available sandbox filters"
         selectedLabel="Selected sandboxes"
         emptyMessage="No sandboxes available."
