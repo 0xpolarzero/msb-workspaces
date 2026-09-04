@@ -303,7 +303,7 @@ export function GitHubPage({
         connectedTitle={`Connected as @${source.github.account ?? "unknown"}`}
         connectedDetail={accessEnabled
           ? "Repository credentials are scoped to each workspace."
-          : "Repository access is disabled. Existing selections are preserved."}
+          : "Repository access is disabled."}
         connectedActions={connectedActions}
         notice={catalogNotice}
         renderWorkspaceNotice={({ name }) => {
