@@ -57,6 +57,35 @@ function copyDraft(draft: GitHubDraft): GitHubDraft {
   }
 }
 
+function draftsAreEqual(left: GitHubDraft, right: GitHubDraft) {
+  const workspaceNames = new Set([
+    ...Object.keys(left.selections),
+    ...Object.keys(right.selections),
+    ...Object.keys(left.identities),
+    ...Object.keys(right.identities),
+  ])
+
+  for (const workspace of workspaceNames) {
+    const leftIdentity = left.identities[workspace]
+    const rightIdentity = right.identities[workspace]
+    if (
+      leftIdentity?.name !== rightIdentity?.name
+      || leftIdentity?.email !== rightIdentity?.email
+      || leftIdentity?.apply !== rightIdentity?.apply
+    ) return false
+
+    const normalizeSelections = (selections: readonly GitHubRepositorySelection[]) => selections
+      .map(({ repository, allowPushes }) => `${repository.toLowerCase()}\0${allowPushes}`)
+      .sort()
+    const leftSelections = normalizeSelections(left.selections[workspace] ?? [])
+    const rightSelections = normalizeSelections(right.selections[workspace] ?? [])
+    if (leftSelections.length !== rightSelections.length) return false
+    if (leftSelections.some((selection, index) => selection !== rightSelections[index])) return false
+  }
+
+  return true
+}
+
 function configurationFromDraft(source: ApplicationSource, draft: GitHubDraft, accessEnabled: boolean): ApplicationGitHubConfiguration {
   return {
     accessEnabled,
@@ -165,7 +194,9 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
 
   function markDirty(nextDraft: GitHubDraft) {
     setDraft(nextDraft)
-    setOperation({ status: "dirty", message: "GitHub access has unsaved changes.", canCancel: true })
+    setOperation(draftsAreEqual(nextDraft, savedDraft)
+      ? { status: "idle" }
+      : { status: "dirty", message: "GitHub access has unsaved changes.", canCancel: true })
   }
 
   function cancelChanges() {

@@ -1026,6 +1026,45 @@ describe("application", () => {
     }))
   })
 
+  it("removes GitHub Save and Cancel when edits return to the saved configuration", async () => {
+    const { user } = renderApplication()
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const github = within(appPanel("GitHub"))
+    const expectClean = () => {
+      expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
+      expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+    }
+
+    const name = github.getByLabelText("Git name for dev")
+    await user.clear(name)
+    await user.type(name, "Morgan Example")
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    await user.clear(name)
+    await user.type(name, "Taylor Example")
+    expectClean()
+
+    const apply = github.getByRole("checkbox", { name: "Apply Git identity to dev" })
+    await user.click(apply)
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    await user.click(apply)
+    expectClean()
+
+    const allowPushes = github.getByRole("checkbox", { name: "Allow pushes for acme/silo" })
+    await user.click(allowPushes)
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    await user.click(allowPushes)
+    expectClean()
+
+    await user.click(github.getByRole("button", { name: "Remove acme/silo from dev" }))
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    const picker = github.getByRole("combobox", { name: "Add repository to dev" })
+    await user.type(picker, "acme/silo")
+    await user.click(screen.getByRole("option", { name: "acme/silo" }))
+    expect(github.getByRole("button", { name: "Save changes" })).toBeVisible()
+    await user.click(github.getByRole("checkbox", { name: "Allow pushes for acme/silo" }))
+    expectClean()
+  })
+
   it("keeps Git identity editable through disconnected and connecting GitHub states", async () => {
     const disconnectedSource = applicationSourceForScenario("running", "disconnected")
     const disconnected = renderApplication("running", disconnectedSource)
