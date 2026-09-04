@@ -20,6 +20,7 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
     openTerminal: vi.fn(),
     openEditor: vi.fn(),
     connectGitHub: vi.fn(),
+    disconnectGitHub: vi.fn(),
     setGitHubAccessEnabled: vi.fn(),
     saveGitHubConfiguration: vi.fn(),
     cancelGitHubConfiguration: vi.fn(),
@@ -934,6 +935,7 @@ describe("application", () => {
     expect(github.queryByRole("heading", { name: "Repository access" })).not.toBeInTheDocument()
     expect(github.getByText("Connected as @taylor")).toBeVisible()
     expect(github.getByRole("button", { name: "Disable access" })).toBeVisible()
+    expect(github.getByRole("button", { name: "Disconnect" })).toBeVisible()
     const clearRepositories = github.getByRole("button", { name: "Clear repositories" })
     expect(clearRepositories).toBeVisible()
     await user.hover(clearRepositories)
@@ -1036,6 +1038,23 @@ describe("application", () => {
     expect(github.getByRole("status")).toHaveTextContent("Connecting to GitHub…")
     expect(github.getByLabelText("Git name for dev")).toBeEnabled()
     expect(github.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
+  })
+
+  it("disconnects the current GitHub account so another account can be connected", async () => {
+    const { actions, user } = renderApplication()
+    await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
+    const github = within(appPanel("GitHub"))
+
+    await user.click(github.getByRole("button", { name: "Disconnect" }))
+    expect(actions.disconnectGitHub).toHaveBeenCalledOnce()
+    expect(github.getByRole("heading", { name: "Not connected" })).toBeVisible()
+    expect(github.queryByText("Connected as @taylor")).not.toBeInTheDocument()
+    expect(github.getByLabelText("Git name for dev")).toBeEnabled()
+    expect(github.queryByRole("combobox", { name: "Add repository to dev" })).not.toBeInTheDocument()
+
+    await user.click(github.getByRole("button", { name: "Connect GitHub" }))
+    expect(actions.connectGitHub).toHaveBeenCalledOnce()
+    expect(github.getByRole("status")).toHaveTextContent("Connecting to GitHub…")
   })
 
   it("supports disabling access and clearing repositories without hiding disabled selections", async () => {

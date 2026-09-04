@@ -193,6 +193,13 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
     actions.setGitHubAccessEnabled?.(nextEnabled)
   }
 
+  function disconnect() {
+    setConfirmingClear(false)
+    setConnectionState("disconnected")
+    setOperation({ status: "idle" })
+    actions.disconnectGitHub?.()
+  }
+
   function confirmClear() {
     setConfirmingClear(false)
     setDraft((current) => ({
@@ -219,6 +226,7 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
   ) : (
     <>
       <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
+      <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={disconnect}>Disconnect</Button>
       <TooltipProvider delayDuration={150}>
         <Tooltip>
           <TooltipTrigger asChild>
