@@ -1,12 +1,12 @@
 import { useId, useMemo, useState } from "react"
-import { Activity, Check, ChevronRight, Copy, ExternalLink, File, Folder, GitBranch, Search, TriangleAlert, X } from "lucide-react"
+import { Activity, Check, ChevronRight, CircleAlert, CircleCheck, Copy, ExternalLink, File, Folder, GitBranch, Loader2, RotateCw, Search, TriangleAlert, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { DetailCard, WorkspaceStateDot, WorkspaceStatus } from "@/features/application/components/application-ui"
-import type { ApplicationFileEntry, ApplicationWorkspace, WorkspaceDetailSection, WorkspaceState } from "@/features/application/model/application-source"
+import type { ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection, WorkspaceState } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
 function WorkspaceFilterBar({
@@ -212,9 +212,73 @@ function WorkspaceFileTree({ workspace }: { workspace: ApplicationWorkspace }) {
   )
 }
 
-function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
+function commitLabel(count: number) {
+  return `${count} ${count === 1 ? "commit" : "commits"}`
+}
+
+function RepositoryPushFeedback({
+  operation,
+  repositoryPath,
+  onRetry,
+}: {
+  operation: RepositoryPushOperation
+  repositoryPath: string
+  onRetry: () => void
+}) {
+  if (operation.status === "pushing") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground" role="status" aria-live="polite" aria-atomic="true">
+        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+        Pushing {commitLabel(operation.commitCount)}…
+      </div>
+    )
+  }
+  if (operation.status === "succeeded") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400" role="status" aria-live="polite" aria-atomic="true">
+        <CircleCheck className="size-3.5" aria-hidden="true" />
+        Pushed {commitLabel(operation.commitCount)}.
+      </div>
+    )
+  }
+  return (
+    <Collapsible className="grid gap-1.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5" role="alert" aria-live="assertive" aria-atomic="true">
+        <CircleAlert className="size-3.5 shrink-0 text-destructive" aria-hidden="true" />
+        <span className="min-w-40 flex-1 text-xs text-destructive">{operation.message}</span>
+        {operation.diagnosticDetails && (
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="xs" aria-label={`Toggle push error details for ${repositoryPath}`}>
+              Details
+            </Button>
+          </CollapsibleTrigger>
+        )}
+        <Button variant="outline" size="xs" onClick={onRetry} aria-label={`Retry push for ${repositoryPath}`}>
+          <RotateCw aria-hidden="true" />
+          Retry
+        </Button>
+      </div>
+      {operation.diagnosticDetails && (
+        <CollapsibleContent>
+          <pre className="overflow-auto rounded-md bg-muted px-2.5 py-2 font-mono text-[10px] leading-4 whitespace-pre-wrap text-muted-foreground">{operation.diagnosticDetails}</pre>
+        </CollapsibleContent>
+      )}
+    </Collapsible>
+  )
+}
+
+function Files({
+  workspaces,
+  repositoryPushOperations,
+  onPushRepository,
+}: {
+  workspaces: ApplicationWorkspace[]
+  repositoryPushOperations: RepositoryPushOperation[]
+  onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
+}) {
   if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to browse its files and repositories." />
   const repositories = workspaces.flatMap((workspace) => workspace.repositories.map((repository) => ({ workspace, repository })))
+  const pushOperations = new Map(repositoryPushOperations.map((operation) => [`${operation.workspace}:${operation.repositoryPath}`, operation]))
 
   return (
     <div className="grid gap-6 lg:grid-cols-2 lg:gap-0">
@@ -222,23 +286,29 @@ function Files({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
         <h3 id="files-repositories-heading" className="mb-3 font-heading text-sm font-medium">Repositories</h3>
         {repositories.length > 0 ? (
           <div className="divide-y divide-border" role="list" aria-label="Repositories">
-            {repositories.map(({ workspace, repository }) => (
-              <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
-                <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
-                <div className="min-w-0">
-                  <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
-                    <div className="truncate text-sm font-medium">{repository.path}</div>
-                    <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
-                  </div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
-                  {repository.ahead > 0 && (
-                    <div className="mt-2" data-repository-actions>
-                      <Button variant="outline" size="xs">Push {repository.ahead} {repository.ahead === 1 ? "commit" : "commits"}</Button>
+            {repositories.map(({ workspace, repository }) => {
+              const operation = pushOperations.get(`${workspace.machine.name}:${repository.path}`)
+              const push = () => onPushRepository(workspace.machine.name, repository.path, operation?.commitCount ?? repository.ahead)
+              return (
+                <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
+                  <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
+                      <div className="truncate text-sm font-medium">{repository.path}</div>
+                      <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
                     </div>
-                  )}
+                    <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
+                    {(operation || repository.ahead > 0) && (
+                      <div className="mt-2" data-repository-actions>
+                        {operation
+                          ? <RepositoryPushFeedback operation={operation} repositoryPath={repository.path} onRetry={push} />
+                          : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
       </section>
@@ -370,15 +440,19 @@ export function WorkspacesPage({
   excludedWorkspaceIds,
   section,
   logQuery,
+  repositoryPushOperations,
   onWorkspaceFilterChange,
   onLogQueryChange,
+  onPushRepository,
 }: {
   workspaces: ApplicationWorkspace[]
   excludedWorkspaceIds: ReadonlySet<string>
   section: WorkspaceDetailSection
   logQuery: string
+  repositoryPushOperations: RepositoryPushOperation[]
   onWorkspaceFilterChange: (excludedWorkspaceIds: Set<string>) => void
   onLogQueryChange: (query: string) => void
+  onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
 }) {
   const visibleWorkspaces = useMemo(
     () => workspaces.filter(({ machine }) => !excludedWorkspaceIds.has(machine.id)),
@@ -388,7 +462,7 @@ export function WorkspacesPage({
   return (
     <div className="mx-auto grid w-full max-w-5xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
       <WorkspaceFilterBar workspaces={workspaces} excludedWorkspaceIds={excludedWorkspaceIds} onChange={onWorkspaceFilterChange} />
-      {section === "files" && <Files workspaces={visibleWorkspaces} />}
+      {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} />}
       {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}
       {section === "network" && <Network workspaces={visibleWorkspaces} />}
       {section === "activity" && <ActivityLog workspaces={visibleWorkspaces} />}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { ApplicationShell } from "@/features/application/components/application-shell"
-import type { ApplicationActions, ApplicationSource, ApplicationTab, RuntimeRepairPresentation, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ApplicationActions, ApplicationSource, ApplicationTab, RepositoryPushOperation, RuntimeRepairPresentation, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { BackupPage } from "@/features/application/pages/backup-page"
 import { GeneralPage } from "@/features/application/pages/general-page"
 import { GitHubPage } from "@/features/application/pages/github-page"
@@ -21,13 +21,14 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
+  const [repositoryPushOperations, setRepositoryPushOperations] = useState<RepositoryPushOperation[]>(source.repositoryPushOperations)
   const [repairConfirmationVisible, setRepairConfirmationVisible] = useState(source.runtimeRepair?.status === "succeeded")
   const previousRuntimeRepairStatus = useRef<RuntimeRepairPresentation["status"] | undefined>(undefined)
   const repairConfirmationTimer = useRef<number | null>(null)
   const resolvedSystemSelection = activeTab === "system" && !activeRuntimeRepair
   const visibleTab = resolvedSystemSelection ? "workspaces" : activeTab
   const visibleWorkspaceSection = resolvedSystemSelection && source.runtimeRepair?.status === "succeeded" ? "overview" : workspaceSection
-  const applicationSource = { ...source, workspaces, sandboxConfigurationOperation }
+  const applicationSource = { ...source, workspaces, sandboxConfigurationOperation, repositoryPushOperations }
 
   useEffect(() => {
     // The source is the authoritative snapshot when the native bridge publishes a replacement.
@@ -42,10 +43,13 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     // The native bridge clears or replaces the pending operation alongside its authoritative snapshot.
     // oxlint-disable-next-line react/set-state-in-effect
     setSandboxConfigurationOperation(source.sandboxConfigurationOperation)
+    // The native bridge replaces local push progress with its authoritative operation result.
+    // oxlint-disable-next-line react/set-state-in-effect
+    setRepositoryPushOperations(source.repositoryPushOperations)
     // The destination only exists while the global issue remains active.
     // oxlint-disable-next-line react/set-state-in-effect
     setActiveTab((current) => current === "system" && !activeRuntimeRepair ? "workspaces" : current)
-  }, [source.workspaces, source.sandboxConfigurationOperation, activeRuntimeRepair])
+  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, activeRuntimeRepair])
 
   useEffect(() => {
     const status = source.runtimeRepair?.status
@@ -94,6 +98,14 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     actions.saveMachineConfiguration(candidate)
   }
 
+  function pushRepository(workspace: string, repositoryPath: string, commitCount: number) {
+    setRepositoryPushOperations((current) => [
+      ...current.filter((operation) => operation.workspace !== workspace || operation.repositoryPath !== repositoryPath),
+      { workspace, repositoryPath, commitCount, status: "pushing" },
+    ])
+    actions.pushRepository(workspace, repositoryPath)
+  }
+
   return (
     <ApplicationShell
       activeTab={visibleTab}
@@ -113,8 +125,10 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
             excludedWorkspaceIds={excludedWorkspaceIds}
             section={visibleWorkspaceSection}
             logQuery={logQuery}
+            repositoryPushOperations={repositoryPushOperations}
             onWorkspaceFilterChange={setExcludedWorkspaceIds}
             onLogQueryChange={setLogQuery}
+            onPushRepository={pushRepository}
           />
         )}
       </section>

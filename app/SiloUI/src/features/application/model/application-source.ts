@@ -77,6 +77,16 @@ export interface ApplicationRepository {
   dirty: boolean
 }
 
+export type RepositoryPushOperation = {
+  workspace: string
+  repositoryPath: string
+  commitCount: number
+} & (
+  | { status: "pushing" }
+  | { status: "succeeded" }
+  | { status: "failed"; message: string; diagnosticDetails?: string }
+)
+
 export interface ApplicationPort {
   port: number
   process: string
@@ -130,6 +140,7 @@ export interface ApplicationSource {
   runtimeRepair: RuntimeRepairPresentation | null
   workspaces: ApplicationWorkspace[]
   sandboxConfigurationOperation: SandboxConfigurationOperation | null
+  repositoryPushOperations: RepositoryPushOperation[]
   github: {
     state: "disconnected" | "connecting" | "connected"
     account?: string
@@ -155,6 +166,7 @@ export interface ApplicationActions {
   repairRuntime: () => void
   saveMachineConfiguration: (request: SetupMachineConfigurationRequest) => void
   retryMachineConfiguration: (workspace: string) => void
+  pushRepository: (workspace: string, repositoryPath: string) => void
   startWorkspace: (workspace: string) => void
   pauseWorkspace: (workspace: string) => void
   stopWorkspace: (workspace: string) => void

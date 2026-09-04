@@ -2,6 +2,7 @@ import type { SetupVirtualMachineConfiguration, SiloProgressEvent } from "@/cont
 import type {
   ApplicationSource,
   ApplicationWorkspace,
+  RepositoryPushOperation,
   RuntimeRepairPresentation,
   SandboxConfigurationOperation,
   WorkspaceState,
@@ -34,6 +35,9 @@ export const systemIssueFixtureModes = [
 ] as const
 export type SystemIssueFixtureMode = (typeof systemIssueFixtureModes)[number]
 
+export const repositoryPushFixtureModes = ["pushing", "succeeded", "failed"] as const
+export type RepositoryPushFixtureMode = (typeof repositoryPushFixtureModes)[number]
+
 export function workspaceFixtureModeFromSearch(search: string): WorkspaceFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("sandbox-state")
   return workspaceFixtureModes.find((mode) => mode === requested)
@@ -47,6 +51,11 @@ export function sandboxConfigurationFixtureModeFromSearch(search: string): Sandb
 export function systemIssueFixtureModeFromSearch(search: string): SystemIssueFixtureMode | undefined {
   const requested = new URLSearchParams(search).get("system-issue")
   return systemIssueFixtureModes.find((mode) => mode === requested)
+}
+
+export function repositoryPushFixtureModeFromSearch(search: string): RepositoryPushFixtureMode | undefined {
+  const requested = new URLSearchParams(search).get("repository-push")
+  return repositoryPushFixtureModes.find((mode) => mode === requested)
 }
 
 const baseWorkspaces: ApplicationWorkspace[] = [
@@ -294,18 +303,45 @@ function runtimeRepairForFixture(
   }
 }
 
+function repositoryPushOperationsForFixture(mode?: RepositoryPushFixtureMode): RepositoryPushOperation[] {
+  if (!mode) return []
+  const operation = {
+    workspace: "dev",
+    repositoryPath: "acme/silo",
+    commitCount: 2,
+  }
+  if (mode === "pushing") return [{ ...operation, status: "pushing" }]
+  if (mode === "succeeded") return [{ ...operation, status: "succeeded" }]
+  return [{
+    ...operation,
+    status: "failed",
+    message: "Push failed because the remote branch changed.",
+    diagnosticDetails: [
+      "Repository: acme/silo",
+      "Branch: main",
+      "The remote branch no longer matches the reviewed commit.",
+    ].join("\n"),
+  }]
+}
+
 export function applicationSourceForScenario(
   scenario: ScenarioName,
   githubState?: GitHubFixtureState,
   workspaceMode?: WorkspaceFixtureMode,
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode,
   systemIssueMode?: SystemIssueFixtureMode,
+  repositoryPushMode?: RepositoryPushFixtureMode,
 ): ApplicationSource {
-  const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode)
+  const workspaces = workspacesForFixtureMode(workspacesForScenario(scenario), workspaceMode).map((workspace) => (
+    repositoryPushMode === "succeeded" && workspace.machine.name === "dev"
+      ? { ...workspace, repositories: workspace.repositories.map((repository) => repository.path === "acme/silo" ? { ...repository, ahead: 0 } : repository) }
+      : workspace
+  ))
   return {
     runtimeRepair: runtimeRepairForFixture(scenario, systemIssueMode),
     workspaces,
     sandboxConfigurationOperation: configurationOperationForFixture(workspaces, sandboxConfigurationMode),
+    repositoryPushOperations: repositoryPushOperationsForFixture(repositoryPushMode),
     github: {
       state: githubState ?? "connected",
       account: githubState === "disconnected" ? undefined : "taylor",

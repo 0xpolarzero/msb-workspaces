@@ -2,9 +2,11 @@ import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
 import {
   sandboxConfigurationFixtureModes,
+  repositoryPushFixtureModes,
   systemIssueFixtureModes,
   workspaceFixtureModes,
   type SandboxConfigurationFixtureMode,
+  type RepositoryPushFixtureMode,
   type SystemIssueFixtureMode,
   type WorkspaceFixtureMode,
 } from "@/fixtures/application-scenarios"
@@ -13,13 +15,14 @@ import { surfaceNames } from "@/fixtures/surfaces"
 
 import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
-export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode }: {
+export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode }: {
   surface: SurfaceName
   scenario: ScenarioName
   githubState?: GitHubFixtureState
   workspaceMode?: WorkspaceFixtureMode
   sandboxConfigurationMode?: SandboxConfigurationFixtureMode
   systemIssueMode?: SystemIssueFixtureMode
+  repositoryPushMode?: RepositoryPushFixtureMode
 }) {
   function selectFixture(parameter: string, value: string) {
     const url = new URL(window.location.href)
@@ -77,6 +80,18 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
             >
               <option value="source">source</option>
               {systemIssueFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            Push
+            <select
+              aria-label="Repository push fixture"
+              className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={repositoryPushMode ?? "source"}
+              onChange={(event) => selectFixture("repository-push", event.target.value)}
+            >
+              <option value="source">source</option>
+              {repositoryPushFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
             </select>
           </label>
         </>

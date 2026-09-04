@@ -12,6 +12,7 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
     repairRuntime: vi.fn(),
     saveMachineConfiguration: vi.fn(),
     retryMachineConfiguration: vi.fn(),
+    pushRepository: vi.fn(),
     startWorkspace: vi.fn(),
     pauseWorkspace: vi.fn(),
     stopWorkspace: vi.fn(),
@@ -91,7 +92,7 @@ describe("application", () => {
   })
 
   it("uses one global sandbox filter across Files, Logs, Network, and Activity", async () => {
-    const { user } = renderApplication()
+    const { actions, user } = renderApplication()
     const navigation = within(appNavigation())
     const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
 
@@ -125,6 +126,12 @@ describe("application", () => {
     expect(repositoryHeader).toContainElement(devBadge)
     expect(repositoryHeader).not.toContainElement(pushButton)
     expect(within(playgroundsRepository).queryByRole("button", { name: /^Push / })).not.toBeInTheDocument()
+
+    await user.click(pushButton)
+    expect(actions.pushRepository).toHaveBeenCalledWith("dev", "acme/silo")
+    expect(devRepository).toHaveAttribute("aria-busy", "true")
+    expect(within(devRepository).getByRole("status")).toHaveTextContent("Pushing 2 commits…")
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
 
     const devFolder = within(fileTree).getByRole("button", { name: "dev" })
     expect(devFolder).toHaveAttribute("aria-expanded", "true")
@@ -172,6 +179,44 @@ describe("application", () => {
     expect(panel.getByRole("list", { name: "Recent activity" })).toBeVisible()
     expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
     expect(filters.getByRole("button", { name: "All" })).toBeDisabled()
+  })
+
+  it.each([
+    ["pushing", "Pushing 2 commits…", true],
+    ["succeeded", "Pushed 2 commits.", false],
+  ] as const)("shows repository push %s feedback inside its row", async (mode, message, busy) => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, undefined, mode)
+    const application = renderApplication("running", source)
+    const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Files" }))
+    const row = within(appPanel("Sandboxes")).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
+    expect(within(row).getByRole("status")).toHaveTextContent(message)
+    if (busy) expect(row).toHaveAttribute("aria-busy", "true")
+    else {
+      expect(row).not.toHaveAttribute("aria-busy")
+      expect(row).toHaveTextContent("main · 0 ahead, 0 behind")
+    }
+    expect(within(row).queryByRole("button", { name: /^Push / })).not.toBeInTheDocument()
+  })
+
+  it("shows a repository push error with details and immediate retry", async () => {
+    const source = applicationSourceForScenario("running", undefined, undefined, undefined, undefined, "failed")
+    const application = renderApplication("running", source)
+    const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Files" }))
+    const row = within(appPanel("Sandboxes")).getByText("acme/silo").closest('[role="listitem"]') as HTMLElement
+    expect(within(row).getByRole("alert")).toHaveTextContent("Push failed because the remote branch changed.")
+    expect(within(row).queryByText(/no longer matches/)).not.toBeInTheDocument()
+
+    await application.user.click(within(row).getByRole("button", { name: "Toggle push error details for acme/silo" }))
+    expect(within(row).getByText(/no longer matches/)).toBeVisible()
+
+    await application.user.click(within(row).getByRole("button", { name: "Retry push for acme/silo" }))
+    expect(application.actions.pushRepository).toHaveBeenCalledWith("dev", "acme/silo")
+    expect(row).toHaveAttribute("aria-busy", "true")
+    expect(within(row).getByRole("status")).toHaveTextContent("Pushing 2 commits…")
   })
 
   it.each([
