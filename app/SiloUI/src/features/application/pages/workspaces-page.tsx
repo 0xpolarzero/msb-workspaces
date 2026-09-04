@@ -205,8 +205,7 @@ function Files({
           data-files-pane="repositories"
           data-pane-position="top"
         >
-          <div className="grid h-8 shrink-0 grid-cols-[1rem_minmax(0,1fr)_1.5rem] items-center gap-2 px-2" role="group" aria-label="Repository pane controls">
-            <GitBranch className="size-4 text-muted-foreground" aria-hidden="true" />
+          <div className="grid h-8 shrink-0 grid-cols-[minmax(0,1fr)_1.5rem] items-center gap-2 px-2" role="group" aria-label="Repository pane controls">
             <span className="text-sm font-medium">Repositories</span>
             <CollapsibleTrigger
               aria-label={`${repositoriesOpen ? "Collapse" : "Expand"} repositories`}
@@ -261,8 +260,7 @@ function Files({
           data-files-pane="file-tree"
           data-pane-position="bottom"
         >
-          <div className="grid h-8 shrink-0 grid-cols-[1rem_minmax(0,1fr)_1.5rem] items-center gap-2 px-2" role="group" aria-label="File tree pane controls">
-            <Folder className="size-4 text-muted-foreground" aria-hidden="true" />
+          <div className="grid h-8 shrink-0 grid-cols-[minmax(0,1fr)_1.5rem] items-center gap-2 px-2" role="group" aria-label="File tree pane controls">
             <span className="text-sm font-medium">File tree</span>
             <CollapsibleTrigger
               aria-label={`${fileTreeOpen ? "Collapse" : "Expand"} file tree`}
