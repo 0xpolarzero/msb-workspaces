@@ -13,10 +13,25 @@ import { SystemIssuePage } from "@/features/application/pages/system-issue-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
 import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
-function workspaceAttentionCounts(workspaces: ApplicationSource["workspaces"]): { errors: number; warnings: number } {
-  return workspaces.reduce((counts, workspace) => {
-    if (workspace.state === "failed" || workspace.attention?.level === "error") counts.errors += 1
-    else if (workspace.attention?.level === "warning") counts.warnings += 1
+function workspaceAttentionCounts(source: Pick<ApplicationSource, "workspaces" | "sandboxConfigurationOperation">): { errors: number; warnings: number } {
+  const attentionByMachine = new Map(source.workspaces.map((workspace) => [
+    workspace.machine.id,
+    workspace.state === "failed" || workspace.attention?.level === "error"
+      ? "error" as const
+      : workspace.attention?.level === "warning"
+        ? "warning" as const
+        : null,
+  ]))
+  const operation = source.sandboxConfigurationOperation
+  if (operation?.status === "failed" && operation.error.workspace) {
+    const failedMachine = operation.candidate.machines.find(({ name }) => name === operation.error.workspace)
+      ?? source.workspaces.find(({ machine }) => machine.name === operation.error.workspace)?.machine
+    if (failedMachine) attentionByMachine.set(failedMachine.id, "error")
+  }
+
+  return [...attentionByMachine.values()].reduce((counts, attention) => {
+    if (attention === "error") counts.errors += 1
+    else if (attention === "warning") counts.warnings += 1
     return counts
   }, { errors: 0, warnings: 0 })
 }
@@ -143,7 +158,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       workspaceSection={visibleWorkspaceSection}
       settingsSection={settingsSection}
       systemIssueStatus={activeRuntimeRepair?.status ?? null}
-      workspaceAttention={workspaceAttentionCounts(workspaces)}
+      workspaceAttention={workspaceAttentionCounts(applicationSource)}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}

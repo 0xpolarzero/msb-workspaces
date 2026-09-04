@@ -635,6 +635,7 @@ describe("application", () => {
     renderApplication("running", applicationSourceForScenario("running", undefined, undefined, fixture))
     const overview = within(appPanel("Sandboxes"))
     const row = overview.getByText(workspace).closest("li") as HTMLElement
+    const overviewNavigation = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: /Overview/ })
 
     expect(row).toHaveAttribute("aria-busy", "true")
     expect(within(row).getByRole("status")).toHaveTextContent(message)
@@ -644,6 +645,7 @@ describe("application", () => {
     expect(within(row).queryByRole("button", { name: `Reorder ${workspace}` })).not.toBeInTheDocument()
     expect(overview.getByRole("button", { name: "Add" })).toBeDisabled()
     expect(overview.queryByText(/Creating your sandboxes/)).not.toBeInTheDocument()
+    expect(within(overviewNavigation).queryByRole("status")).not.toBeInTheDocument()
   })
 
   it("keeps removal feedback inside the retained sandbox row", () => {
@@ -674,6 +676,10 @@ describe("application", () => {
     await user.click(within(row).getByRole("button", { name: "Retry scratch configuration" }))
     expect(actions.retryMachineConfiguration).toHaveBeenCalledWith("scratch")
     expect(overview.queryByText(/needs attention/i)).not.toBeInTheDocument()
+
+    const overviewNavigation = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: /Overview/ })
+    expect(within(overviewNavigation).getByRole("status", { name: "1 sandbox error" })).toHaveTextContent("1")
+    expect(within(overviewNavigation).getByRole("status", { name: "3 sandbox warnings" })).toHaveTextContent("3")
   })
 
   it("starts a new sandbox as an in-card configuration operation", async () => {
