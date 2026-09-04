@@ -88,6 +88,11 @@ export type RepositoryPushOperation = {
   | { status: "failed"; message: string; diagnosticDetails?: string }
 )
 
+export interface ApplicationLog {
+  line: string
+  occurredAt: string
+}
+
 export interface ApplicationPort {
   port: number
   listening: boolean | null
@@ -125,7 +130,7 @@ export interface ApplicationWorkspace {
   repositories: ApplicationRepository[]
   files: ApplicationFileEntry[]
   ports: ApplicationPort[]
-  logs: string[]
+  logs: ApplicationLog[]
   activities: ApplicationActivity[]
   githubRepositories: string[]
   secretNames: string[]

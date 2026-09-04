@@ -170,11 +170,16 @@ describe("application", () => {
     expect(logs.closest('[data-slot="card"]')).toBeNull()
     expect(panel.queryByRole("heading", { name: "Logs" })).not.toBeInTheDocument()
     expect(within(logs).queryByText("dev")).not.toBeInTheDocument()
-    expect(within(logs).getByText("playgrounds")).toBeVisible()
-    expect(within(logs).getByText("personal")).toBeVisible()
+    expect(within(logs).getAllByRole("columnheader").map((header) => header.textContent)).toEqual(["Time", "Message", "Sandbox", "Actions"])
+    expect(within(logs).getByLabelText("playgrounds, Stopped")).toBeVisible()
+    expect(within(logs).getByLabelText("personal, Stopped")).toBeVisible()
 
-    const playgroundsRow = within(logs).getByText("playgrounds").closest('[role="row"]') as HTMLElement
+    const playgroundsRow = within(logs).getByLabelText("playgrounds, Stopped").closest('[role="row"]') as HTMLElement
     expect(playgroundsRow).toHaveClass("hover:bg-muted/55", "focus-within:bg-muted/55")
+    const playgroundsCells = within(playgroundsRow).getAllByRole("cell")
+    expect(playgroundsCells[0]).toHaveTextContent("17:02:11")
+    expect(playgroundsCells[1]).toHaveTextContent("silo Workspace stopped cleanly")
+    expect(playgroundsCells[2]).toContainElement(within(playgroundsRow).getByLabelText("playgrounds, Stopped"))
     const copyLine = within(playgroundsRow).getByRole("button", { name: "Copy log line from playgrounds at 17:02:11" })
     expect(copyLine).toHaveClass("opacity-0", "group-hover/log-row:opacity-100", "group-focus-within/log-row:opacity-100")
     const copy = vi.spyOn(navigator.clipboard, "writeText")
@@ -242,6 +247,18 @@ describe("application", () => {
       expect.stringContaining("Backup completed"),
     ])
     expect(filters.queryByRole("button", { name: "All" })).not.toBeInTheDocument()
+  })
+
+  it("orders logs newest first independently of workspace configuration order", async () => {
+    const source = applicationSourceForScenario("running")
+    source.workspaces.reverse()
+    const application = renderApplication("running", source)
+    const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Logs" }))
+
+    const rows = within(within(appPanel("Sandboxes")).getByRole("table", { name: "Logs" })).getAllByRole("row").slice(1)
+    expect(rows.map((row) => within(row).getAllByRole("cell")[0].textContent)).toEqual(["19:18:42", "19:18:40", "19:18:37", "17:02:11", "09:41:02"])
   })
 
   it("shows one truthful network table and uses the selected browser for opening ports", async () => {

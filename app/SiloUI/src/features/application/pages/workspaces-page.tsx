@@ -230,22 +230,26 @@ function Files({
 interface LogRow {
   id: string
   raw: string
+  occurredAt: string
   timestamp: string
   workspace: string
+  workspaceState: ApplicationWorkspace["state"]
   message: string
 }
 
 function logRows(workspaces: ApplicationWorkspace[]): LogRow[] {
-  return workspaces.flatMap((workspace) => workspace.logs.map((line, index) => {
-    const match = /^(\S+)\s{2,}(.*)$/.exec(line)
+  return workspaces.flatMap((workspace) => workspace.logs.map((log, index) => {
+    const match = /^(\S+)\s{2,}(.*)$/.exec(log.line)
     return {
       id: `${workspace.machine.id}:${index}`,
-      raw: line,
+      raw: log.line,
+      occurredAt: log.occurredAt,
       timestamp: match?.[1] ?? "—",
       workspace: workspace.machine.name,
-      message: match?.[2] ?? line,
+      workspaceState: workspace.state,
+      message: match?.[2] ?? log.line,
     }
-  }))
+  })).sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
 }
 
 function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWorkspace[]; query: string; onQueryChange: (query: string) => void }) {
@@ -272,18 +276,18 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
       </div>
       {filteredRows.length > 0 ? (
         <div role="table" aria-label="Logs" className="overflow-hidden rounded-lg border border-border text-xs">
-          <div role="row" className="grid grid-cols-[5.5rem_7rem_minmax(0,1fr)_1.5rem] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
-            <span role="columnheader">Timestamp</span>
-            <span role="columnheader">Sandbox</span>
+          <div role="row" className="grid grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
+            <span role="columnheader">Time</span>
             <span role="columnheader">Message</span>
+            <span role="columnheader">Sandbox</span>
             <span role="columnheader" className="sr-only">Actions</span>
           </div>
-          <div className="max-h-80 divide-y divide-border overflow-y-auto bg-card font-mono">
+          <div className="max-h-80 divide-y divide-border overflow-y-auto bg-card">
             {filteredRows.map((row) => (
-              <div key={row.id} role="row" className="group/log-row grid grid-cols-[5.5rem_7rem_minmax(0,1fr)_1.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
-                <span role="cell" className="text-muted-foreground">{row.timestamp}</span>
-                <span role="cell" className="truncate font-medium">{row.workspace}</span>
-                <span role="cell" className="min-w-0 break-words text-foreground/85">{row.message}</span>
+              <div key={row.id} role="row" className="group/log-row grid grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
+                <span role="cell" className="font-mono text-muted-foreground">{row.timestamp}</span>
+                <span role="cell" className="min-w-0 break-words font-mono text-foreground/85">{row.message}</span>
+                <span role="cell" className="flex items-center"><WorkspaceBadge name={row.workspace} state={row.workspaceState} /></span>
                 <span role="cell">
                   <CopyButton
                     variant="ghost"
