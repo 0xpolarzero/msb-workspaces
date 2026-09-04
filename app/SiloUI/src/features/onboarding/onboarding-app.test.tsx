@@ -286,6 +286,18 @@ describe("onboarding", () => {
     expect(screen.getByText("Taylor Example <taylor@example.com> → dev, personal; Morgan Example <taylor@example.com> → playgrounds")).toBeVisible()
   })
 
+  it("collapses GitHub sandbox sections independently", async () => {
+    const user = userEvent.setup()
+    renderScenario("running", "connected")
+    await user.click(screen.getByRole("tab", { name: /GitHub/ }))
+
+    const devDisclosure = screen.getByRole("button", { name: "dev" })
+    await user.click(devDisclosure)
+    expect(devDisclosure).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByRole("group", { name: "Git identity for dev" })).not.toBeInTheDocument()
+    expect(screen.getByRole("group", { name: "Git identity for playgrounds" })).toBeVisible()
+  })
+
   it("treats repository names as case-insensitive when preventing duplicates", async () => {
     const user = userEvent.setup()
     render(<OnboardingApp

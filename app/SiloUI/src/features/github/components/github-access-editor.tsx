@@ -4,10 +4,12 @@ import { Check, GitBranch, Info, LoaderCircle, RotateCcw, Search, X } from "luci
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 
 export type GitHubConnectionState = "disconnected" | "connecting" | "connected"
 
@@ -225,147 +227,154 @@ export function GitHubAccessEditor({
             const identity = workspaceIdentities[name] ?? { name: "", email: "", apply: true }
             const workspaceActions = renderWorkspaceActions?.(workspace)
             return (
-              <div key={name} className="grid gap-3 p-3">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={name}>{name}</span>
+              <Collapsible key={name} defaultOpen className="collapsible-motion">
+                <div className="flex min-w-0 items-center gap-1 p-1">
+                  <CollapsibleTrigger className={`${disclosureTriggerStateClass} flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60`}>
+                    <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={name}>{name}</span>
+                    <DisclosureIndicator />
+                  </CollapsibleTrigger>
                   {workspaceActions && <div className="flex shrink-0 items-center gap-1.5">{workspaceActions}</div>}
                 </div>
-                <div
-                  role="group"
-                  aria-label={`Git identity for ${name}`}
-                  data-layout="compact-row"
-                  className="flex min-w-0 items-center gap-1.5"
-                >
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span
-                          tabIndex={0}
-                          aria-label={`About Git identity for ${name}`}
-                          className="grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
-                        >
-                          <GitBranch aria-hidden="true" className="size-3.5" />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>Name and email used for Git commits in this VM.</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                  <Input
-                    aria-label={`Git name for ${name}`}
-                    autoComplete="off"
-                    className="h-7 min-w-0 flex-[0.8] rounded-md px-2 text-[11px] md:text-[11px]"
-                    placeholder="Name"
-                    disabled={disabled}
-                    value={identity.name}
-                    onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
-                  />
-                  <Input
-                    aria-label={`Git email for ${name}`}
-                    autoComplete="off"
-                    className="h-7 min-w-0 flex-[1.2] rounded-md px-2 text-[11px] md:text-[11px]"
-                    inputMode="email"
-                    placeholder="Email"
-                    type="email"
-                    disabled={disabled}
-                    value={identity.email}
-                    onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, email: event.target.value })}
-                  />
-                  <label className="flex shrink-0 items-center gap-1 text-[11px]">
-                    <Checkbox
-                      aria-label={`Apply Git identity to ${name}`}
-                      checked={identity.apply}
-                      disabled={disabled}
-                      onCheckedChange={(checked) => onWorkspaceIdentityChange(name, { ...identity, apply: checked === true })}
-                    />
-                    Apply
-                  </label>
-                  <TooltipProvider delayDuration={150}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span
-                          className="inline-flex shrink-0"
-                          tabIndex={currentHostGitIdentity ? undefined : 0}
-                          aria-label={currentHostGitIdentity ? undefined : `Reset Git identity for ${name}`}
-                        >
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label={`Reset Git identity for ${name}`}
-                            aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
-                            disabled={disabled || !currentHostGitIdentity}
-                            onClick={() => onResetWorkspaceIdentity(name)}
-                          >
-                            <RotateCcw aria-hidden="true" className="size-3" />
-                          </Button>
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>{`Reset Git identity for ${name}`}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                {connectionState === "connected" && (
-                  <>
-                    {repositoryControlsAvailable && (
-                      <RepositoryCombobox
-                        workspace={name}
-                        repositoryOptions={repositoryOptions}
-                        selectedRepositories={selections}
-                        disabled={disabled}
-                        onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
-                      />
-                    )}
-                    {selections.length > 0 && (
-                      <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
-                        <div role="row" className={`grid ${repositoryGridColumns} items-center gap-2 bg-muted/50 px-2 py-1.5 text-left text-[11px] font-medium text-muted-foreground`}>
-                          <span role="columnheader">Repository</span>
-                          <span role="columnheader" className="flex items-center justify-start gap-0.5 text-left">
-                            Allow pushes
-                            <TooltipProvider delayDuration={150}>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button type="button" variant="ghost" size="icon-xs" className="size-5" aria-label="About Allow pushes">
-                                    <Info aria-hidden="true" className="size-3" />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>Allow pushing to this repo from inside this VM.</TooltipContent>
-                              </Tooltip>
-                            </TooltipProvider>
-                          </span>
-                          <span role="columnheader" className="sr-only">Remove</span>
-                        </div>
-                        {selections.map((selection) => (
-                          <div key={selection.repository} role="row" className={`grid ${repositoryGridColumns} items-center gap-2 border-t border-border px-2 py-2 text-left`}>
-                            <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
-                            <span role="cell" className="flex justify-start">
-                              <Checkbox
-                                aria-label={`Allow pushes for ${selection.repository}`}
-                                checked={selection.allowPushes}
-                                disabled={disabled || !repositoryControlsAvailable}
-                                onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
-                                  item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
-                                )))}
-                              />
+                <CollapsibleContent className="collapsible-content-motion">
+                  <div className="grid gap-3 px-3 pt-1 pb-3">
+                    <div
+                      role="group"
+                      aria-label={`Git identity for ${name}`}
+                      data-layout="compact-row"
+                      className="flex min-w-0 items-center gap-1.5"
+                    >
+                      <TooltipProvider delayDuration={150}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              tabIndex={0}
+                              aria-label={`About Git identity for ${name}`}
+                              className="grid size-4 shrink-0 place-items-center rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+                            >
+                              <GitBranch aria-hidden="true" className="size-3.5" />
                             </span>
-                            <span role="cell" className="flex justify-start">
+                          </TooltipTrigger>
+                          <TooltipContent>Name and email used for Git commits in this VM.</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                      <Input
+                        aria-label={`Git name for ${name}`}
+                        autoComplete="off"
+                        className="h-7 min-w-0 flex-[0.8] rounded-md px-2 text-[11px] md:text-[11px]"
+                        placeholder="Name"
+                        disabled={disabled}
+                        value={identity.name}
+                        onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, name: event.target.value })}
+                      />
+                      <Input
+                        aria-label={`Git email for ${name}`}
+                        autoComplete="off"
+                        className="h-7 min-w-0 flex-[1.2] rounded-md px-2 text-[11px] md:text-[11px]"
+                        inputMode="email"
+                        placeholder="Email"
+                        type="email"
+                        disabled={disabled}
+                        value={identity.email}
+                        onChange={(event) => onWorkspaceIdentityChange(name, { ...identity, email: event.target.value })}
+                      />
+                      <label className="flex shrink-0 items-center gap-1 text-[11px]">
+                        <Checkbox
+                          aria-label={`Apply Git identity to ${name}`}
+                          checked={identity.apply}
+                          disabled={disabled}
+                          onCheckedChange={(checked) => onWorkspaceIdentityChange(name, { ...identity, apply: checked === true })}
+                        />
+                        Apply
+                      </label>
+                      <TooltipProvider delayDuration={150}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              className="inline-flex shrink-0"
+                              tabIndex={currentHostGitIdentity ? undefined : 0}
+                              aria-label={currentHostGitIdentity ? undefined : `Reset Git identity for ${name}`}
+                            >
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon-xs"
-                                aria-label={`Remove ${selection.repository} from ${name}`}
-                                disabled={disabled || !repositoryControlsAvailable}
-                                onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
+                                aria-label={`Reset Git identity for ${name}`}
+                                aria-describedby={currentHostGitIdentity ? undefined : "host-git-identity-unavailable"}
+                                disabled={disabled || !currentHostGitIdentity}
+                                onClick={() => onResetWorkspaceIdentity(name)}
                               >
-                                <X aria-hidden="true" />
+                                <RotateCcw aria-hidden="true" className="size-3" />
                               </Button>
                             </span>
+                          </TooltipTrigger>
+                          <TooltipContent>{`Reset Git identity for ${name}`}</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                    {connectionState === "connected" && (
+                      <>
+                        {repositoryControlsAvailable && (
+                          <RepositoryCombobox
+                            workspace={name}
+                            repositoryOptions={repositoryOptions}
+                            selectedRepositories={selections}
+                            disabled={disabled}
+                            onAdd={(repository) => onWorkspaceSelectionsChange(name, [...selections, { repository, allowPushes: false }])}
+                          />
+                        )}
+                        {selections.length > 0 && (
+                          <div role="table" aria-label={`Selected repositories for ${name}`} className="overflow-hidden rounded-md border border-border">
+                            <div role="row" className={`grid ${repositoryGridColumns} items-center gap-2 bg-muted/50 px-2 py-1.5 text-left text-[11px] font-medium text-muted-foreground`}>
+                              <span role="columnheader">Repository</span>
+                              <span role="columnheader" className="flex items-center justify-start gap-0.5 text-left">
+                                Allow pushes
+                                <TooltipProvider delayDuration={150}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button type="button" variant="ghost" size="icon-xs" className="size-5" aria-label="About Allow pushes">
+                                        <Info aria-hidden="true" className="size-3" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Allow pushing to this repo from inside this VM.</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </span>
+                              <span role="columnheader" className="sr-only">Remove</span>
+                            </div>
+                            {selections.map((selection) => (
+                              <div key={selection.repository} role="row" className={`grid ${repositoryGridColumns} items-center gap-2 border-t border-border px-2 py-2 text-left`}>
+                                <span role="cell" className="min-w-0 break-all text-xs">{selection.repository}</span>
+                                <span role="cell" className="flex justify-start">
+                                  <Checkbox
+                                    aria-label={`Allow pushes for ${selection.repository}`}
+                                    checked={selection.allowPushes}
+                                    disabled={disabled || !repositoryControlsAvailable}
+                                    onCheckedChange={(checked) => onWorkspaceSelectionsChange(name, selections.map((item) => (
+                                      item.repository === selection.repository ? { ...item, allowPushes: checked === true } : item
+                                    )))}
+                                  />
+                                </span>
+                                <span role="cell" className="flex justify-start">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    aria-label={`Remove ${selection.repository} from ${name}`}
+                                    disabled={disabled || !repositoryControlsAvailable}
+                                    onClick={() => onWorkspaceSelectionsChange(name, selections.filter(({ repository }) => repository !== selection.repository))}
+                                  >
+                                    <X aria-hidden="true" />
+                                  </Button>
+                                </span>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
+                        )}
+                      </>
                     )}
-                  </>
-                )}
-              </div>
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
             )
           })}
         </div>

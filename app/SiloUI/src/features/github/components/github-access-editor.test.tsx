@@ -1,4 +1,5 @@
 import { render, screen, within } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
 import { GitHubAccessEditor } from "@/features/github/components/github-access-editor"
@@ -42,5 +43,40 @@ describe("GitHubAccessEditor", () => {
     expect(within(editor).getByRole("combobox", { name: "Add repository to dev" })).toBeDisabled()
     expect(within(editor).getByRole("checkbox", { name: "Allow pushes for acme/silo" })).toBeDisabled()
     expect(within(editor).getByRole("button", { name: "Remove acme/silo from dev" })).toBeDisabled()
+  })
+
+  it("collapses sandbox sections independently while leaving them expanded initially", async () => {
+    const user = userEvent.setup()
+    render(
+      <GitHubAccessEditor
+        workspaces={[{ name: "dev" }, { name: "playgrounds" }]}
+        connectionState="connected"
+        repositoryOptions={["acme/silo"]}
+        workspaceSelections={{ dev: [{ repository: "acme/silo", allowPushes: true }], playgrounds: [] }}
+        workspaceIdentities={{
+          dev: { name: "Taylor Example", email: "taylor@example.com", apply: true },
+          playgrounds: { name: "Taylor Example", email: "taylor@example.com", apply: true },
+        }}
+        currentHostGitIdentity={{ name: "Taylor Example", email: "taylor@example.com" }}
+        onConnect={vi.fn()}
+        onWorkspaceSelectionsChange={vi.fn()}
+        onWorkspaceIdentityChange={vi.fn()}
+        onResetWorkspaceIdentity={vi.fn()}
+      />,
+    )
+
+    const devDisclosure = screen.getByRole("button", { name: "dev" })
+    const playgroundsDisclosure = screen.getByRole("button", { name: "playgrounds" })
+    expect(devDisclosure).toHaveAttribute("aria-expanded", "true")
+    expect(playgroundsDisclosure).toHaveAttribute("aria-expanded", "true")
+
+    await user.click(devDisclosure)
+    expect(devDisclosure).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByRole("group", { name: "Git identity for dev" })).not.toBeInTheDocument()
+    expect(screen.getByRole("group", { name: "Git identity for playgrounds" })).toBeVisible()
+
+    await user.click(devDisclosure)
+    expect(devDisclosure).toHaveAttribute("aria-expanded", "true")
+    expect(screen.getByRole("group", { name: "Git identity for dev" })).toBeVisible()
   })
 })

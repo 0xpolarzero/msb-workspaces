@@ -971,6 +971,12 @@ describe("application", () => {
     expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/silo" })).toBeChecked()
     expect(within(repositories).getByRole("checkbox", { name: "Allow pushes for acme/design-system" })).not.toBeChecked()
     expect(within(repositories).getByRole("button", { name: "Remove acme/silo from dev" })).toBeVisible()
+
+    const devDisclosure = github.getByRole("button", { name: "dev" })
+    await user.click(devDisclosure)
+    expect(devDisclosure).toHaveAttribute("aria-expanded", "false")
+    expect(github.queryByRole("group", { name: "Git identity for dev" })).not.toBeInTheDocument()
+    expect(github.getByRole("group", { name: "Git identity for playgrounds" })).toBeVisible()
   })
 
   it("searches and edits GitHub access, exposes dirty actions, and rolls Cancel back", async () => {
