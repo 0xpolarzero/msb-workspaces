@@ -199,7 +199,7 @@ function Files({
         <section
           aria-label="Repositories"
           className={cn(
-            "flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:max-h-none lg:pr-5",
+            "collapsible-motion flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:max-h-none lg:pr-5",
             repositoriesOpen ? fileTreeOpen ? "max-h-[50%] shrink-0" : "flex-1" : "shrink-0",
           )}
           data-files-pane="repositories"
@@ -214,34 +214,36 @@ function Files({
               <DisclosureIndicator />
             </CollapsibleTrigger>
           </div>
-          <CollapsibleContent className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="repositories">
-            {repositories.length > 0 ? (
-              <div className="divide-y divide-border" role="list" aria-label="Repositories">
-                {repositories.map(({ workspace, repository }) => {
-                  const operation = pushOperations.get(`${workspace.machine.name}:${repository.path}`)
-                  const push = () => onPushRepository(workspace.machine.name, repository.path, operation?.commitCount ?? repository.ahead)
-                  return (
-                    <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
-                      <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
-                      <div className="min-w-0">
-                        <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
-                          <div className="truncate text-sm font-medium">{repository.path}</div>
-                          <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
-                        </div>
-                        <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
-                        {(operation || repository.ahead > 0) && (
-                          <div className="mt-2 flex min-h-6 items-start" data-repository-actions>
-                            {operation
-                              ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
-                              : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
+          <CollapsibleContent className="collapsible-content-motion min-h-0 flex-1" data-files-pane-content="repositories">
+            <div className="h-full overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="repositories">
+              {repositories.length > 0 ? (
+                <div className="divide-y divide-border" role="list" aria-label="Repositories">
+                  {repositories.map(({ workspace, repository }) => {
+                    const operation = pushOperations.get(`${workspace.machine.name}:${repository.path}`)
+                    const push = () => onPushRepository(workspace.machine.name, repository.path, operation?.commitCount ?? repository.ahead)
+                    return (
+                      <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
+                        <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
+                            <div className="truncate text-sm font-medium">{repository.path}</div>
+                            <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
                           </div>
-                        )}
+                          <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
+                          {(operation || repository.ahead > 0) && (
+                            <div className="mt-2 flex min-h-6 items-start" data-repository-actions>
+                              {operation
+                                ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
+                                : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  )
-                })}
-              </div>
-            ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
+                    )
+                  })}
+                </div>
+              ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
+            </div>
           </CollapsibleContent>
         </section>
       </Collapsible>
@@ -254,7 +256,7 @@ function Files({
         <section
           aria-label="File tree"
           className={cn(
-            "flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:border-l lg:border-border lg:pl-5",
+            "collapsible-motion flex min-h-0 min-w-0 flex-col overflow-hidden lg:h-full lg:border-l lg:border-border lg:pl-5",
             fileTreeOpen ? "flex-1" : "shrink-0",
           )}
           data-files-pane="file-tree"
@@ -269,10 +271,12 @@ function Files({
               <DisclosureIndicator />
             </CollapsibleTrigger>
           </div>
-          <CollapsibleContent className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="file-tree">
-            <ul className="grid gap-0.5" aria-label="File tree">
-              {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}
-            </ul>
+          <CollapsibleContent className="collapsible-content-motion min-h-0 flex-1" data-files-pane-content="file-tree">
+            <div className="h-full overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="file-tree">
+              <ul className="grid gap-0.5" aria-label="File tree">
+                {workspaces.map((workspace) => <WorkspaceFileTree key={workspace.machine.id} workspace={workspace} />)}
+              </ul>
+            </div>
           </CollapsibleContent>
         </section>
       </Collapsible>

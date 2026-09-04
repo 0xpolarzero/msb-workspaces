@@ -163,34 +163,34 @@ html.dark {
   }
 }
 
-.activity-output-content {
+.collapsible-content-motion {
   overflow: hidden;
 }
 
-.activity-output-content[data-state="open"] {
-  animation: activity-output-reveal 180ms ease-out;
+.collapsible-content-motion[data-state="open"] {
+  animation: collapsible-content-reveal 180ms ease-out;
 }
 
-.activity-output-content[data-state="closed"] {
-  animation: activity-output-collapse 180ms ease-in;
+.collapsible-content-motion[data-state="closed"] {
+  animation: collapsible-content-collapse 180ms ease-in;
 }
 
-@keyframes activity-output-reveal {
+@keyframes collapsible-content-reveal {
   from { height: 0; }
   to { height: var(--radix-collapsible-content-height); }
 }
 
-@keyframes activity-output-collapse {
+@keyframes collapsible-content-collapse {
   from { height: var(--radix-collapsible-content-height); }
   to { height: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .activity-output-content {
+  .collapsible-content-motion {
     animation: none !important;
   }
 
-  .activity-output-collapsible .disclosure-caret {
+  .collapsible-motion .disclosure-caret {
     transition-duration: 0s;
   }
 }
