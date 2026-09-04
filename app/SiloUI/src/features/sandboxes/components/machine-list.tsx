@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react"
 import { Check, Copy, GripVertical, Monitor, Pencil, Plus, Server, Trash2 } from "lucide-react"
 
+import { InlineConfirmation } from "@/components/inline-confirmation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -203,24 +204,6 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
     return next
   }, [editor, machines, sortPriority])
 
-  useEffect(() => {
-    function dismiss(event: PointerEvent) {
-      if (!pendingDelete) return
-      const target = event.target
-      if (target instanceof Element && target.closest(`[data-pending-delete-row="${pendingDelete}"]`)) return
-      setPendingDelete(null)
-    }
-    function escape(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") setPendingDelete(null)
-    }
-    document.addEventListener("pointerdown", dismiss, true)
-    document.addEventListener("keydown", escape)
-    return () => {
-      document.removeEventListener("pointerdown", dismiss, true)
-      document.removeEventListener("keydown", escape)
-    }
-  }, [pendingDelete])
-
   function beginOperation() {
     setPendingDelete(null)
     setOperationError("")
@@ -367,7 +350,6 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                   key={machine.id}
                   data-machine-id={machine.id}
                   data-sandbox-name={machine.name}
-                  data-pending-delete-row={deleteArmed ? machine.id : undefined}
                   aria-busy={presentation?.busy || undefined}
                   className="min-w-0 bg-background"
                   onDragOver={(event) => event.preventDefault()}
@@ -407,14 +389,16 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                       hoverActions={presentation?.suppressInteractions ? undefined : <>
                         <SandboxAction label={`Edit ${machine.name}`} disabled={interactionDisabled} onClick={() => startEdit(machine)}><Pencil /></SandboxAction>
                         <SandboxAction label={`Duplicate ${machine.name}`} disabled={interactionDisabled} onClick={() => startDuplicate(machine)}><Copy /></SandboxAction>
-                        <SandboxAction
-                          label={deleteArmed ? `Confirm deletion of ${machine.name}` : `Delete ${machine.name}`}
-                          destructive={deleteArmed}
-                          disabled={interactionDisabled}
-                          onClick={() => remove(machine)}
-                        >
-                          {deleteArmed ? <Check /> : <Trash2 />}
-                        </SandboxAction>
+                        <InlineConfirmation active={deleteArmed} onDismiss={() => setPendingDelete(null)}>
+                          <SandboxAction
+                            label={deleteArmed ? `Confirm deletion of ${machine.name}` : `Delete ${machine.name}`}
+                            destructive={deleteArmed}
+                            disabled={interactionDisabled}
+                            onClick={() => remove(machine)}
+                          >
+                            {deleteArmed ? <Check /> : <Trash2 />}
+                          </SandboxAction>
+                        </InlineConfirmation>
                       </>}
                     />
                   )}

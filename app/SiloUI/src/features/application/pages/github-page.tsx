@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Check, Loader2, TriangleAlert } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { InlineConfirmation } from "@/components/inline-confirmation"
 import type {
   ApplicationActions,
   ApplicationGitHubConfiguration,
@@ -207,18 +208,20 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
     </div>
   ) : undefined
 
-  const connectedActions = confirmingDisconnect ? (
-    <>
-      <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingDisconnect(false)}>Cancel</Button>
-      <Button type="button" variant="destructive" size="xs" onClick={disconnect}>Disconnect</Button>
-    </>
-  ) : (
-    <>
-      <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
-      <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => {
-        setConfirmingDisconnect(true)
-      }}>Disconnect</Button>
-    </>
+  const connectedActions = (
+    <InlineConfirmation active={confirmingDisconnect} onDismiss={() => setConfirmingDisconnect(false)}>
+      {confirmingDisconnect ? (
+        <>
+          <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingDisconnect(false)}>Cancel</Button>
+          <Button type="button" variant="destructive" size="xs" onClick={disconnect}>Disconnect</Button>
+        </>
+      ) : (
+        <>
+          <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
+          <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => setConfirmingDisconnect(true)}>Disconnect</Button>
+        </>
+      )}
+    </InlineConfirmation>
   )
 
   return (

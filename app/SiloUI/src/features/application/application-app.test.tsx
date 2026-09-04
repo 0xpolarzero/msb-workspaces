@@ -1056,6 +1056,16 @@ describe("application", () => {
     expect(github.getByRole("button", { name: "Cancel" })).toBeVisible()
     expect(github.getByRole("button", { name: "Disconnect" })).toBeVisible()
     expect(github.queryByRole("heading", { name: "Not connected" })).not.toBeInTheDocument()
+    await user.keyboard("{Escape}")
+    expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+    expect(actions.disconnectGitHub).not.toHaveBeenCalled()
+
+    await user.click(github.getByRole("button", { name: "Disconnect" }))
+    fireEvent.pointerDown(github.getByLabelText("Git name for dev"))
+    expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
+    expect(actions.disconnectGitHub).not.toHaveBeenCalled()
+
+    await user.click(github.getByRole("button", { name: "Disconnect" }))
     await user.click(github.getByRole("button", { name: "Cancel" }))
     expect(actions.disconnectGitHub).not.toHaveBeenCalled()
     expect(github.getByText("Connected as @taylor")).toBeVisible()

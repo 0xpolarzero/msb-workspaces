@@ -915,7 +915,9 @@ describe("onboarding", () => {
     expect(screen.getByRole("button", { name: "Delete dev" })).toBeVisible()
 
     await user.click(screen.getByRole("button", { name: "Delete dev" }))
-    fireEvent.pointerDown(screen.getByRole("heading", { name: "Creating your sandboxes" }))
+    const devRow = screen.getByTestId("machine-list").querySelector('[data-sandbox-name="dev"]')
+    expect(devRow).not.toBeNull()
+    fireEvent.pointerDown(within(devRow as HTMLElement).getByText("dev"))
     expect(screen.queryByRole("button", { name: "Confirm deletion of dev" })).not.toBeInTheDocument()
     expect(saveMachineConfiguration).not.toHaveBeenCalled()
 
