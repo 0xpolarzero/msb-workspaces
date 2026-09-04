@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
-import { DetailCard, WorkspaceStateDot, WorkspaceStatus } from "@/features/application/components/application-ui"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { DetailCard, WorkspaceStateDot } from "@/features/application/components/application-ui"
 import type { ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection, WorkspaceState } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
@@ -405,34 +406,76 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
   )
 }
 
-function Network({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
+function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; browser: string }) {
   if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to see its network services." />
+  const rows = workspaces
+    .flatMap((workspace) => workspace.ports.map((port) => ({ workspace, port })))
+    .sort((left, right) => {
+      const listeningRank = (listening: boolean | null) => listening === true ? 0 : listening === null ? 1 : 2
+      const rankDifference = listeningRank(left.port.listening) - listeningRank(right.port.listening)
+      if (rankDifference !== 0) return rankDifference
+      const workspaceDifference = left.workspace.machine.name.localeCompare(right.workspace.machine.name)
+      return workspaceDifference !== 0 ? workspaceDifference : left.port.port - right.port.port
+    })
+
+  if (rows.length === 0) return <EmptyState title="No configured ports" description="Configured sandbox ports will appear here." />
 
   return (
-    <div className="grid gap-3">
-      <p className="text-xs text-muted-foreground">Each sandbox has its own .silo.test address, so the same port can be active in multiple sandboxes.</p>
-      {workspaces.map((workspace) => (
-        <section key={workspace.machine.id} aria-label={`Network for ${workspace.machine.name}`}>
-          <DetailCard title={workspace.machine.name} description={workspace.host} action={<WorkspaceStatus state={workspace.state} />}>
-            {workspace.ports.length > 0 ? (
-              <div className="divide-y divide-border">
-                {workspace.ports.map((port) => (
-                  <div key={`${workspace.machine.id}:${port.port}`} className="grid grid-cols-[1rem_4rem_minmax(0,1fr)_auto] items-center gap-2 py-2.5 first:pt-0 last:pb-0">
-                    <span className={cn("size-2 rounded-full", port.active ? "bg-emerald-500" : "bg-muted-foreground/45")} aria-hidden="true" />
-                    <span className="font-mono text-xs">:{port.port}</span>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">{port.process}</div>
-                      <div className="truncate text-xs text-muted-foreground">{port.url ?? "Configured, not active"}</div>
-                    </div>
-                    {port.url && <Button variant="ghost" size="icon-sm" aria-label={`Open ${workspace.machine.name} port ${port.port}`}><ExternalLink /></Button>}
-                  </div>
-                ))}
-              </div>
-            ) : <p className="text-sm text-muted-foreground">No configured ports.</p>}
-          </DetailCard>
-        </section>
-      ))}
-    </div>
+    <TooltipProvider delayDuration={150}>
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <div role="table" aria-label="Network" className="min-w-[42rem] text-xs">
+          <div role="row" className="grid grid-cols-[5rem_minmax(14rem,1fr)_7rem_7rem_3.5rem] items-center gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
+            <span role="columnheader">Port</span>
+            <span role="columnheader">URL</span>
+            <span role="columnheader">State</span>
+            <span role="columnheader">Sandbox</span>
+            <span role="columnheader" className="sr-only">Actions</span>
+          </div>
+          <div className="divide-y divide-border bg-card">
+            {rows.map(({ workspace, port }) => {
+              const url = `http://${workspace.host}:${port.port}`
+              const state = port.listening === true ? "Listening" : port.listening === false ? "Configured" : "Unknown"
+              return (
+                <div key={`${workspace.machine.id}:${port.port}`} role="row" className="group/network-row grid grid-cols-[5rem_minmax(14rem,1fr)_7rem_7rem_3.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
+                  <span role="cell" className="font-mono font-medium">{port.port}</span>
+                  <span role="cell" className="truncate font-mono text-muted-foreground">{url}</span>
+                  <span role="cell" className="inline-flex items-center gap-1.5">
+                    <span className={cn("size-2 rounded-full", port.listening === true ? "bg-emerald-500" : port.listening === null ? "bg-amber-500" : "bg-muted-foreground/45")} aria-hidden="true" />
+                    <span className={port.listening === true ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}>{state}</span>
+                  </span>
+                  <span role="cell"><WorkspaceBadge name={workspace.machine.name} state={workspace.state} /></span>
+                  <span role="cell" className="flex justify-end gap-1 opacity-0 transition-opacity group-hover/network-row:opacity-100 group-focus-within/network-row:opacity-100">
+                    {port.listening === true && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button variant="ghost" size="icon-xs" aria-label={`Open ${url} in ${browser}`}>
+                            <ExternalLink aria-hidden="true" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>{`Open in ${browser}`}</TooltipContent>
+                      </Tooltip>
+                    )}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Copy ${url}`}
+                          onClick={() => void navigator.clipboard.writeText(url).catch(() => undefined)}
+                        >
+                          <Copy aria-hidden="true" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Copy URL</TooltipContent>
+                    </Tooltip>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </TooltipProvider>
   )
 }
 
@@ -467,6 +510,7 @@ export function WorkspacesPage({
   section,
   logQuery,
   repositoryPushOperations,
+  browser,
   onWorkspaceFilterChange,
   onLogQueryChange,
   onPushRepository,
@@ -477,6 +521,7 @@ export function WorkspacesPage({
   section: WorkspaceDetailSection
   logQuery: string
   repositoryPushOperations: RepositoryPushOperation[]
+  browser: string
   onWorkspaceFilterChange: (excludedWorkspaceIds: Set<string>) => void
   onLogQueryChange: (query: string) => void
   onPushRepository: (workspace: string, repositoryPath: string, commitCount: number) => void
@@ -492,7 +537,7 @@ export function WorkspacesPage({
       <WorkspaceFilterBar workspaces={workspaces} excludedWorkspaceIds={excludedWorkspaceIds} onChange={onWorkspaceFilterChange} />
       {section === "files" && <Files workspaces={visibleWorkspaces} repositoryPushOperations={repositoryPushOperations} onPushRepository={onPushRepository} onDismissRepositoryPush={onDismissRepositoryPush} />}
       {section === "logs" && <Logs workspaces={visibleWorkspaces} query={logQuery} onQueryChange={onLogQueryChange} />}
-      {section === "network" && <Network workspaces={visibleWorkspaces} />}
+      {section === "network" && <Network workspaces={visibleWorkspaces} browser={browser} />}
       {section === "activity" && <ActivityLog workspaces={visibleWorkspaces} />}
     </div>
   )

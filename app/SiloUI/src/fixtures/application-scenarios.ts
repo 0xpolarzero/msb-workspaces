@@ -83,9 +83,9 @@ const baseWorkspaces: ApplicationWorkspace[] = [
       { name: ".gitconfig", kind: "file" },
     ],
     ports: [
-      { port: 3000, process: "web", url: "https://dev.silo.test", active: true },
-      { port: 5173, process: "vite", active: false },
-      { port: 8080, process: "api", active: false },
+      { port: 3000, listening: true },
+      { port: 5173, listening: false },
+      { port: 8080, listening: false },
     ],
     logs: [
       "19:18:42  web       Ready on http://0.0.0.0:3000",
@@ -145,7 +145,7 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
       ...workspace,
       state: "running",
       stateDetail: "Running and verified",
-      ports: workspace.ports.length > 0 ? workspace.ports : [{ port: 3000, process: "web", active: true }],
+      ports: workspace.ports.length > 0 ? workspace.ports : [{ port: 3000, listening: true }],
     }))
   }
   if (scenario === "bootstrap-failure") {

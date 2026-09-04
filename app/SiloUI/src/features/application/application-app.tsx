@@ -149,6 +149,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
             section={visibleWorkspaceSection}
             logQuery={logQuery}
             repositoryPushOperations={repositoryPushOperations}
+            browser={applicationPreferences.browser}
             onWorkspaceFilterChange={setExcludedWorkspaceIds}
             onLogQueryChange={setLogQuery}
             onPushRepository={pushRepository}

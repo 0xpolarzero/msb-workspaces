@@ -175,8 +175,7 @@ describe("application", () => {
 
     await user.click(sandboxSections.getByRole("button", { name: "Network" }))
     expect(panel.queryByRole("region", { name: "Network for dev" })).not.toBeInTheDocument()
-    expect(panel.getByRole("region", { name: "Network for playgrounds" })).toBeVisible()
-    expect(panel.getByRole("region", { name: "Network for personal" })).toBeVisible()
+    expect(panel.getByText("No configured ports")).toBeVisible()
 
     await user.click(sandboxSections.getByRole("button", { name: "Activity" }))
     const activity = panel.getByRole("list", { name: "Recent activity" })
@@ -192,6 +191,48 @@ describe("application", () => {
     expect(panel.getByRole("list", { name: "Recent activity" })).toBeVisible()
     expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
     expect(filters.getByRole("button", { name: "All" })).toBeDisabled()
+  })
+
+  it("shows one truthful network table and uses the selected browser for opening ports", async () => {
+    const application = renderApplication()
+    const navigation = within(appNavigation())
+
+    await application.user.click(navigation.getByRole("button", { name: "Settings" }))
+    const settings = within(appPanel("Settings"))
+    const browser = settings.getByRole("combobox", { name: "Browser" })
+    await application.user.click(browser)
+    await application.user.click(screen.getByRole("option", { name: "Firefox" }))
+
+    await application.user.click(navigation.getByRole("button", { name: "Sandboxes" }))
+    const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
+    await application.user.click(sandboxSections.getByRole("button", { name: "Network" }))
+
+    const panel = within(appPanel("Sandboxes"))
+    const network = panel.getByRole("table", { name: "Network" })
+    expect(network.closest('[data-slot="card"]')).toBeNull()
+    expect(panel.queryByRole("heading", { name: "Network" })).not.toBeInTheDocument()
+    expect(panel.queryByText("Each sandbox has its own .silo.test address, so the same port can be active in multiple sandboxes.")).not.toBeInTheDocument()
+    expect(within(network).queryByText(/^(web|vite|api)$/)).not.toBeInTheDocument()
+
+    const rows = within(network).getAllByRole("row").slice(1)
+    expect(rows).toHaveLength(3)
+    expect(within(rows[0]).getByText("3000")).toBeVisible()
+    expect(within(rows[0]).getByText("Listening")).toHaveClass("text-emerald-700")
+    expect(within(rows[0]).getByText("http://dev.silo.test:3000")).toBeVisible()
+    expect(within(rows[0]).getByLabelText("dev, Running")).toBeVisible()
+    expect(within(rows[1]).getByText("Configured")).toBeVisible()
+
+    expect(rows[0]).toHaveClass("hover:bg-muted/55", "focus-within:bg-muted/55")
+    const open = within(rows[0]).getByRole("button", { name: "Open http://dev.silo.test:3000 in Firefox" })
+    const actions = open.closest('[role="cell"]') as HTMLElement
+    expect(actions).toHaveClass("opacity-0", "group-hover/network-row:opacity-100", "group-focus-within/network-row:opacity-100")
+    await application.user.hover(open)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Open in Firefox")
+    await application.user.unhover(open)
+
+    const copy = vi.spyOn(navigator.clipboard, "writeText")
+    await application.user.click(within(rows[0]).getByRole("button", { name: "Copy http://dev.silo.test:3000" }))
+    expect(copy).toHaveBeenCalledWith("http://dev.silo.test:3000")
   })
 
   it.each([

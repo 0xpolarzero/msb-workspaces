@@ -90,9 +90,7 @@ export type RepositoryPushOperation = {
 
 export interface ApplicationPort {
   port: number
-  process: string
-  url?: string
-  active: boolean
+  listening: boolean | null
 }
 
 export interface ApplicationFileEntry {
