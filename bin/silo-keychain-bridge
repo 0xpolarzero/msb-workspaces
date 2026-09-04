@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Silo Keychain bridge (Path C §5 hygiene, reviewer re-review).
+"""Silo Keychain bridge.
 
 Security.framework generic-password store used for the versioned JSON host
 GitHub credential record. The `security` CLI's prompted `-w` stdin mode reads

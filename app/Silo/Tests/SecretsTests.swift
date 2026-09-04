@@ -102,7 +102,7 @@ final class SecretsTests: XCTestCase {
 
     func testSecretsWorkspaceSnapshotRequiresExactCurrentKeys() throws {
         let withSecrets = """
-        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"needsRestart":false},"secrets":{"state":"restart-required","pendingCount":2,"reason":"Host-held secret changes are pending."},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null},"skippedPorts":[],"portWarning":""}
+        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"secrets":{"state":"restart-required","pendingCount":2,"reason":"Host-held secret changes are pending."},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null},"skippedPorts":[],"portWarning":""}
         """
         let snapshot = try SiloProtocolDecoder.decoder().decode(
             SiloWorkspaceSnapshot.self,
@@ -113,7 +113,7 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(snapshot.secrets.reason, "Host-held secret changes are pending.")
 
         let withoutSecrets = """
-        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"credential":{"state":"Ready","accessMode":"guest-read","verificationRepository":null,"accountLogin":null,"installationId":null,"accessExpiresAt":null,"needsRestart":false},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null}}
+        {"id":"dev","purpose":"Test","lifecycle":"Running","freshness":"fresh","statusObservedAt":null,"metricsObservedAt":null,"githubObservedAt":null,"activityObservedAt":null,"quarantine":{"state":"clear","reason":null},"resources":{"cpus":"2","maxCpus":"8","memory":"4GiB","maxMemory":"16GiB","rootDisk":"20GiB"},"network":{"host":"dev.silo.test","ip":"127.0.0.10"},"actionCapabilities":{"canStart":true,"canStop":true,"canRestart":true,"canOpenTerminal":true,"canPush":true,"reason":null,"recovery":null}}
         """
         XCTAssertThrowsError(try SiloProtocolDecoder.decoder().decode(
             SiloWorkspaceSnapshot.self,
@@ -490,7 +490,6 @@ final class SecretsTests: XCTestCase {
         func snapshot(
             id: String,
             lifecycle: SiloLifecycle,
-            credentialNeedsRestart: Bool,
             secrets: SiloSecretsSnapshot,
             canRestart: Bool = true,
             capabilityReason: String? = nil,
@@ -502,15 +501,6 @@ final class SecretsTests: XCTestCase {
                 lifecycle: lifecycle,
                 freshness: .fresh,
                 quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
-                credential: SiloCredentialSnapshot(
-                    state: .ready,
-                    accessMode: "guest-read",
-                    verificationRepository: nil,
-                    accountLogin: nil,
-                    installationId: nil,
-                    accessExpiresAt: nil,
-                    needsRestart: credentialNeedsRestart
-                ),
                 secrets: secrets,
                 resources: SiloResourceSnapshot(
                     cpus: "2", maxCpus: "8", memory: "4GiB", maxMemory: "16GiB", rootDisk: "20GiB"
@@ -533,7 +523,6 @@ final class SecretsTests: XCTestCase {
                 snapshot(
                     id: "dev",
                     lifecycle: .running,
-                    credentialNeedsRestart: false,
                     secrets: SiloSecretsSnapshot(
                         state: .restartRequired,
                         pendingCount: 1,
@@ -546,7 +535,6 @@ final class SecretsTests: XCTestCase {
                 snapshot(
                     id: "playgrounds",
                     lifecycle: .stopped,
-                    credentialNeedsRestart: true,
                     secrets: SiloSecretsSnapshot(
                         state: .appliesOnNextStart,
                         pendingCount: 2,
@@ -556,7 +544,6 @@ final class SecretsTests: XCTestCase {
                 snapshot(
                     id: "personal",
                     lifecycle: .stopped,
-                    credentialNeedsRestart: false,
                     secrets: SiloSecretsSnapshot(state: .active, pendingCount: 0, reason: nil)
                 )
             ]
@@ -609,7 +596,6 @@ final class SecretsTests: XCTestCase {
         XCTAssertEqual(dev.secrets.pendingCount, 1)
         XCTAssertEqual(dev.secrets.reason, "Host-held secret changes are pending.")
         // The GitHub credential state must remain untouched by secret state.
-        XCTAssertEqual(dev.credential, .ready)
         XCTAssertFalse(dev.actionAvailability(for: .restart).isAllowed)
         XCTAssertEqual(
             dev.repairRequirement,
@@ -628,7 +614,6 @@ final class SecretsTests: XCTestCase {
         let playgrounds = try XCTUnwrap(model.workspaces.first { $0.id == .playgrounds })
         XCTAssertEqual(playgrounds.secrets.status, .appliesOnNextStart)
         XCTAssertEqual(playgrounds.secrets.pendingCount, 2)
-        XCTAssertEqual(playgrounds.credential, .ready)
 
         let personal = try XCTUnwrap(model.workspaces.first { $0.id == .personal })
         XCTAssertEqual(personal.secrets.status, .active)
@@ -1159,15 +1144,6 @@ final class SecretsTests: XCTestCase {
                 lifecycle: lifecycle,
                 freshness: .fresh,
                 quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
-                credential: SiloCredentialSnapshot(
-                    state: .ready,
-                    accessMode: "guest-read",
-                    verificationRepository: nil,
-                    accountLogin: nil,
-                    installationId: nil,
-                    accessExpiresAt: nil,
-                    needsRestart: false
-                ),
                 secrets: secrets,
                 resources: SiloResourceSnapshot(
                     cpus: "2", maxCpus: "8", memory: "4GiB", maxMemory: "16GiB", rootDisk: "20GiB"
@@ -1310,15 +1286,6 @@ final class SecretsTests: XCTestCase {
                     lifecycle: .running,
                     freshness: .fresh,
                     quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
-                    credential: SiloCredentialSnapshot(
-                        state: .ready,
-                        accessMode: "guest-read",
-                        verificationRepository: nil,
-                        accountLogin: nil,
-                        installationId: nil,
-                        accessExpiresAt: nil,
-                        needsRestart: false
-                    ),
                     secrets: SiloSecretsSnapshot(
                         state: .error,
                         pendingCount: 1,

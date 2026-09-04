@@ -98,7 +98,7 @@ install -m 0755 "$SCRIPT_DIR/bin/silo-keychain-bridge" "$HOME/.local/libexec/sil
 install -m 0755 "$SCRIPT_DIR/lib/silo-github-relay.py" "$HOME/.local/libexec/silo-github-relay.py"
 install -m 0755 "$SCRIPT_DIR/lib/silo-github-shuttle.py" "$HOME/.local/libexec/silo-github-shuttle.py"
 install -m 0755 "$SCRIPT_DIR/lib/silo-port-forwarder.py" "$HOME/.local/libexec/silo-port-forwarder.py"
-# Path C §4 proxy stack: wrapper + core + upstream + vendored h11. The
+# GitHub proxy stack: wrapper + core + upstream + vendored h11. The
 # wrapper resolves ../lib relative to its own location, so these exact
 # destinations keep it working unchanged.
 install -m 0755 "$SCRIPT_DIR/bin/silo-github-proxy" "$HOME/.local/bin/silo-github-proxy"
@@ -116,8 +116,8 @@ if [[ -d "$SCRIPT_DIR/lib/vendor/h11" ]]; then
   mkdir -p "$h11_tmp" || fatal "could not stage the vendored h11 tree"
   (
     cd "$SCRIPT_DIR/lib/vendor/h11" || exit 1
-    find . -type d -exec mkdir -p "$h11_tmp/{}" \;
-    find . -type f -exec install -m 0644 "{}" "$h11_tmp/{}" \;
+    find . -type d -name __pycache__ -prune -o -type d -exec mkdir -p "$h11_tmp/{}" \;
+    find . -type d -name __pycache__ -prune -o -type f ! -name '*.pyc' -exec install -m 0644 "{}" "$h11_tmp/{}" \;
   ) || { rm -rf "$h11_tmp"; fatal "could not stage the vendored h11 tree"; }
   find "$h11_tmp" -type d -exec chmod 0755 {} \;
   rm -rf "$HOME/.local/lib/vendor/h11"
@@ -183,10 +183,8 @@ workspace_config_value() {
 }
 workspace_host() { printf '%s.silo.test\n' "$1"; }
 
-# The current Silo GitHub transport is repo-aware local mode.
-: "${SILO_GITHUB_MODE:=local}"
+# Silo uses one repo-aware host-side GitHub transport.
 : "${SILO_GITHUB_PROXY_PORT:=18446}"
-[[ "$SILO_GITHUB_MODE" == local ]] || fatal "invalid SILO_GITHUB_MODE '$SILO_GITHUB_MODE' (expected local)"
 
 verify_installed_proxy_hashes() {
   # Fail-closed: every installed proxy-stack file must match MANIFEST.txt.
@@ -239,7 +237,7 @@ SILO_VENDOR_H11_DIR="$HOME/.local/lib/vendor/h11" SILO_MANIFEST_FILE="$SCRIPT_DI
 
 log "Rendering the GitHub proxy launch agent"
 "$HOME/.local/bin/silo" __proxy-plist-render || fatal "could not render the GitHub proxy launch agent plist"
-if [[ "$TEST_MODE" != 1 && "$SILO_GITHUB_MODE" == local ]]; then
+if [[ "$TEST_MODE" != 1 ]]; then
   "$HOME/.local/bin/silo" github proxy install || fatal "could not install the GitHub proxy launch agent"
   # Socket-activated agent (Wait=false): a loaded, registered job owns the
   # 127.0.0.1:18446 listener, so loaded == idle-valid and live.
@@ -685,11 +683,11 @@ Setup complete. The installer has already run the full local end-to-end test.
 Next:
   1. exec zsh -l
   2. silo identity "YOUR NAME" YOUR_EMAIL@example.com
-  3. Connect GitHub per workspace: open Silo -> GitHub -> Connect,
+  3. Configure GitHub per workspace: open Silo -> GitHub,
      then tick the repositories each workspace may access. The installer
      installs the `gh` CLI (Homebrew), so a clean Mac signs in with gh's web
      OAuth flow and silo reuses the authenticated session automatically.
-     CLI fallbacks: silo github auth | silo github status
+     Terminal: silo github auth | silo github status
 
 Daily use:
   silo dev

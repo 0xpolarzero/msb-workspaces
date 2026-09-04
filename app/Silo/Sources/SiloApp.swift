@@ -23,102 +23,38 @@ struct SiloApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
     private let runner: SiloCommandRunner
-    private let credentialBroker: CredentialBroker?
-    private let connect: SiloConnectClient?
-    private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let client: SiloClient
     let appNavigation = AppNavigationState()
     let applicationState = ApplicationState()
     let applicationPreferences: ApplicationPreferenceStore
-    let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    let githubInstallationURL: URL?
-    let accessMode: GitHubAccessMode
-    let policyStore: GitHubPolicyStore?
-    let provider: (any GitHubProviding)?
+    let policyStore: GitHubPolicyStore
+    let provider: any GitHubProviding
     let githubSettingsState: GitHubSettingsState
     private var pendingAppRoute: AppRoute?
 
-    /// Test seam: local-mode init must never build or pass any Connect
-    /// dependency (broker, client, refresher, coordinator).
-    var hasConnectDependencies: Bool {
-        credentialBroker != nil || connect != nil ||
-            tokenRefreshCoordinator != nil || authorizationCoordinator != nil
-    }
-
-    /// Test seam: the CLI client itself must be broker-free in local mode.
-    var clientHasConnectDependencies: Bool {
-        client.hasConnectDependencies
-    }
-
     convenience override init() {
-        let configuration = Self.readConnectConfiguration()
-        self.init(connectConfiguration: configuration, policyStore: nil)
+        self.init(policyStore: nil)
     }
 
-    /// Test seam + single construction path: resolves the mode BEFORE
-    /// constructing any Connect dependency, so local mode never instantiates
-    /// or passes the Connect broker/client/coordinator (no credentials.json
-    /// reads, no Connect Keychain access, no fallback broker creation).
     init(
-        connectConfiguration: SiloConnectConfiguration,
         policyStore: GitHubPolicyStore?,
-        applicationPreferences: ApplicationPreferenceStore? = nil,
-        makeBroker: () -> CredentialBroker? = { try? CredentialBroker() }
+        applicationPreferences: ApplicationPreferenceStore? = nil
     ) {
-        let accessMode: GitHubAccessMode = connectConfiguration.hasTrustedScopeAttestation ? .connect : .local
-        self.accessMode = accessMode
-        self.githubInstallationURL = connectConfiguration.installationURL
         self.applicationPreferences = applicationPreferences ?? Self.makeApplicationPreferences()
         let runner = SiloCommandRunner()
         self.runner = runner
-        if accessMode == .connect {
-            let connect = SiloConnectClient(configuration: connectConfiguration)
-            let broker = makeBroker()
-            let refresher = broker.map {
-                TokenRefreshCoordinator(broker: $0, connect: connect)
-            }
-            let siloClient = SiloClient(
-                runner: runner,
-                credentialBroker: broker,
-                tokenRefreshCoordinator: refresher
-            )
-            self.connect = connect
-            self.credentialBroker = broker
-            self.tokenRefreshCoordinator = refresher
-            self.client = siloClient
-            self.authorizationCoordinator = broker.map {
-                GitHubAuthorizationCoordinator(
-                    broker: $0,
-                    connect: connect,
-                    tokenRefreshCoordinator: refresher,
-                    siloClient: siloClient
-                )
-            }
-            self.policyStore = nil
-            self.provider = nil
-        } else {
-            // Local mode: no Connect broker, client, refresher, or
-            // coordinator. The CLI client is broker-free, so routine local
-            // operations never request Connect Keychain records.
-            self.connect = nil
-            self.credentialBroker = nil
-            self.tokenRefreshCoordinator = nil
-            self.client = SiloClient(runner: runner)
-            self.authorizationCoordinator = nil
-            let store = policyStore ?? GitHubPolicyStore.standard()
-            self.policyStore = store
-            self.provider = GitHubLocalProvider(
-                client: self.client,
-                policyStore: store,
-                workspaceConfigurations: BootstrapStateStore.persistedWorkspaceConfigurations()
-            )
-            store.startWatching()
-        }
-        self.githubSettingsState = GitHubSettingsState(
-            authorizationCoordinator: self.authorizationCoordinator,
-            provider: self.provider,
-            accessMode: accessMode
+        let client = SiloClient(runner: runner)
+        self.client = client
+        let store = policyStore ?? GitHubPolicyStore.standard()
+        self.policyStore = store
+        let provider = GitHubProvider(
+            client: client,
+            policyStore: store,
+            workspaceConfigurations: BootstrapStateStore.persistedWorkspaceConfigurations()
         )
+        self.provider = provider
+        store.startWatching()
+        self.githubSettingsState = GitHubSettingsState(provider: provider)
         super.init()
     }
 
@@ -183,45 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Reads the Connect build configuration from Info.plist. Reading the
-    /// bundle's own Info.plist is not a Connect store access.
-    static func readConnectConfiguration() -> SiloConnectConfiguration {
-        let configuredBaseURL = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectBaseURL") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let connectBaseURL = configuredBaseURL.flatMap { value in
-            value.isEmpty ? nil : URL(string: value)
-        } ?? SiloConnectConfiguration().baseURL
-        let configuredClientID = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectClientID") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let connectClientID = configuredClientID.flatMap { value in
-            value.isEmpty ? nil : value
-        } ?? SiloConnectConfiguration().clientID
-        let configuredInstallationURL = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectInstallationURL") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let installationURL = configuredInstallationURL.flatMap { value in
-            value.isEmpty ? nil : URL(string: value)
-        }
-        let configuredAttestation = (Bundle.main.object(forInfoDictionaryKey: "SiloConnectScopeAttestationPublicKey") as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let scopeAttestationKey = configuredAttestation.flatMap { value in
-            value.isEmpty ? nil : Data(base64Encoded: value)
-        }
-        return SiloConnectConfiguration(
-            baseURL: connectBaseURL,
-            clientID: connectClientID,
-            installationURL: installationURL,
-            scopeAttestationPublicKey: scopeAttestationKey,
-            requiresScopeAttestation: !(configuredAttestation?.isEmpty ?? true)
-        )
-    }
-    /// Routes OAuth callbacks and user-facing `silo://` deep links.
+    /// Routes user-facing `silo://` deep links.
     /// A cold-launch route is retained until the status controller exists.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            if url.scheme == "silo", accessMode == .connect,
-               SiloConnectBrowser.shared.handleCallback(url) {
-                continue
-            }
             guard let route = AppRoute(deepLink: url) else { continue }
             if let statusBarController {
                 statusBarController.showMain(route: route)
@@ -243,63 +144,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fixtureMode = arguments.contains("--ui-test-open-popover") ||
             arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
-            arguments.contains("--ui-test-setup-reconnect") ||
             arguments.contains("--ui-test-folder-browser") ||
             arguments.contains("--ui-test-app-preferences") ||
             arguments.contains("--ui-test-secrets") ||
             arguments.contains(where: { $0.hasPrefix("--ui-test-github-") }) ||
             isTestHost
         if fixtureMode {
-            installApplication(fixtureMode: true, credentialAccessAllowed: true)
+            installApplication(fixtureMode: true)
             return
         }
-
-        Task { @MainActor [weak self] in
-            await self?.recoverAndInstall()
-        }
+        installApplication(fixtureMode: false)
     }
 
-    private func recoverAndInstall() async {
-        let recoveryResult: Result<Void, Error>
-        do {
-            if accessMode == .connect, let authorizationCoordinator {
-                if authorizationCoordinator.isAvailable {
-                    try await authorizationCoordinator.recoverPendingAuthorization()
-                } else {
-                    _ = try await authorizationCoordinator.quarantineUnresolvableAccess()
-                }
-            }
-            recoveryResult = .success(())
-        } catch {
-            recoveryResult = .failure(error)
-        }
-
-        switch recoveryResult {
-        case .success:
-            installApplication(
-                fixtureMode: false,
-                credentialAccessAllowed: true
-            )
-        case .failure(let error):
-            installApplication(
-                fixtureMode: false,
-                credentialAccessAllowed: false,
-                startupRecoveryBlockedReason: error.localizedDescription
-            )
-        }
-    }
-
-    private func retryStartupRecovery() {
-        Task { @MainActor [weak self] in
-            await self?.recoverAndInstall()
-        }
-    }
-
-    private func installApplication(
-        fixtureMode: Bool,
-        credentialAccessAllowed: Bool,
-        startupRecoveryBlockedReason: String? = nil
-    ) {
+    private func installApplication(fixtureMode: Bool) {
         let arguments = ProcessInfo.processInfo.arguments
         if fixtureMode {
             UserDefaults.standard.removeObject(forKey: "github.settings.access-disabled")
@@ -309,9 +166,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let prefix = "--ui-test-github-"
             return argument.hasPrefix(prefix) ? String(argument.dropFirst(prefix.count)) : nil
         }.first
-        let fixtureProvider: (any GitHubProviding)? = (fixtureMode && accessMode == .local)
-            ? GitHubFixtureProvider(scenario: uiTestGitHubScenario)
-            : nil
+        let fixtureProvider: (any GitHubProviding)? = fixtureMode
+            ? GitHubFixtureProvider(scenario: uiTestGitHubScenario) : nil
         let fixtureOperationFailure = arguments.contains("--ui-test-operation-failure")
             ? SiloOperationFailureNotice(
                 action: "start",
@@ -329,17 +185,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? SetupWorkspaceConfiguration.defaults
             : BootstrapStateStore.persistedWorkspaceConfigurations()
         let operationCoordinator: SiloOperationCoordinator?
-        let startupRecoveryRetry: (() -> Void)? = startupRecoveryBlockedReason == nil
-            ? nil
-            : { [weak self] in self?.retryStartupRecovery() }
-        if fixtureMode || !credentialAccessAllowed {
+        if fixtureMode {
             model = AppModel(
-                provider: fixtureProvider ?? provider,
-                accessMode: accessMode,
                 workspaceConfigurations: configuredWorkspaces,
-                startupRecoveryBlockedReason: fixtureMode ? nil : startupRecoveryBlockedReason,
-                startupRecoveryRetry: fixtureMode ? nil : startupRecoveryRetry,
-                initialOperationFailure: fixtureMode ? fixtureOperationFailure : nil,
+                initialOperationFailure: fixtureOperationFailure,
                 applicationPreferences: applicationPreferences,
                 initialRuntimeRepairRequired: runtimeRepairFixture
             )
@@ -353,8 +202,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 operationCoordinator: operationCoordinator,
                 operationService: service,
                 diagnostics: diagnostics,
-                provider: provider,
-                accessMode: accessMode,
                 workspaceConfigurations: configuredWorkspaces,
                 applicationPreferences: applicationPreferences
             )
@@ -412,15 +259,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Resume a durable pending intent at application startup even when no
         // GitHub view is opened. The provider coalesces this with any later
         // Setup or Settings edit.
-        if accessMode == .local, let activeGitHubProvider {
-            Task { _ = await activeGitHubProvider.policySyncProgress() }
-        }
+        Task { _ = await activeGitHubProvider.policySyncProgress() }
         if runtimeRepairFixture {
             githubSettingsState.installRuntimeRepairUITestFixture()
         }
         let setupFixtureOwnsGitHubLoading = arguments.contains("--ui-test-setup") ||
             arguments.contains("--ui-test-setup-review") ||
-            arguments.contains("--ui-test-setup-reconnect") ||
             arguments.contains("--ui-test-setup-installing") ||
             arguments.contains("--ui-test-setup-registration-failure")
         githubSettingsState.setPollingVisible(false)
@@ -430,21 +274,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bootstrap: (any SiloBootstrapCoordinating)?
         if arguments.contains("--ui-test-setup-registration-failure") {
             bootstrap = SiloBootstrapUITestStub(
-                failureWorkspace: "dev",
                 registrationFailure: "MicroSandbox failed Silo's disk-safety check. Update or repair MicroSandbox, then retry Setup. Safety-check detail: the disposable probe disk changed length after guest fstrim; the runtime truncated the raw image."
-            )
-        } else if arguments.contains("--ui-test-setup-reconnect") {
-            bootstrap = SiloBootstrapUITestStub(
-                failureWorkspace: "dev",
-                keepsFirstRunPending: arguments.contains("--ui-test-setup-registration-pending")
             )
         } else if setupFixtureOwnsGitHubLoading {
             bootstrap = SiloBootstrapUITestStub(
-                failureWorkspace: "dev",
-                completesFirstRun: true,
+                keepsFirstRunPending: arguments.contains("--ui-test-setup-registration-pending"),
                 simulatesRuntimeInstallation: arguments.contains("--ui-test-setup-installing")
             )
-        } else if fixtureMode || !credentialAccessAllowed {
+        } else if fixtureMode {
             bootstrap = nil
         } else {
             bootstrap = BootstrapCoordinator(
@@ -458,16 +295,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = StatusBarController(
             model: model,
             bootstrapCoordinator: bootstrap,
-            authorizationCoordinator: authorizationCoordinator,
-            githubInstallationURL: githubInstallationURL,
             provider: fixtureProvider ?? provider,
             githubSettingsState: githubSettingsState,
-            accessMode: accessMode,
             commandRunner: runner,
             appNavigation: appNavigation,
             applicationPreferences: applicationPreferences,
-            startupRecoveryBlockedReason: startupRecoveryBlockedReason,
-            retryStartupRecovery: retryStartupRecovery,
             runtimeRepairDidSucceed: { [weak githubSettingsState = self.githubSettingsState] in
                 githubSettingsState?.runtimeRepairDidSucceed()
             }
@@ -481,7 +313,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             from: model.workspaces.map(\.id)
         )
         if !fixtureMode,
-           credentialAccessAllowed,
            UserDefaults.standard.bool(forKey: WorkspaceStartupPreferences.enabledKey),
            !startupWorkspaceIDs.isEmpty {
             Task { @MainActor [weak model] in

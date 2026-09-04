@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host shuttle for the Path C GitHub proxy transport (contract §3).
+"""Host shuttle for the host-proxy GitHub proxy transport (contract §3).
 
 One shuttle per workspace. It spawns the guest relay through the byte-faithful
 `msb exec <box> --stream -- python3 <relay>` bridge and multiplexes the framed

@@ -428,7 +428,7 @@ describe("application", () => {
     expect(within(activity).getByText("Push failed")).toBeVisible()
     expect(within(activity).getByText("Backup completed · restart required")).toBeVisible()
     expect(within(activity).getByText("Secret verification failed")).toBeVisible()
-    expect(within(activity).getByText("Grant quarantined")).toBeVisible()
+    expect(within(activity).getByText("GitHub disconnect incomplete")).toBeVisible()
     expect(within(activity).getByText("Deep check failed")).toBeVisible()
   })
 

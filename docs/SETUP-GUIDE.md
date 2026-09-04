@@ -113,9 +113,9 @@ The same surface is available from the terminal:
 
 ```bash
 silo github auth [--force] [--json]          # provision or rotate the host credential
-silo github status [WORKSPACE|all]           # mode, capability, repos, credential, shuttle
+silo github status [WORKSPACE|all]           # capability, repos, credential, shuttle
 silo github verify WORKSPACE [OWNER/REPO]    # probe policy, capability, credential (no VM writes)
-silo github remove WORKSPACE                 # revoke the host credential (fail-closed)
+silo github disconnect                       # revoke the host credential (fail-closed)
 silo github capability rotate WORKSPACE      # mint a fresh capability; the old one is denied immediately
 silo github proxy-configure [WORKSPACE]      # install or repair the proxy transport idempotently
 silo github repos [--owner OWNER] [--json]   # discover repositories for the picker
@@ -126,9 +126,6 @@ Troubleshoot with `silo github status`, then `silo github verify`; repair the
 transport with `silo github proxy-configure`, and rotate a compromised
 credential with `silo github auth --force`. `silo check --deep` asserts that no
 guest holds a `GH_TOKEN` and probes proxy reachability from the guest.
-
-Connect mode (`SILO_GITHUB_MODE=connect`) is enabled only by a trusted signed
-configuration. Local mode is the default and never reads or writes Connect grants.
 
 ### Host-held API secrets
 

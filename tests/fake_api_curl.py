@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal curl(1) simulator for host_github_api tests (Path C §5).
+"""Minimal curl(1) simulator for host_github_api tests (host-proxy §5).
 
 The real host_github_api keeps the Bearer token out of the child argv by
 passing `-H @-` (curl reads the header line from stdin — no tempfile, §5

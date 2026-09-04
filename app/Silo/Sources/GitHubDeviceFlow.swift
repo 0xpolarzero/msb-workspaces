@@ -39,7 +39,7 @@ protocol DeviceFlowPolling: Sendable {
 
 /// Deterministic device-flow state machine (plan.md §3.5): begin -> show
 /// code -> poll (pending repeats; slow_down backs off; authorized completes;
-/// expired/denied end) -> restart/cancel. The view drives the timer loop; the
+/// expired/denied end) -> retry/cancel. The view drives the timer loop; the
 /// session owns every transition and is fully testable with scripted
 /// start/poll closures.
 @MainActor
@@ -157,7 +157,7 @@ final class GitHubDeviceFlowSession {
     }
 
     /// Re-arms the session for a fresh code.
-    func restart() {
+    func reset() {
         phase = .idle
         deviceId = nil
     }
@@ -241,13 +241,13 @@ struct GitHubDeviceFlowView: View {
             case .expired:
                 Label("The code expired.", systemImage: "clock.badge.exclamationmark.fill")
                     .foregroundStyle(.orange)
-                Button("Start over", action: restart)
-                    .accessibilityIdentifier("setup.github.device.restart")
+                Button("Start over", action: startOver)
+                    .accessibilityIdentifier("setup.github.device.start-over")
             case .denied:
                 Label("Authorization was denied or could not be completed.", systemImage: "xmark.octagon.fill")
                     .foregroundStyle(.red)
-                Button("Start over", action: restart)
-                    .accessibilityIdentifier("setup.github.device.restart")
+                Button("Start over", action: startOver)
+                    .accessibilityIdentifier("setup.github.device.start-over")
             case .failed(let message):
                 Text(message)
                     .font(.caption)
@@ -275,8 +275,8 @@ struct GitHubDeviceFlowView: View {
         return "\(seconds)s"
     }
 
-    private func restart() {
-        session.restart()
+    private func startOver() {
+        session.reset()
         flowGeneration += 1
     }
 

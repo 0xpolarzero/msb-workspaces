@@ -8,16 +8,11 @@ final class StatusBarController {
     let popover: NSPopover
 
     private let bootstrapCoordinator: (any SiloBootstrapCoordinating)?
-    private let authorizationCoordinator: GitHubAuthorizationCoordinator?
-    private let githubInstallationURL: URL?
     private let provider: (any GitHubProviding)?
     private let githubSettingsState: GitHubSettingsState
-    private let accessMode: GitHubAccessMode
     private let commandRunner: SiloCommandRunner
     private let appNavigation: AppNavigationState
     private let applicationPreferences: ApplicationPreferenceStore
-    private let startupRecoveryBlockedReason: String?
-    private let retryStartupRecovery: () -> Void
     private let runtimeRepairDidSucceed: () -> Void
     private var setupWindowController: SetupWindowController?
     private var runtimeRepairWindowController: RuntimeRepairWindowController?
@@ -25,34 +20,20 @@ final class StatusBarController {
     init(
         model: AppModel,
         bootstrapCoordinator: (any SiloBootstrapCoordinating)? = nil,
-        authorizationCoordinator: GitHubAuthorizationCoordinator? = nil,
-        githubInstallationURL: URL? = nil,
         provider: (any GitHubProviding)? = nil,
         githubSettingsState: GitHubSettingsState? = nil,
-        accessMode: GitHubAccessMode = .local,
         commandRunner: SiloCommandRunner = SiloCommandRunner(),
         appNavigation: AppNavigationState = AppNavigationState(),
         applicationPreferences: ApplicationPreferenceStore,
-        startupRecoveryBlockedReason: String? = nil,
-        retryStartupRecovery: @escaping () -> Void = {},
         runtimeRepairDidSucceed: @escaping () -> Void = {}
     ) {
         self.model = model
         self.bootstrapCoordinator = bootstrapCoordinator
-        self.authorizationCoordinator = authorizationCoordinator
-        self.githubInstallationURL = githubInstallationURL
         self.provider = provider
-        self.githubSettingsState = githubSettingsState ?? GitHubSettingsState(
-            authorizationCoordinator: authorizationCoordinator,
-            provider: provider,
-            accessMode: accessMode
-        )
-        self.accessMode = accessMode
+        self.githubSettingsState = githubSettingsState ?? GitHubSettingsState(provider: provider)
         self.commandRunner = commandRunner
         self.appNavigation = appNavigation
         self.applicationPreferences = applicationPreferences
-        self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
-        self.retryStartupRecovery = retryStartupRecovery
         self.runtimeRepairDidSucceed = runtimeRepairDidSucceed
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         popover = NSPopover()
@@ -182,11 +163,8 @@ final class StatusBarController {
             }.first
             setupWindowController = SetupWindowController(
                 coordinator: bootstrapCoordinator,
-                authorizationCoordinator: authorizationCoordinator,
-                githubInstallationURL: githubInstallationURL,
                 provider: provider,
                 githubState: githubSettingsState,
-                accessMode: accessMode,
                 commandRunner: commandRunner,
                 applicationPreferences: applicationPreferences,
                 openSettings: { [weak self] tab in
@@ -200,11 +178,7 @@ final class StatusBarController {
                     arguments.contains("--ui-test-setup-review") ||
                     uiTestGitHubScenario != nil,
                 uiTestStartsInReview: arguments.contains("--ui-test-setup-review"),
-                uiTestGitHubScenario: uiTestGitHubScenario,
-                uiTestBootstrapReconnect: arguments.contains("--ui-test-setup-reconnect") ||
-                    arguments.contains("--ui-test-setup-registration-failure"),
-                startupRecoveryBlockedReason: startupRecoveryBlockedReason,
-                retryStartupRecovery: retryStartupRecovery
+                uiTestGitHubScenario: uiTestGitHubScenario
             )
         }
         setupWindowController?.show()

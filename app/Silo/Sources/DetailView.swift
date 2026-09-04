@@ -1799,7 +1799,7 @@ private extension DetailView {
             workspace.state == .running &&
             workspace.freshness == .fresh &&
             workspace.networkHost != nil &&
-            workspace.credential != .quarantined &&
+            workspace.state != .quarantined &&
             !(workspace.skippedPorts ?? []).contains(Int(port.port) ?? -1)
     }
 
@@ -2015,7 +2015,7 @@ private extension DetailView {
 
     private var needsInstallationRepair: Bool {
         guard !model.runtimeRepairRequired else { return false }
-        return model.startupRecoveryBlockedReason != nil || model.systemHealthChecks.contains { check in
+        return model.systemHealthChecks.contains { check in
             let repairable = check.id == "host-integration" ||
                 check.id.hasPrefix("tool-")
             return repairable && check.status != .pass
@@ -2308,13 +2308,6 @@ private struct WorkspaceSummaryRow: View {
         }
         if let warning = workspace.portWarning, !warning.isEmpty {
             return Attention(message: warning, destination: .network, isCritical: false)
-        }
-        if workspace.credential.needsAttention {
-            return Attention(
-                message: "GitHub access: \(workspace.credential.rawValue)",
-                destination: .github,
-                isCritical: false
-            )
         }
         if workspace.freshness != .fresh {
             return Attention(

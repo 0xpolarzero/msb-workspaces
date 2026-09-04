@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal security(1) simulator for Keychain tests.
 
-Supports the Path C §5 hygiene form `add-generic-password ... -w` with -w as
+Supports the host-proxy §5 hygiene form `add-generic-password ... -w` with -w as
 the LAST option: security(1)'s prompted mode reads the password from stdin,
 so the simulator reads it from stdin too (never from argv). It records every
 invocation's argv to SILO_FAKE_SECURITY_ARGV_LOG when set, so tests can prove

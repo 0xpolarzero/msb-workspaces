@@ -30,7 +30,6 @@ struct SiloBootstrapState: Codable, Sendable, Equatable {
     var lastError: String?
     var completedPhases: Set<Phase>
     var workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil
-    var reconnectWorkspace: String? = nil
     /// Wall-clock seconds per phase for the most recent `run()`, keyed by
     /// `Phase.rawValue`; `preflight` accumulates both read-only passes.
     var phaseDurations: [String: TimeInterval] = [:]
@@ -816,7 +815,6 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
         current.startedAt = current.startedAt ?? Date()
         current.updatedAt = Date()
         current.lastError = nil
-        current.reconnectWorkspace = nil
         try await stateStore.save(current)
         current.phase = .toolchain
         try await stateStore.save(current)
@@ -984,21 +982,6 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
             try await stateStore.save(current)
             return result
         } catch {
-            if let clientError = error as? SiloClientError,
-               case .protocolFailure(let protocolError) = clientError,
-               protocolError.code == "SILO_GITHUB_RECONNECT_REQUIRED" {
-                // Reconnect can interrupt first-run bootstrap while the CLI's
-                // selected configuration is still staged. Route to GitHub,
-                // but only mark the workspace boundary applied when a prior
-                // committed configuration already matches the selection.
-                if let installed = await runner.installedWorkspaceConfigurations(),
-                   SiloBootstrapConfiguration(installed) == SiloBootstrapConfiguration(workspaceConfigurations) {
-                    current.workspaceConfigurations = workspaceConfigurations
-                    current.completedPhases.formUnion([.preflight, .toolchain, .hostIntegration, .workspaces])
-                }
-                current.phase = .github
-                current.reconnectWorkspace = protocolError.workspace
-            }
             current.lastError = error.localizedDescription
             current.updatedAt = Date()
             try? await stateStore.save(current)
@@ -1044,31 +1027,21 @@ actor BootstrapCoordinator: SiloBootstrapCoordinating {
     }
 }
 
-/// Deterministic bootstrap fixture for UI tests. The first `run()` throws the
-/// typed GitHub reconnect protocol error a real `silo app bootstrap` reports for
-/// a configured workspace whose credential is unavailable; later `run()` calls
-/// report a completed verification, mirroring a successful resume after the
-/// user reconnects GitHub.
+/// Deterministic bootstrap fixture for UI tests.
 @MainActor
 final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
     private var current: SiloBootstrapState
     private var runCount = 0
-    private let failureWorkspace: String
     private let keepsFirstRunPending: Bool
-    private let completesFirstRun: Bool
     private let simulatesRuntimeInstallation: Bool
     private let registrationFailure: String?
 
     init(
-        failureWorkspace: String,
         keepsFirstRunPending: Bool = false,
-        completesFirstRun: Bool = false,
         simulatesRuntimeInstallation: Bool = false,
         registrationFailure: String? = nil
     ) {
-        self.failureWorkspace = failureWorkspace
         self.keepsFirstRunPending = keepsFirstRunPending
-        self.completesFirstRun = completesFirstRun
         self.simulatesRuntimeInstallation = simulatesRuntimeInstallation
         self.registrationFailure = registrationFailure
         let now = Date()
@@ -1140,26 +1113,9 @@ final class SiloBootstrapUITestStub: SiloBootstrapCoordinating {
             current.updatedAt = Date()
             throw BootstrapCoordinatorError.hostRegistrationFailed(registrationFailure)
         }
-        if runCount == 1, !completesFirstRun {
-            current.workspaceConfigurations = workspaceConfigurations
-            current.completedPhases.insert(.workspaces)
-            current.phase = .github
-            current.reconnectWorkspace = failureWorkspace
-            let failure = SiloClientError.protocolFailure(SiloProtocolError(
-                code: "SILO_GITHUB_RECONNECT_REQUIRED",
-                message: "GitHub is configured for '\(failureWorkspace)', but its credential is unavailable.",
-                recovery: "Reconnect '\(failureWorkspace)' in Silo, then resume Setup.",
-                workspace: failureWorkspace,
-                retryable: true
-            ))
-            current.lastError = String(describing: failure)
-            current.updatedAt = Date()
-            throw failure
-        }
         current.phase = .complete
         current.completedPhases = Set(SiloBootstrapState.Phase.allCases)
         current.workspaceConfigurations = workspaceConfigurations
-        current.reconnectWorkspace = nil
         current.lastError = nil
         current.updatedAt = Date()
         return SiloBootstrapResult(

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Minimal gh(1) simulator for host-credential acquisition tests (Path C §5).
+"""Minimal gh(1) simulator for host-credential acquisition tests (host-proxy §5).
 
 Driven by SILO_FAKE_GH_STATE (a JSON file):
   {"authed": true, "token": "gho_...", "account": "fake-user"}
 - `gh auth status --active` exits 0 and prints a login line when authed, else 1.
   When `status_timeout` is true it exits 1 WITHOUT looking at authed, modeling
   the real `gh auth status` network round-trip timing out while the local
-  keyring token stays readable (Path C §8 acquisition must not gate on it).
+  keyring token stays readable (host-proxy §8 acquisition must not gate on it).
 - `gh auth token` prints the token (only when authed).
 Anything else exits 2.
 """

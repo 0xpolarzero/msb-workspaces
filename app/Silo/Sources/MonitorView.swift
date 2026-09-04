@@ -148,7 +148,7 @@ struct MonitorView: View {
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("error.details.button")
                 .help("View error details")
-            } else if model.lastError != nil || model.startupRecoveryBlockedReason != nil {
+            } else if model.lastError != nil {
                 Button {
                     model.refresh()
                 } label: {
@@ -327,14 +327,6 @@ private struct WorkspaceRow: View {
             compactButton("Retry", systemImage: "arrow.clockwise") {
                 model.refresh()
             }
-        } else if workspace.credential == .needsRestart && workspace.canRestart && workspace.state == .running {
-            compactButton("Restart", systemImage: "arrow.clockwise") {
-                model.restart(workspace.id)
-            }
-        } else if workspace.credential.needsAttention {
-            compactButton("Review access", systemImage: "exclamationmark.shield") {
-                openRoute(AppRoute(tab: .github, workspace: workspace.id))
-            }
         } else if canOpenWorkspace {
             compactButton(model.terminalActionTitle, systemImage: "terminal") {
                 model.openTerminal(for: workspace.id)
@@ -453,7 +445,7 @@ private struct WorkspaceRow: View {
         workspace.state == .running &&
             workspace.freshness == .fresh &&
             workspace.canOpenTerminal &&
-            workspace.credential != .quarantined
+            workspace.state != .quarantined
     }
 
     private var canOpenSite: Bool {

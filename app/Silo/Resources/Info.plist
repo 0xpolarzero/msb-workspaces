@@ -6,14 +6,6 @@
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>org.silo.Silo.oauth</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>silo</string>
-            </array>
-        </dict>
-        <dict>
-            <key>CFBundleURLName</key>
             <string>org.silo.Silo.navigation</string>
             <key>CFBundleURLSchemes</key>
             <array>
@@ -43,14 +35,6 @@
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>LSUIElement</key>
     <false/>
-    <key>SiloConnectBaseURL</key>
-    <string>$(SILO_CONNECT_BASE_URL)</string>
-    <key>SiloConnectClientID</key>
-    <string>$(SILO_CONNECT_CLIENT_ID)</string>
-    <key>SiloConnectInstallationURL</key>
-    <string>$(SILO_CONNECT_INSTALLATION_URL)</string>
-    <key>SiloConnectScopeAttestationPublicKey</key>
-    <string>$(SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY)</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Silo opens requested workspaces in a new tab of your default terminal.</string>
     <key>NSHighResolutionCapable</key>

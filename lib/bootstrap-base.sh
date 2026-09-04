@@ -157,14 +157,14 @@ git config --system fetch.prune true
 git config --system pull.ff only
 git config --system rerere.enabled true
 # Keep clones, submodules, and GitHub CLI operations on HTTPS so the guest
-# reaches GitHub through the host's repo-aware proxy (Path C §7). No
+# reaches GitHub through the host's repo-aware proxy (host-proxy §7). No
 # credentials are baked into the base image.
 git config --system url.https://github.com/.insteadOf git@github.com:
 git config --system --add url.https://github.com/.insteadOf ssh://git@github.com/
 git config --system --add url.https://github.com/.insteadOf ssh://git@github.com:22/
 gh config set git_protocol https --host github.com
 
-# Path C §7: never prompt interactively for GitHub credentials inside a
+# host-proxy §7: never prompt interactively for GitHub credentials inside a
 # workspace; the proxy enforces access with the workspace capability.
 cat >/etc/profile.d/silo-github.sh <<'PROFILE'
 export GIT_TERMINAL_PROMPT=0

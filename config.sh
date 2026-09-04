@@ -44,13 +44,12 @@ SILO_PERSONAL_RUNTIME_SIZE="80G"
 SILO_PUBLISHED_PORTS="1234,1337,24678-24679,3000-3010,3100,3333,3306-3308,4000-4005,4173,4200,4321,5001-5005,5173-5180,5432-5435,5555,6006,6379-6382,7001-7005,8000-8010,8080-8090,8787,8888,9000-9005,9229-9230,27017-27019"
 
 # The current repo-aware proxy never puts a GitHub credential in a guest.
-SILO_GITHUB_MODE="local"
 
 # Host prerequisite: setup.sh installs the GitHub CLI (`gh`) via Homebrew;
-# local-mode sign-in on a clean Mac uses `gh`'s web OAuth flow and silo reuses
+# Sign-in on a clean Mac uses `gh`'s web OAuth flow and Silo reuses
 # the authenticated `gh` session. No OAuth client ID lives in this file.
 
-# Path C §3/§4: host loopback port for the repo-aware GitHub proxy. The guest
+# Host loopback port for the repo-aware GitHub proxy. The guest
 # relay listens on the same port inside each workspace; the host shuttle
 # bridges the two over `msb exec --stream`.
 SILO_GITHUB_PROXY_PORT="18446"

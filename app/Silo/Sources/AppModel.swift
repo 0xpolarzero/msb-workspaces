@@ -32,21 +32,7 @@ struct Workspace: Identifiable, Equatable, Sendable {
         case quarantined = "Quarantined"
     }
 
-    enum CredentialState: String, Equatable, Sendable {
-        case unconfigured = "Unconfigured"
-        case ready = "Ready"
-        case expiring = "Expiring"
-        case needsRestart = "Needs restart"
-        case needsAuthorization = "Needs authorization"
-        case serviceUnavailable = "Service unavailable"
-        case readOnly = "Read-only"
-        case removalPending = "Removal pending"
-        case quarantined = "Quarantined"
-    }
-
-    /// Host-held secret configuration state for a workspace. Deliberately
-    /// separate from `CredentialState`: pending secret restarts must never
-    /// ride the GitHub credential state.
+    /// Host-held secret configuration state for a workspace.
     struct SecretsState: Equatable, Sendable {
         enum Status: String, Equatable, Sendable {
             case active
@@ -91,7 +77,6 @@ struct Workspace: Identifiable, Equatable, Sendable {
     let id: ID
     let purpose: String
     var state: State
-    var credential: CredentialState
     var secrets: SecretsState
     var freshness: SiloFreshness
     var observedAt: Date?
@@ -115,7 +100,6 @@ struct Workspace: Identifiable, Equatable, Sendable {
         id: ID,
         purpose: String? = nil,
         state: State = .stopped,
-        credential: CredentialState = .unconfigured,
         secrets: SecretsState = .active,
         freshness: SiloFreshness = .neverObserved,
         observedAt: Date? = nil,
@@ -136,7 +120,6 @@ struct Workspace: Identifiable, Equatable, Sendable {
         self.id = id
         self.purpose = purpose ?? Self.defaultPurpose(for: id)
         self.state = state
-        self.credential = credential
         self.secrets = secrets
         self.freshness = freshness
         self.observedAt = observedAt
@@ -219,18 +202,6 @@ enum WorkspaceAction: Equatable, Sendable {
     }
 }
 
-extension Workspace.CredentialState {
-    var needsAttention: Bool {
-        switch self {
-        case .ready, .readOnly, .unconfigured:
-            return false
-        case .expiring, .needsRestart, .needsAuthorization, .serviceUnavailable,
-             .removalPending, .quarantined:
-            return true
-        }
-    }
-}
-
 struct WorkspaceActionAvailability: Equatable, Sendable {
     let isAllowed: Bool
     let reason: String?
@@ -249,7 +220,6 @@ extension Workspace {
               state != .unknown,
               state != .unavailable,
               state != .quarantined,
-              credential != .quarantined,
               let reason = serverCapabilities.reason,
               !reason.isEmpty,
               let recovery = serverCapabilities.recovery,
@@ -285,7 +255,7 @@ extension Workspace {
                 recovery: serverCapabilities.recovery ?? recoveryAction
             )
         }
-        if action != .stop, state == .quarantined || credential == .quarantined {
+        if action != .stop, state == .quarantined {
             return WorkspaceActionAvailability(
                 isAllowed: false,
                 reason: "\(actionTitle) is blocked because \(id.rawValue) is quarantined. \(quarantineReason ?? "Workspace safety state could not be verified.")",
@@ -957,12 +927,10 @@ final class AppModel {
     private(set) var operationStates: [String: SiloOperationState] = [:]
     private(set) var notificationEvents: [SiloNotificationEvent] = []
     private(set) var setupState: SiloBootstrapState = .initial
-    private(set) var startupRecoveryBlockedReason: String?
     private(set) var repositoriesByWorkspace: [String: SiloRepositoriesResponse] = [:]
     private(set) var repositoryLoadingWorkspaces: Set<String> = []
     private(set) var repositoryUnavailableWorkspaces: Set<String> = []
     private(set) var portsSnapshot: SiloPortsResponse?
-    private(set) var githubSnapshot: SiloGitHubStateResponse?
     private(set) var detailError: String?
     private(set) var backupError: String?
     private(set) var isDetailLoading = false
@@ -1021,15 +989,12 @@ final class AppModel {
         let cachedAt: Date
     }
 
-    private var startupRecoveryRetry: (() -> Void)?
     private let client: SiloClient?
     let applicationPreferences: ApplicationPreferenceStore
     private let operationCoordinator: SiloOperationCoordinator?
     private let operationService: SiloOperationService?
     private let diagnostics: SiloDiagnostics?
     private var systemHealthCoordinator: (any SiloBootstrapCoordinating)?
-    private let provider: (any GitHubProviding)?
-    let accessMode: GitHubAccessMode
     private let activityStore: SiloActivityStore
     private var pollingTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
@@ -1072,12 +1037,8 @@ final class AppModel {
         operationCoordinator: SiloOperationCoordinator? = nil,
         operationService: SiloOperationService? = nil,
         diagnostics: SiloDiagnostics? = nil,
-        provider: (any GitHubProviding)? = nil,
-        accessMode: GitHubAccessMode = .local,
         activityStore: SiloActivityStore = SiloActivityStore(),
         workspaceConfigurations: [SetupWorkspaceConfiguration]? = nil,
-        startupRecoveryBlockedReason: String? = nil,
-        startupRecoveryRetry: (() -> Void)? = nil,
         initialOperationFailure: SiloOperationFailureNotice? = nil,
         applicationPreferences: ApplicationPreferenceStore? = nil,
         applicationDefaults: SystemApplicationDefaults? = nil,
@@ -1092,11 +1053,7 @@ final class AppModel {
         self.operationCoordinator = operationCoordinator
         self.operationService = operationService
         self.diagnostics = diagnostics
-        self.provider = provider
-        self.accessMode = accessMode
         self.activityStore = activityStore
-        self.startupRecoveryBlockedReason = startupRecoveryBlockedReason
-        self.startupRecoveryRetry = startupRecoveryRetry
         self.latestOperationFailure = initialOperationFailure
         self.runtimeRepairRequired = initialRuntimeRepairRequired
         self.lifecycleVerificationDelays = lifecycleVerificationDelays
@@ -1112,26 +1069,11 @@ final class AppModel {
         let initialWorkspaceIDs = resolvedWorkspaceIDs
         configuredWorkspaceIDs = initialWorkspaceIDs
         workspaces = initialWorkspaceIDs.map {
-            if let startupRecoveryBlockedReason {
-                return Workspace(
-                    id: $0,
-                    state: .quarantined,
-                    credential: .quarantined,
-                    freshness: .unavailable,
-                    quarantineReason: startupRecoveryBlockedReason,
-                    statusReason: "Startup authorization recovery is blocked.",
-                    recoveryAction: "Retry authorization recovery before using workspace credentials.",
-                    nextAction: "Recover authorization",
-                    canStart: false,
-                    canStop: false,
-                    canRestart: false
-                )
-            }
-            return client == nil
+            client == nil
                 ? Workspace(
                     id: $0,
                     statusReason: "No authoritative state has been observed.",
-                    recoveryAction: "Connect Silo and retry the observation.",
+                    recoveryAction: "Retry the observation.",
                     nextAction: "Observe",
                     canStart: false
                 )
@@ -1183,7 +1125,6 @@ final class AppModel {
                 canRestart: false
             )
         }
-        githubSnapshot = nil
         pendingLifecycleRequests.removeAll()
         pendingPushPlan = nil
     }
@@ -1241,15 +1182,7 @@ final class AppModel {
     }
 
     var health: MonitorHealth {
-        if let startupRecoveryBlockedReason {
-            return MonitorHealth(
-                title: "Authorization recovery blocked",
-                detail: "Workspace credentials remain protected until startup recovery succeeds. \(startupRecoveryBlockedReason)",
-                symbol: "exclamationmark.octagon.fill",
-                severity: .critical
-            )
-        }
-        if workspaces.contains(where: { $0.state == .quarantined || $0.credential == .quarantined }) {
+        if workspaces.contains(where: { $0.state == .quarantined }) {
             return MonitorHealth(
                 title: "Action required",
                 detail: "A workspace is quarantined. Unsafe actions are blocked.",
@@ -1290,7 +1223,7 @@ final class AppModel {
                 severity: .attention
             )
         }
-        if workspaces.contains(where: { $0.state == .exited || $0.credential.needsAttention }) {
+        if workspaces.contains(where: { $0.state == .exited }) {
             return MonitorHealth(
                 title: "Needs attention",
                 detail: "One or more workspaces has a recovery step.",
@@ -1307,10 +1240,6 @@ final class AppModel {
     }
 
     func refresh() {
-        if startupRecoveryBlockedReason != nil {
-            startupRecoveryRetry?()
-            return
-        }
         if client == nil {
             return
         }
@@ -1792,8 +1721,7 @@ final class AppModel {
 
     func startWorkspacesAtLaunch(_ selectedWorkspaceIDs: Set<Workspace.ID>) async {
         guard !selectedWorkspaceIDs.isEmpty,
-              client != nil,
-              startupRecoveryBlockedReason == nil else { return }
+              client != nil else { return }
         await refreshRuntimeRepairState()
         guard !runtimeRepairRequired,
               case .applied = await refreshRemoteResult() else { return }
@@ -2109,86 +2037,6 @@ final class AppModel {
             }
             self?.finishDetailRequest(request)
         }
-    }
-
-    func loadGitHubState() {
-        if accessMode == .local {
-            guard let provider else {
-                detailError = "GitHub state is unavailable in fixture mode."
-                return
-            }
-            let request = beginDetailRequest()
-            Task { [weak self] in
-                do {
-                    let catalog = try await provider.loadCatalog()
-                    let policy = await provider.desiredPolicy()
-                    guard let self, request == self.detailRequestGeneration else { return }
-                    self.githubSnapshot = Self.localGitHubSnapshot(
-                        policy: policy,
-                        catalog: catalog,
-                        workspaceIDs: self.configuredWorkspaceIDs
-                    )
-                } catch {
-                    guard let self, request == self.detailRequestGeneration else { return }
-                    self.noteRuntimeRepairFailure(error)
-                    self.detailError = error.localizedDescription
-                }
-                self?.finishDetailRequest(request)
-            }
-            return
-        }
-        guard let operationService else { detailError = "GitHub state is unavailable in fixture mode."; return }
-        let request = beginDetailRequest()
-        Task { [weak self] in
-            do {
-                let result = try await operationService.githubState()
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.githubSnapshot = result
-            } catch {
-                guard let self, request == self.detailRequestGeneration else { return }
-                self.noteRuntimeRepairFailure(error)
-                self.detailError = error.localizedDescription
-            }
-            self?.finishDetailRequest(request)
-        }
-    }
-
-    /// Builds the Detail GitHub snapshot from the policy file (single source
-    /// of truth) plus the CLI-reported credential/account presence.
-    static func localGitHubSnapshot(
-        policy: GitHubPolicyFile?,
-        catalog: GitHubCatalog,
-        workspaceIDs: [Workspace.ID] = Workspace.ID.fixtureDefaults
-    ) -> SiloGitHubStateResponse {
-        let workspaces = workspaceIDs.map { id in
-            let workspace = policy?.workspaces[id.rawValue]
-            let repos = workspace?.repos ?? []
-            let hasWrite = repos.contains { $0.mode == .readWrite }
-            let accessMode: String
-            if hasWrite {
-                accessMode = "read-write"
-            } else if repos.isEmpty {
-                accessMode = "none"
-            } else {
-                accessMode = "read-only"
-            }
-            return SiloGitHubWorkspaceState(
-                workspace: id.rawValue,
-                provider: "local-policy",
-                configured: workspace != nil,
-                accessMode: accessMode,
-                verificationRepository: nil,
-                accountLogin: catalog.account?.login,
-                installationId: nil,
-                accessExpiresAt: nil,
-                needsRestart: false,
-                quarantined: false,
-                repos: repos.map { SiloGitHubPolicyRepo(canonical: $0.canonical, mode: $0.mode) },
-                policyUpdatedAt: policy?.updatedAt,
-                hostCredential: catalog.hostCredentialPresent ? "present" : "missing"
-            )
-        }
-        return SiloGitHubStateResponse(workspaces: workspaces)
     }
 
     func loadLogs(for id: Workspace.ID, clearsError: Bool = true) {
@@ -3673,15 +3521,6 @@ final class AppModel {
                 lifecycle: lifecycle,
                 freshness: .fresh,
                 quarantine: SiloQuarantineSnapshot(state: .clear, reason: nil),
-                credential: SiloCredentialSnapshot(
-                    state: .ready,
-                    accessMode: "fixture",
-                    verificationRepository: nil,
-                    accountLogin: nil,
-                    installationId: nil,
-                    accessExpiresAt: nil,
-                    needsRestart: false
-                ),
                 secrets: secretsSnapshot,
                 resources: SiloResourceSnapshot(
                     cpus: "1",
@@ -3773,8 +3612,7 @@ final class AppModel {
             }
             // Unknown quarantine state is fail-closed for every action except
             // the safe Stop path, which the CLI exposes independently.
-            let isQuarantined = snapshot.quarantine.state != .clear ||
-                snapshot.credential.state == .quarantined
+            let isQuarantined = snapshot.quarantine.state != .clear
             let lifecycle = isQuarantined
                 ? Workspace.State.quarantined
                 : Workspace.State(rawValue: snapshot.lifecycle.rawValue) ?? .unknown
@@ -3810,7 +3648,6 @@ final class AppModel {
                 id: id,
                 purpose: snapshot.purpose,
                 state: lifecycle,
-                credential: isQuarantined ? .quarantined : credentialState(snapshot.credential.state),
                 secrets: secretsState(snapshot.secrets),
                 freshness: snapshot.freshness,
                 observedAt: stateObservedAt,
@@ -3941,20 +3778,6 @@ final class AppModel {
             break
         case .quarantined:
             workspaces[index].canStop = capabilities.canStop
-        }
-    }
-
-    private func credentialState(_ state: SiloCredentialSnapshot.State) -> Workspace.CredentialState {
-        switch state {
-        case .ready: return .ready
-        case .expiring: return .expiring
-        case .needsRestart: return .needsRestart
-        case .needsAuthorization: return .needsAuthorization
-        case .serviceUnavailable: return .serviceUnavailable
-        case .removalPending: return .removalPending
-        case .readOnly: return .readOnly
-        case .quarantined: return .quarantined
-        case .unconfigured: return .unconfigured
         }
     }
 

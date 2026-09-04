@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Silo GitHub proxy LaunchAgent (Path C, section 4).
+  Silo GitHub proxy LaunchAgent.
 
   Socket-activated per-connection spawn: launchd owns the 127.0.0.1:18446
   listener, ACCEPTS each connection itself (inetdCompatibility Wait:false —
@@ -15,10 +15,8 @@
   owns the actual install/teardown):
     launchctl bootstrap gui/$(id -u) launchd/org.silo.Silo.github-proxy.plist
 
-  SILO_GITHUB_MODE=local is the single source of truth (section 1). The proxy
-  itself is mode-agnostic; local mode is asserted here so the agent can never
-  accidentally serve in connect mode. PYTHONDONTWRITEBYTECODE=1 keeps the
-  vendored tree bytecode-clean so reinstalls stay idempotent.
+  PYTHONDONTWRITEBYTECODE=1 keeps the vendored tree bytecode-clean so
+  reinstalls stay idempotent.
 -->
 <plist version="1.0">
 <dict>
@@ -55,8 +53,6 @@
     <string>Interactive</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>SILO_GITHUB_MODE</key>
-        <string>local</string>
         <key>SILO_GITHUB_PROXY_PORT</key>
         <string>18446</string>
         <key>PYTHONDONTWRITEBYTECODE</key>

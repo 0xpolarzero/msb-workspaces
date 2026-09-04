@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guest relay for the Path C GitHub proxy transport (contract §3).
+"""Guest relay for the host-proxy GitHub proxy transport (contract §3).
 
 Bridges guest TCP connections on 127.0.0.1:18446 over a single framed byte
 stream carried by `msb exec --stream` stdin/stdout:

@@ -104,18 +104,17 @@ final class AppNavigationState {
     }
 }
 
-struct WorkspaceGrantGroup: Identifiable, Equatable {
+struct WorkspaceRepositoryAccess: Identifiable, Equatable {
     let workspace: String
-    let entries: [WorkspaceCredentialMetadata]
     let repositoryNames: [String]
 
     var id: String { workspace }
 }
 
 enum GitHubDestructiveAction: Identifiable {
-    case reset(GitHubAccount?)
-    case remove(WorkspaceGrantGroup)
-    case disconnect([WorkspaceGrantGroup], GitHubAccount?)
+    case reset
+    case remove(WorkspaceRepositoryAccess)
+    case disconnect([WorkspaceRepositoryAccess])
 
     var id: String {
         switch self {
@@ -128,12 +127,6 @@ enum GitHubDestructiveAction: Identifiable {
 
 enum GitHubConnectionState: Equatable {
     case loading
-    case notAvailable
-    case readyNoAccess
-    case temporaryOutage
-    case recoveryRequired
-    case connected
-    // Local mode (Path C): policy-file driven.
     case noCredential(String?)
     case catalogUnavailable(String)
     case catalogFailed(String)
@@ -143,18 +136,15 @@ enum GitHubConnectionState: Equatable {
 @MainActor
 @Observable
 final class GitHubSettingsState {
-    let authorizationCoordinator: GitHubAuthorizationCoordinator?
     private(set) var provider: (any GitHubProviding)?
-    let accessMode: GitHubAccessMode
 
-    var metadata: [WorkspaceCredentialMetadata] = []
     var connectedAccount: GitHubAccount?
     var connectionState: GitHubConnectionState = .loading
     var error: String?
-    var localPolicy: GitHubPolicyFile?
+    var policy: GitHubPolicyFile?
     var syncProgress: GitHubApplyProgress?
-    var installations: [GitHubInstallation] = []
-    var repositoriesByInstallation: [Int: [GitHubRepository]] = [:]
+    var owners: [GitHubOwner] = []
+    var repositoriesByOwner: [Int: [GitHubRepository]] = [:]
 
     private var hasLoaded = false
     private var refreshTask: Task<Void, Never>?
@@ -163,14 +153,8 @@ final class GitHubSettingsState {
     private var pollingVisible = false
     private var pollingSuspensionCount = 0
 
-    init(
-        authorizationCoordinator: GitHubAuthorizationCoordinator?,
-        provider: (any GitHubProviding)?,
-        accessMode: GitHubAccessMode
-    ) {
-        self.authorizationCoordinator = authorizationCoordinator
+    init(provider: (any GitHubProviding)?) {
         self.provider = provider
-        self.accessMode = accessMode
     }
 
     func configure(provider: (any GitHubProviding)?) {
@@ -185,10 +169,10 @@ final class GitHubSettingsState {
         connectedAccount = nil
         connectionState = .loading
         error = nil
-        localPolicy = nil
+        policy = nil
         syncProgress = nil
-        installations = []
-        repositoriesByInstallation = [:]
+        owners = []
+        repositoriesByOwner = [:]
     }
 
     func installRuntimeRepairUITestFixture() {
@@ -272,85 +256,52 @@ final class GitHubSettingsState {
         }
         error = nil
 
-        if accessMode == .local {
-            guard let provider else {
-                connectionState = .catalogFailed("GitHub local access is unavailable in this build.")
-                localPolicy = nil
-                hasLoaded = true
-                return
-            }
-            do {
-                let catalog = try await loadLocalCatalogWithRetry(from: provider)
-                let policy = await provider.desiredPolicy()
-                // Catalog discovery can outlast a reconciliation. Read
-                // progress last so Settings never republishes a stale
-                // Applying/Delayed snapshot after the CLI has confirmed it.
-                let progress = await provider.policySyncProgress()
-                connectedAccount = catalog.account
-                localPolicy = policy
-                syncProgress = progress
-                installations = catalog.installations
-                repositoriesByInstallation = catalog.repositoriesByInstallation
-                connectionState = catalog.hostCredentialPresent
-                    ? .ready(
-                        account: catalog.account,
-                        owners: Set(catalog.installations.map(\.account.login)).sorted(),
-                        policy: policy
-                    )
-                    : .noCredential(GitHubLocalStrings.settingsNoCredential)
-                hasLoaded = true
-            } catch is CancellationError {
-                return
-            } catch let clientError as SiloClientError where clientError == .cancelled {
-                return
-            } catch {
-                if !hasLoaded {
-                    connectedAccount = nil
-                    if let catalogError = error as? GitHubCatalogError,
-                       case .unavailable(let message) = catalogError {
-                        connectionState = .catalogUnavailable(message)
-                    } else {
-                        connectionState = .catalogFailed(error.localizedDescription)
-                    }
-                    hasLoaded = true
+        guard let provider else {
+            connectionState = .catalogFailed("GitHub access is unavailable in this build.")
+            policy = nil
+            hasLoaded = true
+            return
+        }
+        do {
+            let catalog = try await loadCatalog(from: provider)
+            let policy = await provider.desiredPolicy()
+            // Catalog discovery can outlast a reconciliation. Read progress
+            // last so Settings never republishes a stale Applying/Delayed
+            // snapshot after the CLI has confirmed it.
+            let progress = await provider.policySyncProgress()
+            connectedAccount = catalog.account
+            self.policy = policy
+            syncProgress = progress
+            owners = catalog.owners
+            repositoriesByOwner = catalog.repositoriesByOwner
+            connectionState = catalog.hostCredentialPresent
+                ? .ready(
+                    account: catalog.account,
+                    owners: Set(catalog.owners.map(\.account.login)).sorted(),
+                    policy: policy
+                )
+                : .noCredential(GitHubStrings.settingsNoCredential)
+            hasLoaded = true
+        } catch is CancellationError {
+            return
+        } catch let clientError as SiloClientError where clientError == .cancelled {
+            return
+        } catch {
+            if !hasLoaded {
+                connectedAccount = nil
+                if let catalogError = error as? GitHubCatalogError,
+                   case .unavailable(let message) = catalogError {
+                    connectionState = .catalogUnavailable(message)
+                } else {
+                    connectionState = .catalogFailed(error.localizedDescription)
                 }
-                self.error = error.localizedDescription
+                hasLoaded = true
             }
-            return
+            self.error = error.localizedDescription
         }
-
-        guard let authorizationCoordinator else {
-            connectionState = .notAvailable
-            hasLoaded = true
-            return
-        }
-        guard authorizationCoordinator.isAvailable else {
-            connectedAccount = nil
-            metadata = await authorizationCoordinator.retainedMetadata()
-            connectionState = .notAvailable
-            hasLoaded = true
-            return
-        }
-
-        let refreshedMetadata = await authorizationCoordinator.metadata()
-        connectedAccount = await authorizationCoordinator.connectedAccount()
-        metadata = refreshedMetadata
-        let presentations = Dictionary(grouping: refreshedMetadata, by: \.workspace).map {
-            GitHubWorkspaceAccessPresentation.make(workspace: $0.key, entries: $0.value)
-        }
-        if refreshedMetadata.isEmpty {
-            connectionState = .readyNoAccess
-        } else if presentations.contains(where: { $0.action == .reconnect }) {
-            connectionState = .recoveryRequired
-        } else if presentations.contains(where: { $0.action == .retry }) {
-            connectionState = .temporaryOutage
-        } else {
-            connectionState = .connected
-        }
-        hasLoaded = true
     }
 
-    private func loadLocalCatalogWithRetry(
+    private func loadCatalog(
         from provider: any GitHubProviding
     ) async throws -> GitHubCatalog {
         var lastError: Error?
@@ -445,9 +396,6 @@ struct SettingsView: View {
     @State private var deviceFlowSession: GitHubDeviceFlowSession?
     @State private var deviceFlowShown = false
     @State private var destructiveAction: GitHubDestructiveAction?
-    @State private var isEditingGitHubAccess = false
-    @State private var isPreparingGitHubEditor = false
-    @State private var githubEditorSessionID: UUID?
     @State private var githubEditorDrafts: [String: WorkspaceRepositoryDraft] = [:]
     @State private var githubSavedEditorDrafts: [String: WorkspaceRepositoryDraft] = [:]
     @State private var githubEditorWorkspaces: Set<String> = []
@@ -475,21 +423,8 @@ struct SettingsView: View {
         self.notificationCoordinator = notificationCoordinator
     }
 
-    private var authorizationCoordinator: GitHubAuthorizationCoordinator? {
-        githubState.authorizationCoordinator
-    }
-
     private var provider: (any GitHubProviding)? {
         githubState.provider
-    }
-
-    private var accessMode: GitHubAccessMode {
-        githubState.accessMode
-    }
-
-    private var metadata: [WorkspaceCredentialMetadata] {
-        get { githubState.metadata }
-        nonmutating set { githubState.metadata = newValue }
     }
 
     private var connectedAccount: GitHubAccount? {
@@ -497,10 +432,7 @@ struct SettingsView: View {
         nonmutating set { githubState.connectedAccount = newValue }
     }
 
-    private var githubConnectionState: GitHubConnectionState {
-        get { githubState.connectionState }
-        nonmutating set { githubState.connectionState = newValue }
-    }
+    private var githubConnectionState: GitHubConnectionState { githubState.connectionState }
 
     @State private var didApplyInitialNavigation = false
     private var githubError: String? {
@@ -515,9 +447,9 @@ struct SettingsView: View {
         )
     }
 
-    private var localPolicy: GitHubPolicyFile? {
-        get { githubState.localPolicy }
-        nonmutating set { githubState.localPolicy = newValue }
+    private var githubPolicy: GitHubPolicyFile? {
+        get { githubState.policy }
+        nonmutating set { githubState.policy = newValue }
     }
 
     var body: some View {
@@ -648,7 +580,7 @@ struct SettingsView: View {
             }
         }
         .sheet(item: $destructiveAction) { action in
-            GitHubImpactConfirmation(action: action, accessMode: accessMode) {
+            GitHubImpactConfirmation(action: action) {
                 destructiveAction = nil
             } onConfirm: {
                 destructiveAction = nil
@@ -779,70 +711,8 @@ struct SettingsView: View {
     private var githubSettings: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                if accessMode == .local {
-                    localGitHubAccountSection
-                    localGitHubAccessSection
-                } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Account")
-                            .font(.headline)
-                            .accessibilityAddTraits(.isHeader)
-                        if let connectedAccount {
-                            Label("Connected as @\(connectedAccount.login)", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                                .accessibilityLabel("Connected as @\(connectedAccount.login)")
-                                .accessibilityIdentifier("settings.github.status")
-                        } else {
-                            LabeledContent("Status", value: githubStatusText)
-                                .accessibilityIdentifier("settings.github.status")
-                        }
-                        githubPrimaryAction
-                        Button("Remove all GitHub access…", role: .destructive) {
-                            destructiveAction = .disconnect(groupedMetadata, connectedAccount)
-                        }
-                        .disabled(
-                            !githubFeatureAvailable ||
-                                (metadata.isEmpty && connectedAccount == nil) ||
-                                isUpdatingGitHub
-                        )
-                        if let presentedGitHubError {
-                            recoveryMessage(presentedGitHubError)
-                                .accessibilityIdentifier("settings.github.error")
-                            Button("Retry GitHub status") {
-                                Task { await loadGitHubState() }
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    if !isEditingGitHubAccess, !isPreparingGitHubEditor {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Repository access")
-                                .font(.headline)
-                                .accessibilityAddTraits(.isHeader)
-                            if groupedMetadata.isEmpty {
-                                ContentUnavailableView(
-                                    "No workspace access",
-                                    systemImage: "lock.shield",
-                                    description: Text(
-                                        githubFeatureAvailable
-                                            ? "Connect GitHub to review repository access for each workspace."
-                                            : GitHubFeatureAvailability.unavailableNotice
-                                    )
-                                )
-                            } else {
-                                ForEach(groupedMetadata) { group in
-                                    workspaceGrantRow(group)
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                if accessMode == .connect,
-                   isEditingGitHubAccess || isPreparingGitHubEditor {
-                    githubAccessEditorSection
-                }
+                githubAccountSection
+                githubAccessSection
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 20)
@@ -856,17 +726,17 @@ struct SettingsView: View {
             isGitHubAccessTemporarilyDisabled = UserDefaults.standard.bool(
                 forKey: "github.settings.access-disabled"
             )
-            synchronizeLocalGitHubEditorIfClean()
+            synchronizeGitHubEditorIfClean()
         }
         .onReceive(NotificationCenter.default.publisher(for: .githubPolicyDidChange)) { _ in
             Task {
                 await loadGitHubState()
-                synchronizeLocalGitHubEditorIfClean()
+                synchronizeGitHubEditorIfClean()
             }
         }
     }
 
-    private var localGitHubAccountSection: some View {
+    private var githubAccountSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Account")
                 .font(.headline)
@@ -877,7 +747,7 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings.github.status")
             case .ready(let account, _, _):
                 if let account {
-                    localGitHubConnectedAccountRow(account)
+                    githubConnectedAccountRow(account)
                 } else {
                     LabeledContent("Status", value: githubStatusText)
                         .accessibilityIdentifier("settings.github.status")
@@ -892,7 +762,7 @@ struct SettingsView: View {
                 LabeledContent("Status", value: githubStatusText)
                     .accessibilityIdentifier("settings.github.status")
             }
-            localGitHubPrimaryAction
+            githubPrimaryAction
             if let presentedGitHubError {
                 recoveryMessage(presentedGitHubError)
                     .accessibilityIdentifier("settings.github.error")
@@ -904,7 +774,7 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func localGitHubConnectedAccountRow(_ account: GitHubAccount) -> some View {
+    private func githubConnectedAccountRow(_ account: GitHubAccount) -> some View {
         HStack(spacing: 10) {
             Label("Connected as @\(account.login)", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
@@ -924,10 +794,10 @@ struct SettingsView: View {
             .disabled(isUpdatingGitHub || !githubEditorWorkspaces.isEmpty)
             .accessibilityIdentifier("settings.github.disable-all")
             Button("Reset…", role: .destructive) {
-                destructiveAction = .reset(connectedAccount)
+                destructiveAction = .reset
             }
             .disabled(
-                !githubFeatureAvailable ||
+                provider?.isAvailable != true ||
                     isUpdatingGitHub ||
                     !githubEditorWorkspaces.isEmpty
             )
@@ -937,7 +807,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var localGitHubPrimaryAction: some View {
+    private var githubPrimaryAction: some View {
         switch githubConnectionState {
         case .loading:
             ProgressView("Loading GitHub status…")
@@ -961,7 +831,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var localGitHubAccessSection: some View {
+    private var githubAccessSection: some View {
         if case .ready = githubConnectionState {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Repository access")
@@ -969,9 +839,8 @@ struct SettingsView: View {
                     .accessibilityAddTraits(.isHeader)
                 RepositoryWorkspacePolicyEditor(
                     workspaces: githubWorkspaceNames,
-                    installations: githubState.installations,
-                    repositoriesByInstallation: githubState.repositoriesByInstallation,
-                    accessMode: accessMode,
+                    owners: githubState.owners,
+                    repositoriesByOwner: githubState.repositoriesByOwner,
                     drafts: $githubEditorDrafts,
                     editedWorkspaces: $githubEditorWorkspaces,
                     disabled: isUpdatingGitHub || isGitHubAccessTemporarilyDisabled,
@@ -994,7 +863,7 @@ struct SettingsView: View {
                         .foregroundStyle(.orange)
                         .accessibilityIdentifier("settings.github.unsaved")
                         Spacer()
-                        Button("Cancel", action: cancelLocalGitHubAccessChanges)
+                        Button("Cancel", action: cancelGitHubAccessChanges)
                             .disabled(isUpdatingGitHub)
                         Button("Save Changes", action: saveGitHubAccessChanges)
                             .buttonStyle(.borderedProminent)
@@ -1006,10 +875,10 @@ struct SettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {
-                synchronizeLocalGitHubEditorIfClean()
+                synchronizeGitHubEditorIfClean()
             }
-            .onChange(of: localPolicy) { _, _ in
-                synchronizeLocalGitHubEditorIfClean()
+            .onChange(of: githubPolicy) { _, _ in
+                synchronizeGitHubEditorIfClean()
             }
         }
     }
@@ -1047,42 +916,6 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private var githubAccessEditorSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Edit repository access")
-                .font(.headline)
-                .accessibilityAddTraits(.isHeader)
-            if isPreparingGitHubEditor {
-                ProgressView("Preparing repository editor…")
-                    .accessibilityIdentifier("settings.github.editor.loading")
-            } else {
-                RepositoryWorkspacePolicyEditor(
-                    workspaces: githubWorkspaceNames,
-                    installations: githubState.installations,
-                    repositoriesByInstallation: githubState.repositoriesByInstallation,
-                    accessMode: accessMode,
-                    drafts: $githubEditorDrafts,
-                    editedWorkspaces: $githubEditorWorkspaces,
-                    disabled: isUpdatingGitHub,
-                    onEdit: reconcileGitHubEditorDirtyState
-                )
-                .accessibilityIdentifier("settings.github.editor")
-
-                HStack {
-                    Button("Cancel", action: closeGitHubAccessEditor)
-                        .disabled(isUpdatingGitHub)
-                    Spacer()
-                    Button("Save Changes", action: saveGitHubAccessChanges)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(githubEditorWorkspaces.isEmpty || isUpdatingGitHub)
-                        .accessibilityIdentifier("settings.github.editor.save")
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     private var githubWorkspaceNames: [String] {
         let names = applicationState.model?.workspaces.map(\.id.rawValue) ?? []
         return names.isEmpty
@@ -1090,8 +923,8 @@ struct SettingsView: View {
             : names
     }
 
-    private func synchronizeLocalGitHubEditorIfClean() {
-        guard accessMode == .local, githubEditorWorkspaces.isEmpty else { return }
+    private func synchronizeGitHubEditorIfClean() {
+        guard githubEditorWorkspaces.isEmpty else { return }
         var drafts = Dictionary(
             uniqueKeysWithValues: githubWorkspaceNames.map { ($0, WorkspaceRepositoryDraft.initial($0)) }
         )
@@ -1099,20 +932,29 @@ struct SettingsView: View {
             for policy in backup where drafts[policy.workspace] != nil {
                 drafts[policy.workspace]?.repositoryModes = Dictionary(
                     uniqueKeysWithValues: policy.repositories.map {
-                        (GitHubLocalProvider.canonicalize($0.fullName), $0.mode)
+                        (GitHubProvider.canonicalize($0.fullName), $0.mode)
                     }
                 )
             }
         } else {
             for workspace in githubWorkspaceNames {
-                guard let policyWorkspace = localPolicy?.workspaces[workspace] else { continue }
-                drafts[workspace]?.repositoryModes = SetupView.localPolicyPrefill(
-                    policyWorkspace: policyWorkspace
-                )
+                guard let policyWorkspace = githubPolicy?.workspaces[workspace] else { continue }
+                drafts[workspace]?.repositoryModes = repositoryModes(from: policyWorkspace)
             }
         }
         githubSavedEditorDrafts = drafts
         githubEditorDrafts = drafts
+    }
+
+    private func repositoryModes(
+        from policyWorkspace: GitHubPolicyWorkspace
+    ) -> [String: GitHubRepositoryAccessMode] {
+        var modes: [String: GitHubRepositoryAccessMode] = [:]
+        for entry in policyWorkspace.repos
+            where GitHubProvider.isValidCanonical(entry.canonical) {
+            modes[entry.canonical] = entry.mode
+        }
+        return modes
     }
 
     private func reconcileGitHubEditorDirtyState() {
@@ -1121,12 +963,12 @@ struct SettingsView: View {
         })
     }
 
-    private func cancelLocalGitHubAccessChanges() {
+    private func cancelGitHubAccessChanges() {
         githubEditorDrafts = githubSavedEditorDrafts
         githubEditorWorkspaces.removeAll()
     }
 
-    private var allLocalGitHubPolicies: [GitHubWorkspacePolicy] {
+    private var allGitHubPolicies: [GitHubWorkspacePolicy] {
         githubWorkspaceNames.map { workspace in
             let draft = githubEditorDrafts[workspace] ?? .initial(workspace)
             return GitHubWorkspacePolicy(
@@ -1134,9 +976,8 @@ struct SettingsView: View {
                 repositories: SetupView.repositoryPolicyEntries(
                     workspace: workspace,
                     draft: draft,
-                    installations: githubState.installations,
-                    repositoriesByInstallation: githubState.repositoriesByInstallation,
-                    accessMode: .local
+                    owners: githubState.owners,
+                    repositoriesByOwner: githubState.repositoriesByOwner
                 )
             )
         }
@@ -1166,8 +1007,8 @@ struct SettingsView: View {
                     }
                     policy = backup
                 } else {
-                    synchronizeLocalGitHubEditorIfClean()
-                    let backup = allLocalGitHubPolicies
+                    synchronizeGitHubEditorIfClean()
+                    let backup = allGitHubPolicies
                     let data = try JSONEncoder().encode(backup)
                     UserDefaults.standard.set(data, forKey: "github.settings.disabled-policy")
                     policy = githubWorkspaceNames.map {
@@ -1177,7 +1018,7 @@ struct SettingsView: View {
 
                 let progress = try await provider.savePolicy(policy)
                 githubState.syncProgress = progress
-                githubState.localPolicy = await provider.desiredPolicy()
+                githubState.policy = await provider.desiredPolicy()
                 isGitHubAccessTemporarilyDisabled.toggle()
                 UserDefaults.standard.set(
                     isGitHubAccessTemporarilyDisabled,
@@ -1189,81 +1030,13 @@ struct SettingsView: View {
                     )
                 }
                 githubEditorWorkspaces.removeAll()
-                synchronizeLocalGitHubEditorIfClean()
+                synchronizeGitHubEditorIfClean()
                 NotificationCenter.default.post(name: .githubPolicyDidChange, object: nil)
             } catch {
                 githubError = "GitHub access could not be saved: \(error.localizedDescription)"
             }
             isUpdatingGitHub = false
         }
-    }
-
-    private func beginEditingGitHubAccess() {
-        guard !isPreparingGitHubEditor, !isEditingGitHubAccess else { return }
-        githubError = nil
-
-        guard let authorizationCoordinator else {
-            githubError = GitHubFeatureAvailability.unavailableNotice
-            return
-        }
-        isPreparingGitHubEditor = true
-        Task {
-            do {
-                let discovery: GitHubAuthorizationDiscovery
-                if let resumed = try await authorizationCoordinator.resumeAuthorization() {
-                    discovery = resumed
-                } else {
-                    discovery = try await authorizationCoordinator.beginAuthorization()
-                }
-                var repositories: [Int: [GitHubRepository]] = [:]
-                for installation in discovery.installations {
-                    repositories[installation.id] = try await authorizationCoordinator.repositories(
-                        sessionID: discovery.sessionID,
-                        installationID: installation.id
-                    )
-                }
-                githubState.connectedAccount = discovery.account
-                githubState.installations = discovery.installations
-                githubState.repositoriesByInstallation = repositories
-                githubEditorSessionID = discovery.sessionID
-                configureGitHubEditorDrafts()
-                isEditingGitHubAccess = true
-            } catch {
-                githubError = error.localizedDescription
-            }
-            isPreparingGitHubEditor = false
-        }
-    }
-
-
-    private func configureGitHubEditorDrafts() {
-        var drafts = Dictionary(
-            uniqueKeysWithValues: githubWorkspaceNames.map {
-                ($0, WorkspaceRepositoryDraft.initial($0))
-            }
-        )
-        for workspace in githubWorkspaceNames {
-            let entries = metadata.filter { $0.workspace == workspace }
-            guard let installationID = entries.compactMap(\.installationID).first else { continue }
-            let available = githubState.repositoriesByInstallation[installationID] ?? []
-            let byID = Dictionary(uniqueKeysWithValues: available.map { ($0.id, $0) })
-            var modes: [String: GitHubRepositoryAccessMode] = [:]
-            for entry in entries {
-                for repositoryID in entry.repositoryIDs {
-                    guard let repository = byID[repositoryID] else { continue }
-                    let canonical = GitHubLocalProvider.canonicalize(repository.fullName)
-                    let mode: GitHubRepositoryAccessMode = entry.role == .host ? .readWrite : .readOnly
-                    if modes[canonical] != .readWrite {
-                        modes[canonical] = mode
-                    }
-                }
-            }
-            drafts[workspace]?.installationID = installationID
-            drafts[workspace]?.repositoryModes = modes
-        }
-        githubSavedEditorDrafts = drafts
-        githubEditorDrafts = drafts
-        githubEditorWorkspaces.removeAll()
     }
 
     private func saveGitHubAccessChanges() {
@@ -1275,9 +1048,8 @@ struct SettingsView: View {
                 repositories: SetupView.repositoryPolicyEntries(
                     workspace: workspace,
                     draft: draft,
-                    installations: githubState.installations,
-                    repositoriesByInstallation: githubState.repositoriesByInstallation,
-                    accessMode: accessMode
+                    owners: githubState.owners,
+                    repositoriesByOwner: githubState.repositoriesByOwner
                 )
             )
         }
@@ -1285,30 +1057,15 @@ struct SettingsView: View {
         githubError = nil
         Task {
             do {
-                if accessMode == .local {
-                    guard let provider else {
-                        throw GitHubCatalogError.unavailable("GitHub local access is unavailable in this build.")
-                    }
-                    let progress = try await provider.savePolicy(policy)
-                    githubState.syncProgress = progress
-                    githubState.localPolicy = await provider.desiredPolicy()
-                } else {
-                    guard let authorizationCoordinator, let sessionID = githubEditorSessionID else {
-                        throw GitHubAuthorizationError.authorizationSessionExpired
-                    }
-                    _ = try await authorizationCoordinator.commitPolicyWithVerification(
-                        sessionID: sessionID,
-                        policy: policy
-                    )
+                guard let provider else {
+                    throw GitHubCatalogError.unavailable("GitHub access is unavailable in this build.")
                 }
+                let progress = try await provider.savePolicy(policy)
+                githubState.syncProgress = progress
+                githubState.policy = await provider.desiredPolicy()
                 NotificationCenter.default.post(name: .githubPolicyDidChange, object: nil)
-                if accessMode == .local {
-                    githubSavedEditorDrafts = githubEditorDrafts
-                    githubEditorWorkspaces.removeAll()
-                } else {
-                    await githubState.refresh()
-                    closeGitHubAccessEditor()
-                }
+                githubSavedEditorDrafts = githubEditorDrafts
+                githubEditorWorkspaces.removeAll()
             } catch {
                 githubError = "GitHub access could not be saved: \(error.localizedDescription)"
             }
@@ -1323,7 +1080,7 @@ struct SettingsView: View {
                 try await provider.retryPolicySync()
                 githubState.syncProgress = await provider.policySyncProgress()
             } catch {
-                githubError = "GitHub synchronization could not restart: \(error.localizedDescription)"
+                githubError = "GitHub synchronization retry failed: \(error.localizedDescription)"
             }
         }
     }
@@ -1334,15 +1091,6 @@ struct SettingsView: View {
             await provider.cancelPolicySync()
             githubState.syncProgress = await provider.policySyncProgress()
         }
-    }
-
-    private func closeGitHubAccessEditor() {
-        isEditingGitHubAccess = false
-        isPreparingGitHubEditor = false
-        githubEditorSessionID = nil
-        githubEditorDrafts.removeAll()
-        githubSavedEditorDrafts.removeAll()
-        githubEditorWorkspaces.removeAll()
     }
 
     private var notificationSettings: some View {
@@ -1400,89 +1148,6 @@ struct SettingsView: View {
 
 
 
-    @ViewBuilder
-    private var githubPrimaryAction: some View {
-        switch githubConnectionState {
-        case .loading:
-            ProgressView("Loading GitHub status…")
-        case .notAvailable:
-            Label(GitHubFeatureAvailability.unavailableNotice, systemImage: "info.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("settings.github.unavailable")
-        case .readyNoAccess:
-            Button("Connect GitHub", action: beginEditingGitHubAccess)
-                .buttonStyle(.borderedProminent)
-                .disabled(isUpdatingGitHub)
-                .accessibilityIdentifier("settings.github.connect.button")
-        case .temporaryOutage:
-            Button("Retry", action: retryTemporaryOutages)
-            .buttonStyle(.borderedProminent)
-            .disabled(isUpdatingGitHub)
-            .accessibilityIdentifier("settings.github.retry.button")
-        case .recoveryRequired:
-            Text("Use the workspace-specific Reconnect action below.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .connected:
-            Button("Edit repository access", action: beginEditingGitHubAccess)
-                .disabled(isUpdatingGitHub)
-                .accessibilityIdentifier("settings.github.connect.button")
-        case .noCredential, .catalogUnavailable, .catalogFailed, .ready:
-            // Local-mode states render through localGitHubPrimaryAction.
-            EmptyView()
-        }
-    }
-
-    private func workspaceGrantRow(_ group: WorkspaceGrantGroup) -> some View {
-        let presentation = GitHubWorkspaceAccessPresentation.make(
-            workspace: group.workspace,
-            entries: group.entries
-        )
-        return VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(group.workspace).font(.body.weight(.semibold))
-                Spacer()
-                Text(presentation.status)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(presentation.action == .edit ? Color.secondary : Color.orange)
-            }
-            LabeledContent("Repositories", value: repositorySummary(for: group))
-                .font(.caption)
-            Text(presentation.reason)
-                .font(.caption)
-                .foregroundStyle(presentation.action == .edit ? Color.secondary : Color.orange)
-            HStack {
-                if githubFeatureAvailable {
-                    switch presentation.action {
-                    case .edit:
-                        Button("Edit \(group.workspace)", action: beginEditingGitHubAccess)
-                            .disabled(isUpdatingGitHub)
-                    case .retry:
-                        Button("Retry") { retryWorkspace(group.workspace) }
-                            .disabled(isUpdatingGitHub)
-                            .accessibilityIdentifier("settings.github.\(group.workspace).retry.button")
-                    case .reconnect:
-                        Button("Reconnect \(group.workspace)", action: beginEditingGitHubAccess)
-                            .disabled(isUpdatingGitHub)
-                            .accessibilityIdentifier("settings.github.\(group.workspace).reconnect.button")
-                    }
-                }
-                Button("Remove \(group.workspace) access…", role: .destructive) {
-                    destructiveAction = .remove(group)
-                }
-                .disabled(!githubFeatureAvailable || isUpdatingGitHub)
-            }
-            if !githubFeatureAvailable {
-                Text("This build cannot prove remote revocation or removal. The retained grant stays quarantined and no removal is claimed.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        }
-        .padding(12)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 9))
-    }
-
     private func recoveryMessage(_ message: String) -> some View {
         Label(message, systemImage: "exclamationmark.triangle")
             .font(.caption)
@@ -1515,48 +1180,15 @@ struct SettingsView: View {
         reducedMotion || systemReduceMotion
     }
 
-    private var groupedMetadata: [WorkspaceGrantGroup] {
-        Dictionary(grouping: metadata, by: \.workspace)
-            .map { workspace, entries in
-                WorkspaceGrantGroup(
-                    workspace: workspace,
-                    entries: entries,
-                    repositoryNames: Array(Set(entries.flatMap { $0.repositoryNames })).sorted()
-                )
-            }
-            .sorted { $0.workspace < $1.workspace }
-    }
-
-
-
     private var githubStatusText: String {
         switch githubConnectionState {
         case .loading: return "Loading…"
-        case .notAvailable: return "Not available in this build"
-        case .readyNoAccess: return "Ready to connect · no workspace access"
-        case .temporaryOutage: return "Service unavailable · retry without reconnecting"
-        case .recoveryRequired: return "Workspace access needs reconnecting"
-        case .connected: return "Connected · \(groupedMetadata.count) workspace\(groupedMetadata.count == 1 ? "" : "s")"
-        case .noCredential: return GitHubLocalStrings.settingsNoCredential
+        case .noCredential: return GitHubStrings.settingsNoCredential
         case .catalogUnavailable, .catalogFailed: return "GitHub repositories could not be loaded"
         case .ready(let account, let owners, _):
             if let account { return "Connected as @\(account.login)" }
             return owners.isEmpty ? "Connected · no repository access" : "Connected · \(owners.count) owner\(owners.count == 1 ? "" : "s")"
         }
-    }
-
-    private var githubFeatureAvailable: Bool {
-        if accessMode == .local { return provider?.isAvailable == true }
-        return authorizationCoordinator?.isAvailable == true
-    }
-
-
-    private func repositorySummary(for group: WorkspaceGrantGroup) -> String {
-        let writable = Set(group.entries.filter { $0.role == .host }.flatMap(\.repositoryNames))
-        let values = group.repositoryNames.map { repository in
-            "\(repository) — \(writable.contains(repository) ? GitHubRepositoryAccessMode.readWrite.label : GitHubRepositoryAccessMode.readOnly.label)"
-        }
-        return values.isEmpty ? "None recorded" : values.joined(separator: ", ")
     }
 
     private func refreshLoginItemStatus() {
@@ -1582,128 +1214,53 @@ struct SettingsView: View {
         await githubState.refresh()
     }
 
-    private func retryWorkspace(_ workspace: String) {
-        guard let authorizationCoordinator else { return }
-        isUpdatingGitHub = true
-        githubError = nil
-        Task {
-            do {
-                try await authorizationCoordinator.retryUnavailableWorkspace(workspace)
-            } catch {
-                githubError = "Retry for \(workspace) did not succeed: \(error.localizedDescription)"
-            }
-            isUpdatingGitHub = false
-            await loadGitHubStatePreservingError()
-        }
-    }
-
-    private func retryTemporaryOutages() {
-        guard let authorizationCoordinator else { return }
-        let workspaces = Set(metadata.compactMap { entry in
-            !entry.quarantined &&
-                (entry.recoveryState == .serviceUnavailable || entry.recoveryState == .expired)
-                ? entry.workspace
-                : nil
-        })
-        isUpdatingGitHub = true
-        githubError = nil
-        Task {
-            for workspace in workspaces.sorted() {
-                do {
-                    try await authorizationCoordinator.retryUnavailableWorkspace(workspace)
-                } catch {
-                    githubError = "Retry for \(workspace) did not succeed: \(error.localizedDescription)"
-                    break
-                }
-            }
-            isUpdatingGitHub = false
-            await loadGitHubStatePreservingError()
-        }
-    }
-
     private func removeWorkspace(_ workspace: String) {
-        if accessMode == .local {
-            guard let provider else {
-                githubError = "GitHub local access is unavailable in this build."
-                return
-            }
-            isUpdatingGitHub = true
-            githubError = nil
-            Task {
-                do {
-                    // An empty repository list clears the workspace's access
-                    // through the journaled CLI.
-                    let progress = try await provider.savePolicy([
-                        GitHubWorkspacePolicy(workspace: workspace, repositories: [])
-                    ])
-                    githubState.syncProgress = progress
-                    githubState.localPolicy = await provider.desiredPolicy()
-                    isUpdatingGitHub = false
-                    githubEditorWorkspaces.removeAll()
-                    synchronizeLocalGitHubEditorIfClean()
-                } catch {
-                    isUpdatingGitHub = false
-                    githubError = "Removal could not be applied. \(workspace) access remains unchanged: \(error.localizedDescription)"
-                    await loadGitHubStatePreservingError()
-                }
-            }
+        guard let provider else {
+            githubError = "GitHub access is unavailable in this build."
             return
         }
-        guard let authorizationCoordinator else { return }
         isUpdatingGitHub = true
         githubError = nil
         Task {
             do {
-                try await authorizationCoordinator.removeWorkspace(workspace)
+                // An empty repository list clears the workspace's access
+                // through the journaled CLI.
+                let progress = try await provider.savePolicy([
+                    GitHubWorkspacePolicy(workspace: workspace, repositories: [])
+                ])
+                githubState.syncProgress = progress
+                githubState.policy = await provider.desiredPolicy()
                 isUpdatingGitHub = false
-                await loadGitHubState()
+                githubEditorWorkspaces.removeAll()
+                synchronizeGitHubEditorIfClean()
             } catch {
                 isUpdatingGitHub = false
-                githubError = "Removal could not be verified. \(workspace) remains visible and may be quarantined. Retry or reconnect: \(error.localizedDescription)"
+                githubError = "Removal could not be applied. \(workspace) access remains unchanged: \(error.localizedDescription)"
                 await loadGitHubStatePreservingError()
             }
         }
     }
 
     private func disconnectAccount() {
-        if accessMode == .local {
-            guard let provider else {
-                githubError = "GitHub local access is unavailable in this build."
-                return
-            }
-            isUpdatingGitHub = true
-            githubError = nil
-            Task {
-                do {
-                    _ = try await provider.resetAccess()
-                    await githubState.refresh()
-                    isGitHubAccessTemporarilyDisabled = false
-                    UserDefaults.standard.removeObject(forKey: "github.settings.access-disabled")
-                    UserDefaults.standard.removeObject(forKey: "github.settings.disabled-policy")
-                    githubEditorWorkspaces.removeAll()
-                    synchronizeLocalGitHubEditorIfClean()
-                    isUpdatingGitHub = false
-                } catch {
-                    isUpdatingGitHub = false
-                    githubError = "Removal could not be applied. Repository access remains unchanged: \(error.localizedDescription)"
-                    await loadGitHubStatePreservingError()
-                }
-            }
+        guard let provider else {
+            githubError = "GitHub access is unavailable in this build."
             return
         }
-        guard let authorizationCoordinator else { return }
         isUpdatingGitHub = true
         githubError = nil
         Task {
             do {
-                try await authorizationCoordinator.disconnectAccount()
+                _ = try await provider.resetAccess()
+                await githubState.refresh()
+                isGitHubAccessTemporarilyDisabled = false
+                UserDefaults.standard.removeObject(forKey: "github.settings.access-disabled")
+                UserDefaults.standard.removeObject(forKey: "github.settings.disabled-policy")
+                githubEditorWorkspaces.removeAll()
+                synchronizeGitHubEditorIfClean()
                 isUpdatingGitHub = false
-                metadata = []
-                connectedAccount = nil
-                githubConnectionState = .readyNoAccess
             } catch {
                 isUpdatingGitHub = false
-                githubError = "Removal could not be verified. Affected grants remain visible and may be quarantined. Retry or reconnect: \(error.localizedDescription)"
+                githubError = "Removal could not be applied. Repository access remains unchanged: \(error.localizedDescription)"
                 await loadGitHubStatePreservingError()
             }
         }
@@ -1715,9 +1272,6 @@ struct SettingsView: View {
         githubError = message
     }
 
-    /// Runs the CLI-owned host-credential flow. gh reuse completes
-    /// in-process; when the CLI routes to the OAuth Device Flow the app
-    /// presents the in-app device sheet (typed not-configured remedies are
     /// Runs the CLI-owned host-credential flow. gh reuse completes
     /// in-process. When the CLI reports gh is unauthenticated with no
     /// device-flow client ID (SILO_HOST_OAUTH_NOT_CONFIGURED) the app
@@ -1843,7 +1397,6 @@ private extension UNAuthorizationStatus {
 
 struct GitHubImpactConfirmation: View {
     let action: GitHubDestructiveAction
-    let accessMode: GitHubAccessMode
     let onCancel: () -> Void
     let onConfirm: () -> Void
     @State private var confirmation = ""
@@ -1905,18 +1458,11 @@ struct GitHubImpactConfirmation: View {
     private var introduction: String {
         switch action {
         case .reset:
-            return "This removes GitHub repository access from every workspace. You can reconnect it later."
+            return "This disconnects the GitHub account on this Mac and clears repository access from every workspace. You can connect it again later."
         case .remove:
-            if accessMode == .local {
-                return "This removes the workspace's repositories from the local GitHub policy."
-            }
-            return "Review this workspace-specific access change before it is applied."
-        case .disconnect(_, let account):
-            if accessMode == .local {
-                return "This clears every workspace's repository list from the local GitHub policy."
-            }
-            return account.map { "This removes every listed workspace grant associated with @\($0.login)." }
-                ?? "This removes every listed workspace grant associated with the current account."
+            return "This removes the workspace's repositories from the GitHub policy."
+        case .disconnect:
+            return "This disconnects the GitHub account on this Mac and clears every workspace's repository access."
         }
     }
 
@@ -1926,12 +1472,12 @@ struct GitHubImpactConfirmation: View {
         case .reset:
             EmptyView()
         case .remove(let group):
-            grantImpact(group)
-        case .disconnect(let groups, _):
+            repositoryImpact(group)
+        case .disconnect(let groups):
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(groups) { group in
-                        grantImpact(group)
+                        repositoryImpact(group)
                     }
                 }
             }
@@ -1939,7 +1485,7 @@ struct GitHubImpactConfirmation: View {
         }
     }
 
-    private func grantImpact(_ group: WorkspaceGrantGroup) -> some View {
+    private func repositoryImpact(_ group: WorkspaceRepositoryAccess) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(group.workspace).font(.body.weight(.semibold))
             Text("Repositories: \(group.repositoryNames.isEmpty ? "None recorded" : group.repositoryNames.joined(separator: ", "))")

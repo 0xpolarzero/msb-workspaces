@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Stateful fake GitHub server for the Silo Path C proxy tests.
+"""Stateful fake GitHub server for the Silo host-proxy proxy tests.
 
 Phase 0 fixture: a stdlib-only, DUMB recording upstream that speaks the git
 smart-HTTP protocol, a small GitHub REST surface, and Git LFS basic transfer.
@@ -810,7 +810,7 @@ def serve(state_dir: Path, remote_root: Path, mode: dict[str, Any], port: int, g
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Stateful fake GitHub server (Silo Path C test fixture).")
+    parser = argparse.ArgumentParser(description="Stateful fake GitHub server (Silo host-proxy test fixture).")
     parser.add_argument("--serve", action="store_true", help="serve (default action; accepted for symmetry with the test harness)")
     parser.add_argument("--port", type=int, default=int(os.environ.get("SILO_FAKE_GITHUB_PORT", "0")))
     parser.add_argument("--state", default=os.environ.get("SILO_FAKE_GITHUB_STATE", ""))

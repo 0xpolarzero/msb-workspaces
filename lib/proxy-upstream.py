@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Silo GitHub proxy -- outbound (upstream) leg (Path C contract section 4).
+"""Silo GitHub proxy -- outbound (upstream) leg (host-proxy contract section 4).
 
 The upstream side is the TRUSTED leg (real github.com / objects.githubusercontent.com,
 or the tests/fake_github.py fixture via SILO_PROXY_UPSTREAM_ROOT). It therefore uses

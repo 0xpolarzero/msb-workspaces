@@ -50,17 +50,7 @@ def fail(msg: str, code: int = 1) -> int:
     print(msg, file=sys.stderr)
     return code
 
-def require_secret_source(sb: dict[str, Any], *, binding_operation: bool = False) -> bool:
-    if (
-        binding_operation
-        and
-        os.environ.get("SILO_FAKE_REQUIRE_SECRET_SOURCE") == "1"
-        and sb.get("secrets", {}).get("GH_TOKEN")
-        and not os.environ.get("GH_TOKEN")
-    ):
-        fail("host source GH_TOKEN missing")
-        return False
-    return True
+
 def record_lock_fd() -> None:
     marker = os.environ.get("SILO_FAKE_LOCK_FD_MARKER", "")
     if not marker:
@@ -203,14 +193,10 @@ def git_env(state: dict[str, Any], box: str) -> dict[str, str]:
         # host /etc/gitconfig.
         "GIT_CONFIG_SYSTEM": str(Path(sb["root"]) / "gitconfig"),
     })
-    # Bound secrets substitute placeholders inside the guest, so a real value
-    # can never reach the simulated VM environment even if the host-side CLI
-    # leaked it.
+    # Bound secrets substitute placeholders inside the guest, so real values
+    # never reach the simulated VM environment.
     for secret_name in sb.get("secrets", {}):
-        if secret_name == "GH_TOKEN":
-            env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
-        else:
-            env[secret_name] = "$MSB_" + secret_name
+        env[secret_name] = "$MSB_" + secret_name
     if os.environ.get("SILO_FAKE_GUEST_PUSH_ALLOWED") != "1":
         env["SILO_GUEST_READ_ONLY"] = "1"
     if REMOTE_ROOT:
@@ -369,8 +355,6 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     if not command:
         return fail("missing exec command")
     sb = ensure_sandbox_dirs(state, box)
-    if not require_secret_source(sb):
-        return 1
     sb["running"] = True
     # Silo control-plane execs run through a bash -c wrapper that prints the
     # reserved internal-session marker (control conn-id 0, length 1, payload
@@ -397,8 +381,6 @@ def parse_exec(args: list[str], state: dict[str, Any]) -> int:
     mapped_workdir.mkdir(parents=True, exist_ok=True)
     env = git_env(state, box)
     env.update(sb.get("env", {}))
-    if "GH_TOKEN" in sb.get("secrets", {}): env["GH_TOKEN"] = r"$MSB_GH_TOKEN"
-
     wants_stdin = len(command) >= 2 and command[0] == "bash" and command[1] == "-s"
     stdin_data = sys.stdin.buffer.read() if wants_stdin else b""
 
@@ -652,8 +634,6 @@ def do_copy(args: list[str], state: dict[str, Any]) -> int:
     src_raw, dst_raw = args
     if ":" in src_raw and src_raw.split(":", 1)[0] in state["sandboxes"]:
         box, raw = src_raw.split(":", 1)
-        if not require_secret_source(state["sandboxes"][box]):
-            return 1
         src = Path(map_guest_path(state, box, raw))
         dst = Path(dst_raw)
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -672,8 +652,6 @@ def do_copy(args: list[str], state: dict[str, Any]) -> int:
         return 0
     if ":" in dst_raw and dst_raw.split(":", 1)[0] in state["sandboxes"]:
         box, raw = dst_raw.split(":", 1)
-        if not require_secret_source(state["sandboxes"][box]):
-            return 1
         dst = Path(map_guest_path(state, box, raw))
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_raw, dst)
@@ -730,8 +708,6 @@ def main() -> int:
         if os.environ.get("SILO_FAKE_INSPECT_FAIL") == "1":
             return fail("fake inspect failure", 2)
         if box in state["sandboxes"]:
-            if not require_secret_source(state["sandboxes"][box]):
-                return 1
             if "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:
                 tls_enabled = "--tls-intercept" in state["sandboxes"][box].get("args", [])
                 secrets = []
@@ -756,7 +732,7 @@ def main() -> int:
         box = parse_named_arg(rest) or ""
         if os.environ.get("SILO_FAKE_PING_FAIL") == "1":
             return 1
-        if box not in state["sandboxes"] or not require_secret_source(state["sandboxes"][box]):
+        if box not in state["sandboxes"]:
             return 1
         return 0 if state["sandboxes"][box].get("running") else 1
     if cmd in {"start", "restart"}:
@@ -775,8 +751,6 @@ def main() -> int:
     if cmd == "stop":
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
-        if not require_secret_source(state["sandboxes"][box]):
-            return 1
         if os.environ.get("SILO_FAKE_STOP_FAIL") == "1":
             return fail("fake stop failure")
         state["sandboxes"][box]["running"] = False
@@ -786,8 +760,6 @@ def main() -> int:
     if cmd == "rm":
         box = parse_named_arg(rest) or ""
         if box not in state["sandboxes"]: return 1
-        if not require_secret_source(state["sandboxes"][box]):
-            return 1
         state["sandboxes"].pop(box, None)
         shutil.rmtree(STATE_ROOT / "guests" / box, ignore_errors=True)
         save(state)
@@ -882,8 +854,6 @@ def main() -> int:
         box = rest[0] if rest else ""
         if box not in state["sandboxes"]: return 1
         sb = ensure_sandbox_dirs(state, box)
-        if not require_secret_source(sb):
-            return 1
         if "--secret" in rest:
             spec = rest[rest.index("--secret") + 1]
             name = spec.split("@", 1)[0]
@@ -906,8 +876,6 @@ def main() -> int:
             return 0
         if rest and rest[0] == "serve":
             box = rest[1] if len(rest) > 1 else ""
-            if box in state["sandboxes"] and not require_secret_source(state["sandboxes"][box]):
-                return 1
             return 0
     if cmd in {"ps", "ls", "status"}:
         if cmd == "status" and "--format" in rest and rest[rest.index("--format") + 1:rest.index("--format") + 2] == ["json"]:

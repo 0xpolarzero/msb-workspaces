@@ -42,11 +42,10 @@ silo identity "Ada Lovelace" ada@example.com
 
 ## GitHub permissions
 
-GitHub setup presents **Connect GitHub** and **Skip GitHub** in connect mode.
-Local mode (`SILO_GITHUB_MODE=local`, the default) never binds a token into a
-workspace: git reaches GitHub through a host proxy that enforces a per-workspace
-capability, and the Mac holds one host credential (`silo github auth`) that the
-proxy uses for every outbound request.
+GitHub setup presents **Connect GitHub** and **Skip GitHub**. Silo never binds a
+token into a workspace: git reaches GitHub through a host proxy that enforces a
+per-workspace capability, and the Mac holds one host credential
+(`silo github auth`) that the proxy uses for every outbound request.
 
 ```bash
 silo github auth [--force] [--json]        # Provision/rotate the host credential
@@ -58,16 +57,13 @@ silo github capability rotate WORKSPACE    # Rotate that workspace's capability
 silo github verify WORKSPACE [OWNER/REPO]
 silo github status [WORKSPACE|all]
 silo github status [WORKSPACE|all] --format json
-silo github remove WORKSPACE               # Revoke the host credential (local mode)
+silo github disconnect                     # Revoke the host credential
 silo app github-policy-get [--workspace W] --format json
 silo app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear] --format json
 ```
 
-`silo github remove` in local mode revokes the host credential (metadata first,
-fail-closed). In connect mode it refuses current Connect grants because
-revocation must be performed by Silo; use the app's workspace removal or
-account disconnect action so the service grant and local credential state are
-updated together.
+`silo github disconnect` revokes the host credential metadata first and fails
+closed if cleanup cannot be verified.
 
 ## Host-held API secrets
 

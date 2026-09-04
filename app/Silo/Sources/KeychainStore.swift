@@ -91,5 +91,3 @@ protocol CredentialKeychainStoring: Sendable {
 }
 
 extension KeychainStore: CredentialKeychainStoring {}
-
-extension KeychainStore: SiloConnectKeychainStoring {}

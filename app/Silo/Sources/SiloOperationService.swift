@@ -68,12 +68,6 @@ actor SiloOperationService {
         return result
     }
 
-    func githubState(workspace: String? = nil) async throws -> SiloGitHubStateResponse {
-        let response = try await client.githubState(workspace: workspace)
-        guard let result = response.result else { throw SiloClientError.missingResult(command: "github-state") }
-        return result
-    }
-
     func lifecycle(_ action: SiloLifecycleAction, workspace: String) async throws -> SiloApplyResult {
         (try await coordinator.lifecycle(action, workspace: workspace)).result
     }

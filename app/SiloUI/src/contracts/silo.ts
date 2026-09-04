@@ -94,7 +94,6 @@ export const siloBootstrapStateSchema = z.object({
   lastError: z.string().optional(),
   completedPhases: z.array(siloBootstrapPhaseSchema),
   workspaceConfigurations: z.array(setupWorkspaceConfigurationSchema).optional(),
-  reconnectWorkspace: z.string().optional(),
   phaseDurations: z.record(z.string(), z.number().nonnegative()),
 }).strict()
 
@@ -131,7 +130,6 @@ export const githubRepositoryPolicySchema = z.object({
   workspace: z.string().min(1),
   repositoryID: z.number().int(),
   fullName: z.string().min(1),
-  installationID: z.number().int(),
   ownerID: z.number().int(),
   ownerLogin: z.string().min(1),
   ownerType: z.string().nullable(),

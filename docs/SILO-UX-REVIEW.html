@@ -127,7 +127,7 @@
   <header class="hero">
     <div class="eyebrow">Silo · Product UX review</div>
     <h1>Make every workspace action trustworthy, recoverable, and obvious.</h1>
-    <p class="lede">The review found several trust gaps, then the implementation pass closed the highest-risk contracts: health now waits for an authoritative baseline, destructive GitHub changes require scoped review, Connect-to-Apply retains verification results, and workspace scope/capabilities are explicit. Remaining work is concentrated in start-and-open compound actions, per-section loading/navigation polish, backup preflight detail, accessibility, and the deployment-supplied GitHub App installation link.</p>
+    <p class="lede">The review found several trust gaps, then the implementation pass closed the highest-risk contracts: health now waits for an authoritative baseline, destructive GitHub changes require scoped review, GitHub policy changes retain verification results, and workspace scope/capabilities are explicit. Remaining work is concentrated in start-and-open compound actions, per-section loading/navigation polish, backup preflight detail, and accessibility.</p>
     <div class="meta">
       <span class="pill">Review date: 2026-08-11</span>
       <span class="pill">Verification refreshed: 2026-08-14</span>
@@ -140,7 +140,7 @@
   <section class="grid">
     <article class="card verdict span-8">
       <h2>Executive verdict</h2>
-      <p><strong>Prioritize trust before polish.</strong> The implementation pass now closes the most consequential trust breaks: cold launch reports “Not observed,” destructive GitHub revocation is reviewed and phrase-gated, Connect-to-Apply commits only after verification, and detail routes carry workspace scope. The remaining contract gaps are narrower: stopped-workspace start-and-open actions, backup preflight/rollback detail, per-section request state, and inclusive interaction polish.</p>
+      <p><strong>Prioritize trust before polish.</strong> The implementation pass now closes the most consequential trust breaks: cold launch reports “Not observed,” destructive GitHub revocation is reviewed and phrase-gated, GitHub policy changes commit only after verification, and detail routes carry workspace scope. The remaining contract gaps are narrower: stopped-workspace start-and-open actions, backup preflight/rollback detail, per-section request state, and inclusive interaction polish.</p>
       <p>The fail-closed model and transactional services are now surfaced more honestly through health states, freshness/quarantine reasons, operation phases, verification summaries, notification categories, and deep links. The report below marks each original finding as shipped, partial, or open instead of presenting the pre-remediation review as current behavior.</p>
     </article>
     <article class="card span-4">
@@ -155,9 +155,9 @@
     <div class="card">
       <h2>Implementation status</h2>
       <p>The original UX findings remain useful as acceptance criteria, but their status changed during the remediation pass.</p>
-      <div class="status good"><strong>Shipped</strong> Unified health/baseline semantics; destructive GitHub impact review; verification-aware Connect-to-Apply; workspace-scoped detail routes and capability propagation; resumable setup choices and explicit completion; opt-in notification categories with deduplicated deep links.</div>
+      <div class="status good"><strong>Shipped</strong> Unified health/baseline semantics; destructive GitHub impact review; verification-aware GitHub policy apply; workspace-scoped detail routes and capability propagation; resumable setup choices and explicit completion; opt-in notification categories with deduplicated deep links.</div>
       <div class="status"><strong>Partial</strong> Lifecycle/backup reconciliation, typed recovery presentation, Details/Settings consolidation, and backup/restore review are materially improved but still have the gaps called out below.</div>
-      <div class="status"><strong>Open</strong> Truthful stopped-workspace start-and-open actions, full accessibility focus/announcement coverage, and the approved release installation URL input.</div>
+      <div class="status"><strong>Open</strong> Truthful stopped-workspace start-and-open actions and full accessibility focus/announcement coverage.</div>
     </div>
   </section>
 
@@ -189,10 +189,10 @@
         <p class="fix"><strong>Status:</strong> Shipped and covered by the native model/UI verification. Remaining work is accessibility announcement/focus polish, not the Ready-before-baseline contract.</p>
       </article>
       <article class="card finding p0-card span-6">
-        <div class="title"><h3>2. Put a reviewed confirmation boundary around GitHub revocation</h3><span class="priority p0">P0</span></div>
-        <p class="why">Fixed. Workspace removal and account disconnect now open a scoped impact review, list affected owners/repositories, explain VM-held and service-grant effects, preserve quarantine on uncertain cleanup, and require an exact phrase.</p>
-        <div class="evidence"><strong>Implemented</strong><span class="ref">SettingsView.swift:141-151, 365-397, 646-748</span> provides the sheet, impact list, credential effects, workspace-name phrase, and <code>DISCONNECT</code> phrase. <span class="ref">GitHubAuthorizationCoordinator.swift:647-728</span> performs ordered cleanup and typed recovery.</div>
-        <p class="fix"><strong>Status:</strong> Shipped. The destructive boundary is now explicit before any revocation or local credential mutation.</p>
+        <div class="title"><h3>2. Confirm destructive GitHub actions</h3><span class="priority p0">P0</span></div>
+        <p class="why">Fixed. Removing every repository from a sandbox confirms the scoped impact. Disconnecting the account confirms the global impact, clears repository policy, and removes the Mac credential.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">SettingsView.swift</span> provides the repository-removal and account-disconnect confirmations.</div>
+        <p class="fix"><strong>Status:</strong> Shipped. Ordinary repository changes still apply immediately.</p>
       </article>
       <article class="card finding p0-card span-6">
         <div class="title"><h3>3. Let onboarding continue, then verify before completion</h3><span class="priority p0">P0</span></div>
@@ -244,9 +244,9 @@
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>10. Make GitHub setup explicit, resumable, and safe</h3><span class="priority p1">P1</span></div>
-        <p class="why">Partial. Setup now resumes drafts, preserves existing access on cancellation, requires an explicit GitHub decision and identity decision before Done, prevents incomplete enabled assignments from reaching Apply, and retains verification results. The access-mode label still needs a clearer guest-read/host-write product name, and the installation URL is a deployment input rather than a checked-in release value.</p>
-        <div class="evidence"><strong>Implemented</strong><span class="ref">SetupView.swift:341-375, 1248-1264, 1786-1797, 1960-1990</span> gates completion, validates drafts, persists resume state, and clears it only on Done. <span class="ref">docs/GITHUB-SETUP.md:25-39</span> documents the safe installation-link boundary.</div>
-        <p class="fix"><strong>Status:</strong> Partial. Rename access modes for trust clarity and provide the approved installation URL in the signed/release build.</p>
+        <p class="why">Partial. Setup now resumes drafts, preserves existing access on cancellation, requires an explicit GitHub decision and identity decision before Done, prevents incomplete enabled assignments from reaching Apply, and retains verification results. The access-mode label still needs a clearer guest-read/host-write product name.</p>
+        <div class="evidence"><strong>Implemented</strong><span class="ref">SetupView.swift:341-375, 1248-1264, 1786-1797, 1960-1990</span> gates completion, validates drafts, persists resume state, and clears it only on Done. <span class="ref">docs/GITHUB-SETUP.md:25-39</span> documents repository selection and push permissions.</div>
+        <p class="fix"><strong>Status:</strong> Partial. Rename repository access modes for trust clarity.</p>
       </article>
       <article class="card finding p1-card span-6">
         <div class="title"><h3>11. Add opt-in background notifications with deep links</h3><span class="priority p1">P1</span></div>
@@ -301,7 +301,7 @@
       <table>
         <thead><tr><th>Phase</th><th>Ship</th><th>Acceptance gate</th></tr></thead>
         <tbody>
-          <tr><td>1 · Safety contract</td><td>Shipped: unified health/severity semantics; successful-observation meaning; authoritative capability propagation; verification-aware GitHub bind; destructive confirmation flows.</td><td>Cold launch reports Not observed; destructive actions require scoped review; grants are not shown as verified until the verification gate passes.</td></tr>
+          <tr><td>1 · Safety contract</td><td>Shipped: unified health/severity semantics; successful-observation meaning; authoritative capability propagation; verification-aware GitHub policy apply; destructive confirmation flows.</td><td>Cold launch reports Not observed; destructive actions require scoped review; repository access is not shown as verified until the verification gate passes.</td></tr>
           <tr><td>2 · Scope and action</td><td>Partial: workspace + section routes, persistent picker, truthful recovery state. Stopped-workspace start-and-open actions remain.</td><td>A user can tell which workspace they are viewing and what each disabled action requires; compound start/open behavior is still pending.</td></tr>
           <tr><td>3 · Operations and recovery</td><td>Partial: verification-aware lifecycle, operation rows, recovery metadata, notification delivery, and backup/restore review are shipped. Progress-event and rollback detail remain.</td><td>Every long operation has a review boundary and a visible final/unknown outcome; richer authoritative progress and rollback proof remain.</td></tr>
           <tr><td>4 · Onboarding finish</td><td>Shipped for the fixture and injected authorization paths: explicit Dependencies → Workspaces → GitHub/Skip → Identity → Review → Done, resumable drafts, configurable per-workspace resource limits, and per-workspace verification summary.</td><td>Closing and reopening Setup resumes safely; no incomplete enabled workspace is silently omitted; completion is deliberate.</td></tr>
@@ -345,18 +345,17 @@
     <div class="card">
       <ul>
         <li><strong>Build:</strong> <code>app/Silo/Scripts/build.sh</code> passed and produced <code>app/Silo/build/Silo.app</code>. Log: <code>app/Silo/build/logs/build.log</code>.</li>
-        <li><strong>Installation URL input:</strong> a synthetic valid installation URL passed through <code>SILO_CONNECT_INSTALLATION_URL</code> into the built <code>SiloConnectInstallationURL</code> key; a following default build produced an empty value. The release slug remains intentionally unset until an approved value is supplied.</li>
         <li><strong>Unit tests:</strong> <code>app/Silo/Scripts/test.sh</code> passed: 57 tests, 0 failures. Log: <code>app/Silo/build/logs/test.log</code>. Result: <code>app/Silo/build/DerivedData/Tests/Logs/Test/Test-Silo-2026.08.14_16-06-46-+0200.xcresult</code>.</li>
         <li><strong>UI smoke:</strong> <code>app/Silo/Scripts/smoke-test.sh</code> passed 6 UI tests with 0 failures against the rebuilt canonical bundle in fixture modes. Log: <code>app/Silo/build/logs/smoke-ui.log</code>. Result: <code>app/Silo/build/DerivedData/Smoke/Logs/Test/Test-Silo-2026.08.14_16-07-12-+0200.xcresult</code>.</li>
         <li><strong>Runtime cleanup:</strong> the UI flow clicked <code>quit.button</code>; the subsequent <code>pgrep -x Silo</code> check returned no remaining instance.</li>
         <li><strong>Semantic UI evidence:</strong> <code>statusItem.button</code> was labeled <code>Silo</code>; the application menu exposed <code>About Silo</code>, <code>Settings…</code>, <code>Hide Silo</code>, and <code>Quit Silo</code>; <code>monitor.title</code> was <code>Silo</code>; <code>monitor.health</code> was <code>Not observed</code>; workspace rows were <code>dev</code>/<code>Stopped</code>, <code>playgrounds</code>/<code>Stopped</code>, and <code>personal</code>/<code>Stopped</code>; <code>observation.value</code> changed from <code>Not yet refreshed</code> to <code>Observation #1</code> after <code>refresh.button</code>; <code>quit.button</code> reached <code>notRunning</code>.</li>
-        <li><strong>GitHub UI E2E evidence:</strong> fixture-driven UI tests passed successful authorization → owner/repository selection → review → Apply → retained verification → setup completion; cancel → retry generation isolation; unavailable Connect with the optional path preserved; setup review completion semantics. The injected coordinator/browser/session path is deterministic and does not use a GitHub credential.</li>
-        <li><strong>OAuth unit evidence:</strong> the current unit suite covers native authorization URL creation without endpoint preflight, successful callback/account and installation discovery, callback/session rejection for unknown, expired, and replayed state, cancellation, unavailable callback exchange, repository-scope validation, and verified Connect-to-Apply persistence/rollback. The browser and transport are injected test doubles; no GitHub credential or token is stored in test artifacts.</li>
-        <li><strong>Live-service limit:</strong> the configured external Connect endpoint was unavailable from this machine during probing (DNS resolution failed), so a real GitHub account/browser authorization and live grant issuance were not completed. The unavailable-service path is covered independently by deterministic transport tests; this report does not claim live GitHub E2E success.</li>
+        <li><strong>GitHub UI E2E evidence:</strong> fixture-driven UI tests passed successful authorization → owner/repository selection → review → Apply → retained verification → setup completion; cancel → retry generation isolation; unavailable GitHub sign-in with the optional path preserved; setup review completion semantics. The injected provider and browser path is deterministic and does not use a GitHub credential.</li>
+        <li><strong>GitHub account unit evidence:</strong> the current unit suite covers authenticated <code>gh</code> reuse, web sign-in routing, OAuth Device Flow, repository permission discovery, policy application, and failure recovery through injected process and session doubles; no GitHub credential or token is stored in test artifacts.</li>
+        <li><strong>Live GitHub limit:</strong> no real GitHub account or credential was used during this run, so the report does not claim live GitHub end-to-end success.</li>
         <li><strong>Fixture versus production:</strong> UI-test mode uses a deterministic fixture model with Stopped workspaces and an Observation counter; production constructs the client-backed model in <span class="ref">app/Silo/Sources/SiloApp.swift:64-94</span>. Fixture values are not live sandbox telemetry.</li>
         <li><strong>Unified log evidence:</strong> after the smoke test, queried a three-minute window with <code>log show --last 3m --style compact --info --debug --predicate 'process == "Silo"'</code> and the matching error/fault predicate <code>process == "Silo" AND (messageType == "error" OR messageType == "fault")</code>. The records were framework/AppKit/AppIntents/SQLite diagnostics; the app has no intentional application-level logger and emitted no application-specific failure.</li>
       </ul>
-      <div class="status"><strong>Interpretation</strong>The implementation and evidence pass close findings 1–4 and 11, materially improve findings 5, 6, 8, 9, and 10, and leave findings 7, accessibility, and the approved release installation URL as explicit remaining work. Build output, 57 model tests, and 6 UI tests passed. The external Connect service was unavailable during this run, so live GitHub authorization remains an explicit deployment/integration prerequisite rather than a claimed result. Native fixture values remain deterministic and are not live sandbox telemetry.</div>
+      <div class="status"><strong>Interpretation</strong>The implementation and evidence pass close findings 1–4 and 11, materially improve findings 5, 6, 8, 9, and 10, and leave finding 7 and accessibility as explicit remaining work. Build output, 57 model tests, and 6 UI tests passed. No real GitHub credential was used, so live GitHub behavior remains outside this report. Native fixture values remain deterministic and are not live sandbox telemetry.</div>
     </div>
   </section>
 

@@ -113,7 +113,6 @@ class ReleaseBase:
             {
                 "HOME": str(home),
                 "SILO_TEST_MODE": "1",
-                "SILO_GITHUB_MODE": "local",
                 "SILO_TEST_HOST_CPUS": "12",
                 "SILO_FAKE_STATE": str(home / ".microsandbox"),
                 "SILO_MSB_BIN": str(FAKE_MSB),
@@ -483,7 +482,6 @@ class SyntaxAndStaticTests(SiloTestCase):
         self.assertIn("24678-24679", config)
         self.assertIn("3000-3010", config)
         self.assertIn("5173-5180", config)
-        self.assertIn('SILO_GITHUB_MODE="local"', config)
         self.assertNotRegex((PACKAGE / "bin/silo").read_text(), r"(?:declare|local) -A|mapfile|readarray")
         docs = "\n".join(
             (PACKAGE / name).read_text()
@@ -509,7 +507,7 @@ class SyntaxAndStaticTests(SiloTestCase):
         self.assertIn("-- sleep infinity", setup)
         self.assertIn("wait_for_guest_systemd", setup)
         self.assertIn("--tls-intercept", setup)
-        # Setup's completion text must describe the current local-mode GitHub UX.
+        # Setup's completion text must describe the current GitHub UX.
         # Recreated VMs regenerate host keys; only the dedicated Silo file is
         # ever touched, and only for the box being recreated.
         self.assertIn('ssh-keygen -R "${box}.msb" -f "$HOME/.ssh/silo_known_hosts"', setup)
@@ -540,8 +538,6 @@ class SyntaxAndStaticTests(SiloTestCase):
         config_text = (PACKAGE / "config.sh").read_text()
         self.assertIn("gh", config_text)
         self.assertNotRegex(config_text, r"[Cc]lient.?[Ii]d\s*[=:]|[Ii]d\s*[=:]\s*[A-Za-z0-9]{8,}")
-        self.assertIn('--secret "GH_TOKEN@github.com" --restart', silo)
-        self.assertIn("--secret-rm GH_TOKEN --restart", silo)
         self.assertIn("env -i", silo)
         self.assertIn("GIT_CONFIG_NOSYSTEM=1", silo)
         self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", silo)
@@ -549,51 +545,54 @@ class SyntaxAndStaticTests(SiloTestCase):
         self.assertIn("failed SHA-256 verification", silo)
         self.assertIn('"$LOCKF_BIN" -s -t 0 9', silo)
         self.assertIn('"$MSB_BIN" "$@" 9>&-', silo)
-        self.assertIn("SILO_GITHUB_VERIFY_INHERITED=1", silo)
         self.assertNotIn("tar -x", silo[silo.index("copy_lfs_objects"):silo.index("cmd_github_status")])
         self.assertNotIn("ForwardAgent", setup + proxy)
         self.assertNotIn("/var/run/docker.sock", setup)
-        self.assertIn('--secret "GH_TOKEN@github.com"', silo)
         push_body = silo[silo.index("push_impl()") : silo.index("cmd_push()")]
         self.assertNotIn("write_token_for_workspace", push_body)
         bootstrap = (PACKAGE / "lib/bootstrap-base.sh").read_text()
         self.assertIn("url.https://github.com/.insteadOf", bootstrap)
         self.assertIn("gh config set git_protocol https", bootstrap)
         self.assertIn('"$MSB_BIN" self update', silo)
-    def test_askpass_reads_schema3_installation_token(self) -> None:
-        state_path = self.env.root / "askpass-app-security.json"
-        service = "silo.github.app.dev.host.tokens"
+    def test_askpass_reads_host_token(self) -> None:
+        meta_path = self.env.root / "askpass-host-meta.json"
+        service = HOST_KEYCHAIN_SERVICE
         raw = json.dumps({
-            "schemaVersion": 3,
-            "grantID": "00000000-0000-0000-0000-000000000001",
-            "accessToken": "ghs_host_installation_token",
-            "accessExpiresAt": "2099-08-08T08:00:00Z",
+            "schemaVersion": 1,
+            "provider": "gh-cli",
+            "tokenKind": "oauth",
+            "accessToken": HOST_TOKEN,
+            "accountLogin": "fake-user",
+            "verifiedAt": "2026-01-01T00:00:00Z",
             "generation": 1,
+            "storedAt": "2026-01-01T00:00:00Z",
         })
-        security_env = self.env.env.copy()
-        security_env.update({
-            "SILO_FAKE_SECURITY_STATE": str(state_path),
-            "SILO_SECURITY_BIN": str(FAKE_SECURITY),
-        })
-        run_cmd(
-            [FAKE_SECURITY, "add-generic-password", "-s", service, "-a", "profile", "-w", raw],
-            env=security_env,
-        )
-        askpass_env = security_env.copy()
+        meta_path.write_text(json.dumps({
+            "schemaVersion": 1,
+            "state": "active",
+            "provider": "gh-cli",
+            "tokenKind": "oauth",
+            "accountLogin": "fake-user",
+            "verifiedAt": "2026-01-01T00:00:00Z",
+            "generation": 1,
+            "storedAt": "2026-01-01T00:00:00Z",
+            "repoChecks": [],
+        }))
+        self.env.key_file(service, HOST_KEYCHAIN_ACCOUNT).write_text(raw)
+        askpass_env = self.env.env.copy()
         askpass_env.update({
-            "SILO_GITHUB_MODE": "connect",
-            "SILO_TEST_KEYCHAIN_DIR": "",
-            "SILO_APP_KEYCHAIN_SERVICE": service,
-            "SILO_APP_KEYCHAIN_ACCOUNT": "profile",
-            "SILO_JQ_BIN": shutil.which("jq") or "",
-            "SILO_KEYCHAIN_HOME": str(self.env.home),
+            "SILO_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
+            "SILO_HOST_KEYCHAIN_SERVICE": service,
+            "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
+            "SILO_HOST_META_FILE": str(meta_path),
+            "SILO_HOST_KEYCHAIN_HOME": str(self.env.home),
             "SILO_FAKE_SECURITY_HOME": str(self.env.home),
         })
         proc = run_cmd(
             [PACKAGE / "bin/silo-git-askpass", "Password for https://github.com:"],
             env=askpass_env,
         )
-        self.assertEqual(proc.stdout, "ghs_host_installation_token\n")
+        self.assertEqual(proc.stdout, HOST_TOKEN + "\n")
 
 
 class InstallerAndDailyTests(SiloTestCase):
@@ -1837,7 +1836,7 @@ class PortForwarderHelperTests(unittest.TestCase):
 
 
 class InstalledProxyPackagingTests(unittest.TestCase):
-    """Fresh-install proof (Path C §4/§6 packaging): a clean HOME installed
+    """Fresh-install proof (host-proxy §4/§6 packaging): a clean HOME installed
     from the repo in SILO_TEST_MODE runs the proxy stack from ~/.local ONLY —
     checkout absent from PATH/PYTHONPATH/imports — and a real git clone works
     through the INSTALLED proxy against the fake GitHub + a seeded policy.
@@ -1850,7 +1849,6 @@ class InstalledProxyPackagingTests(unittest.TestCase):
         env.update({
             "HOME": str(home),
             "SILO_TEST_MODE": "1",
-            "SILO_GITHUB_MODE": "local",
             "SILO_TEST_HOST_CPUS": "12",
             "SILO_FAKE_STATE": str(home / ".microsandbox"),
             "SILO_MSB_BIN": str(FAKE_MSB),
@@ -1978,7 +1976,6 @@ class InstalledProxyPackagingTests(unittest.TestCase):
             "HOME": str(home),
             "PATH": "/usr/bin:/bin",
             "PYTHONPATH": "",
-            "SILO_GITHUB_MODE": "local",
             "SILO_POLICY_FILE": str(home / "Library/Application Support/Silo/github-policy.json"),
             "SILO_PROXY_UPSTREAM_ROOT": fake_base_url,
             "SILO_PROXY_LOG_FILE": str(root / "proxy.log"),
@@ -2422,7 +2419,7 @@ class GitHubAndPushTests(SiloTestCase):
         host_credential.unlink()
         self.assertFailed(
             self.env.silo("push", "dev", "clients/acme/demo", "--yes", check=False),
-            "host GitHub credential is not provisioned",
+            "GitHub is not connected on this Mac",
         )
         host_credential.write_text(saved_credential)
         (repo / "cancel.txt").write_text("cancel\n")
@@ -4293,13 +4290,6 @@ class PackagedBehaviorTests(SiloTestCase):
         self.assertEqual(deep_without_confirmation.returncode, 77)
         self.assertFailed(deep_without_confirmation, "SILO_CONFIRMATION_MISMATCH")
 
-        invalid_repository = self.env.silo(
-            "app", "github-bind", "--workspace", "dev", "--repository", "../escape",
-            "--mode", "read-only", "--format", "json", check=False,
-        )
-        self.assertEqual(invalid_repository.returncode, 64)
-        self.assertFailed(invalid_repository, "SILO_INVALID_REQUEST")
-
         invalid_push_path = self.env.silo(
             "app", "push-plan", "--workspace", "dev", "--repositories", "../escape",
             "--format", "json", check=False,
@@ -4352,7 +4342,7 @@ PROXY_HOST = "127.0.0.1:18446"  # default proxy base (socketpair tests send this
 
 
 class GitHubProxyContractTests(SiloTestCase):
-    """Path C proxy contract tests — proxy direct (SILO_TEST_MODE unset).
+    """host-proxy proxy contract tests — proxy direct (SILO_TEST_MODE unset).
 
     Drives the per-connection proxy (bin/silo-github-proxy +
     lib/proxycore.py + lib/proxy-upstream.py) two ways:
@@ -4383,7 +4373,6 @@ class GitHubProxyContractTests(SiloTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.env.env.pop("SILO_TEST_MODE", None)
-        self.env.env["SILO_GITHUB_MODE"] = "local"
         self.policy_dir = self.env.root / "policy"
         self.policy_dir.mkdir()
         self.policy_file = self.policy_dir / "github-policy.json"
@@ -4453,7 +4442,6 @@ class GitHubProxyContractTests(SiloTestCase):
     def _proxy_env(self, **overrides: str) -> dict[str, str]:
         env = self.env.env.copy()
         env.update({
-            "SILO_GITHUB_MODE": "local",
             "SILO_POLICY_FILE": str(self.policy_file),
             "SILO_PROXY_LOG_FILE": str(self.proxy_log),
             "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
@@ -6474,14 +6462,13 @@ class GitHubProxyContractTests(SiloTestCase):
         self.assertEqual(fake.proc.poll(), 0)
 
 
-class _LocalModeGitHubBase(SiloTestCase):
-    """Shared fixtures for Path C §5/§8/§11 local-mode CLI tests."""
+class _GitHubHostProxyBase(SiloTestCase):
+    """Shared fixtures for host-proxy §5/§8/§11 host-proxy CLI tests."""
 
     POLICY_DIR_NAME = "Library/Application Support/Silo"
 
     def setUp(self) -> None:
         super().setUp()
-        self.env.env["SILO_GITHUB_MODE"] = "local"
         self.env.env["SILO_JQ_BIN"] = "/usr/bin/jq"
         self.env.env["SILO_HOST_KEYCHAIN_SERVICE"] = HOST_KEYCHAIN_SERVICE
         self.env.env["SILO_HOST_KEYCHAIN_ACCOUNT"] = HOST_KEYCHAIN_ACCOUNT
@@ -6586,7 +6573,6 @@ class _LocalModeGitHubBase(SiloTestCase):
     def host_tool_env(self) -> dict[str, str]:
         env = self.env.env.copy()
         env.update({
-            "SILO_GITHUB_MODE": "local",
             "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
             "SILO_HOST_KEYCHAIN_ACCOUNT": HOST_KEYCHAIN_ACCOUNT,
             "SILO_TEST_KEYCHAIN_DIR": str(self.env.root / "keychain"),
@@ -6608,9 +6594,9 @@ class _LocalModeGitHubBase(SiloTestCase):
         return repo
 
 
-class GitHubProxyTests(_LocalModeGitHubBase):
-    """Path C CLI-driven local-mode tests: host credential lifecycle, verify,
-    remove, policy get/set, push gates (§8), askpass and host-token helpers."""
+class GitHubProxyTests(_GitHubHostProxyBase):
+    """Host-proxy CLI tests: host credential lifecycle, verify,
+    disconnect, policy get/set, push gates (§8), askpass and host-token helpers."""
 
     # ---- host credential helpers (bin/silo-github-host-token) ------------
 
@@ -6751,7 +6737,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
                                   stdout=subprocess.PIPE, text=True)
         self.assertNotEqual(leftover.returncode, 0, "bridge descendants must be killed")
 
-    def test_askpass_local_emits_token_only_for_github(self) -> None:
+    def test_askpass_emits_token_only_for_github(self) -> None:
         askpass = PACKAGE / "bin" / "silo-git-askpass"
         env = self.host_tool_env()
         self.seed_host_credential()
@@ -6885,7 +6871,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertFalse(self.host_meta_path.exists())
 
 
-    def test_remove_local_unproven_metadata_deletion_quarantines(self) -> None:
+    def test_disconnect_unproven_metadata_deletion_denies_globally(self) -> None:
         self.seed_host_credential()
         self.seed_host_meta()
         # Inject a metadata-write failure so the revocation metadata tombstone
@@ -6895,19 +6881,16 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         # helper keeps denying.
         env = self.env.env.copy()
         env["SILO_FAKE_HOST_META_WRITE_FAIL"] = "1"
-        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
-        self.assertFailed(proc, "removal failed")
-        quarantine = self.github_meta_dir / "dev.quarantine"
-        self.assertTrue(quarantine.exists())
-        self.assertIn("Host GitHub credential removal failed", quarantine.read_text())
+        proc = self.env.silo("github", "disconnect", check=False, extra_env=env)
+        self.assertFailed(proc, "could not be fully removed")
         # the KEYCHAIN RECORD is proven deleted (the token cannot be emitted)
         self.assertFalse(self.host_key_path.exists())
         # the global deny marker remains (helpers deny even with stale state)
         self.assertTrue((self.env.home / ".config/silo/credential-disabled").exists())
 
-    # ---- verify (local probe) -------------------------------------------
+    # ---- proxy verification --------------------------------------------
 
-    def test_verify_local_probes_user_and_read_write_repo(self) -> None:
+    def test_verify_proxy_probes_user_and_read_write_repo(self) -> None:
         self.env.init_remote()
         self.empty_policy()
         self.set_policy({"schemaVersion": 1, "workspaces": {
@@ -6927,12 +6910,12 @@ class GitHubProxyTests(_LocalModeGitHubBase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("Account:          fake-user", proc.stdout)
             self.assertIn("push=true", proc.stdout)
-            self.assertIn("GitHub access verified for dev (local)", proc.stdout)
+            self.assertIn("GitHub access verified for dev: acme/demo is read-write", proc.stdout)
             records = fake.requests()
             self.assertTrue(any(r["path"] == "/user" for r in records), records)
             self.assertTrue(any(r["path"] == "/repos/acme/demo" for r in records), records)
 
-    def test_verify_local_fails_when_credential_missing(self) -> None:
+    def test_verify_proxy_fails_when_credential_missing(self) -> None:
         self.empty_policy()
         self.set_policy({"schemaVersion": 1, "workspaces": {
             "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-only"}]},
@@ -6943,7 +6926,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertFailed(proc, "host GitHub credential is missing")
         self.assertIn("silo github auth", proc.stdout + proc.stderr)
 
-    def test_verify_local_fails_on_push_probe_rejection(self) -> None:
+    def test_verify_proxy_fails_on_push_probe_rejection(self) -> None:
         self.empty_policy()
         self.set_policy({"schemaVersion": 1, "workspaces": {
             "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
@@ -6976,7 +6959,6 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         proc = self.env.silo("github", "status", "--format", "json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         result = json.loads(proc.stdout)
-        self.assertEqual(result["mode"], "local")
         self.assertEqual(result["hostCredential"], "missing")
         dev = next(w for w in result["workspaces"] if w["workspace"] == "dev")
         self.assertEqual(dev["capability"], "minted")
@@ -6996,7 +6978,6 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         proc = self.env.silo("github", "status", "--format", "json")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(json.loads(proc.stdout), {
-            "mode": "local",
             "hostCredential": "missing",
             "workspaces": [],
         })
@@ -7095,7 +7076,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
 
     # ---- push gates (§8 corrected rule) ---------------------------------
 
-    def test_push_local_ticked_read_only_repo_with_credential_succeeds(self) -> None:
+    def test_push_ticked_read_only_repo_with_credential_succeeds(self) -> None:
         # §8: host push is allowed for EVERY ticked repo in BOTH modes; only
         # VM-originated push is gated by read-write (enforced by the proxy).
         self.empty_policy()
@@ -7111,15 +7092,15 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("pushed main from dev:repo", proc.stdout)
 
-    def test_push_local_unticked_repo_blocked(self) -> None:
+    def test_push_unticked_repo_blocked(self) -> None:
         self.empty_policy()
         self.seed_host_credential()
         self.prepare_guest_repo()
         proc = self.env.silo("push", "dev", "repo", "--yes", check=False)
-        self.assertFailed(proc, "has no credential grant on workspace 'dev'")
-        self.assertIn("github-policy-set", proc.stdout + proc.stderr)
+        self.assertFailed(proc, "is not enabled for workspace 'dev'")
+        self.assertIn("update its access in Silo", proc.stdout + proc.stderr)
 
-    def test_push_local_missing_host_credential_blocked(self) -> None:
+    def test_push_missing_host_credential_blocked(self) -> None:
         self.empty_policy()
         self.set_policy({"schemaVersion": 1, "workspaces": {
             "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
@@ -7128,7 +7109,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         }})
         self.prepare_guest_repo()
         proc = self.env.silo("push", "dev", "repo", "--yes", check=False)
-        self.assertFailed(proc, "host GitHub credential is not provisioned")
+        self.assertFailed(proc, "GitHub is not connected on this Mac")
         self.assertIn("silo github auth", proc.stdout + proc.stderr)
 
     def test_auth_gh_reuse_is_fully_noninteractive_non_tty(self) -> None:
@@ -7630,7 +7611,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
 
     @unittest.skipUnless(sys.platform == "darwin", "real macOS Keychain only")
 
-    def test_remove_local_keychain_deletion_failure_denies_globally(self) -> None:
+    def test_disconnect_keychain_deletion_failure_denies_globally(self) -> None:
         """Blocker 4 + re-review: if the Keychain deletion fails, the global
         deny marker (recorded first) plus the revocation-uncertain tombstone
         keep every helper denying — no other workspace can remain live on the
@@ -7643,8 +7624,8 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         env["SILO_TEST_KEYCHAIN_DIR"] = ""
         env["SILO_FAKE_KC_DELETE_FAIL"] = "1"
         env["SILO_KEYCHAIN_TIMEOUT_SECS"] = "2"
-        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
-        self.assertFailed(proc, "removal failed")
+        proc = self.env.silo("github", "disconnect", check=False, extra_env=env)
+        self.assertFailed(proc, "could not be fully removed")
         # at least one durable deny gate was recorded: the file marker
         marker = self.env.home / ".config/silo/credential-disabled"
         self.assertTrue(marker.exists())
@@ -7652,9 +7633,6 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         meta = json.loads(self.host_meta_path.read_text())
         self.assertEqual(meta["state"], "revocation-uncertain")
         self.assertIn("revokedAt", meta)
-        # the workspace is quarantined (fail-closed)
-        quarantine = self.github_meta_dir / "dev.quarantine"
-        self.assertTrue(quarantine.exists())
         # every helper denies: the marker is checked before the Keychain, so
         # no token is emitted even though the record may still exist
         helper = PACKAGE / "bin" / "silo-github-host-token"
@@ -7672,7 +7650,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(json.loads(proc.stdout)["hostCredential"], "missing")
 
-    def test_remove_local_primary_marker_failure_uses_deny_item_safely(self) -> None:
+    def test_disconnect_primary_marker_failure_uses_deny_item_safely(self) -> None:
         """If the primary file marker cannot be written, the independent
         Keychain deny item still gates the credential before deletion, so a
         fully proven removal may complete safely."""
@@ -7682,15 +7660,14 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         blocker.write_text("x")
         env = self.env.env.copy()
         env["SILO_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
-        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
+        proc = self.env.silo("github", "disconnect", check=False, extra_env=env)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("removed the host GitHub credential", proc.stdout + proc.stderr)
+        self.assertIn("disconnected GitHub", proc.stdout + proc.stderr)
         self.assertFalse(self.host_key_path.exists())
         self.assertFalse(self.host_meta_path.exists())
-        self.assertFalse((self.github_meta_dir / "dev.quarantine").exists())
         self.assertFalse((self.env.home / ".config/silo/credential-disabled").exists())
 
-    def test_remove_local_deny_item_blocks_helper_when_primary_marker_fails(self) -> None:
+    def test_disconnect_deny_item_blocks_helper_when_primary_marker_fails(self) -> None:
         """Closure re-review: if the primary FILE marker cannot be recorded,
         the dedicated Keychain deny item (.v2.deny) is the durable deny gate —
         it is written + verified first and keeps the helper denying GLOBALLY
@@ -7702,8 +7679,8 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         env = self.env.env.copy()
         env["SILO_CREDENTIAL_DENY_MARKER"] = str(blocker / "nested" / "credential-disabled")
         env["SILO_FAKE_KC_DELETE_FAIL"] = "1"  # token deletion fails: gates stay
-        proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
-        self.assertFailed(proc, "removal failed")
+        proc = self.env.silo("github", "disconnect", check=False, extra_env=env)
+        self.assertFailed(proc, "could not be fully removed")
         # the primary file marker was NOT recorded (impossible path)...
         self.assertFalse((self.env.home / ".config/silo/credential-disabled").exists())
         # ...but the Keychain deny item was (file seam) and denies the helper
@@ -7719,7 +7696,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(json.loads(proc.stdout)["hostCredential"], "missing")
 
-    def test_remove_local_no_primary_deny_uses_global_quarantine(self) -> None:
+    def test_disconnect_no_primary_deny_fails_closed(self) -> None:
         """If every earlier deny/deletion path fails, a durable global
         quarantine still blocks every helper and workspace."""
         self.seed_host_credential()
@@ -7733,15 +7710,13 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         env["SILO_HOST_KEYCHAIN_DENY_SERVICE"] = "org.silo.unwritable.deny"
         env["SILO_FAKE_HOST_META_WRITE_FAIL"] = "1"
         try:
-            proc = self.env.silo("github", "remove", "dev", check=False, extra_env=env)
-            self.assertFailed(proc, "quarantined")
+            proc = self.env.silo("github", "disconnect", check=False, extra_env=env)
+            self.assertFailed(proc, "could not be fully removed")
             self.assertTrue(self.host_key_path.exists())
             self.assertTrue(self.host_meta_path.exists())
             global_quarantine = self.github_meta_dir / "credential.quarantine"
             self.assertTrue(global_quarantine.exists())
-            self.assertTrue((self.github_meta_dir / "dev.quarantine").exists())
             helper_env = self.host_tool_env()
-            helper_env["SILO_GLOBAL_CREDENTIAL_QUARANTINE"] = str(global_quarantine)
             denied = run_cmd(
                 [PACKAGE / "bin" / "silo-github-host-token"],
                 env=helper_env, check=False,
@@ -7751,7 +7726,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         finally:
             keychain_dir.chmod(0o700)
 
-    # ---- blocker 4: global credential lock serializes store/rotate/remove
+    # ---- global credential lock serializes store, rotate, and disconnect
 
     def test_credential_lock_serializes_store(self) -> None:
         self.empty_policy()
@@ -7869,96 +7844,7 @@ class GitHubProxyTests(_LocalModeGitHubBase):
         proc = self.env.silo("github", "verify", "dev", check=False)
         self.assertFailed(proc, "missing or malformed")
 
-    # ---- app github-state local branch ----------------------------------
-
-    def test_app_github_state_local_mode_reports_policy(self) -> None:
-        self.empty_policy()
-        self.set_policy({"schemaVersion": 1, "workspaces": {
-            "dev": {"capability": DEV_CAP, "repos": [{"canonical": "acme/demo", "mode": "read-write"}]},
-            "playgrounds": {"capability": PLAY_CAP, "repos": []},
-            "personal": {"capability": PERSONAL_CAP, "repos": []},
-        }})
-        proc = self.env.silo("app", "github-state", "--format", "json")
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        result = json.loads(proc.stdout)
-        dev = next(w for w in result["result"]["workspaces"] if w["workspace"] == "dev")
-        self.assertEqual(dev["provider"], "local-policy")
-        self.assertTrue(dev["configured"])
-        self.assertEqual(dev["accessMode"], "read-write")
-        self.assertEqual(dev["verificationRepository"], "acme/demo")
-        self.assertEqual(dev["capability"], "minted")
-        self.assertEqual(dev["hostCredential"], "missing")
-        self.assertFalse(dev["quarantined"])
-
-
-class LocalModeSSHTests(_LocalModeGitHubBase):
-    """Local-mode SSH ignores Connect credentials and never exports GH_TOKEN."""
-
-    def _guest_secret_state(self) -> dict:
-        state = self.env.state()
-        return state["sandboxes"]["dev"].get("secrets", {})
-
-    def test_ssh_proxy_local_never_reads_connect_credentials_or_exports_token(self) -> None:
-        # Plant dormant Connect state (credentials.json + schema-3 keychain
-        # record) to prove that local mode does not inspect it.
-        cred = self.env.home / "Library/Application Support/Silo"
-        cred.mkdir(parents=True, exist_ok=True)
-        (cred / "credentials.json").write_text(json.dumps({
-            "entries": {
-                "dev.guest": {
-                    "provider": "github-app-installation",
-                    "workspace": "dev",
-                    "recoveryState": "ready",
-                    "accessExpiresAt": "2099-01-01T00:00:00Z",
-                    "repositoryNames": ["acme/demo"],
-                },
-            },
-        }))
-        self.env.key_file("silo.github.app.dev.guest.tokens", "profile").write_text(json.dumps({
-            "schemaVersion": 3,
-            "grantID": "grant-1",
-            "accessToken": "ghs_connect_abcdefghijklmnopqrstuvwxyz0123456789",
-            "accessExpiresAt": "2099-01-01T00:00:00Z",
-            "generation": 1,
-        }))
-        env = self.env.env.copy()
-        env["SILO_FAKE_RECORD_CREDENTIAL_ENV"] = "1"
-        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
-        proc = self.env.run(proxy, "dev.msb", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        events = self.env.state()["events"]
-        credential_events = [e for e in events if e["event"] == "credential-env"]
-        self.assertTrue(credential_events, events)
-        self.assertTrue(all(e["gh_token_present"] is False for e in credential_events),
-                        "local-mode SSH must never export GH_TOKEN")
-        # the workspace came up (token-free path)
-        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
-
-
-    def test_ssh_proxy_local_quarantine_fails_closed(self) -> None:
-        meta_dir = self.github_meta_dir
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        (meta_dir / "dev.quarantine").write_text("pre-existing credential failure\n")
-        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
-        proc = self.env.run(proxy, "dev.msb", check=False)
-        self.assertFailed(proc, "quarantined")
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-
-    def test_ssh_proxy_local_starts_stopped_workspace_token_free(self) -> None:
-        self.env.silo("stop", "dev")
-        self.assertFalse(self.env.state()["sandboxes"]["dev"]["running"])
-        env = self.env.env.copy()
-        env["SILO_FAKE_RECORD_CREDENTIAL_ENV"] = "1"
-        proxy = self.env.home / ".local/bin/silo-ssh-proxy"
-        proc = self.env.run(proxy, "dev.msb", extra_env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        events = self.env.state()["events"]
-        credential_events = [e for e in events if e["event"] == "credential-env"]
-        self.assertTrue(all(e["gh_token_present"] is False for e in credential_events), events)
-        self.assertTrue(self.env.state()["sandboxes"]["dev"]["running"])
-
-
-class GitHubPolicyApplyTests(_LocalModeGitHubBase):
+class GitHubPolicyApplyTests(_GitHubHostProxyBase):
     """Blocker 3: `silo app github-policy-apply` — full policy on stdin, strict
     validation, transport provisioned BEFORE one atomic policy commit, typed
     rollback on partial failure, idempotent."""
@@ -8576,7 +8462,6 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
         err = err_path.open("ab")
         proxy_env = self.env.env.copy()
         proxy_env.update({
-            "SILO_GITHUB_MODE": "local",
             "SILO_POLICY_FILE": str(self.policy_path),
             "SILO_PROXY_LOG_FILE": str(self.env.root / "apply-proxy.log"),
             "SILO_HOST_KEYCHAIN_SERVICE": HOST_KEYCHAIN_SERVICE,
@@ -8711,7 +8596,7 @@ class GitHubPolicyApplyTests(_LocalModeGitHubBase):
             self.assertEqual(json.loads(proc.stdout)["error"]["code"], "SILO_INVALID_REQUEST", bad)
         self.assertFalse(self.policy_path.exists())
 
-class GitHubShuttleRetryTests(_LocalModeGitHubBase):
+class GitHubShuttleRetryTests(_GitHubHostProxyBase):
     """Root cause 1 regression: the shuttle must circuit-break on permanent
     missing-relay preconditions (exactly one actionable failure, no respawn
     storm, recovery without a restart) and keep bounded backoff for transient

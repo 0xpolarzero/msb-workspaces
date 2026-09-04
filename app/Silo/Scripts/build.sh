@@ -34,20 +34,6 @@ if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
   signingSettings+=("DEVELOPMENT_TEAM=${DEVELOPMENT_TEAM}")
 fi
 
-typeset -a connectSettings
-if [[ -n "${SILO_CONNECT_BASE_URL:-}" ]]; then
-  connectSettings+=("SILO_CONNECT_BASE_URL=${SILO_CONNECT_BASE_URL}")
-fi
-if [[ -n "${SILO_CONNECT_CLIENT_ID:-}" ]]; then
-  connectSettings+=("SILO_CONNECT_CLIENT_ID=${SILO_CONNECT_CLIENT_ID}")
-fi
-if [[ -n "${SILO_CONNECT_INSTALLATION_URL:-}" ]]; then
-  connectSettings+=("SILO_CONNECT_INSTALLATION_URL=${SILO_CONNECT_INSTALLATION_URL}")
-fi
-if [[ -n "${SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY:-}" ]]; then
-  connectSettings+=("SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY=${SILO_CONNECT_SCOPE_ATTESTATION_PUBLIC_KEY}")
-fi
-
 xcodebuild \
   -project "$APP_DIR/Silo.xcodeproj" \
   -scheme Silo \
@@ -58,7 +44,6 @@ xcodebuild \
   ONLY_ACTIVE_ARCH=YES \
   CONFIGURATION_BUILD_DIR="$BUILD_DIR" \
   "${signingSettings[@]}" \
-  "${connectSettings[@]}" \
   build 2>&1 | tee "$LOG_DIR/build.log"
 
 test -x "$BUILD_DIR/Silo.app/Contents/MacOS/Silo"

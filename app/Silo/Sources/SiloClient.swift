@@ -2,8 +2,6 @@ import Foundation
 
 actor SiloClient {
     private let runner: SiloCommandRunner
-    private let credentialBroker: CredentialBroker?
-    private let tokenRefreshCoordinator: TokenRefreshCoordinator?
     private let ghResolver: @Sendable () async -> URL?
     private var configuredWorkspaces: [String]
     private var lastState: SiloStateResponse?
@@ -11,22 +9,11 @@ actor SiloClient {
 
     init(
         runner: SiloCommandRunner = SiloCommandRunner(),
-        credentialBroker: CredentialBroker? = nil,
-        tokenRefreshCoordinator: TokenRefreshCoordinator? = nil,
         ghResolver: (@Sendable () async -> URL?)? = nil
     ) {
         self.runner = runner
-        self.credentialBroker = credentialBroker
-        self.tokenRefreshCoordinator = tokenRefreshCoordinator
         self.ghResolver = ghResolver ?? { await runner.resolveExecutable(named: "gh") }
         self.configuredWorkspaces = BootstrapStateStore.persistedWorkspaceConfigurations().map(\.name)
-    }
-
-    /// Test seam: local-mode clients must never carry Connect dependencies
-    /// (Path C §1 / reviewer blocker 7). A nil broker means `accessToken`
-    /// returns immediately without reading any Connect Keychain record.
-    nonisolated var hasConnectDependencies: Bool {
-        credentialBroker != nil || tokenRefreshCoordinator != nil
     }
 
     func executableURL() async -> URL? {
@@ -209,9 +196,7 @@ actor SiloClient {
         return try await execute(
             arguments: arguments,
             as: SiloRepositoriesResponse.self,
-            command: "repositories",
-            credentialsFor: workspace,
-            includeGuestCredentials: true
+            command: "repositories"
         )
     }
 
@@ -274,12 +259,6 @@ actor SiloClient {
             throw SiloClientError.malformedJSON(command: "editor-target")
         }
         return envelope
-    }
-
-    func githubState(workspace: String? = nil) async throws -> SiloEnvelope<SiloGitHubStateResponse> {
-        var arguments = ["app", "github-state", "--format", "json"]
-        if let workspace { arguments += ["--workspace", workspace] }
-        return try await execute(arguments: arguments, as: SiloGitHubStateResponse.self, command: "github-state")
     }
 
     // MARK: - Host-held secrets
@@ -435,7 +414,7 @@ actor SiloClient {
         return result
     }
 
-    // MARK: - Path C local mode
+    // MARK: - GitHub
 
     /// `silo github status --format json` (raw, non-envelope CLI output).
     func githubStatus() async throws -> SiloGitHubStatusResponse {
@@ -478,17 +457,16 @@ actor SiloClient {
 
     /// Revokes the current local host credential. Generic Silo secrets use a
     /// separate metadata and Keychain domain and are intentionally untouched.
-    func resetLocalGitHub(workspace: String) async throws {
-        guard WorkspaceID.isValid(workspace) else { throw SiloClientError.invalidArguments }
+    func disconnectGitHub() async throws {
         let request = try await runner.makeSiloCommand(
-            arguments: ["github", "remove", workspace],
+            arguments: ["github", "disconnect"],
             timeout: .seconds(180)
         )
         let output = try await runner.run(request)
         guard output.status == 0 else {
             let message = output.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
             throw SiloClientError.processFailed(
-                command: "github remove",
+                command: "github disconnect",
                 status: output.status,
                 message: message.isEmpty ? nil : message
             )
@@ -656,7 +634,7 @@ actor SiloClient {
     /// semantically changed, non-empty workspace using the final capabilities,
     /// and performs ONE atomic policy-file commit (rolling back byte-exact on
     /// any unproven step).
-    /// Typed failures (SILO_INVALID_REQUEST, SILO_GITHUB_MODE_MISMATCH,
+    /// Typed failures (SILO_INVALID_REQUEST,
     /// SILO_OPERATION_CONFLICT, SILO_TRANSPORT_PROVISION_FAILED,
     /// SILO_POLICY_WRITE_FAILED, SILO_INTERNAL_ERROR) surface as protocol
     /// failures; the caller marks the operation applied only after the CLI
@@ -714,78 +692,6 @@ actor SiloClient {
         }
     }
 
-
-    func bindGitHubCredentials(
-        workspace: String,
-        accessMode: String,
-        verificationRepository: String
-    ) async throws -> SiloEnvelope<SiloGitHubBindResult> {
-        guard accessMode == "read-only" || accessMode == "host-write",
-              !verificationRepository.isEmpty else {
-            throw SiloClientError.invalidArguments
-        }
-        if accessMode == "host-write" {
-            _ = try await execute(
-                arguments: [
-                    "app", "github-bind",
-                    "--workspace", workspace,
-                    "--repository", verificationRepository,
-                    "--mode", "read-only",
-                    "--format", "json"
-                ],
-                as: SiloGitHubBindResult.self,
-                command: "github-bind",
-                credentialsFor: workspace,
-                includeGuestCredentials: true,
-                timeout: .seconds(300)
-            )
-            return try await execute(
-                arguments: [
-                    "app", "github-bind",
-                    "--workspace", workspace,
-                    "--repository", verificationRepository,
-                    "--mode", "host-write",
-                    "--format", "json"
-                ],
-                as: SiloGitHubBindResult.self,
-                command: "github-bind",
-                credentialsFor: workspace,
-                includeGuestCredentials: true,
-                includeHostCredentials: true,
-                timeout: .seconds(300)
-            )
-        }
-        return try await execute(
-            arguments: [
-                "app", "github-bind",
-                "--workspace", workspace,
-                "--repository", verificationRepository,
-                "--mode", accessMode,
-                "--format", "json"
-            ],
-            as: SiloGitHubBindResult.self,
-            command: "github-bind",
-            credentialsFor: workspace,
-            includeGuestCredentials: true,
-            timeout: .seconds(300)
-        )
-    }
-    func unbindGitHubCredentials(workspace: String) async throws -> SiloEnvelope<SiloGitHubUnbindResult> {
-        guard WorkspaceID.isValid(workspace) else {
-            throw SiloClientError.invalidArguments
-        }
-        return try await execute(
-            arguments: [
-                "app", "github-unbind",
-                "--workspace", workspace,
-                "--format", "json"
-            ],
-            as: SiloGitHubUnbindResult.self,
-            command: "github-unbind",
-            timeout: .seconds(300)
-        )
-    }
-
  
     func preparePushPlan(workspace: String, repositories: [String]) async throws -> SiloEnvelope<SiloPushPlan> {
         guard WorkspaceID.isValid(workspace), repositories.count == 1,
@@ -795,9 +701,7 @@ actor SiloClient {
         return try await execute(
             arguments: ["app", "push-plan", "--workspace", workspace, "--repositories"] + repositories + ["--format", "json"],
             as: SiloPushPlan.self,
-            command: "push-plan",
-            credentialsFor: workspace,
-            includeGuestCredentials: true
+            command: "push-plan"
         )
     }
 
@@ -812,9 +716,6 @@ actor SiloClient {
             arguments: ["app", "apply", plan.planId, "--confirmation-fd", "0", "--format", "json"],
             as: SiloPushApplyResult.self,
             command: "apply",
-            credentialsFor: plan.workspace,
-            includeGuestCredentials: true,
-            includeHostCredentials: true,
             stdin: input,
             timeout: .seconds(120)
         )
@@ -832,24 +733,15 @@ actor SiloClient {
 
     func applyLifecyclePlan(_ plan: SiloLifecyclePlan, confirmation: String) async throws -> SiloEnvelope<SiloApplyResult> {
         guard WorkspaceID.isValid(plan.workspace),
-              let action = SiloLifecycleAction(rawValue: plan.action),
+              SiloLifecycleAction(rawValue: plan.action) != nil,
               plan.expiresAt > Date(),
               confirmation == plan.confirmationPhrase else {
             throw SiloClientError.invalidArguments
-        }
-        let includeGuestCredentials: Bool
-        switch action {
-        case .stop:
-            includeGuestCredentials = false
-        case .start, .restart:
-            includeGuestCredentials = true
         }
         return try await execute(
             arguments: ["app", "apply", plan.planId, "--confirmation-fd", "0", "--format", "json"],
             as: SiloApplyResult.self,
             command: "apply",
-            credentialsFor: includeGuestCredentials ? plan.workspace : nil,
-            includeGuestCredentials: includeGuestCredentials,
             stdin: Data((confirmation + "\n").utf8),
             timeout: .seconds(120)
         )
@@ -863,11 +755,6 @@ actor SiloClient {
             throw SiloClientError.invalidArguments
         }
         let input = try JSONEncoder().encode(SiloBootstrapConfiguration(workspaceConfigurations))
-        try await prepareCredentials(
-            for: nil,
-            includeGuest: true,
-            includeHost: false
-        )
         let eventsFileDescriptor = SiloCommandRunner.progressEventsFileDescriptor
         let request = try await runner.makeSiloCommand(
             arguments: [
@@ -984,8 +871,6 @@ actor SiloClient {
             arguments: arguments,
             as: SiloWorkspaceOperationResult.self,
             command: "clone",
-            credentialsFor: workspace,
-            includeGuestCredentials: true,
             timeout: .seconds(600)
         )
     }
@@ -998,8 +883,6 @@ actor SiloClient {
             arguments: ["app", "pull", "--workspace", workspace, "--path", path, "--format", "json"],
             as: SiloWorkspaceOperationResult.self,
             command: "pull",
-            credentialsFor: workspace,
-            includeGuestCredentials: true,
             timeout: .seconds(600)
         )
     }
@@ -1012,8 +895,6 @@ actor SiloClient {
             arguments: arguments,
             as: SiloIdentityResult.self,
             command: "identity",
-            credentialsFor: workspace,
-            includeGuestCredentials: true,
             timeout: .seconds(300)
         )
     }
@@ -1026,8 +907,6 @@ actor SiloClient {
             arguments: arguments,
             as: SiloWorkspaceOperationResult.self,
             command: "disk",
-            credentialsFor: workspace,
-            includeGuestCredentials: true,
             timeout: .seconds(300)
         )
     }
@@ -1040,8 +919,6 @@ actor SiloClient {
             arguments: arguments,
             as: SiloResourceResult.self,
             command: "resize",
-            credentialsFor: workspace,
-            includeGuestCredentials: true,
             timeout: .seconds(120)
         )
     }
@@ -1059,8 +936,6 @@ actor SiloClient {
             arguments: arguments,
             as: SiloMaintenanceResult.self,
             command: "clean",
-            credentialsFor: workspace == "all" ? nil : workspace,
-            includeGuestCredentials: true,
             stdin: input,
             timeout: .seconds(600)
         )
@@ -1076,8 +951,6 @@ actor SiloClient {
             arguments: ["app", "upgrade", "--workspace", workspace, "--confirmation-fd", "0", "--format", "json"],
             as: SiloMaintenanceResult.self,
             command: "upgrade",
-            credentialsFor: workspace == "all" ? nil : workspace,
-            includeGuestCredentials: true,
             stdin: input,
             timeout: .seconds(1800)
         )
@@ -1109,7 +982,6 @@ actor SiloClient {
             arguments: arguments,
             as: SiloCheckResult.self,
             command: "check",
-            includeGuestCredentials: deep,
             stdin: stdin,
             timeout: deep ? .seconds(1800) : .seconds(120)
         )
@@ -1123,7 +995,6 @@ actor SiloClient {
             arguments: ["app", "backup-start", "--directory", directory.path, "--request-key", requestKey, "--format", "json"],
             as: SiloBackupOperationResponse.self,
             command: "backup-start",
-            includeGuestCredentials: true,
             timeout: .seconds(30)
         )
     }
@@ -1167,7 +1038,6 @@ actor SiloClient {
             arguments: ["app", "restore", "--archive", archive.path, "--confirmation-fd", "0", "--format", "json"],
             as: SiloWorkspaceOperationResult.self,
             command: "restore",
-            includeGuestCredentials: true,
             stdin: input,
             timeout: .seconds(1800)
         )
@@ -1178,18 +1048,10 @@ actor SiloClient {
         arguments: [String],
         as type: Value.Type,
         command: String,
-        credentialsFor workspace: String? = nil,
-        includeGuestCredentials: Bool = false,
-        includeHostCredentials: Bool = false,
         stdin: Data? = nil,
         timeout: Duration = .seconds(30),
         terminationGrace: Duration = .milliseconds(250)
     ) async throws -> SiloEnvelope<Value> {
-        try await prepareCredentials(
-            for: workspace,
-            includeGuest: includeGuestCredentials,
-            includeHost: includeHostCredentials
-        )
         let request = try await runner.makeSiloCommand(
             arguments: arguments,
             timeout: timeout,
@@ -1219,56 +1081,6 @@ actor SiloClient {
                 message: message.isEmpty ? nil : message
             )
         }
-    }
-
-    /// Refreshes expiring records in Keychain before invoking Silo. Token bytes
-    /// are not copied into the app-to-CLI environment; Silo obtains the fixed
-    /// workspace/role record only at the narrow binding or host-askpass edge.
-    private func prepareCredentials(
-        for workspace: String?,
-        includeGuest: Bool,
-        includeHost: Bool
-    ) async throws {
-        let workspaces = workspace.map { [$0] } ?? configuredWorkspaces
-        for workspace in workspaces {
-            if includeGuest { _ = try await accessToken(workspace: workspace, role: .guest) }
-            if includeHost { _ = try await accessToken(workspace: workspace, role: .host) }
-        }
-    }
-
-    private func accessToken(workspace: String, role: CredentialRole) async throws -> String? {
-        guard let credentialBroker else { return nil }
-        let bundle: CredentialBundle
-        do {
-            bundle = try await credentialBroker.load(workspace: workspace, role: role)
-        } catch CredentialBrokerError.missingCredential {
-            return nil
-        } catch CredentialBrokerError.grantUnavailable {
-            var canRetry = false
-            do {
-                if let entry = try await credentialBroker.metadata(for: workspace, role: role) {
-                    canRetry = (entry.recoveryState == .expired ||
-                        entry.recoveryState == .serviceUnavailable) && !entry.quarantined
-                }
-            } catch {
-                canRetry = false
-            }
-            if canRetry, let tokenRefreshCoordinator {
-                let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
-                return refreshed.accessToken
-            }
-            throw SiloClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
-        } catch CredentialBrokerError.quarantineRequired {
-            throw SiloClientError.unavailable("The GitHub installation grant for \(workspace) requires reconnecting.")
-        }
-        if !bundle.credential.isAccessExpired {
-            return bundle.credential.accessToken
-        }
-        guard let tokenRefreshCoordinator else {
-            throw SiloClientError.unavailable("The GitHub installation token expired, but renewal is unavailable in this build. GitHub access remains blocked.")
-        }
-        let refreshed = try await tokenRefreshCoordinator.refresh(workspace: workspace, role: role)
-        return refreshed.accessToken
     }
 
     private static func isSafeRelativePath(_ path: String) -> Bool {

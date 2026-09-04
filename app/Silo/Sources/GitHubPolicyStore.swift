@@ -1,6 +1,6 @@
 import Foundation
 
-/// Path C §2: the local GitHub policy file is the single source of truth for
+/// The GitHub policy file is the single source of truth for
 /// host-credential grants. The app never writes it directly — policy writes
 /// go through the journaled `silo app github-policy-apply` CLI so capability
 /// preservation, transport provisioning, atomic tmp+rename, and the

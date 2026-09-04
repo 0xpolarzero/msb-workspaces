@@ -430,7 +430,6 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
     let githubObservedAt: Date?
     let activityObservedAt: Date?
     let quarantine: SiloQuarantineSnapshot
-    let credential: SiloCredentialSnapshot
     let secrets: SiloSecretsSnapshot
     let resources: SiloResourceSnapshot
     let network: SiloNetworkSnapshot
@@ -447,7 +446,6 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         lifecycle: SiloLifecycle,
         freshness: SiloFreshness,
         quarantine: SiloQuarantineSnapshot,
-        credential: SiloCredentialSnapshot,
         secrets: SiloSecretsSnapshot,
         resources: SiloResourceSnapshot,
         network: SiloNetworkSnapshot,
@@ -468,7 +466,6 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         self.githubObservedAt = githubObservedAt
         self.activityObservedAt = activityObservedAt
         self.quarantine = quarantine
-        self.credential = credential
         self.secrets = secrets
         self.resources = resources
         self.network = network
@@ -489,7 +486,6 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         githubObservedAt = try container.decodeIfPresent(Date.self, forKey: .githubObservedAt)
         activityObservedAt = try container.decodeIfPresent(Date.self, forKey: .activityObservedAt)
         quarantine = try container.decode(SiloQuarantineSnapshot.self, forKey: .quarantine)
-        credential = try container.decode(SiloCredentialSnapshot.self, forKey: .credential)
         secrets = try container.decode(SiloSecretsSnapshot.self, forKey: .secrets)
         resources = try container.decode(SiloResourceSnapshot.self, forKey: .resources)
         network = try container.decode(SiloNetworkSnapshot.self, forKey: .network)
@@ -509,7 +505,6 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
         try container.encode(githubObservedAt, forKey: .githubObservedAt)
         try container.encode(activityObservedAt, forKey: .activityObservedAt)
         try container.encode(quarantine, forKey: .quarantine)
-        try container.encode(credential, forKey: .credential)
         try container.encode(secrets, forKey: .secrets)
         try container.encode(resources, forKey: .resources)
         try container.encode(network, forKey: .network)
@@ -520,7 +515,7 @@ struct SiloWorkspaceSnapshot: Codable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case id, purpose, lifecycle, freshness, statusObservedAt, metricsObservedAt
-        case githubObservedAt, activityObservedAt, quarantine, credential, resources, network, actionCapabilities
+        case githubObservedAt, activityObservedAt, quarantine, resources, network, actionCapabilities
         case secrets, skippedPorts, portWarning
     }
 
@@ -558,28 +553,6 @@ struct SiloQuarantineSnapshot: Codable, Sendable {
         case clear
         case quarantined
         case unknown
-    }
-}
-
-struct SiloCredentialSnapshot: Codable, Sendable {
-    let state: State
-    let accessMode: String
-    let verificationRepository: String?
-    let accountLogin: String?
-    let installationId: String?
-    let accessExpiresAt: Date?
-    let needsRestart: Bool
-
-    enum State: String, Codable, Sendable {
-        case unconfigured = "Unconfigured"
-        case needsAuthorization = "Needs authorization"
-        case serviceUnavailable = "Service unavailable"
-        case ready = "Ready"
-        case expiring = "Expiring"
-        case needsRestart = "Needs restart"
-        case readOnly = "Read-only"
-        case removalPending = "Removal pending"
-        case quarantined = "Quarantined"
     }
 }
 
@@ -818,13 +791,7 @@ struct SiloRepositorySnapshot: Codable, Identifiable, Sendable {
     }
 }
 
-struct SiloGitHubStateResponse: Codable, Sendable {
-    let workspaces: [SiloGitHubWorkspaceState]
-}
-
 /// Per-workspace host-secret configuration state from the app state protocol.
-/// Deliberately separate from `SiloCredentialSnapshot`; secret restart
-/// requirements must never ride the GitHub credential state.
 struct SiloSecretsSnapshot: Codable, Sendable, Equatable {
     let state: State
     let pendingCount: Int
@@ -930,52 +897,9 @@ struct SiloSecretApplyResult: Codable, Sendable, Equatable {
     }
 }
 
-struct SiloGitHubBindResult: Codable, Sendable {
-    let workspace: String
-    let accessMode: String
-    let verificationRepository: String
-    let verified: Bool
-    let lifecycleRestored: Bool
-}
-struct SiloGitHubUnbindResult: Codable, Sendable {
-    let workspace: String
-    let unbound: Bool
-}
-
-
-struct SiloGitHubWorkspaceState: Codable, Identifiable, Sendable {
-    let workspace: String
-    let provider: String
-    let configured: Bool
-    let accessMode: String
-    let verificationRepository: String?
-    let accountLogin: String?
-    let installationId: String?
-    let accessExpiresAt: Date?
-    let needsRestart: Bool
-    let quarantined: Bool
-    /// Local-mode only: the ticked repositories for this workspace from the
-    /// policy file. Absent in Connect-mode CLI output.
-    let repos: [SiloGitHubPolicyRepo]?
-    let policyUpdatedAt: Date?
-    let hostCredential: String?
-
-    var id: String { workspace }
-}
-
-/// A ticked repository as rendered from the local policy file.
-struct SiloGitHubPolicyRepo: Codable, Identifiable, Sendable, Equatable {
-    let canonical: String
-    let mode: GitHubRepositoryAccessMode
-
-    var id: String { canonical }
-    var modeLabel: String { mode.label }
-}
-
 /// `silo github status --format json`: global host-credential state plus
 /// workspace-scoped policy, capability, and shuttle state.
 struct SiloGitHubStatusResponse: Codable, Sendable {
-    let mode: String
     let hostCredential: String?
     let workspaces: [SiloGitHubStatusWorkspace]
 }
@@ -1062,7 +986,6 @@ struct SiloGitHubRawError: Codable, Sendable, Equatable {
 /// callers validate the fields their command needs.
 struct SiloGitHubCLIResponse: Codable, Sendable {
     let ok: Bool?
-    let mode: String?
     let repos: [SiloGitHubDiscoveredRepo]?
     let status: String?
     let interval: Int?

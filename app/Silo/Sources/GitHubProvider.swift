@@ -1,17 +1,7 @@
 import Foundation
 
-/// Path C mode switch (§1): decided once at app launch. `local` is the
-/// default; `connect` is used only when the build carries a trusted Connect
-/// scope attestation.
-enum GitHubAccessMode: String, Sendable, Equatable {
-    case local
-    case connect
-}
-
 /// The app-facing GitHub surface. SetupView/SettingsView depend on this
-/// behavior, not on the Connect types. `GitHubLocalProvider` conforms in
-/// local mode; `GitHubAuthorizationCoordinator` is NOT retrofitted (it stays
-/// Connect-only).
+/// behavior, not on transport details.
 protocol GitHubProviding: Sendable {
     var isAvailable: Bool { get }
     func loadCatalog() async throws -> GitHubCatalog
@@ -36,7 +26,7 @@ protocol GitHubProviding: Sendable {
     /// `pollDeviceFlow(deviceId:)` at `interval` sleeps.
     func startDeviceFlow() async throws -> SiloDeviceFlowStart
     func pollDeviceFlow(deviceId: String) async throws -> SiloDeviceFlowPoll
-    /// Local onboarding's desired/effective cutover. Implementations that do
+    /// Onboarding's desired/effective cutover. Implementations that do
     /// not support the background contract may use the synchronous default.
     func policySyncProgress() async -> GitHubApplyProgress?
     func waitForPolicySync() async throws
@@ -136,18 +126,15 @@ struct GitHubApplyProgress: Sendable, Equatable {
     }
 }
 
-/// Catalog for the existing picker models. `installations` is a synthetic
-/// one-installation-per-owner adaptation: in local mode the owner scope
-/// replaces the GitHub App installation scope.
+/// Catalog of the authenticated account's GitHub owners and repositories.
 struct GitHubCatalog: Sendable, Equatable {
     var account: GitHubAccount?
     var hostCredentialPresent: Bool
-    var installations: [GitHubInstallation]
-    var repositoriesByInstallation: [Int: [GitHubRepository]]
+    var owners: [GitHubOwner]
+    var repositoriesByOwner: [Int: [GitHubRepository]]
 }
 
 enum GitHubCatalogError: Error, LocalizedError, Sendable, Equatable {
-    case notLocalMode(String)
     case unavailable(String)
     case commitFailed(String)
     /// gh is not authenticated and no device-flow client ID is configured;
@@ -163,7 +150,6 @@ enum GitHubCatalogError: Error, LocalizedError, Sendable, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .notLocalMode(let message): return message
         case .unavailable(let message): return message
         case .commitFailed(let message): return message
         case .ghWebLoginRequired: return "GitHub sign-in on this Mac is required."
@@ -173,23 +159,23 @@ enum GitHubCatalogError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-enum GitHubLocalStrings {
+enum GitHubStrings {
     static let settingsNoCredential = "GitHub account not connected on this Mac"
     static let settingsConnectAccount = "Connect GitHub account on this Mac…"
     static let noReposCopy = "No repositories found."
     static let detailFootnote = "Authenticated GitHub access is enforced by the local proxy on this Mac. Your workspace never receives a GitHub credential. Local editing and commits always work."
 }
 
-/// Local-mode provider. The repo catalog is assembled from the policy file
+/// The repo catalog is assembled from the policy file
 /// read-back through `silo github status --format json`, which lists every
 /// workspace's granted repos; the CLI exposes no GitHub repo enumeration,
-/// so the app never adds one. On EVERY successful load, credential grants
-/// whose repos are missing from the discovered catalog are re-synthesized
+/// so the app never adds one. On EVERY successful load, grants
+/// whose repos are missing from the discovered catalog are restored
 /// into the fresh catalog so a refresh can never drop a granted repo from
 /// the picker or from the draft-to-policy mapping. Credential/account state
 /// comes from the CLI (`github status`, `github auth --json`) — the app
 /// only reads status and never holds the token.
-actor GitHubLocalProvider: GitHubProviding {
+actor GitHubProvider: GitHubProviding {
     private let client: SiloClient
     private let policyURL: URL
     private var applyProgress: GitHubApplyProgress?
@@ -251,7 +237,7 @@ actor GitHubLocalProvider: GitHubProviding {
             )
             // Intent is repository-only and scoped to the current configured
             // workspace set. Rewriting obsolete keys here prevents a pending
-            // pre-rename generation from being replayed after restart.
+            // pre-rename generation from being replayed on the next launch.
             if let persistedDesired, let persistedHash,
                persistedDesired != persisted.desired ||
                     persistedHash != persisted.semanticHash ||
@@ -337,11 +323,6 @@ actor GitHubLocalProvider: GitHubProviding {
     func loadCatalog() async throws -> GitHubCatalog {
         await waitForConfigurationReload()
         let status = try await client.githubStatus()
-        guard status.mode == GitHubAccessMode.local.rawValue else {
-            throw GitHubCatalogError.notLocalMode(
-                "GitHub is in \(status.mode) mode on this Mac; local repository access is unavailable."
-            )
-        }
         let hasCredential = status.hostCredential == "present"
         var account: GitHubAccount?
         if hasCredential, let metadata = try? await client.githubAuthMetadata(),
@@ -360,19 +341,18 @@ actor GitHubLocalProvider: GitHubProviding {
         } else {
             discovered = []
         }
-        var installations: [GitHubInstallation] = []
-        var repositoriesByInstallation: [Int: [GitHubRepository]] = [:]
-        var seenOwners: [Int: GitHubInstallationAccount] = [:]
+        var owners: [GitHubOwner] = []
+        var repositoriesByOwner: [Int: [GitHubRepository]] = [:]
+        var seenOwners: [Int: GitHubOwnerAccount] = [:]
         for repo in discovered.sorted(by: { $0.canonical < $1.canonical }) {
             let ownerID = Self.stableID(repo.owner)
             let ownerAccount = seenOwners[ownerID]
-                ?? GitHubInstallationAccount(login: repo.owner, id: ownerID, type: nil)
+                ?? GitHubOwnerAccount(login: repo.owner, id: ownerID, type: nil)
             seenOwners[ownerID] = ownerAccount
-            if repositoriesByInstallation[ownerID] == nil {
-                installations.append(GitHubInstallation(
+            if repositoriesByOwner[ownerID] == nil {
+                owners.append(GitHubOwner(
                     id: ownerID,
-                    account: ownerAccount,
-                    repositorySelection: nil
+                    account: ownerAccount
                 ))
             }
             let repository = GitHubRepository(
@@ -385,28 +365,28 @@ actor GitHubLocalProvider: GitHubProviding {
                 canPush: repo.permissions.push,
                 inPolicy: repo.inPolicy
             )
-            if !(repositoriesByInstallation[ownerID]?.contains(where: { $0.id == repository.id }) ?? false) {
-                repositoriesByInstallation[ownerID, default: []].append(repository)
+            if !(repositoriesByOwner[ownerID]?.contains(where: { $0.id == repository.id }) ?? false) {
+                repositoriesByOwner[ownerID, default: []].append(repository)
             }
         }
         // Every successful load re-merges policy-only grants into the fresh
         // catalog BEFORE any draft-to-policy mapping, so a refresh can never
         // make an existing grant disappear or be silently dropped on save.
         let merged = Self.mergingPolicyOnlyRepositories(
-            installations: installations,
-            repositoriesByInstallation: repositoriesByInstallation,
+            owners: owners,
+            repositoriesByOwner: repositoriesByOwner,
             policy: await desiredPolicy(),
             configuredWorkspaces: Set(configuredWorkspaces)
         )
         return GitHubCatalog(
             account: account,
             hostCredentialPresent: hasCredential,
-            installations: merged.installations,
-            repositoriesByInstallation: merged.repositoriesByInstallation
+            owners: merged.owners,
+            repositoriesByOwner: merged.repositoriesByOwner
         )
     }
 
-    /// Pure merge used by `loadCatalog` on EVERY successful local load,
+    /// Pure merge used by `loadCatalog` on EVERY successful catalog load,
     /// before any draft-to-policy mapping: policy-only credential grants
     /// (canonical repos absent from the discovered catalog, e.g. an owner
     /// GitHub no longer lists or a missing host credential) are re-added as
@@ -416,14 +396,14 @@ actor GitHubLocalProvider: GitHubProviding {
     /// available in the catalog. Entries from workspaces outside
     /// `configuredWorkspaces` are ignored.
     static func mergingPolicyOnlyRepositories(
-        installations: [GitHubInstallation],
-        repositoriesByInstallation: [Int: [GitHubRepository]],
+        owners: [GitHubOwner],
+        repositoriesByOwner: [Int: [GitHubRepository]],
         policy: GitHubPolicyFile?,
         configuredWorkspaces: Set<String>
-    ) -> (installations: [GitHubInstallation], repositoriesByInstallation: [Int: [GitHubRepository]]) {
-        guard let policy else { return (installations, repositoriesByInstallation) }
-        var updatedInstallations = installations
-        var updatedRepositories = repositoriesByInstallation
+    ) -> (owners: [GitHubOwner], repositoriesByOwner: [Int: [GitHubRepository]]) {
+        guard let policy else { return (owners, repositoriesByOwner) }
+        var updatedOwners = owners
+        var updatedRepositories = repositoriesByOwner
         for workspaceName in policy.workspaces.keys where configuredWorkspaces.contains(workspaceName) {
             for entry in policy.workspaces[workspaceName]?.repos ?? [] {
                 let canonical = entry.canonical
@@ -433,24 +413,23 @@ actor GitHubLocalProvider: GitHubProviding {
                 guard !(updatedRepositories[ownerID]?.contains(where: { $0.id == repositoryID }) ?? false) else {
                     continue
                 }
-                if !updatedInstallations.contains(where: { $0.id == ownerID }) {
-                    updatedInstallations.append(GitHubInstallation(
+                if !updatedOwners.contains(where: { $0.id == ownerID }) {
+                    updatedOwners.append(GitHubOwner(
                         id: ownerID,
-                        account: GitHubInstallationAccount(login: owner, id: ownerID, type: nil),
-                        repositorySelection: nil
+                        account: GitHubOwnerAccount(login: owner, id: ownerID, type: nil)
                     ))
                 }
                 updatedRepositories[ownerID, default: []].append(GitHubRepository(
                     id: repositoryID,
                     fullName: canonical,
                     name: name,
-                    owner: GitHubInstallationAccount(login: owner, id: ownerID, type: nil),
+                    owner: GitHubOwnerAccount(login: owner, id: ownerID, type: nil),
                     private: true,
                     defaultBranch: nil
                 ))
             }
         }
-        return (updatedInstallations, updatedRepositories)
+        return (updatedOwners, updatedRepositories)
     }
 
     /// Returns the newest durable desired state for responsive local-first UI.
@@ -517,7 +496,7 @@ actor GitHubLocalProvider: GitHubProviding {
             applyProgress = completed
             // The effective policy already matches. If only the non-secret
             // completion marker fails, keep Applied in memory; the durable
-            // pending intent safely re-verifies on restart.
+            // pending intent safely re-verifies on the next launch.
             try? persist(request: request, hash: hash, progress: completed, status: .completed)
             return completed
         }
@@ -798,12 +777,12 @@ actor GitHubLocalProvider: GitHubProviding {
             // CLI confirmation is authoritative for effective state. If the
             // non-secret completion marker cannot be updated, keep the
             // truthful Applied state in memory; the existing pending marker
-            // safely replays and verifies the same desired intent on restart.
+            // safely replays and verifies the same desired intent on the next launch.
             do {
                 try persist(request: request, hash: hash, progress: completed, status: .completed)
             } catch {
                 // The current session already has CLI confirmation. A
-                // surviving pending marker will be replayed after restart;
+                // surviving pending marker will be replayed on the next launch;
                 // if no marker survives, the effective CLI-owned policy is
                 // still the source of truth.
             }
@@ -1076,12 +1055,7 @@ actor GitHubLocalProvider: GitHubProviding {
                 "GitHub policy cleanup did not complete before account reset."
             )
         }
-        guard let workspace = configuredWorkspaces.first else {
-            throw BootstrapCoordinatorError.invalidWorkspaceConfiguration(
-                "At least one workspace is required to reset GitHub access."
-            )
-        }
-        try await client.resetLocalGitHub(workspace: workspace)
+        try await client.disconnectGitHub()
         return completed
     }
 
@@ -1140,8 +1114,8 @@ actor GitHubLocalProvider: GitHubProviding {
         try await client.githubAuthDeviceComplete(deviceId: deviceId)
     }
 
-    /// Stable 31-bit FNV-1a hash used to synthesize stable local-mode
-    /// repository/owner identifiers from canonical names. The same catalog
+    /// Stable 31-bit FNV-1a hash used to derive stable repository and owner
+    /// identifiers from canonical names. The same catalog
     /// and policy read-back share these ids, so drafts and prefills agree.
     static func stableID(_ value: String) -> Int {
         var hash: UInt32 = 2_166_136_261
@@ -1164,7 +1138,7 @@ actor GitHubLocalProvider: GitHubProviding {
         guard value.range(of: #"^[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*$"#, options: .regularExpression) != nil else {
             return false
         }
-        // Canonical repo ids never carry a trailing .git (Path C §2).
+        // Canonical repository IDs never carry a trailing .git.
         return !value.hasSuffix(".git")
     }
 
@@ -1175,7 +1149,7 @@ actor GitHubLocalProvider: GitHubProviding {
     }
 }
 
-/// UI-test fixture provider: simulates local-mode catalog loads and policy
+/// UI-test fixture provider: simulates catalog loads and policy
 /// commits so the `--ui-test-github-*` flows never invoke a developer's Silo
 /// runtime.
 actor GitHubFixtureProvider: GitHubProviding {
@@ -1225,27 +1199,27 @@ actor GitHubFixtureProvider: GitHubProviding {
                 throw GitHubCatalogError.unavailable("GitHub could not be reached. Try again later.")
             }
         }
-        if scenario == "no-installation" {
+        if scenario == "no-owner" {
             return GitHubCatalog(
                 account: Self.fixtureAccount,
                 hostCredentialPresent: true,
-                installations: [],
-                repositoriesByInstallation: [:]
+                owners: [],
+                repositoriesByOwner: [:]
             )
         }
         if !connected {
             return GitHubCatalog(
                 account: nil,
                 hostCredentialPresent: false,
-                installations: [],
-                repositoriesByInstallation: [:]
+                owners: [],
+                repositoriesByOwner: [:]
             )
         }
         return GitHubCatalog(
             account: Self.fixtureAccount,
             hostCredentialPresent: true,
-            installations: [Self.fixtureInstallation],
-            repositoriesByInstallation: [Self.fixtureInstallation.id: Self.fixtureRepositories]
+            owners: [Self.fixtureOwner],
+            repositoriesByOwner: [Self.fixtureOwner.id: Self.fixtureRepositories]
         )
     }
 
@@ -1264,7 +1238,7 @@ actor GitHubFixtureProvider: GitHubProviding {
                 capability: nil,
                 repos: item.repositories.map {
                     GitHubPolicyRepository(
-                        canonical: GitHubLocalProvider.canonicalize($0.fullName),
+                        canonical: GitHubProvider.canonicalize($0.fullName),
                         mode: $0.mode
                     )
                 }
@@ -1374,17 +1348,16 @@ actor GitHubFixtureProvider: GitHubProviding {
     }
 
     static let fixtureAccount = GitHubAccount(login: "octocat", id: 1, name: nil, email: nil)
-    static let fixtureInstallation = GitHubInstallation(
-        id: 42,
-        account: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
-        repositorySelection: nil
+    static let fixtureOwner = GitHubOwner(
+        id: 7,
+        account: GitHubOwnerAccount(login: "acme", id: 7, type: "Organization")
     )
     static let fixtureRepositories = [
         GitHubRepository(
             id: 1001,
             fullName: "acme/one",
             name: "one",
-            owner: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
+            owner: GitHubOwnerAccount(login: "acme", id: 7, type: "Organization"),
             private: true,
             defaultBranch: "main"
         ),
@@ -1392,7 +1365,7 @@ actor GitHubFixtureProvider: GitHubProviding {
             id: 1002,
             fullName: "acme/two",
             name: "two",
-            owner: GitHubInstallationAccount(login: "acme", id: 7, type: "Organization"),
+            owner: GitHubOwnerAccount(login: "acme", id: 7, type: "Organization"),
             private: true,
             defaultBranch: "main"
         )

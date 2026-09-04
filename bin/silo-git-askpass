@@ -1,37 +1,16 @@
 #!/bin/sh
 # GIT_ASKPASS helper for Silo host-side git operations.
 #
-# Local mode (SILO_GITHUB_MODE=local, §5/§8): answers ONLY github.com prompts,
+# Answers ONLY github.com prompts,
 # emitting the host credential's accessToken through the fail-closed
 # silo-github-host-token helper (missing/invalid record => exit 1, nothing
 # emitted). Any non-github.com prompt exits 1 so the token can never be
 # handed to another host.
 #
-# Connect mode answers from the current schema-3 app installation record.
 set -eu
 
-security_bin="${SILO_SECURITY_BIN:-/usr/bin/security}"
-keychain_home="${SILO_KEYCHAIN_HOME:-$HOME}"
-test_keychain_dir="${SILO_TEST_KEYCHAIN_DIR:-}"
 host_token_bin="${SILO_HOST_TOKEN_BIN:-}"
 prompt="${1:-}"
-
-safe_component() {
-  printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
-}
-
-keychain_read() {
-  service_name="$1"
-  account_name="$2"
-  if [ -n "$test_keychain_dir" ]; then
-    file="$test_keychain_dir/$(safe_component "$service_name")__$(safe_component "$account_name")"
-    [ -f "$file" ] || return 1
-    cat "$file"
-  else
-    HOME="$keychain_home" "$security_bin" find-generic-password \
-      -w -s "$service_name" -a "$account_name" 2>/dev/null
-  fi
-}
 
 resolve_host_token_bin() {
   if [ -n "$host_token_bin" ]; then
@@ -58,29 +37,6 @@ host_token() {
   printf '%s\n' "$token"
 }
 
-valid_scoped_record() {
-  raw="$1"
-  jq_bin="${SILO_JQ_BIN:-}"
-  [ -n "$jq_bin" ] && [ -x "$jq_bin" ] || return 1
-  "$jq_bin" -e '
-    type == "object" and
-    .schemaVersion == 3 and
-    (.grantID | type == "string" and length > 0) and
-    (.accessToken |
-      type == "string" and
-      length > 0 and
-      length <= 4096 and
-      test("^ghs_[^[:space:][:cntrl:]]+$") and
-      (test("^(ghp_|gho_|ghu_|ghr_|github_pat_)"; "i") | not)
-    ) and
-    (.accessExpiresAt | type == "string" and length > 0) and
-    (.generation | type == "number" and . > 0) and
-    (.refreshToken // null) == null
-  ' <<EOF >/dev/null 2>&1
-$raw
-EOF
-}
-
 case "$prompt" in
   *sername*|*Username*)
     case "$prompt" in
@@ -89,22 +45,11 @@ case "$prompt" in
     esac
     ;;
   *assword*)
-    if [ "${SILO_GITHUB_MODE:-}" = local ]; then
-      case "$prompt" in
-        *github.com*) ;;
-        *) exit 1 ;;
-      esac
-      host_token || exit 1
-    elif [ -n "${SILO_APP_KEYCHAIN_SERVICE:-}" ]; then
-      raw="$(keychain_read "$SILO_APP_KEYCHAIN_SERVICE" "${SILO_APP_KEYCHAIN_ACCOUNT:-profile}")" || exit 1
-      valid_scoped_record "$raw" || exit 1
-      jq_bin="${SILO_JQ_BIN:-}"
-      "$jq_bin" -r '.accessToken' <<EOF
-$raw
-EOF
-    else
-      exit 1
-    fi
+    case "$prompt" in
+      *github.com*) ;;
+      *) exit 1 ;;
+    esac
+    host_token || exit 1
     ;;
   *)
     exit 1

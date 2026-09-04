@@ -32,7 +32,6 @@ fi
 WORKSPACES=()
 WORKSPACE_COUNT=0
 readonly GITHUB_META_DIR="$HOME/.config/silo/github"
-readonly APP_CREDENTIALS_FILE="$HOME/Library/Application Support/Silo/credentials.json"
 readonly SILO_SECRETS_FILE="${SILO_SECRETS_FILE:-$HOME/.config/silo/secrets.json}"
 # Generic host-held secrets lifecycle state: SILO_SECRET_BINDINGS carries
 # "name=value ..." pairs (values are validated graph-only, so space-delimited
@@ -40,17 +39,9 @@ readonly SILO_SECRETS_FILE="${SILO_SECRETS_FILE:-$HOME/.config/silo/secrets.json
 # environment. It is never printed, logged, or persisted.
 SILO_SECRET_BINDINGS=""
 SECRET_PREPARE_ERROR=""
-SETUP_TRANSACTION_ACTIVE=0
-SETUP_TRANSACTION_BOX=""
 GITHUB_LOCK_HELD=0
 
-# The current GitHub transport is the repo-aware local proxy.
-: "${SILO_GITHUB_MODE:=local}"
 : "${SILO_GITHUB_PROXY_PORT:=18446}"
-if [[ "$SILO_GITHUB_MODE" != local && "$SILO_GITHUB_MODE" != connect ]]; then
-  printf 'silo: invalid SILO_GITHUB_MODE %s (expected local or connect)\n' "$SILO_GITHUB_MODE" >&2
-  exit 1
-fi
 
 MSB_BIN="${SILO_MSB_BIN:-$(command -v msb 2>/dev/null || true)}"
 SSH_BIN="${SILO_SSH_BIN:-$(command -v ssh 2>/dev/null || true)}"
@@ -312,166 +303,8 @@ keychain_delete() {
   fi
 }
 
-metadata_access() {
-  local box="$1"
-  if app_metadata_profile_present "$box" guest; then
-    # Native OAuth credentials are independent guest and host profiles. The
-    # guest profile remains read-only after host authorization, so aggregate
-    # write capability must be derived from the host profile as well.
-    if app_metadata_profile_present "$box" host &&
-      [[ "$(app_metadata_value "$box" host accessMode 2>/dev/null || true)" == host-write ]]; then
-      printf 'host-write\n'
-    else
-      app_metadata_value "$box" guest accessMode
-    fi
-  else
-    return 1
-  fi
-}
-
-metadata_repo() {
-  local box="$1"
-  if app_metadata_profile_present "$box" guest; then
-    app_metadata_value "$box" guest verificationRepository
-  else
-    return 1
-  fi
-}
-
-
-app_credential_environment_token() {
-  local box="$1" role="$2" suffix variable value="" expiry_state
-  app_metadata_profile_present "$box" "$role" || return 1
-  [[ "$(app_metadata_value "$box" "$role" provider 2>/dev/null || true)" == github-app-installation ]] || return 1
-  [[ "$(app_metadata_value "$box" "$role" recoveryState 2>/dev/null || true)" == ready ]] || return 1
-  expiry_state="$(app_profile_expiry_state "$box" "$role" 2>/dev/null || true)"
-  [[ "$expiry_state" == valid || "$expiry_state" == expiring ]] || return 1
-  suffix="$(printf '%s' "$box" | tr '[:lower:]' '[:upper:]')"
-  case "$role" in
-    guest) variable="SILO_GITHUB_READ_TOKEN_${suffix}" ;;
-    host) variable="SILO_GITHUB_WRITE_TOKEN_${suffix}" ;;
-    *) return 1 ;;
-  esac
-  value="${!variable:-}"
-  [[ -n "$value" ]] || return 1
-  [[ "${#value}" -le 4096 && "$value" =~ ^ghs_[^[:space:][:cntrl:]]+$ ]] || return 1
-  printf '%s' "$value"
-}
-
-app_keychain_service() {
-  local box="$1" role="$2"
-  case "$role" in
-    guest) printf 'silo.github.app.%s.guest.tokens' "$box" ;;
-    host) printf 'silo.github.app.%s.host.tokens' "$box" ;;
-    *) return 1 ;;
-  esac
-}
-app_keychain_get() {
-  local box="$1" role="$2" service raw expiry_state allow_expired="${3:-0}"
-  app_metadata_profile_present "$box" "$role" || return 1
-  service="$(app_keychain_service "$box" "$role")"
-  if [[ "$allow_expired" != 1 ]]; then
-    expiry_state="$(app_profile_expiry_state "$box" "$role" 2>/dev/null || true)"
-    [[ "$expiry_state" == valid || "$expiry_state" == expiring ]] || return 1
-  fi
-  raw="$(keychain_get "$service" profile)" || return 1
-  # The native broker stores only a short-lived installation token. A
-  # refresh_token or schema-v2 user token is deliberately rejected.
-  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
-  "$JQ_BIN" -e '
-    type == "object" and
-    .schemaVersion == 3 and
-    (.grantID | type == "string" and length > 0) and
-    (.accessToken |
-      type == "string" and
-      length > 0 and
-      length <= 4096 and
-      test("^ghs_[^[:space:][:cntrl:]]+$") and
-      (test("^(ghp_|gho_|ghu_|ghr_|github_pat_)"; "i") | not)
-    ) and
-    (.accessExpiresAt | type == "string" and length > 0) and
-    (.generation | type == "number" and . > 0) and
-    (.refreshToken // null) == null
-  ' <<<"$raw" >/dev/null 2>&1 || return 1
-  "$JQ_BIN" -r '.accessToken' <<<"$raw"
-}
-
-app_keychain_has() {
-  local box="$1" role="$2"
-  app_metadata_profile_present "$box" "$role" || return 1
-  app_keychain_get "$box" "$role" >/dev/null 2>&1
-}
-
-app_credential_available() {
-  local box="$1" role="$2"
-  app_metadata_profile_present "$box" "$role" || return 1
-  [[ "$(app_metadata_value "$box" "$role" provider 2>/dev/null || true)" == github-app-installation ]] || return 1
-  [[ "$(app_metadata_value "$box" "$role" recoveryState 2>/dev/null || true)" == ready ]] || return 1
-  app_credential_environment_token "$box" "$role" >/dev/null 2>&1 ||
-    app_keychain_has "$box" "$role"
-}
-
-app_credential_value() {
-  local box="$1" role="$2" value
-  if value="$(app_credential_environment_token "$box" "$role" 2>/dev/null)"; then
-    printf '%s' "$value"
-  else
-    app_keychain_get "$box" "$role"
-  fi
-}
-app_credential_value_for_cleanup() {
-  local box="$1" role="$2" value
-  if value="$(app_credential_environment_token "$box" "$role" 2>/dev/null)"; then
-    printf '%s' "$value"
-  else
-    # Secret removal may be the recovery path for an expired grant. The
-    # installation token is still structurally validated, but expiry is not
-    # used to decide whether it may authenticate this local config mutation.
-    app_keychain_get "$box" "$role" 1
-  fi
-}
-
-
-app_metadata_value() {
-  local box="$1" role="$2" field="$3" key
-  [[ -f "$APP_CREDENTIALS_FILE" && ! -L "$APP_CREDENTIALS_FILE" ]] || return 1
-  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
-  key="$box.$role"
-  "$JQ_BIN" -r --arg key "$key" --arg field "$field" \
-    '.entries[$key][$field] // empty' "$APP_CREDENTIALS_FILE" 2>/dev/null
-}
-
-app_metadata_profile_present() {
-  local box="$1" role="$2" value
-  value="$(app_metadata_value "$box" "$role" workspace 2>/dev/null || true)"
-  [[ "$value" == "$box" ]]
-}
-
-app_repository_allowed() {
-  local box="$1" role="$2" repository="$3" key
-  [[ -f "$APP_CREDENTIALS_FILE" && ! -L "$APP_CREDENTIALS_FILE" ]] || return 1
-  [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || return 1
-  key="$box.$role"
-  repository="$(printf '%s' "$repository" | tr '[:upper:]' '[:lower:]')"
-  "$JQ_BIN" -e --arg key "$key" --arg repository "$repository" '
-    (
-      .entries[$key].provider == "github-app-installation" and
-      .entries[$key].recoveryState == "ready" and
-      ((.entries[$key].repositoryNames // []) | map(ascii_downcase) | index($repository)) != null
-    )
-  ' "$APP_CREDENTIALS_FILE" >/dev/null 2>&1
-}
-
-require_repository_access() {
-  local box="$1" repository="$2" role="${3:-guest}"
-  if app_metadata_profile_present "$box" "$role"; then
-    app_repository_allowed "$box" "$role" "$repository" ||
-      fatal "repository '$repository' is not assigned to workspace '$box' for the $role grant"
-  fi
-}
-
 # ---------------------------------------------------------------------------
-# Path C §2 policy helpers. The policy file is the single source of truth for
+# GitHub policy helpers. The policy file is the single source of truth for
 # host-credential grants: it decides, per workspace and canonical repository,
 # whether the host OAuth/token may be injected and whether that grant is
 # read-only or read-write. Missing/malformed file, unknown workspace, and
@@ -482,7 +315,7 @@ require_repository_access() {
 # ---------------------------------------------------------------------------
 policy_file() { printf '%s' "${SILO_POLICY_FILE:-$HOME/Library/Application Support/Silo/github-policy.json}"; }
 
-# Path C §2 / high-risk / closure: ONE strict policy validator shared by every
+# One strict policy validator is shared by every
 # host gate (push, verify, host-credential checks, app reads). A malformed
 # policy denies host push and host API work — both inject the host credential,
 # which is never granted from an invalid policy — but it never blocks
@@ -589,7 +422,7 @@ canonicalize_github_repo() {
 }
 
 # ---------------------------------------------------------------------------
-# Path C §5 host credential: one versioned JSON record in the Keychain
+# Host credential: one versioned JSON record in the Keychain
 # (SILO_HOST_KEYCHAIN_SERVICE/ACCOUNT; SILO_TEST_KEYCHAIN_DIR file fallback),
 # plus a nonsecret metadata file beside the policy file (SILO_HOST_META_FILE).
 # The record is written only after verification passes; rotation bumps
@@ -608,7 +441,7 @@ host_credential_token_valid() {
   [[ -n "$token" && "${#token}" -le 4096 ]] || return 1
   case "$token" in
     gho_*|ghp_*|github_pat_*|ghu_*) ;;
-    ghs_*|ghr_*) return 1 ;;  # installation tokens and refresh tokens are the wrong kind
+    ghs_*|ghr_*) return 1 ;;
     *) return 1 ;;
   esac
   case "$token" in
@@ -1141,8 +974,8 @@ host_device_flow_interactive() {
     case "$error" in
       authorization_pending) continue ;;
       slow_down) poll_interval=$((poll_interval + 5)); continue ;;
-      expired_token) printf 'silo: GitHub Device Flow expired; restart: silo github auth\n' >&2; return 76 ;;
-      access_denied) printf 'silo: GitHub Device Flow access denied; restart: silo github auth\n' >&2; return 76 ;;
+      expired_token) printf 'silo: GitHub Device Flow expired; run silo github auth again\n' >&2; return 76 ;;
+      access_denied) printf 'silo: GitHub Device Flow access denied; run silo github auth again\n' >&2; return 76 ;;
       "")
         token="$(printf '%s' "$token_json" | "$JQ_BIN" -r '.access_token // empty' 2>/dev/null || true)"
         [[ -n "$token" ]] || { printf 'silo: GitHub Device Flow returned no access token\n' >&2; return 1; }
@@ -1152,7 +985,7 @@ host_device_flow_interactive() {
         ;;
     esac
   done
-  printf 'silo: GitHub Device Flow authorization timed out; restart: silo github auth\n' >&2
+  printf 'silo: GitHub Device Flow authorization timed out; run silo github auth again\n' >&2
   return 75
 }
 
@@ -1810,7 +1643,6 @@ attest_runtime_discard_safety() {
   fi
 }
 
-quarantine_file() { printf '%s/%s.quarantine\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_file() { printf '%s/%s.lock\n' "$GITHUB_META_DIR" "$1"; }
 github_lock_release() {
   if (( GITHUB_LOCK_HELD )); then
@@ -1848,23 +1680,6 @@ github_lock_acquire() {
   trap 'github_lock_exit $?' EXIT
 }
 
-assert_not_quarantined() {
-  local box="$1" file role app_quarantined=0
-  [[ "${SILO_ALLOW_QUARANTINED:-0}" == 1 ]] && return 0
-  file="$(quarantine_file "$box")"
-  if [[ -e "$file" || -L "$file" ]]; then
-    fatal "workspace '$box' is quarantined; repair it from Silo's Connect GitHub flow"
-  fi
-  for role in guest host; do
-    if app_metadata_profile_present "$box" "$role" &&
-      [[ "$(app_metadata_value "$box" "$role" quarantined 2>/dev/null || true)" == true ]]; then
-      app_quarantined=1
-    fi
-  done
-  (( app_quarantined == 0 )) ||
-    fatal "workspace '$box' is quarantined; repair it from Silo setup"
-}
-
 sandbox_running() {
   local box="$1" status
   status="$(workspace_msb "$box" status "$box" --format json 2>/dev/null)" || return 2
@@ -1875,88 +1690,6 @@ sandbox_running() {
     *) return 2 ;;
   esac
 }
-
-quarantine_workspace() {
-  local box="$1" reason="${2:-GitHub credential cleanup failed}" file attempt=0 stop_failed=0 running_rc inspect_rc
-  file="$(quarantine_file "$box")"
-  mkdir -p "$GITHUB_META_DIR" || return 1
-  chmod 700 "$GITHUB_META_DIR" || return 1
-  umask 077 || return 1
-  printf '%s\n' "$reason" >"$file" || return 1
-  if sandbox_inspect_state "$box"; then
-    :
-  else
-    inspect_rc=$?
-    if (( inspect_rc == 1 )); then return 0; fi
-    printf 'silo: could not inspect quarantined workspace %s; stop not confirmed\n' "$box" >&2
-    return 1
-  fi
-  if ! workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1; then stop_failed=1; fi
-  while (( attempt < 5 )); do
-    if sandbox_running "$box"; then
-      :
-    else
-      running_rc=$?
-      if (( running_rc == 1 )); then return 0; fi
-    fi
-    attempt=$((attempt + 1))
-    if (( attempt < 5 )); then sleep 1; fi
-  done
-  if (( stop_failed )); then
-    printf 'silo: could not stop quarantined workspace %s\n' "$box" >&2
-  else
-    printf 'silo: could not prove quarantined workspace %s is stopped\n' "$box" >&2
-  fi
-  return 1
-}
-
-clear_quarantine() {
-  local file
-  file="$(quarantine_file "$1")"
-  rm -f "$file"
-  # Enforcement (assert_not_quarantined) treats -e OR -L as quarantined, so a
-  # dangling symlink that rm could not remove must still count as a failure;
-  # checking only ! -e would report success while the symlink keeps blocking.
-  if [[ -e "$file" || -L "$file" ]]; then
-    printf 'silo: could not clear quarantine for %s\n' "$1" >&2
-    return 1
-  fi
-}
-setup_transaction_arm() {
-  SETUP_TRANSACTION_BOX="$1"
-  SETUP_TRANSACTION_ACTIVE=1
-  trap 'setup_transaction_trap EXIT $?' EXIT
-  trap 'setup_transaction_trap INT 130' INT
-  trap 'setup_transaction_trap TERM 143' TERM
-  trap 'setup_transaction_trap HUP 129' HUP
-}
-
-setup_transaction_disarm() {
-  SETUP_TRANSACTION_ACTIVE=0
-  SETUP_TRANSACTION_BOX=""
-  trap - EXIT INT TERM HUP
-  if (( GITHUB_LOCK_HELD )); then trap 'github_lock_exit $?' EXIT; fi
-}
-
-setup_transaction_trap() {
-  local signal="$1" status="${2:-1}"
-  trap - EXIT
-  trap '' INT TERM HUP
-  if (( SETUP_TRANSACTION_ACTIVE )); then
-    SETUP_TRANSACTION_ACTIVE=0
-    quarantine_workspace "$SETUP_TRANSACTION_BOX" "GitHub setup interrupted" >/dev/null 2>&1 || true
-  fi
-  github_lock_release
-  trap - INT TERM HUP
-  exit "$status"
-}
-
-read_token_for_workspace() {
-  local box="$1"
-  app_metadata_profile_present "$box" guest || return 1
-  app_credential_value "$box" guest
-}
-
 
 workspace_msb_unset_args() {
   # Non-lifecycle msb children must never see a configured secret name, even
@@ -1992,80 +1725,9 @@ workspace_msb() {
   fi
 }
 
-workspace_msb_with_read_token() {
-  local box="$1" token="" status
-  shift
-  local -a unset_args=() name
-  local secrets_file
-  secrets_file="$(secrets_meta_file)"
-  if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
-    secrets_meta_valid "$secrets_file" || return 1
-  fi
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    unset_args+=("-u" "$name")
-  done < <(workspace_msb_unset_args)
-  # Path C §1: local mode never reads Connect grants or keychain tokens.
-  if [[ "$SILO_GITHUB_MODE" != local ]] && token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
-    if (( ${#unset_args[@]} > 0 )); then
-      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
-        status=0
-      else
-        status=$?
-      fi
-    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
-      status=0
-    else
-      status=$?
-    fi
-    unset token
-    return "$status"
-  fi
-  if (( ${#unset_args[@]} > 0 )); then
-    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&- 6>&-
-  else
-    "$MSB_BIN" "$@" 9>&- 6>&-
-  fi
-}
-workspace_msb_with_read_token_for_cleanup() {
-  local box="$1" token="" status
-  shift
-  local -a unset_args=() name
-  local secrets_file
-  secrets_file="$(secrets_meta_file)"
-  if [[ -e "$secrets_file" || -L "$secrets_file" ]]; then
-    secrets_meta_valid "$secrets_file" || return 1
-  fi
-  while IFS= read -r name; do
-    [[ -n "$name" ]] || continue
-    unset_args+=("-u" "$name")
-  done < <(workspace_msb_unset_args)
-  if [[ "$SILO_GITHUB_MODE" != local ]] && token="$(app_credential_value_for_cleanup "$box" guest 2>/dev/null)"; then
-    if (( ${#unset_args[@]} > 0 )); then
-      if env "${unset_args[@]}" GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
-        status=0
-      else
-        status=$?
-      fi
-    elif GH_TOKEN="$token" "$MSB_BIN" "$@" 9>&- 6>&-; then
-      status=0
-    else
-      status=$?
-    fi
-    unset token
-    return "$status"
-  fi
-  if (( ${#unset_args[@]} > 0 )); then
-    env "${unset_args[@]}" "$MSB_BIN" "$@" 9>&- 6>&-
-  else
-    "$MSB_BIN" "$@" 9>&- 6>&-
-  fi
-}
-
 start_sandbox() {
   local box="$1"
   require_runtime_discard_safety
-  assert_not_quarantined "$box"
   workspace_storage_require "$box"
   # Generic host-held secrets: reconcile pending add/edit/remove operations
   # and resolve every bound value ONLY inside the direct msb child's
@@ -2099,7 +1761,7 @@ wait_for_guest_systemd() {
 guest_exec() {
   local box="$1"; shift
   ensure_running "$box"
-  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- "$@"
+  workspace_msb "$box" exec --no-tty "$box" -- "$@"
 }
 
 # Run a guest command as an internal control-plane session (directory,
@@ -2114,7 +1776,7 @@ guest_exec() {
 guest_control_exec() {
   local box="$1"; shift
   ensure_running "$box"
-  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- \
+  workspace_msb "$box" exec --no-tty "$box" -- \
     bash -c 'printf '\''\x00\x00\x00\x00\x01H\n'\'' >&2; exec "$@"' _ "$@"
 }
 
@@ -2126,14 +1788,13 @@ guest_control_exec() {
 # the reserved internal-session marker from its first write.
 guest_exec_ready() {
   local box="$1"; shift
-  workspace_msb_with_read_token "$box" exec --no-tty "$box" -- \
+  workspace_msb "$box" exec --no-tty "$box" -- \
     bash -c 'printf '\''\x00\x00\x00\x00\x01H\n'\'' >&2; exec "$@"' _ "$@"
 }
 
 ensure_running() {
   local box="$1" attempt=0 output=""
   validate_workspace "$box"
-  assert_not_quarantined "$box"
   sandbox_exists "$box" || fatal "workspace '$box' does not exist; rerun setup.sh"
   if workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
     wait_for_guest_systemd "$box"
@@ -2158,13 +1819,13 @@ ensure_running() {
 guest_exec_w() {
   local box="$1" workdir="$2"; shift 2
   ensure_running "$box"
-  workspace_msb_with_read_token "$box" exec --no-tty -w "$workdir" "$box" -- "$@"
+  workspace_msb "$box" exec --no-tty -w "$workdir" "$box" -- "$@"
 }
 
 guest_script() {
   local box="$1" script="$2"; shift 2
   ensure_running "$box"
-  printf '%s\n' "$script" | workspace_msb_with_read_token "$box" exec --no-tty "$box" -- bash -s -- "$@"
+  printf '%s\n' "$script" | workspace_msb "$box" exec --no-tty "$box" -- bash -s -- "$@"
 }
 
 validate_relative_path() {
@@ -2529,7 +2190,6 @@ cmd_restart() {
   local target="${1:-all}" box
   while IFS= read -r box; do
     sandbox_exists "$box" || fatal "workspace '$box' does not exist"
-    assert_not_quarantined "$box"
     workspace_storage_require "$box"
     note "Restarting $box"
     # Generic host-held secrets: reconcile pending operations and resolve
@@ -2828,11 +2488,6 @@ cmd_clone() {
   local box="$1" repo="${2:-}" destination="${3:-}" remote repo_name parent
   validate_workspace "$box"
   validate_github_repo "$repo"
-  # Local mode clones public repositories anonymously. Connect mode requires
-  # the repository to be present in the current scoped grant.
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    require_repository_access "$box" "$repo" guest
-  fi
   repo_name="${repo#*/}"
   if [[ -z "$destination" ]]; then destination="$repo_name"; fi
   validate_relative_path "$destination"
@@ -2877,11 +2532,6 @@ pull_one() {
   canonical_repo="$(normalize_github_remote "$remote_raw")"
   canonical_repo="${canonical_repo#https://github.com/}"
   canonical_repo="${canonical_repo%.git}"
-  # Local mode pulls public repositories anonymously. Connect mode requires
-  # the repository to be present in the current scoped grant.
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    require_repository_access "$box" "$canonical_repo" guest
-  fi
   guest_exec_w "$box" "$repo_root" git pull --ff-only --prune
 }
 cmd_pull() {
@@ -2923,27 +2573,6 @@ cmd_clean() {
   done < <(for_targets "$target")
 }
 
-bind_github_read_token() {
-  local box="$1"
-  [[ "$SILO_GITHUB_MODE" != local ]] || return 0
-  app_credential_available "$box" guest || fatal "current guest grant missing for $box"
-  workspace_msb_with_read_token "$box" modify "$box" --secret "GH_TOKEN@github.com" --restart >/dev/null
-}
-
-remove_github_secret() {
-  local box="$1" inspect_rc
-  [[ "$SILO_GITHUB_MODE" != local ]] || return 0
-  if sandbox_inspect_state "$box"; then
-    :
-  else
-    inspect_rc=$?
-    if (( inspect_rc == 1 )); then return 0; fi
-    printf 'silo: could not inspect workspace %s before removing its GitHub secret\n' "$box" >&2
-    return 1
-  fi
-  workspace_msb_with_read_token_for_cleanup "$box" modify "$box" --secret-rm GH_TOKEN --restart >/dev/null
-}
-
 host_safe_path() {
   local path="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin" dir tool
   for tool in "$GIT_BIN" "$(command -v git-lfs 2>/dev/null || true)" "$ASKPASS_BIN"; do
@@ -2955,10 +2584,7 @@ host_safe_path() {
 }
 
 host_git_run() {
-  local temp_home="$1" box="$2" keychain_home="$HOME" app_service=""; shift 2
-  if app_metadata_profile_present "$box" host; then
-    app_service="$(app_keychain_service "$box" host)"
-  fi
+  local temp_home="$1" box="$2" keychain_home="$HOME"; shift 2
   mkdir -p "$temp_home"
   env -i \
     HOME="$temp_home" \
@@ -2974,9 +2600,6 @@ host_git_run() {
     SILO_KEYCHAIN_HOME="$keychain_home" \
     SILO_SECURITY_BIN="$SECURITY_BIN" \
     SILO_JQ_BIN="$JQ_BIN" \
-    SILO_APP_KEYCHAIN_SERVICE="$app_service" \
-    SILO_APP_KEYCHAIN_ACCOUNT=profile \
-    SILO_GITHUB_MODE="$SILO_GITHUB_MODE" \
     SILO_HOST_KEYCHAIN_SERVICE="${SILO_HOST_KEYCHAIN_SERVICE:-}" \
     SILO_HOST_KEYCHAIN_ACCOUNT="${SILO_HOST_KEYCHAIN_ACCOUNT:-}" \
     SILO_HOST_META_FILE="${SILO_HOST_META_FILE:-}" \
@@ -3061,33 +2684,16 @@ push_impl() {
   repo_root="$(resolve_guest_repo "$box" "$relative")"
   remote_raw="$(guest_exec_w "$box" "$repo_root" git config --get remote.origin.url)"
   canonical_url="$(normalize_github_remote "$remote_raw")"
-  require_repository_access "$box" "${canonical_url#https://github.com/}" guest
-  require_repository_access "$box" "${canonical_url#https://github.com/}" host
-  # Path C §8 push gate (local mode): pushing injects the host credential, so
-  # the canonical repo must carry a credential grant and the host credential
-  # must be available. Host push is allowed for every granted repo in BOTH
-  # modes — only VM-originated push is gated by read-write (enforced by the
-  # proxy's receive-pack rules).
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    # High-risk: the strict policy validator runs at EVERY host gate; a
-    # corrupt policy grants no host credential, so host push is denied — but
-    # otherwise valid anonymous public GitHub traffic is not affected. The
-    # repo must carry an EXPLICIT valid grant mode.
-    if ! policy_validate; then
-      fatal "GitHub policy file is missing or malformed: $(policy_file); host push fails closed until it is repaired (run: silo github proxy-configure)"
-    fi
-    canonical_repo="${canonical_url#https://github.com/}"
-    canonical_repo="${canonical_repo%.git}"
-    canonical_repo="$(printf '%s' "$canonical_repo" | tr '[:upper:]' '[:lower:]')"
-    local_repo_mode="$(policy_repo_mode "$box" "$canonical_repo" 2>/dev/null || true)"
-    case "$local_repo_mode" in
-      read-only|read-write) ;;
-      *) fatal "repository '$canonical_repo' has no credential grant on workspace '$box'; add one with: silo app github-policy-set --workspace $box --repository $canonical_repo --mode read-write" ;;
-    esac
-    if ! host_credential_available; then
-      fatal "host GitHub credential is not provisioned for $box; outbound pushes fail closed until it is (run: silo github auth)"
-    fi
-  fi
+  policy_validate ||
+    fatal "GitHub policy file is missing or malformed: $(policy_file); host push is disabled until it is repaired"
+  canonical_repo="${canonical_url#https://github.com/}"
+  canonical_repo="${canonical_repo%.git}"
+  canonical_repo="$(printf '%s' "$canonical_repo" | tr '[:upper:]' '[:lower:]')"
+  local_repo_mode="$(policy_repo_mode "$box" "$canonical_repo" 2>/dev/null || true)"
+  [[ "$local_repo_mode" == read-only || "$local_repo_mode" == read-write ]] ||
+    fatal "repository '$canonical_repo' is not enabled for workspace '$box'; update its access in Silo"
+  host_credential_available ||
+    fatal "GitHub is not connected on this Mac; run: silo github auth"
   guest_exec_w "$box" "$repo_root" git fetch --prune origin
   branch="$(guest_exec_w "$box" "$repo_root" git symbolic-ref --quiet --short HEAD)" || fatal "detached HEAD cannot be pushed"
   guest_exec_w "$box" "$repo_root" git check-ref-format --branch "$branch" >/dev/null
@@ -3202,7 +2808,7 @@ read_hidden_token() {
   printf '%s' "$value"
 }
 
-cmd_github_verify_local() {
+cmd_github_verify_proxy() {
   local box="$1" repo="${2:-}" cap repo_mode host_cred_state raw token user_json login repo_json push_ok entry probe_repo failed=0
   validate_workspace "$box"
   if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
@@ -3236,12 +2842,11 @@ cmd_github_verify_local() {
     host_cred_state=missing
   fi
   printf 'Workspace:        %s\n' "$box"
-  printf 'Mode:             local\n'
   printf 'Capability:       minted\n'
   printf 'Repositories:    %s\n' "$(policy_repo_summary "$box" 2>/dev/null || printf ' none')"
   printf 'Host credential:  %s\n' "$host_cred_state"
   if [[ "$host_cred_state" == present ]]; then
-    # §8 local probe: GET /user plus per-repo capability checks via
+    # Probe the host account and per-repository capabilities via
     # host_github_api — no VM branch operations.
     raw="$(host_credential_read)" || { github_lock_release; fatal "host GitHub credential record is invalid; re-provision with: silo github auth --force"; }
     token="$(printf '%s' "$raw" | "$JQ_BIN" -r '.accessToken')"
@@ -3288,111 +2893,18 @@ cmd_github_verify_local() {
     fatal "host GitHub credential verification failed for $box; rotate it with: silo github auth --force"
   fi
   if [[ -n "$repo" ]]; then
-    ok "GitHub access verified for $box (local): $repo is $repo_mode"
+    ok "GitHub access verified for $box: $repo is $repo_mode"
   else
-    ok "GitHub access verified for $box (local mode)"
+    ok "GitHub access verified for $box"
   fi
 }
 
 cmd_github_verify() {
-  local box="$1" repo="${2:-}" mode="${3:-}" inherited_lock="${4:-0}" lock_acquired=0 id temp_rel branch repo_root canonical remote_heads="" remote_sha="" host_write=1 read_token="" verify_status=0
-  validate_workspace "$box"
-  # Path C §8: local mode runs a policy/capability probe with no VM branch ops.
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    cmd_github_verify_local "$box" "$repo"
-    return
-  fi
-  if (( inherited_lock == 0 )); then
-    if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
-    lock_acquired=1
-  fi
-  assert_not_quarantined "$box"
-  if [[ -z "$mode" ]]; then mode="$(metadata_access "$box" 2>/dev/null || printf 'host-write')"; fi
-  case "$mode" in
-    host-write) ;;
-    read-only) host_write=0 ;;
-    *) fatal "unknown GitHub access mode '$mode'" ;;
-  esac
-  if [[ -z "$repo" ]]; then repo="$(metadata_repo "$box")" || fatal "no verification repository recorded for $box"; fi
-  validate_github_repo "$repo"
-  read_token="$(read_token_for_workspace "$box")" || fatal "read token missing for $box"
-  if (( host_write )); then
-    app_credential_available "$box" host || fatal "current host grant missing for $box"
-  fi
-
-  # MicroSandbox secret references require the source environment variable for
-  # every CLI operation that reads the sandbox config, not only for modify/start.
-  # Keep the host-held token in this verifier process so guest exec, clone, and
-  # cleanup commands all resolve the source reference without exposing it to the VM.
-  export GH_TOKEN="$read_token"
-  bind_github_read_token "$box"
-  ensure_running "$box"
-  id="$(date +%Y%m%d%H%M%S)-$RANDOM"
-  temp_rel=".silo-verification/$id"
-  branch="silo-permission-test-$id"
-  canonical="https://github.com/$repo.git"
-
-  (
-    cleanup_verify() {
-      local event="${1:-EXIT}" status="${2:-0}"
-      if [[ "$event" != EXIT ]]; then
-        trap - INT TERM HUP
-        exit "$status"
-      fi
-      guest_exec "$box" rm -rf "/workspace/$temp_rel" >/dev/null 2>&1 || true
-    }
-    trap 'cleanup_verify EXIT' EXIT
-    trap 'cleanup_verify INT 130' INT
-    trap 'cleanup_verify TERM 143' TERM
-    trap 'cleanup_verify HUP 129' HUP
-
-    note "Verifying read-only guest access in $box"
-    cmd_clone "$box" "$repo" "$temp_rel" >/dev/null
-    repo_root="$(resolve_guest_repo "$box" "$temp_rel")"
-    remote_heads="$(guest_exec_w "$box" "$repo_root" git ls-remote --heads origin)" || fatal "could not inspect verification repository branches"
-    [[ -n "$remote_heads" ]] || fatal "verification repository '$repo' has no branches; initialize main (for example, add a README.md and push main) before retrying"
-    guest_exec_w "$box" "$repo_root" git config user.name "Silo Permission Test"
-    guest_exec_w "$box" "$repo_root" git config user.email "silo-permission-test@localhost"
-    guest_exec_w "$box" "$repo_root" git switch -c "$branch" >/dev/null
-    guest_exec_w "$box" "$repo_root" git commit --allow-empty -m "Silo permission verification" >/dev/null
-
-    if guest_exec_w "$box" "$repo_root" git push origin "HEAD:refs/heads/$branch" >/dev/null 2>&1; then
-      if (( host_write )); then
-        host_delete_branch "$box" "$canonical" "$branch" >/dev/null 2>&1 || true
-      else
-        guest_exec_w "$box" "$repo_root" git push origin --delete "$branch" >/dev/null 2>&1 || true
-      fi
-      fatal "the guest token can push. Replace it with a Contents: read-only fine-grained token"
-    fi
-    ok "guest push rejected"
-
-    if (( host_write )); then
-      note "Verifying the host-only push path"
-      push_impl "$box" "$temp_rel" 0 1 1
-      remote_sha="$(guest_exec_w "$box" "$repo_root" bash -c 'git ls-remote --exit-code origin "refs/heads/$1" | awk '\''NR==1 {print $1}'\''' _ "$branch")"
-      [[ "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || fatal "host push could not be confirmed"
-      host_delete_branch "$box" "$canonical" "$branch" >/dev/null
-      if guest_exec_w "$box" "$repo_root" git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
-        fatal "temporary verification branch could not be deleted"
-      fi
-      ok "host push and cleanup succeeded"
-    fi
-  )
-  verify_status=$?
-  unset GH_TOKEN read_token
-  if (( verify_status != 0 )); then
-    if (( lock_acquired )); then github_lock_release; fi
-    return "$verify_status"
-  fi
-  if (( host_write )); then
-    ok "GitHub permissions verified for $box using $repo"
-  else
-    ok "Read-only GitHub access verified for $box using $repo"
-  fi
+  cmd_github_verify_proxy "$1" "${2:-}"
 }
 
 cmd_github_status() {
-  local target="all" format="text" box repo read_state write_state cap_state repo_summary shuttle_state mode global_host_cred_state
+  local target="all" format="text" box cap_state repo_summary shuttle_state global_host_cred_state
   while (( $# > 0 )); do
     case "$1" in
       --format)
@@ -3406,132 +2918,63 @@ cmd_github_status() {
     esac
   done
   case "$format" in json|text) ;; *) fatal "status format must be json or text" ;; esac
-  mode="$SILO_GITHUB_MODE"
-  global_host_cred_state=""
-  if [[ "$mode" == local ]]; then
-    global_host_cred_state="$(host_credential_state | tr -d '\n')"
-  fi
+  global_host_cred_state="$(host_credential_state | tr -d '\n')"
   if [[ "$format" == json ]]; then
     local items="" entry
     while IFS= read -r box; do
-      if [[ "$mode" == local ]]; then
-        cap_state="$(policy_capability_state "$box")"
-        shuttle_state="$(shuttle_state "$box")"
-        entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"shuttle\":$(app_json_string "$shuttle_state")}"
-      else
-        if app_credential_available "$box" guest; then read_state=present; else read_state=missing; fi
-        if app_credential_available "$box" host; then write_state=present; else write_state=missing; fi
-        repo="$(metadata_repo "$box" 2>/dev/null || true)"
-        entry="{\"workspace\":$(app_json_string "$box"),\"guestRead\":$(app_json_string "$read_state"),\"hostWrite\":$(app_json_string "$write_state"),\"verificationRepo\":$(app_json_optional "$repo")}"
-      fi
+      cap_state="$(policy_capability_state "$box")"
+      shuttle_state="$(shuttle_state "$box")"
+      entry="{\"workspace\":$(app_json_string "$box"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"shuttle\":$(app_json_string "$shuttle_state")}"
       [[ -n "$items" ]] && items+=","
       items+="$entry"
     done < <(for_targets "$target")
-    printf '{"mode":%s,"hostCredential":%s,"workspaces":[%s]}\n' "$(app_json_string "$mode")" "$(app_json_optional "$global_host_cred_state")" "$items"
+    printf '{"hostCredential":%s,"workspaces":[%s]}\n' "$(app_json_optional "$global_host_cred_state")" "$items"
     return
   fi
-  if [[ "$mode" == local ]]; then
-    printf '%-13s %-8s %-10s %-12s %-12s %s\n' WORKSPACE MODE CAPABILITY REPOS HOST_CRED SHUTTLE
-    while IFS= read -r box; do
-      cap_state="$(policy_capability_state "$box")"
-      shuttle_state="$(shuttle_state "$box")"
-      repo_summary="$(policy_repo_summary "$box")"
-      printf '%-13s %-8s %-10s %-12s %-12s %s\n' "$box" local "$cap_state" "$repo_summary" "$global_host_cred_state" "$shuttle_state"
-    done < <(for_targets "$target")
-  else
-    printf '%-13s %-10s %-10s %-18s %s\n' WORKSPACE GUEST_READ HOST_WRITE VERIFICATION_REPO MODE
-    while IFS= read -r box; do
-      if app_credential_available "$box" guest; then read_state=present; else read_state=missing; fi
-      if app_credential_available "$box" host; then write_state=present; else write_state=missing; fi
-      repo="$(metadata_repo "$box" 2>/dev/null || printf '-')"
-      printf '%-13s %-10s %-10s %-18s %s\n' "$box" "$read_state" "$write_state" "$repo" connect
-    done < <(for_targets "$target")
-  fi
+  printf '%-13s %-10s %-12s %-12s %s\n' WORKSPACE CAPABILITY REPOS HOST_CRED SHUTTLE
+  while IFS= read -r box; do
+    cap_state="$(policy_capability_state "$box")"
+    shuttle_state="$(shuttle_state "$box")"
+    repo_summary="$(policy_repo_summary "$box")"
+    printf '%-13s %-10s %-12s %-12s %s\n' "$box" "$cap_state" "$repo_summary" "$global_host_cred_state" "$shuttle_state"
+  done < <(for_targets "$target")
 }
 
-cmd_github_remove() {
-  local box="$1" meta_file cleanup_failed=0 record_gone=0
-  validate_workspace "$box"
-  # Path C §5 revocation (local), closure re-review invariant: before any
-  # failed remove returns, the credential is globally denied OR the token is
-  # proven deleted — no other workspace can remain live on it.
-  # Store/rotate/remove serialize on the global credential lock. Sequence:
-  #   1. prove at least ONE durable global deny gate BEFORE any mutation:
-  #      the independent file marker (fsync) AND/OR the dedicated Keychain
-  #      deny item (.v2.deny, written + verified via the bridge). If neither
-  #      can be proven, attempt the inactive metadata tombstone + a PROVEN
-  #      token deletion (bridge delete + read-back proof); if still no deny
-  #      can be proven, ABORT BEFORE mutation with a typed global safety error.
-  #   2. proven Keychain deletion of the activation record.
-  #   3. metadata tombstone (revoked; revocation-uncertain on step-2 failure).
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    if ! github_lock_acquire "$box"; then fatal "could not acquire GitHub workspace lock for $box"; fi
-    if ! host_credential_lock_acquire; then github_lock_release; fatal "could not acquire the global host credential lock"; fi
-    record_gone=0
-    deny_proven=0
-    # 1) at least one durable deny gate must be proven BEFORE any mutation.
-    if host_credential_deny_marker_write; then deny_proven=1; fi
-    if host_credential_deny_item_set; then deny_proven=1; fi
-    if (( deny_proven != 1 )); then
-      # Neither gate could be recorded. An inactive metadata
-      # tombstone (helpers require active metadata, so an inactive record is
-      # itself a deny) AND/OR a PROVEN token deletion.
-      if host_meta_tombstone revocation-uncertain >/dev/null 2>&1; then
-        deny_proven=1
-      fi
-      if host_credential_delete; then
-        deny_proven=1
-        record_gone=1
-      fi
-    fi
-    if (( deny_proven != 1 )); then
-      # The primary marker, Keychain deny item, metadata tombstone, and token
-      # deletion were all unprovable. Establish a durable global quarantine in
-      # the global state domain; every helper checks it before the token.
-      if host_credential_global_quarantine_write; then
-        deny_proven=1
-        cleanup_failed=1
-      else
-        host_credential_lock_release
-        github_lock_release
-        fatal "host GitHub credential revocation refused: no durable global deny or quarantine could be recorded; credential state remains active and requires manual recovery"
-      fi
-    fi
-    # 2) proven token deletion — no helper can emit the token afterwards.
-    if (( record_gone != 1 )); then
-      if ! host_credential_delete; then
-        host_meta_tombstone revocation-uncertain >/dev/null 2>&1 || true
-        cleanup_failed=1
-      else
-        record_gone=1
-      fi
-    fi
-    # 3) metadata tombstone replaces any active metadata.
-    if (( cleanup_failed == 0 )) && [[ -e "$(host_meta_file)" || -L "$(host_meta_file)" ]]; then
-      if ! host_meta_tombstone revoked; then
-        cleanup_failed=1
-      fi
-    fi
-    host_credential_lock_release
-    if (( cleanup_failed )); then
-      if ! quarantine_workspace "$box" "Host GitHub credential removal failed"; then
-        fatal "host GitHub credential removal failed and workspace quarantine could not be recorded"
-      fi
-      fatal "host GitHub credential removal failed; workspace quarantined (the global deny gates remain in effect)"
-    fi
-    # Token + metadata proven gone; the deny gates are now moot — clear them.
-    host_credential_deny_marker_clear >/dev/null 2>&1 || true
-    host_credential_deny_item_clear >/dev/null 2>&1 || true
-    host_credential_global_quarantine_clear >/dev/null 2>&1 || true
-    host_meta_delete >/dev/null 2>&1 || true
-    github_lock_release
-    ok "removed the host GitHub credential"
-    return
+cmd_github_disconnect() {
+  local cleanup_failed=0 record_gone=0 deny_proven=0
+  if ! host_credential_lock_acquire; then fatal "could not acquire the global host credential lock"; fi
+  if host_credential_deny_marker_write; then deny_proven=1; fi
+  if host_credential_deny_item_set; then deny_proven=1; fi
+  if (( deny_proven != 1 )); then
+    if host_meta_tombstone revocation-uncertain >/dev/null 2>&1; then deny_proven=1; fi
+    if host_credential_delete; then deny_proven=1; record_gone=1; fi
   fi
-  if app_metadata_profile_present "$box" guest || app_metadata_profile_present "$box" host; then
-    fatal "schema-3 GitHub App grants must be revoked from Silo so the service grant is revoked; no local credentials were changed"
+  if (( deny_proven != 1 )); then
+    if host_credential_global_quarantine_write; then
+      cleanup_failed=1
+    else
+      host_credential_lock_release
+      fatal "GitHub disconnect refused because no durable deny state could be recorded"
+    fi
   fi
-  fatal "no current GitHub App grant exists for $box"
+  if (( record_gone != 1 )); then
+    if ! host_credential_delete; then
+      host_meta_tombstone revocation-uncertain >/dev/null 2>&1 || true
+      cleanup_failed=1
+    fi
+  fi
+  if (( cleanup_failed == 0 )) && [[ -e "$(host_meta_file)" || -L "$(host_meta_file)" ]]; then
+    host_meta_tombstone revoked || cleanup_failed=1
+  fi
+  host_credential_lock_release
+  if (( cleanup_failed )); then
+    fatal "GitHub was disabled, but its host credential could not be fully removed; retry disconnect"
+  fi
+  host_credential_deny_marker_clear >/dev/null 2>&1 || true
+  host_credential_deny_item_clear >/dev/null 2>&1 || true
+  host_credential_global_quarantine_clear >/dev/null 2>&1 || true
+  host_meta_delete >/dev/null 2>&1 || true
+  ok "disconnected GitHub"
 }
 
 cmd_github() {
@@ -3545,9 +2988,9 @@ cmd_github() {
     status)
       cmd_github_status "$@"
       ;;
-    remove)
-      (( $# == 1 )) || fatal "usage: silo github remove WORKSPACE"
-      cmd_github_remove "$1"
+    disconnect)
+      (( $# == 0 )) || fatal "usage: silo github disconnect"
+      cmd_github_disconnect
       ;;
     auth)
       cmd_github_auth "$@"
@@ -3579,7 +3022,7 @@ cmd_github() {
 }
 
 # ---------------------------------------------------------------------------
-# Path C §8 local-mode commands: proxy-configure (transport install), capability
+# Proxy commands: transport configuration, capability
 # rotate, auth (Phase 2 refusal), plus the shuttle lifecycle helpers they use.
 # ---------------------------------------------------------------------------
 # Typed JSON error contract for --format json auth/device/repos commands.
@@ -3738,11 +3181,6 @@ cmd_github_auth() {
       *) fatal "usage: silo github auth [--force] [--json|--format json] [--device [--device-complete DEVICE_CODE]]" ;;
     esac
   done
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    host_auth_error_exit SILO_GITHUB_MODE_MISMATCH 69 \
-      "silo github auth is a local-mode command; in connect mode use Silo's Connect GitHub flow" \
-      "Switch SILO_GITHUB_MODE=local"
-  fi
   require_command_path jq "$JQ_BIN"
   if (( device )); then
     if [[ -n "$device_complete" ]]; then
@@ -3786,7 +3224,7 @@ cmd_github_auth() {
             "host GitHub credential could not be stored; nothing was kept" \
             "Check Keychain access and retry" ;;
       75) host_auth_error_exit SILO_DEVICE_TIMED_OUT 75 \
-            "GitHub Device Flow authorization timed out; restart: silo github auth --device" \
+            "GitHub Device Flow authorization timed out; run silo github auth --device again" \
             "Start a new device flow" ;;
       76) host_auth_error_exit SILO_DEVICE_EXPIRED 76 \
             "GitHub Device Flow ended (expired or denied); start again: silo github auth --device" \
@@ -3895,7 +3333,7 @@ cmd_github_repos() {
   fi
   unset token
   if [[ "$fmt" == json ]]; then
-    printf '{"ok":true,"mode":"local","repos":%s}\n' "$repos_json"
+    printf '{"ok":true,"repos":%s}\n' "$repos_json"
   else
     printf '%-42s %-5s %-8s\n' REPOSITORY PUSH IN_POLICY
     printf '%s' "$repos_json" | "$JQ_BIN" -r '.[] | "\(.canonical)\t\(.permissions.push)\t\(.inPolicy)"' 2>/dev/null || true
@@ -4110,7 +3548,7 @@ proxy_shuttle_cleanup() {
 }
 
 # ---------------------------------------------------------------------------
-# GitHub proxy launch agent (Path C §4). Deterministic install/teardown:
+# GitHub proxy launch agent. Deterministic install/teardown:
 # render the plist from the installed template (or the repo template),
 # plutil -lint, then bootstrap gui/$UID. Uninstall bootouts BEFORE deleting
 # the plist. The rendered port comes from SILO_GITHUB_PROXY_PORT.
@@ -4190,9 +3628,6 @@ github_proxy_launchd_loaded() {
 }
 
 cmd_github_proxy_install() {
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    fatal "the GitHub proxy launch agent only runs in local mode; switch SILO_GITHUB_MODE=local first"
-  fi
   github_proxy_render_plist || fatal "could not render the GitHub proxy launch agent plist"
   /bin/launchctl bootout "gui/$(id -u)/$(github_proxy_launchd_label)" >/dev/null 2>&1 || true
   /bin/launchctl bootstrap "gui/$(id -u)" "$(github_proxy_plist_file)" || \
@@ -4292,7 +3727,7 @@ objects_base="$proxy_base/objects.githubusercontent.com/"
 GUEST
 }
 
-# Path C §7 per-workspace git config: insteadOf rewrites for every github.com
+# Per-workspace git config: insteadOf rewrites for every github.com
 # URL form (the ssh forms chain through to https, then to the proxy) plus the
 # objects host, and the capability extraHeader scoped to the proxy prefix.
 # The base image's ssh->https chain (url.https://github.com/.insteadOf) is
@@ -4348,9 +3783,9 @@ proxy_configure_one() {
   if ! proxy_shuttle_start "$box"; then github_lock_release; fatal "could not start the GitHub shuttle for $box"; fi
   # A live pid is not sufficient health evidence: require the bounded
   # end-to-end relay/proxy routing probe (heartbeat) before reporting
-  # configured. Restart once on probe failure, then require it to pass.
+  # configured. Recreate the shuttle once on probe failure, then require it to pass.
   if ! app_apply_verify_transport "$box" "$capability"; then
-    proxy_shuttle_start "$box" 1 || { github_lock_release; fatal "could not restart the GitHub shuttle for $box"; }
+    proxy_shuttle_start "$box" 1 || { github_lock_release; fatal "could not recreate the GitHub shuttle for $box"; }
     if ! app_apply_verify_transport "$box" "$capability"; then
       github_lock_release
       fatal "GitHub transport readiness could not be verified for $box; the tunnel did not pass the end-to-end probe"
@@ -4362,9 +3797,6 @@ proxy_configure_one() {
 
 cmd_github_proxy_configure() {
   local target="${1:-all}" box
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    fatal "silo github proxy-configure is a local-mode command; in connect mode use Silo's Connect GitHub flow"
-  fi
   [[ "$target" == all ]] || is_workspace "$target" || fatal "usage: silo github proxy-configure [WORKSPACE]"
   require_command_path jq "$JQ_BIN"
   require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
@@ -4374,15 +3806,12 @@ cmd_github_proxy_configure() {
   while IFS= read -r box; do proxy_configure_one "$box"; done < <(for_targets "$target")
 }
 
-# Path C §2/§8: mint a fresh capability, atomically rewrite the policy, and
+# Mint a fresh capability, atomically rewrite the policy, and
 # update the guest's extraHeader. The old capability dies immediately because
 # the proxy re-reads the policy per request.
 cmd_github_capability_rotate() {
   local box="$1" new_cap
   validate_workspace "$box"
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    fatal "silo github capability rotate is a local-mode command; in connect mode use Silo's Connect GitHub flow"
-  fi
   require_command_path jq "$JQ_BIN"
   require_command_path openssl "$(command -v openssl 2>/dev/null || true)"
   if ! policy_validate; then fatal "GitHub policy file is missing or malformed: $(policy_file)"; fi
@@ -4457,10 +3886,6 @@ deep_check_failure() {
 check_one_deep() {
   local box="$1" was_running=0 failed=0 host direct_url docker_url direct_unit docker_name probe_repo probe_code
   workspace_msb "$box" ping -q "$box" >/dev/null 2>&1 && was_running=1
-  if app_workspace_quarantined "$box"; then
-    deep_check_failure "$box" github "The workspace is quarantined and cannot be verified."
-    return 1
-  fi
   if ! (ensure_running "$box"); then
     deep_check_failure "$box" runtime "The workspace could not start for verification."
     return 1
@@ -4545,43 +3970,9 @@ SCRIPT
   }
   guest_control_exec "$box" docker rm -f "$docker_name" >/dev/null 2>&1 || true
 
-  # Local mode asserts that the guest carries no credential and probes proxy
-  # reachability through the endpoint. Connect mode verifies its current
+  # The host-proxy design asserts that the guest carries no credential and probes proxy
+  # reachability through the endpoint.
   # secret binding.
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in "") exit 0;; *) exit 1;; esac' || {
-      deep_check_failure "$box" github "The workspace exposed an unexpected GitHub credential."
-      failed=1
-    }
-    if [[ -f "$(policy_file)" ]]; then
-      probe_repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
-      if [[ -n "$probe_repo" ]]; then
-        if host_credential_available; then
-          guest_control_exec "$box" env GIT_TERMINAL_PROMPT=0 git ls-remote "http://127.0.0.1:18446/github.com/$probe_repo.git" >/dev/null 2>&1 || {
-            deep_check_failure "$box" github "The GitHub proxy endpoint is unreachable from the workspace."
-            failed=1
-          }
-        else
-          probe_code="$(guest_control_exec "$box" curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:18446/github.com/$probe_repo.git/info/refs?service=git-upload-pack" 2>/dev/null || true)"
-          if [[ ! "$probe_code" =~ ^[0-9]{3}$ ]]; then
-            deep_check_failure "$box" github "The GitHub proxy endpoint is unreachable from the workspace."
-            failed=1
-          else
-            note "$box: proxy reachable (HTTP $probe_code); anonymous public git requests proceed, host-credential injection waits for provisioning (silo github auth)"
-          fi
-        fi
-      else
-        note "$box: no GitHub repositories ticked; skipping proxy reachability"
-      fi
-    else
-      note "$box: no GitHub policy; skipping proxy reachability"
-    fi
-  elif app_credential_available "$box" guest; then
-    guest_control_exec "$box" sh -c 'case "${GH_TOKEN:-}" in \$MSB_GH_TOKEN*|\$GH_TOKEN*) exit 0;; *) exit 1;; esac' || {
-      deep_check_failure "$box" github "The GitHub credential placeholder is invalid."
-      failed=1
-    }
-  fi
 
   if (( was_running == 0 )); then workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1 || failed=1; fi
   (( failed == 0 )) || return 1
@@ -5755,7 +5146,7 @@ GitHub permissions
   silo github capability rotate WORKSPACE   Rotate that workspace's capability
   silo github verify WORKSPACE [REPO]       Verify GitHub access
   silo github status [WORKSPACE|all]        Show credential/capability state
-  silo github remove WORKSPACE              Revoke the host credential (local mode)
+  silo github disconnect                    Revoke the host credential
 
 Websites
   silo open WORKSPACE [PORT] [SCHEME]    Start VM and open published URL
@@ -5783,7 +5174,7 @@ Backup / reference
   silo version
   silo help
 Machine-readable app integration
-  silo app handshake|state|metrics|logs|repositories|directory-list|directory-search|editor-target|ports|github-state
+  silo app handshake|state|metrics|logs|repositories|directory-list|directory-search|editor-target|ports
   silo app github-policy-get|github-policy-set|github-policy-apply
   silo app secrets-list|secret-plan|secret-apply
   silo app url|clone|pull|identity|disk|resize|clean|upgrade|update
@@ -5972,142 +5363,12 @@ app_status_for_workspace() {
   esac
 }
 
-app_workspace_quarantined() {
-  local box="$1" file role
-  file="$(quarantine_file "$box")"
-  [[ -e "$file" || -L "$file" ]] && return 0
-  for role in guest host; do
-    if app_metadata_profile_present "$box" "$role" &&
-      [[ "$(app_metadata_value "$box" "$role" quarantined 2>/dev/null || true)" == true ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-app_timestamp_epoch() {
-  local value="${1-}"
-  [[ -n "$value" ]] || return 1
-  date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$value" +%s 2>/dev/null ||
-    date -u -d "$value" +%s 2>/dev/null
-}
-
-app_profile_expiry_state() {
-  local box="$1" role="$2" access now soon access_epoch
-  access="$(app_metadata_value "$box" "$role" accessExpiresAt 2>/dev/null || true)"
-  [[ -n "$access" ]] || return 1
-  access_epoch="$(app_timestamp_epoch "$access")" || return 1
-  now="$(date +%s)"
-  soon=$((now + 3600))
-  if (( access_epoch <= now )); then
-    printf 'authorization-required'
-  elif (( access_epoch <= soon )); then
-    printf 'expiring'
-  else
-    printf 'valid'
-  fi
-}
-
-app_workspace_credential_state() {
-  local box="$1" access needs_restart host_needs_restart guest_expiry host_expiry recovery_state host_recovery_state
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    # §8: host push is allowed for every ticked repo in both modes, so the
-    # local credential state is Ready exactly when the host credential exists.
-    if app_workspace_quarantined "$box"; then
-      printf 'Quarantined'
-    elif ! policy_validate; then
-      printf 'Unconfigured'
-    elif host_credential_available; then
-      printf 'Ready'
-    else
-      printf 'Needs authorization'
-    fi
-    return
-  fi
-  if app_workspace_quarantined "$box"; then
-    printf 'Quarantined'
-  elif app_metadata_profile_present "$box" guest; then
-    recovery_state="$(app_metadata_value "$box" guest recoveryState 2>/dev/null || true)"
-    if [[ -n "$recovery_state" && "$recovery_state" != ready ]]; then
-      case "$recovery_state" in
-        serviceUnavailable) printf 'Service unavailable' ;;
-        revoked|expired|installationRemoved|quarantined) printf 'Needs authorization' ;;
-        *) printf 'Needs authorization' ;;
-      esac
-      return
-    fi
-    access="$(metadata_access "$box" 2>/dev/null || true)"
-    needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
-    guest_expiry="$(app_profile_expiry_state "$box" guest 2>/dev/null || true)"
-    if ! app_credential_available "$box" guest || [[ -z "$guest_expiry" ]]; then
-      printf 'Needs authorization'
-      return
-    fi
-    if [[ "$access" == host-write ]]; then
-      host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
-      host_recovery_state="$(app_metadata_value "$box" host recoveryState 2>/dev/null || true)"
-      if [[ -n "$host_recovery_state" && "$host_recovery_state" != ready ]]; then
-        case "$host_recovery_state" in
-          serviceUnavailable) printf 'Service unavailable' ;;
-          *) printf 'Needs authorization' ;;
-        esac
-        return
-      fi
-      host_expiry="$(app_profile_expiry_state "$box" host 2>/dev/null || true)"
-      if ! app_metadata_profile_present "$box" host ||
-        ! app_credential_available "$box" host || [[ -z "$host_expiry" ]]; then
-        printf 'Needs authorization'
-        return
-      fi
-      if [[ "$guest_expiry" == authorization-required || "$host_expiry" == authorization-required ]]; then
-        printf 'Needs authorization'
-      elif [[ "$guest_expiry" == expiring || "$host_expiry" == expiring ]]; then
-        printf 'Expiring'
-      elif [[ "$needs_restart" == true || "$host_needs_restart" == true ]]; then
-        printf 'Needs restart'
-      else
-        printf 'Ready'
-      fi
-    elif [[ "$access" == read-only ]]; then
-      if [[ "$guest_expiry" == authorization-required ]]; then
-        printf 'Needs authorization'
-      elif [[ "$guest_expiry" == expiring ]]; then
-        printf 'Expiring'
-      elif [[ "$needs_restart" == true ]]; then
-        printf 'Needs restart'
-      else
-        printf 'Read-only'
-      fi
-    else
-      printf 'Needs authorization'
-    fi
-  else
-    printf 'Unconfigured'
-  fi
-}
-
 app_workspace_json() {
   local box="$1" lifecycle="${2:-Unknown}" freshness="${3:-unavailable}" status_observed_at="${4:-}" quarantine="clear"
   local metrics_observed_at="" github_observed_at="" activity_observed_at=""
-  local credential purpose host ip cpus max_cpus memory max_memory root_disk verification_repo access
-  local account_login installation_id access_expires needs_restart host_needs_restart quarantine_reason role
-  local skipped_ports_json port_warning secrets_snapshot storage_ready=true action_reason="" action_recovery=""
-  if app_workspace_quarantined "$box"; then
-    quarantine="quarantined"
-    if [[ -f "$(quarantine_file "$box")" && ! -L "$(quarantine_file "$box")" ]]; then
-      quarantine_reason="$(sed -n '1p' "$(quarantine_file "$box")" 2>/dev/null || true)"
-      quarantine_reason="$(app_redact "$quarantine_reason")"
-    fi
-    if [[ -z "$quarantine_reason" ]]; then
-      for role in guest host; do
-        if app_metadata_profile_present "$box" "$role" &&
-          [[ "$(app_metadata_value "$box" "$role" quarantined 2>/dev/null || true)" == true ]]; then
-          quarantine_reason="Credential repair is required for the $role authorization."
-          break
-        fi
-      done
-    fi
-  fi
+  local purpose host ip cpus max_cpus memory max_memory root_disk
+  local quarantine_reason=""
+  local skipped_ports_json port_warning secrets_snapshot storage_ready=true github_ready=false action_reason="" action_recovery=""
   purpose="$(app_workspace_purpose "$box")"
   host="$(workspace_host "$box")"
   ip="$(workspace_ip "$box")"
@@ -6116,34 +5377,12 @@ app_workspace_json() {
   memory="$(app_workspace_resource "$box" MEMORY)"
   max_memory="$(app_workspace_resource "$box" MAX_MEMORY)"
   root_disk="${SILO_ROOT_DISK:-}"
-  credential="$(app_workspace_credential_state "$box")"
-  if app_metadata_profile_present "$box" guest; then
-    github_observed_at="$(app_metadata_value "$box" guest updatedAt 2>/dev/null || true)"
-    verification_repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
-    access="$(metadata_access "$box" 2>/dev/null || true)"
-    account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
-    installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
-    access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
-    needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
-    if app_metadata_profile_present "$box" host; then
-      local host_access_expires
-      host_access_expires="$(app_metadata_value "$box" host accessExpiresAt 2>/dev/null || true)"
-      [[ -n "$host_access_expires" && ( -z "$access_expires" || "$host_access_expires" < "$access_expires" ) ]] && access_expires="$host_access_expires"
-    fi
-    host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
-    [[ "$host_needs_restart" == true ]] && needs_restart=true
-  else
-    verification_repo="$(metadata_repo "$box" 2>/dev/null || true)"
-    access="$(metadata_access "$box" 2>/dev/null || true)"
-    account_login=""
-    installation_id=""
-    access_expires=""
-    needs_restart=false
-  fi
-  [[ -n "$needs_restart" ]] || needs_restart=false
   skipped_ports_json="$(workspace_state_skipped_json "$box")"
   port_warning="$(workspace_port_warning "$box")"
   secrets_snapshot="$(app_workspace_secrets_snapshot "$box" "$lifecycle")"
+  if policy_validate && host_credential_available; then
+    github_ready=true
+  fi
   if [[ "$quarantine" == clear &&
         ( "$lifecycle" == Running || "$lifecycle" == Stopped || "$lifecycle" == Exited ) ]] &&
      ! workspace_storage_check "$box"; then
@@ -6151,7 +5390,7 @@ app_workspace_json() {
     action_reason="Workspace storage must be repaired before starting or restarting $box."
     action_recovery="$WORKSPACE_STORAGE_ERROR"
   fi
-  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"credential":{"state":%s,"accessMode":%s,"verificationRepository":%s,"accountLogin":%s,"installationId":%s,"accessExpiresAt":%s,"needsRestart":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s,"reason":%s,"recovery":%s}}' \
+  printf '{"id":%s,"purpose":%s,"lifecycle":%s,"freshness":%s,"statusObservedAt":%s,"metricsObservedAt":%s,"githubObservedAt":%s,"activityObservedAt":%s,"quarantine":{"state":%s,"reason":%s},"resources":{"cpus":%s,"maxCpus":%s,"memory":%s,"maxMemory":%s,"rootDisk":%s},"network":{"host":%s,"ip":%s},"skippedPorts":%s,"portWarning":%s,"secrets":%s,"actionCapabilities":{"canStart":%s,"canStop":%s,"canRestart":%s,"canOpenTerminal":%s,"canPush":%s,"reason":%s,"recovery":%s}}' \
     "$(app_json_string "$box")" \
     "$(app_json_string "$purpose")" \
     "$(app_json_string "$lifecycle")" \
@@ -6162,13 +5401,6 @@ app_workspace_json() {
     "$(app_json_optional "$activity_observed_at")" \
     "$(app_json_string "$quarantine")" \
     "$(app_json_optional "$quarantine_reason")" \
-    "$(app_json_string "$credential")" \
-    "$(app_json_string "${access:-unconfigured}")" \
-    "$(app_json_optional "$verification_repo")" \
-    "$(app_json_optional "$account_login")" \
-    "$(app_json_optional "$installation_id")" \
-    "$(app_json_optional "$access_expires")" \
-    "$needs_restart" \
     "$(app_json_string "$cpus")" \
     "$(app_json_string "$max_cpus")" \
     "$(app_json_string "$memory")" \
@@ -6183,7 +5415,7 @@ app_workspace_json() {
     "$([[ "$lifecycle" == Running ]] && printf true || printf false)" \
     "$([[ "$storage_ready" == true && "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
     "$([[ "$quarantine" == clear && "$lifecycle" == Running ]] && printf true || printf false)" \
-    "$([[ "$quarantine" == clear && "$credential" == Ready && "$lifecycle" == Running ]] && printf true || printf false)" \
+    "$([[ "$quarantine" == clear && "$github_ready" == true && "$lifecycle" == Running ]] && printf true || printf false)" \
     "$(app_json_optional "$action_reason")" \
     "$(app_json_optional "$action_recovery")"
 }
@@ -6540,7 +5772,7 @@ app_cmd_clone() {
   app_require_config clone
   app_require_runtime clone
   if ! output="$(cmd_clone "$box" "$repository" "$destination" 2>/dev/null)"; then
-    app_emit_error clone "SILO_CLONE_FAILED" "The repository could not be cloned into the workspace." "In local mode public repositories clone anonymously; in Connect mode the repository must be authorized for this workspace." "$box" true 1
+    app_emit_error clone "SILO_CLONE_FAILED" "The repository could not be cloned into the workspace." "Check the repository and GitHub access, then retry." "$box" true 1
   fi
   app_emit_success clone "{\"workspace\":$(app_json_string "$box"),\"operation\":\"clone\",\"target\":$(app_json_string "$destination"),\"changed\":true,\"outcome\":\"repository cloned\"}"
 }
@@ -7057,78 +6289,6 @@ app_cmd_ports() {
   app_emit_success ports "{\"workspace\":$(app_json_string "$target"),\"workspaces\":[$workspaces_json],\"freshness\":\"fresh\"}"
 }
 
-app_cmd_github_state() {
-  local target="all" box items="" repo access provider configured quarantine account_login installation_id access_expires refresh_expires needs_restart
-  local host_access_expires host_refresh_expires host_needs_restart cap cap_state host_cred_state
-  while (( $# > 0 )); do
-    case "$1" in
-      --workspace) [[ $# -ge 2 ]] || app_usage_error github-state "missing value for --workspace"; target="$2"; shift 2 ;;
-      --format) [[ "${2:-}" == json ]] || app_usage_error github-state "github-state requires --format json"; shift 2 ;;
-      *) app_usage_error github-state "unknown github-state option '$1'" ;;
-    esac
-  done
-  if [[ "$target" != all ]]; then
-    is_workspace "$target" || app_usage_error github-state "workspace must be one of the configured workspaces"
-  fi
-  for box in "${WORKSPACES[@]}"; do
-    [[ "$target" == all || "$target" == "$box" ]] || continue
-    if [[ "$SILO_GITHUB_MODE" == local ]]; then
-      # §1/§8: local mode never reads Connect grants; report policy state.
-      provider="local-policy"
-      configured=false
-      if policy_validate; then
-        cap="$(policy_workspace_capability "$box" 2>/dev/null || true)"
-        [[ -n "$cap" ]] && configured=true
-      fi
-      repo="$(policy_first_ticked_repo "$box" 2>/dev/null || true)"
-      access="unconfigured"
-      if policy_validate; then
-        if "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos // [] | any(.mode == "read-write")' "$(policy_file)" >/dev/null 2>&1; then
-          access="read-write"
-        elif "$JQ_BIN" -e --arg w "$box" '.workspaces[$w].repos // [] | length > 0' "$(policy_file)" >/dev/null 2>&1; then
-          access="read-only"
-        fi
-      fi
-      cap_state="$(policy_capability_state "$box")"
-      host_cred_state="$(host_credential_state | tr -d '\n')"
-      quarantine=false
-      app_workspace_quarantined "$box" && quarantine=true
-      [[ -n "$items" ]] && items+=","
-      items+="{\"workspace\":$(app_json_string "$box"),\"provider\":$(app_json_string "$provider"),\"configured\":$configured,\"accessMode\":$(app_json_string "$access"),\"verificationRepository\":$(app_json_optional "$repo"),\"capability\":$(app_json_string "$cap_state"),\"repos\":$(policy_repo_json "$box"),\"hostCredential\":$(app_json_string "$host_cred_state"),\"quarantined\":$quarantine}"
-      continue
-    fi
-    configured=false
-    repo=""
-    access=""
-    provider="none"
-    account_login=""
-    needs_restart=false
-    if app_metadata_profile_present "$box" guest; then
-      configured=true
-      provider="$(app_metadata_value "$box" guest provider 2>/dev/null || true)"
-      [[ "$provider" == github-app-installation ]] ||
-        app_emit_error github-state "SILO_CREDENTIAL_METADATA_INVALID" "The GitHub credential metadata is invalid." "Reconnect GitHub in Silo to create a current credential record." "$box" false 78
-      repo="$(app_metadata_value "$box" guest verificationRepository 2>/dev/null || true)"
-      access="$(metadata_access "$box" 2>/dev/null || true)"
-      account_login="$(app_metadata_value "$box" guest accountLogin 2>/dev/null || true)"
-      installation_id="$(app_metadata_value "$box" guest installationID 2>/dev/null || true)"
-      access_expires="$(app_metadata_value "$box" guest accessExpiresAt 2>/dev/null || true)"
-      needs_restart="$(app_metadata_value "$box" guest needsRestart 2>/dev/null || true)"
-      if app_metadata_profile_present "$box" host; then
-        host_access_expires="$(app_metadata_value "$box" host accessExpiresAt 2>/dev/null || true)"
-        host_needs_restart="$(app_metadata_value "$box" host needsRestart 2>/dev/null || true)"
-        [[ -n "$host_access_expires" && ( -z "$access_expires" || "$host_access_expires" < "$access_expires" ) ]] && access_expires="$host_access_expires"
-        [[ "$host_needs_restart" == true ]] && needs_restart=true
-      fi
-    fi
-    [[ "$needs_restart" == true ]] || needs_restart=false
-    quarantine=false
-    app_workspace_quarantined "$box" && quarantine=true
-    [[ -n "$items" ]] && items+=","
-    items+="{\"workspace\":$(app_json_string "$box"),\"provider\":$(app_json_string "$provider"),\"configured\":$configured,\"accessMode\":$(app_json_string "${access:-unconfigured}"),\"verificationRepository\":$(app_json_optional "$repo"),\"accountLogin\":$(app_json_optional "$account_login"),\"installationId\":$(app_json_optional "$installation_id"),\"accessExpiresAt\":$(app_json_optional "$access_expires"),\"needsRestart\":$needs_restart,\"quarantined\":$quarantine}"
-  done
-  app_emit_success github-state "{\"workspaces\":[$items]}"
-}
 
 app_cmd_github_policy_get() {
   local target="all" box items="" entry
@@ -7180,9 +6340,6 @@ app_cmd_github_policy_set() {
       ;;
     clear) ;;
   esac
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    app_emit_error github-policy-set "SILO_GITHUB_MODE_MISMATCH" "GitHub policy edits are local-mode operations." "Switch SILO_GITHUB_MODE=local or use the Connect flow for connect-mode access." "$box" false 69
-  fi
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error github-policy-set "SILO_JSON_TOOL_UNAVAILABLE" "The policy editor requires jq." "Repair the Silo toolchain and retry the policy edit." "$box" true 69
   if ! github_lock_acquire "$box"; then
     app_emit_error github-policy-set "SILO_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then retry the policy edit." "$box" true 73
@@ -7230,7 +6387,7 @@ app_cmd_github_policy_set() {
 # config + shuttle) with the final capabilities BEFORE one atomic policy
 # commit, and restores the pre-apply policy on any unproven step (typed
 # error). Idempotent: re-applying the same desired state succeeds. The
-# per-repo github-policy-set command remains the CLI fallback.
+# per-repo github-policy-set command remains available for direct edits.
 #
 # Request (stdin, schema v1, full desired state):
 #   {"schemaVersion":1,"workspaces":{"dev":{"repos":[{"canonical":"owner/name",
@@ -7487,10 +6644,6 @@ app_apply_reconcile_transport() {
       eval "exec ${lock_fd}>&-" 2>/dev/null || true
     done
   fi
-  if app_workspace_quarantined "$box"; then
-    printf 'silo: workspace %s is quarantined\n' "$box" >&2
-    return 1
-  fi
   if ! sandbox_exists "$box"; then
     printf 'silo: workspace %s does not exist\n' "$box" >&2
     return 1
@@ -7604,12 +6757,6 @@ app_cmd_github_policy_apply() {
       *) app_usage_error github-policy-apply "unknown github-policy-apply option '$1'" ;;
     esac
   done
-  if [[ "$SILO_GITHUB_MODE" != local ]]; then
-    app_emit_error github-policy-apply "SILO_GITHUB_MODE_MISMATCH" \
-      "GitHub policy apply is a local-mode operation." \
-      "Switch SILO_GITHUB_MODE=local or use the Connect flow for connect-mode access." "" false 69
-    return
-  fi
   app_require_config github-policy-apply
   app_require_runtime github-policy-apply
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || {
@@ -7905,133 +7052,6 @@ app_cmd_github_policy_apply() {
     "{\"applied\":true,\"provisioned\":true,\"committed\":true,\"workspaces\":[$items]}"
 }
 
-app_cmd_github_bind() {
-  local box="" repo="" mode="read-only" before="Unknown" after="Unknown" verify_output=""
-  while (( $# > 0 )); do
-    case "$1" in
-      --workspace) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --workspace"; box="$2"; shift 2 ;;
-      --repository) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --repository"; repo="$2"; shift 2 ;;
-      --mode) [[ $# -ge 2 ]] || app_usage_error github-bind "missing value for --mode"; mode="$2"; shift 2 ;;
-      --format) [[ "${2:-}" == json ]] || app_usage_error github-bind "github-bind requires --format json"; shift 2 ;;
-      *) app_usage_error github-bind "unknown github-bind option '$1'" ;;
-    esac
-  done
-  is_workspace "$box" || app_usage_error github-bind "workspace must be one of the configured workspaces"
-  app_valid_repository "$repo" || app_usage_error github-bind "repository must be OWNER/REPOSITORY"
-  [[ "$mode" == host-write || "$mode" == read-only ]] ||
-    app_usage_error github-bind "mode must be host-write or read-only"
-  # Path C §1: local mode refuses the Connect bind flow with a typed
-  # mode-mismatch error; access is configured through the policy file.
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    app_emit_error github-bind "SILO_GITHUB_MODE_MISMATCH" \
-      "GitHub bind is not available in local mode." \
-      "Local mode uses the repo-aware GitHub proxy; configure access with 'silo github proxy-configure'." "$box" false 69
-  fi
-  app_require_config github-bind
-  app_require_runtime github-bind
-  require_repository_access "$box" "$repo" guest
-  if [[ "$mode" == host-write ]]; then
-    require_repository_access "$box" "$repo" host
-  fi
-  app_metadata_profile_present "$box" guest ||
-    app_emit_error github-bind "SILO_GITHUB_CREDENTIAL_MISSING" "Guest GitHub authorization is not committed." "Authorize guest access in Silo first." "$box" false 77
-  app_credential_available "$box" guest ||
-    app_emit_error github-bind "SILO_GITHUB_CREDENTIAL_MISSING" "The guest GitHub credential is unavailable." "Authorize guest access again in Silo." "$box" false 77
-  if [[ "$mode" == host-write ]]; then
-    app_metadata_profile_present "$box" host ||
-      app_emit_error github-bind "SILO_GITHUB_CREDENTIAL_MISSING" "Host GitHub authorization is not committed." "Authorize host write access in Silo first." "$box" false 77
-    app_credential_available "$box" host ||
-      app_emit_error github-bind "SILO_GITHUB_CREDENTIAL_MISSING" "The host GitHub credential is unavailable." "Authorize host write access again in Silo." "$box" false 77
-  fi
-  before="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
-  [[ "$before" != Unknown ]] || app_emit_error github-bind "SILO_STATE_UNAVAILABLE" "Workspace state could not be observed before credential binding." "Repair state observation and authorize again." "$box" true 69
-  if ! github_lock_acquire "$box"; then
-    app_emit_error github-bind "SILO_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then authorize again." "$box" true 73
-  fi
-  if ! quarantine_workspace "$box" "GitHub App credential binding pending verification" >/dev/null 2>&1; then
-    app_emit_error github-bind "SILO_GITHUB_QUARANTINE_FAILED" "Silo could not prove the workspace safe before binding credentials." "Repair the quarantined workspace before authorizing again." "$box" false 77
-  fi
-  if ! verify_output="$(SILO_ALLOW_QUARANTINED=1 SILO_GITHUB_VERIFY_INHERITED=1 "${SILO_SELF_BIN:-$0}" __github-verify-transaction "$box" "$repo" "$mode" 2>&1)"; then
-    quarantine_workspace "$box" "GitHub App credential verification failed" >/dev/null 2>&1 || true
-    app_emit_error github-bind "SILO_GITHUB_BIND_FAILED" "GitHub permissions could not be verified and the workspace remains quarantined." "Review the repository and GitHub App permissions, then authorize again." "$box" true 77
-  fi
-  after="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
-  if [[ "$before" == Stopped || "$before" == Exited ]] && [[ "$after" == Running ]]; then
-    if ! workspace_msb "$box" stop -q -t 60 "$box" >/dev/null 2>&1; then
-      quarantine_workspace "$box" "GitHub verification lifecycle restoration failed" >/dev/null 2>&1 || true
-      app_emit_error github-bind "SILO_GITHUB_BIND_RECONCILE_FAILED" "GitHub verification completed but the workspace could not be returned to its prior stopped state." "Repair the quarantined workspace before continuing." "$box" true 69
-    fi
-    after="$(app_status_for_workspace "$box" 2>/dev/null || printf 'Unknown')"
-  fi
-  if [[ "$before" == Running && "$after" != Running ]] ||
-    { [[ "$before" == Stopped || "$before" == Exited ]] && [[ "$after" != Stopped ]]; }; then
-    quarantine_workspace "$box" "GitHub verification outcome could not be reconciled" >/dev/null 2>&1 || true
-    app_emit_error github-bind "SILO_GITHUB_BIND_RECONCILE_FAILED" "GitHub verification exited without restoring the previously observed lifecycle." "Repair the quarantined workspace before continuing." "$box" true 69
-  fi
-  if ! clear_quarantine "$box"; then
-    quarantine_workspace "$box" "GitHub verification quarantine cleanup failed" >/dev/null 2>&1 || true
-    app_emit_error github-bind "SILO_GITHUB_QUARANTINE_FAILED" "GitHub verification succeeded but quarantine cleanup could not be proven." "Repair the quarantined workspace before continuing." "$box" false 77
-  fi
-  github_lock_release
-  app_emit_success github-bind "{\"workspace\":$(app_json_string "$box"),\"accessMode\":$(app_json_string "$mode"),\"verificationRepository\":$(app_json_string "$repo"),\"verified\":true,\"lifecycleRestored\":true}"
-}
-
-app_cmd_github_quarantine() {
-  local box=""
-  while (( $# > 0 )); do
-    case "$1" in
-      --workspace) [[ $# -ge 2 ]] || app_usage_error github-quarantine "missing value for --workspace"; box="$2"; shift 2 ;;
-      --format) [[ "${2:-}" == json ]] || app_usage_error github-quarantine "github-quarantine requires --format json"; shift 2 ;;
-      *) app_usage_error github-quarantine "unknown github-quarantine option '$1'" ;;
-    esac
-  done
-  is_workspace "$box" || app_usage_error github-quarantine "workspace must be one of the configured workspaces"
-  app_require_config github-quarantine
-  app_require_runtime github-quarantine
-  if ! github_lock_acquire "$box"; then
-    app_emit_error github-quarantine "SILO_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then retry fail-closed quarantine." "$box" true 73
-  fi
-  quarantine_workspace "$box" "Native credential transaction requires repair" >/dev/null 2>&1 ||
-    app_emit_error github-quarantine "SILO_GITHUB_QUARANTINE_FAILED" "The workspace was marked quarantined, but a stopped lifecycle could not be proven." "Inspect the workspace runtime before any further credential operation." "$box" false 77
-  github_lock_release
-  app_emit_success github-quarantine "{\"workspace\":$(app_json_string "$box"),\"quarantined\":true,\"lifecycle\":\"Stopped\"}"
-}
-app_cmd_github_unbind() {
-  local box=""
-  while (( $# > 0 )); do
-    case "$1" in
-      --workspace) [[ $# -ge 2 ]] || app_usage_error github-unbind "missing value for --workspace"; box="$2"; shift 2 ;;
-      --format) [[ "${2:-}" == json ]] || app_usage_error github-unbind "github-unbind requires --format json"; shift 2 ;;
-      *) app_usage_error github-unbind "unknown github-unbind option '$1'" ;;
-    esac
-  done
-  is_workspace "$box" || app_usage_error github-unbind "workspace must be one of the configured workspaces"
-  # Path C §1: local mode refuses the Connect unbind flow with a typed
-  # mode-mismatch error; local mode never binds GitHub secrets.
-  if [[ "$SILO_GITHUB_MODE" == local ]]; then
-    app_emit_error github-unbind "SILO_GITHUB_MODE_MISMATCH" \
-      "GitHub unbind is not available in local mode." \
-      "Local mode never binds GitHub secrets; remove access through the policy file." "$box" false 69
-  fi
-  app_require_config github-unbind
-  app_require_runtime github-unbind
-  if ! github_lock_acquire "$box"; then
-    app_emit_error github-unbind "SILO_OPERATION_CONFLICT" "Another GitHub operation is already running for this workspace." "Wait for it to finish, then retry workspace credential removal." "$box" true 73
-  fi
-  if ! remove_github_secret "$box"; then
-    quarantine_workspace "$box" "GitHub App credential unbinding failed" >/dev/null 2>&1 || true
-    github_lock_release
-    app_emit_error github-unbind "SILO_GITHUB_UNBIND_FAILED" "The VM GitHub secret could not be removed and the workspace remains quarantined." "Repair the workspace, then retry removing GitHub access." "$box" true 77
-  fi
-  # A prior failed unbind quarantined the workspace; a successful retry must
-  # clear that marker or bootstrap deep verification still fails.
-  if ! clear_quarantine "$box"; then
-    github_lock_release
-    app_emit_error github-unbind "SILO_GITHUB_QUARANTINE_FAILED" "GitHub access was removed but the workspace quarantine could not be cleared." "Repair the quarantined workspace, then retry removing GitHub access." "$box" true 77
-  fi
-  github_lock_release
-  app_emit_success github-unbind "{\"workspace\":$(app_json_string "$box"),\"unbound\":true}"
-}
 
 app_guest_repository_scan() {
 
@@ -8193,7 +7213,7 @@ while IFS= read -r -d '' marker; do
         read -r behind ahead <<<"$counts"
       fi
     fi
-    if [[ "$quarantine_state" == clear && "$credential_state" == Ready && "$worktree_state" != detached && "$worktree_state" != unavailable && "$destination_state" != unavailable && "$destination_state" != behind && "$destination_state" != diverged ]]; then
+    if [[ "$quarantine_state" == clear && "$credential_state" == present && "$worktree_state" != detached && "$worktree_state" != unavailable && "$destination_state" != unavailable && "$destination_state" != behind && "$destination_state" != diverged ]]; then
       if [[ "$destination_state" == absent ]]; then pushability=publish; else pushability=pushable; fi
     else
       pushability=blocked
@@ -8242,8 +7262,8 @@ app_cmd_repositories() {
     app_emit_success repositories "{\"workspace\":$(app_json_string "$box"),\"repositories\":[],\"needsStart\":true,\"freshness\":\"fresh\",\"worktreeStatusIncluded\":false,\"notice\":\"Repository scanning is unavailable while this workspace is stopped.\"}"
     return
   fi
-  credential_state="$(app_workspace_credential_state "$box")"
-  quarantine_state="$(app_workspace_quarantined "$box" && printf quarantined || printf clear)"
+  credential_state="$(host_credential_state)"
+  quarantine_state=clear
   if ! repositories_json="$(app_guest_repository_scan "$box" "$include_status" "$credential_state" "$quarantine_state" 2>/dev/null)"; then
     app_emit_error repositories "SILO_REPOSITORIES_UNAVAILABLE" "The running workspace did not provide a repository snapshot." "Retry after repairing the workspace runtime." "$box" true 69
   fi
@@ -8385,9 +7405,6 @@ app_cmd_plan() {
   if ! expected="$(app_status_for_workspace "$box" 2>/dev/null)"; then
     app_emit_error plan "SILO_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the Silo runtime." "$box" true 69
   fi
-  if app_workspace_quarantined "$box"; then
-    app_emit_error plan "SILO_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace before planning a lifecycle change." "$box" false 77
-  fi
   case "$action:$expected" in
     start:Stopped|start:Exited|stop:Running|restart:Running) ;;
     *) app_emit_error plan "SILO_PLAN_STATE_CHANGED" "The workspace is not in a state that permits this lifecycle action." "Refresh the workspace and review the action again." "$box" true 73 ;;
@@ -8433,10 +7450,9 @@ app_cmd_push_plan() {
     app_emit_error push-plan "SILO_STATE_UNAVAILABLE" "Workspace state could not be observed." "Refresh after repairing the workspace runtime." "$box" true 69
   fi
   [[ "$status" == Running ]] || app_emit_error push-plan "SILO_WORKSPACE_NOT_RUNNING" "The workspace is not running." "Start the workspace, refresh state, and review the repository again." "$box" true 69
-  credential_state="$(app_workspace_credential_state "$box")"
-  quarantine_state="$(app_workspace_quarantined "$box" && printf quarantined || printf clear)"
-  [[ "$quarantine_state" == clear ]] || app_emit_error push-plan "SILO_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace credentials before reviewing a push." "$box" false 77
-  [[ "$credential_state" == Ready ]] || app_emit_error push-plan "SILO_PUSH_NOT_AUTHORIZED" "Host write authorization is not ready for this workspace." "Authorize host write access before reviewing a push." "$box" false 77
+  credential_state="$(host_credential_state)"
+  quarantine_state=clear
+  [[ "$credential_state" == present ]] || app_emit_error push-plan "SILO_PUSH_NOT_AUTHORIZED" "Host write authorization is not ready for this workspace." "Authorize host write access before reviewing a push." "$box" false 77
   [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error push-plan "SILO_JSON_TOOL_UNAVAILABLE" "The repository adapter requires jq to validate its snapshot." "Repair the Silo toolchain and retry the repository review." "$box" true 69
   if ! snapshot_json="$(app_guest_repository_scan "$box" 1 "$credential_state" "$quarantine_state" "$path" 2>/dev/null)"; then
     app_emit_error push-plan "SILO_REPOSITORIES_UNAVAILABLE" "The running workspace did not provide a repository snapshot." "Retry after repairing the workspace runtime." "$box" true 69
@@ -8457,7 +7473,7 @@ app_cmd_push_plan() {
   # §8 local gate: host push injects the host credential, so the canonical
   # repo must carry a credential grant (host push is allowed for every granted
   # repo in BOTH modes).
-  if [[ "$SILO_GITHUB_MODE" == local && "$canonical" == https://github.com/* ]]; then
+  if [[ "$canonical" == https://github.com/* ]]; then
     canonical_repo="${canonical#https://github.com/}"
     canonical_repo="${canonical_repo%.git}"
     canonical_repo="$(printf '%s' "$canonical_repo" | tr '[:upper:]' '[:lower:]')"
@@ -8559,9 +7575,6 @@ app_cmd_apply() {
       app_emit_error apply "SILO_STATE_UNAVAILABLE" "Workspace state could not be observed before the operation." "Refresh after repairing the Silo runtime." "$box" true 69
     fi
     [[ "$current_state" == "$planned" ]] || app_emit_error apply "SILO_PLAN_STATE_CHANGED" "The workspace changed after the action was reviewed." "Refresh the workspace and create a new plan." "$box" true 73
-    if app_workspace_quarantined "$box"; then
-      app_emit_error apply "SILO_WORKSPACE_QUARANTINED" "The workspace is quarantined." "Repair the workspace before retrying this action." "$box" false 77
-    fi
     if [[ "$action" == start || "$action" == restart ]]; then
       if workspace_storage_check "$box"; then
         :
@@ -8620,9 +7633,9 @@ app_cmd_apply() {
     push)
       app_valid_relative_path "$path" || app_emit_error apply "SILO_PLAN_INVALID" "The plan contains an invalid repository path." "Create a fresh plan." "$box" false 78
       [[ -n "${JQ_BIN:-}" && -x "${JQ_BIN:-}" ]] || app_emit_error apply "SILO_JSON_TOOL_UNAVAILABLE" "The repository adapter requires jq to validate its snapshot." "Repair the Silo toolchain and retry the repository review." "$box" true 69
-      credential_state="$(app_workspace_credential_state "$box")"
-      quarantine_state="$(app_workspace_quarantined "$box" && printf quarantined || printf clear)"
-      [[ "$quarantine_state" == clear && "$credential_state" == Ready ]] || app_emit_error apply "SILO_PUSH_NOT_AUTHORIZED" "Host write authorization is no longer ready for this workspace." "Reauthorize host write access and create a fresh push plan." "$box" false 77
+      credential_state="$(host_credential_state)"
+      quarantine_state=clear
+      [[ "$credential_state" == present ]] || app_emit_error apply "SILO_PUSH_NOT_AUTHORIZED" "Host write authorization is no longer ready for this workspace." "Authenticate GitHub and create a fresh push plan." "$box" false 77
       if ! current_json="$(app_guest_repository_scan "$box" 1 "$credential_state" "$quarantine_state" "$path" 2>/dev/null)"; then
         app_emit_error apply "SILO_REPOSITORIES_UNAVAILABLE" "The running workspace did not provide a repository snapshot." "Refresh repositories and create a fresh push plan." "$box" true 69
       fi
@@ -9322,27 +8335,6 @@ app_cmd_bootstrap() {
       "The native setup coordinator completed this phase." "$phase" "" "$BOOTSTRAP_NETWORK_REVISION"
   done
 
-  # Deep verification must start each stopped workspace. A workspace whose
-  # GitHub credential is unavailable cannot start, so report it precisely and
-  # let the app route the user into the GitHub connection flow instead of
-  # failing with a generic verification error.
-  for box in "${WORKSPACES[@]}"; do
-    if app_workspace_quarantined "$box"; then
-      app_bootstrap_discard_staged_configuration "workspace quarantined"
-      app_emit_error bootstrap "SILO_BOOTSTRAP_VERIFICATION_FAILED" \
-        "Workspace '$box' is quarantined and cannot be verified." \
-        "Clear the quarantine by repairing the GitHub configuration for '$box', then resume Setup." "$box" true 69
-    fi
-    if [[ "$SILO_GITHUB_MODE" == connect ]] && app_metadata_profile_present "$box" guest &&
-      ! app_credential_available "$box" guest &&
-      ! workspace_msb "$box" ping -q "$box" >/dev/null 2>&1; then
-      app_bootstrap_discard_staged_configuration "GitHub reconnect required"
-      app_emit_error bootstrap "SILO_GITHUB_RECONNECT_REQUIRED" \
-        "GitHub is configured for '$box', but its credential is unavailable." \
-        "Connect GitHub for '$box' in Silo, then resume Setup." "$box" true 69
-    fi
-  done
-
   # Secret metadata is nonsecret, but every configured value must still exist
   # in Keychain before deep verification starts a workspace. Report this as a
   # typed, actionable setup failure instead of embedding terminal diagnostics
@@ -9807,23 +8799,20 @@ secret_inspect_binding_matches() {
 }
 
 # Run the DIRECT msb child for the lifecycle boundary. Every value in
-# SILO_SECRET_BINDINGS (plus the connect-mode read token) is exported inside a
+# SILO_SECRET_BINDINGS is exported inside a
 # subshell that is exec'd into msb, so the values exist ONLY in the child
 # process environment — never in the CLI's own environment or in argv. The
 # nonsecret name list is mirrored via SILO_SECRET_EXPORTED for observability.
 workspace_msb_with_secret_env() {
   local box="$1"; shift
   (
-    pair=""; name=""; value=""; token=""; exported=""
+    pair=""; name=""; value=""; exported=""
     while IFS= read -r name; do
       [[ -n "$name" ]] && unset "$name"
     done < <(workspace_msb_unset_args)
     # Values are graph-valid and may contain glob metacharacters (*, ?, [);
     # disable pathname expansion before word-splitting the binding pairs.
     set -f
-    if [[ "$SILO_GITHUB_MODE" != local ]] && token="$(read_token_for_workspace "$box" 2>/dev/null)"; then
-      export GH_TOKEN="$token"
-    fi
     for pair in ${SILO_SECRET_BINDINGS:-}; do
       name="${pair%%=*}"
       value="${pair#*=}"
@@ -10535,13 +9524,9 @@ Machine-readable `silo app` commands:
   silo app editor-target --workspace WORKSPACE [--path PATH] --format json
   silo app push-plan --workspace WORKSPACE --repositories PATH... --format json
   silo app ports [--workspace WORKSPACE] --format json
-  silo app github-state [--workspace WORKSPACE] --format json
   silo app github-policy-get [--workspace WORKSPACE] --format json
   silo app github-policy-set --workspace WORKSPACE --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear] --format json
   silo app github-policy-apply --format json   (full desired policy JSON on stdin; provision+commit atomically)
-  silo app github-bind --workspace WORKSPACE --repository OWNER/REPO --mode read-only|host-write --format json
-  silo app github-unbind --workspace WORKSPACE --format json
-  silo app github-quarantine --workspace WORKSPACE --format json
   silo app secrets-list --format json
   silo app secret-plan --input-fd FD --format json   (plan JSON on the descriptor: operation/name/workspaces/allowedDomains)
   silo app secret-apply PLAN_ID --input-fd FD --format json   ({"confirmation":"...","value":"..."?} on the descriptor; values go to Keychain only)
@@ -10603,13 +9588,9 @@ cmd_app() {
     directory-search) app_cmd_directory_query directory-search search "$@" ;;
     editor-target) app_cmd_editor_target "$@" ;;
     ports) app_cmd_ports "$@" ;;
-    github-state) app_cmd_github_state "$@" ;;
     github-policy-get) app_cmd_github_policy_get "$@" ;;
     github-policy-set) app_cmd_github_policy_set "$@" ;;
     github-policy-apply) app_cmd_github_policy_apply "$@" ;;
-    github-bind) app_cmd_github_bind "$@" ;;
-    github-unbind) app_cmd_github_unbind "$@" ;;
-    github-quarantine) app_cmd_github_quarantine "$@" ;;
     secrets-list) app_cmd_secrets_list "$@" ;;
     secret-plan) app_cmd_secret_plan "$@" ;;
     secret-apply) app_cmd_secret_apply "$@" ;;
@@ -10695,12 +9676,6 @@ main() {
       [[ "${1:-}" == repair && $# == 1 ]] || fatal "usage: silo host repair"
       cmd_host_repair
       ;;
-    __github-verify-transaction)
-      (( $# >= 2 && $# <= 3 )) || fatal "internal GitHub verification arguments missing"
-      [[ "${SILO_GITHUB_VERIFY_INHERITED:-0}" == 1 ]] || fatal "internal GitHub verification lock missing"
-      "$LOCKF_BIN" -s -t 0 9 >/dev/null 2>&1 || fatal "internal GitHub verification lock missing"
-      cmd_github_verify "$1" "$2" "${3:-}" 1
-      ;;
     __workspace-state-init)
       (( $# == 1 )) || fatal "internal workspace state arguments missing"
       __workspace_state_init "$@"
@@ -10728,7 +9703,7 @@ main() {
 }
 
 # ============================================================================
-# Vendored h11 verification region — Path C §6 (append-only; Phase 1 may wire
+# Vendored h11 verification region (append-only; setup may wire
 # SILO_VENDOR_H11_ENFORCED or call verify_vendored_h11 directly, but MUST NOT
 # edit the existing helper below).
 # ----------------------------------------------------------------------------

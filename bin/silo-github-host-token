@@ -1,5 +1,5 @@
 #!/bin/sh
-# Path C §4/§5: emits the host GitHub credential accessToken on stdout for the
+# Emits the host GitHub credential accessToken on stdout for the
 # proxy (over an inherited pipe) and the git askpass helper. FAIL-CLOSED: on a
 # missing record, an invalid schema-v1 record, a rejected token kind (ghs_
 # installation tokens, ghr_ refresh tokens), OR a missing/inactive/mismatched
@@ -15,7 +15,7 @@
 # Activation gate (§5/blocker 4): the nonsecret metadata file must exist with
 # schemaVersion 1, state "active", and generation/accountLogin EQUAL to the
 # Keychain record. A revoked/revocation-uncertain tombstone (written by
-# `silo github remove` BEFORE the Keychain deletion) or a generation/account
+# `silo github disconnect` before Keychain deletion) or a generation/account
 # mismatch denies the credential GLOBALLY, so no other workspace can keep
 # using a credential whose revocation is unproven.
 #

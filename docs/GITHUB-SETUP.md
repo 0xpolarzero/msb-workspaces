@@ -1,7 +1,7 @@
 # GitHub access in Silo
 
-GitHub is optional. The default local mode (`SILO_GITHUB_MODE=local`) keeps the
-GitHub credential on this Mac: git inside a workspace reaches GitHub through a
+GitHub is optional. Silo keeps the GitHub credential on this Mac: git inside a
+workspace reaches GitHub through a
 host-side proxy on `127.0.0.1:18446` that enforces a per-workspace capability
 (`X-Silo-Capability`) against the policy file
 (`~/Library/Application Support/Silo/github-policy.json`). No GitHub
@@ -57,7 +57,7 @@ The repository picker shows **paginated checkboxes grouped by owner**:
 - `silo github auth --force` — rotates the host credential (generation+1).
 - `silo github capability rotate WORKSPACE` — mints a fresh capability; the old
   one is denied immediately.
-- `silo github remove WORKSPACE` — revokes the host credential metadata-first,
+- `silo github disconnect` — revokes the host credential metadata-first,
   then removes the Keychain record; if either step cannot be proven, the state
   stays quarantined (fail-closed). The app never claims removal it cannot
   verify.
@@ -86,11 +86,7 @@ The repository picker shows **paginated checkboxes grouped by owner**:
   prompts.
 - Deleting or corrupting the policy file denies all proxy and host-push access;
   no repository remains selected.
-- Connect mode (`SILO_GITHUB_MODE=connect`) remains available as a rollback
-  alternative; local mode is the default and never reads or writes Connect
-  grants.
-
-## CLI fallback
+## Terminal commands
 
 The same surface is available from the terminal (the app remains the
 recommended path):
@@ -100,7 +96,7 @@ silo github auth [--force] [--json]
 silo github repos [--owner OWNER] [--format json]   # picker repository list
 silo github status [WORKSPACE|all] [--format json|text]
 silo github verify WORKSPACE [OWNER/REPO]
-silo github remove WORKSPACE
+silo github disconnect
 silo app github-policy-get [--workspace W] --format json
 silo app github-policy-set --workspace W --repository OWNER/REPO --mode read-only|read-write [--remove] [--clear]
 ```

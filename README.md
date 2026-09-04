@@ -33,8 +33,8 @@ Then set your commit identity:
 silo identity "Your Name" you@example.com
 ```
 
-GitHub is optional. The default local mode (`SILO_GITHUB_MODE=local`) never
-binds a GitHub token into a workspace: git inside a workspace reaches GitHub
+GitHub is optional. Silo never binds a GitHub token into a workspace: git
+inside a workspace reaches GitHub
 through a host-side proxy on `127.0.0.1:18446`. Public repositories are
 cloneable anonymously with no setup at all. A per-workspace policy file
 controls host-credential injection only: it decides, per workspace and
@@ -53,7 +53,7 @@ app's Push button) is allowed for every granted repository, while push from
 inside a VM is allowed only for repositories granted for VM push. The policy
 starts empty — no credential is injected anywhere until you grant
 repositories. Port warnings during setup are nonfatal. The CLI mirrors this
-surface: `silo github auth|repos|status|verify|remove`. See
+surface: `silo github auth|repos|status|verify|disconnect`. See
 [`docs/GITHUB-SETUP.md`](docs/GITHUB-SETUP.md).
 
 ### Host-held API secrets

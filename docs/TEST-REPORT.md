@@ -1,6 +1,6 @@
 # Silo verification report
 
-Verification is split between the native Silo app and the portable `silo` release suite. Local mode (`SILO_GITHUB_MODE=local`) is the default and the Connect service is dormant in this build; the current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
+Verification is split between the native Silo app and the portable `silo` release suite. Current GitHub acceptance covers the proxy transport, host credential, and policy tests (portable suite, against a fake GitHub) plus the app build, Swift unit tests, and UI smoke test. The portable suite also covers installer, VM lifecycle, local Git, host-only push, backup/restore, and security behavior.
 
 Run the app checks after source changes:
 
@@ -41,7 +41,8 @@ The focused smoke flows prove the app bundle, status-item/popover UI, and runtim
   - `process == "Silo" AND (messageType == error OR messageType == fault)`
   No narrower wall-clock interval was recorded. These logs are framework diagnostics; the app has no intentional application-level logger.
 
-- Live-service limit: historical — the configured Silo Connect endpoint was unavailable from this machine during probing (DNS resolution failed), and Connect is dormant in the current build. Current GitHub verification is local mode: the proxy contract and integration suites run against `tests/fake_github.py`; no real GitHub account or credential was used.
+- Live GitHub limit: the proxy contract and integration suites run against
+  `tests/fake_github.py`; no real GitHub account or credential was used.
 
 The native app values above are deterministic fixture values from the current scaffold, not live sandbox telemetry. The smoke test does not prove VM health, `silo` integration, lifecycle actions, telemetry, signing, notarization, or release readiness.
 
@@ -74,10 +75,10 @@ The native app values above are deterministic fixture values from the current sc
 - Start, stop, restart, resize, missing-token guard, and SSH proxy behavior.
 - Nested clone paths, direct in-VM cloning, repository listing, identity, fast-forward pull, path containment, and duplicate-destination rejection.
 
-### GitHub proxy, transport, credential, and policy (local mode)
+### GitHub proxy, transport, credential, and policy
 
 Current acceptance — `GitHubProxyContractTests` (proxy direct) and
-`GitHubProxyTests` (CLI-driven integration, local mode), backed by
+`GitHubProxyTests` (CLI-driven integration), backed by
 `tests/fake_github.py` (stateful fake GitHub with git smart-HTTP, `/user`,
 `/repos/{o}/{r}` permissions, and LFS batch/object endpoints):
 
@@ -108,10 +109,8 @@ Current acceptance — `GitHubProxyContractTests` (proxy direct) and
 - Quarantined workspace access fails closed until the recovery state is
   resolved.
 
-Connect coverage in the app's Swift unit tests includes callback
-state/session/issuer/client/redirect validation, scoped assignment
-verification, distinct guest-read/host-write grants, transactional assignment
-writes, and current recovery states.
+The app's Swift unit tests also cover host account discovery and authentication,
+repository permission mapping, policy synchronization, and recovery states.
 
 ### Backup and restore — 6 scenarios
 
@@ -130,7 +129,7 @@ writes, and current recovery states.
 
 ## Security properties exercised
 
-- The guest holds no GitHub credential at all; its only identity is the per-workspace capability sent to the host proxy, and local mode asserts the guest has no token anywhere in VM state.
+- The guest holds no GitHub credential at all; its only identity is the per-workspace capability sent to the host proxy, and Silo asserts the guest has no token anywhere in VM state.
 - The host credential is retrieved from macOS Keychain only by the proxy's outbound leg and the host push path, including when host Git runs with an isolated temporary `HOME`.
 - The privileged push process uses an empty environment, temporary home, no system/global Git config, no custom hooks, no SSH agent, and no ambient GitHub token.
 - Push authorization requires the canonical repository to be on the workspace's ticked list and the host credential to be available; VM-initiated push additionally requires the repository ticked as **read-write**, enforced by the proxy's receive-pack rules.
@@ -150,7 +149,7 @@ The portable simulator suite cannot instantiate Apple's Virtualization framework
 
 ### Real macOS canary
 
-A prior real Apple Silicon macOS canary against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. This is historical evidence, not part of the current run; current verification used no GitHub credentials (local mode; the Connect service is dormant).
+A prior real Apple Silicon macOS canary against MicroSandbox v0.6.8 independently passed VM startup, systemd, Docker/containerd, SSH, GitHub connectivity, and published-port checks. This is historical evidence, not part of the current run; current verification used no GitHub credentials.
 
 ## The only checks you need to run
 
@@ -166,7 +165,7 @@ The installer ends by running `silo check --deep`. Continue only when it reports
 all live VM, Docker, SSH, internet, and published-port checks passed
 ```
 
-### 2. Configure GitHub in local mode
+### 2. Configure GitHub
 
 Open **Silo** → **Settings** → **GitHub**, connect the account on this
 Mac, tick the repositories each workspace may use (new assignments default to

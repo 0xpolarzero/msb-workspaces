@@ -122,7 +122,6 @@ const runningSource = {
       workspace: "dev",
       repositoryID: 1001,
       fullName: "acme/silo",
-      installationID: 501,
       ownerID: 42,
       ownerLogin: "acme",
       ownerType: "Organization",

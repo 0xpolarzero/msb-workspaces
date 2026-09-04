@@ -1768,8 +1768,8 @@ final class SiloUITests: XCTestCase {
             app.descendants(matching: .any)["setup.github-boundary"]
                 .waitForExistence(timeout: 2)
         )
-        // Local mode (default) presents the policy picker, never the Connect
-        // unavailable outcome.
+        // The host-proxy flow presents the policy picker without an
+        // unavailable fallback state.
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.unavailable"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.disconnected"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["setup.github.attention"].exists)
@@ -1987,7 +1987,6 @@ final class SiloUITests: XCTestCase {
             "Hovering the help tooltip must not consume the switch click"
         )
         XCTAssertFalse(app.checkBoxes["Assign"].exists)
-        XCTAssertFalse(app.staticTexts["Owner installation"].exists)
         XCTAssertFalse(app.staticTexts["Verification repository"].exists)
         XCTAssertFalse(app.staticTexts["Access mode"].exists)
         XCTAssertEqual(setup.frame, initialSetupFrame, "Repository selection must not resize setup")
@@ -2111,7 +2110,7 @@ final class SiloUITests: XCTestCase {
         XCTAssertFalse(app.buttons["github.workspace.dev.repository-picker.button"].exists)
     }
 
-    func testGitHubLocalEmptyCatalogShowsNoRepositories() {
+    func testGitHubEmptyCatalogShowsNoRepositories() {
         let appURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2124,7 +2123,7 @@ final class SiloUITests: XCTestCase {
                 app.terminate()
             }
         }
-        app.launchArguments = ["--ui-test-setup", "--ui-test-github-no-installation"]
+        app.launchArguments = ["--ui-test-setup", "--ui-test-github-no-owner"]
         app.launch()
 
         let setup = app.windows["setup.window"]
@@ -2161,7 +2160,6 @@ final class SiloUITests: XCTestCase {
         defer { terminateIfNeeded(app) }
         app.launchArguments = [
             "--ui-test-setup",
-            "--ui-test-setup-reconnect",
             "--ui-test-setup-registration-pending",
             "--ui-test-github-interaction-states"
         ]
@@ -2213,7 +2211,7 @@ final class SiloUITests: XCTestCase {
                 app.terminate()
             }
         }
-        app.launchArguments = ["--ui-test-setup", "--ui-test-setup-reconnect", "--ui-test-github-success"]
+        app.launchArguments = ["--ui-test-setup", "--ui-test-github-success"]
         app.launch()
 
         let setup = app.windows["setup.window"]
@@ -2283,7 +2281,6 @@ final class SiloUITests: XCTestCase {
         }
         app.launchArguments = [
             "--ui-test-setup",
-            "--ui-test-setup-reconnect",
             "--ui-test-setup-registration-pending",
             "--ui-test-github-success"
         ]

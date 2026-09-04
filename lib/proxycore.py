@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Silo GitHub proxy core -- the per-connection "checker" (Path C contract section 4).
+"""Silo GitHub proxy core -- the per-connection "checker" (host-proxy contract section 4).
 
 Per-connection process: launchd spawns one instance per accepted socket on
 127.0.0.1:18446 (inetdCompatibility Wait:true); the socket is stdin/stdout.

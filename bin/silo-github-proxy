@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-# Silo GitHub proxy entry point (Path C, section 4).
+# Silo GitHub proxy entry point.
 #
 # Per-connection process: launchd spawns one instance per accepted socket on
 # 127.0.0.1:18446 (inetdCompatibility Wait:true) with the socket as
