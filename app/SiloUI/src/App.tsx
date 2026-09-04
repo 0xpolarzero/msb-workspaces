@@ -59,7 +59,7 @@ export default function App() {
             restartWorkspace: (_workspace) => undefined,
             openTerminal: (_workspace) => undefined,
             openEditor: (_workspace) => undefined,
-            resetGitHubAccess: () => undefined,
+            clearGitHubRepositoryAccess: () => undefined,
           }}
         />
       ) : (

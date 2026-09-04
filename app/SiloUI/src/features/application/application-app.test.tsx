@@ -23,7 +23,7 @@ function renderApplication(scenario: Parameters<typeof applicationSourceForScena
     setGitHubAccessEnabled: vi.fn(),
     saveGitHubConfiguration: vi.fn(),
     cancelGitHubConfiguration: vi.fn(),
-    resetGitHubAccess: vi.fn(),
+    clearGitHubRepositoryAccess: vi.fn(),
     retryGitHubConfiguration: vi.fn(),
     retryGitHubRepositoryCatalog: vi.fn(),
   }
@@ -934,7 +934,7 @@ describe("application", () => {
     expect(github.queryByRole("heading", { name: "Repository access" })).not.toBeInTheDocument()
     expect(github.getByText("Connected as @taylor")).toBeVisible()
     expect(github.getByRole("button", { name: "Disable access" })).toBeVisible()
-    expect(github.getByRole("button", { name: "Reset…" })).toBeVisible()
+    expect(github.getByRole("button", { name: "Clear repositories…" })).toBeVisible()
     expect(github.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument()
     expect(github.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument()
 
@@ -1034,19 +1034,19 @@ describe("application", () => {
     expect(github.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
   })
 
-  it("supports disabling and removing all GitHub access without hiding disabled selections", async () => {
+  it("supports disabling access and clearing repositories without hiding disabled selections", async () => {
     const { actions, unmount, user } = renderApplication()
     await user.click(within(appNavigation()).getByRole("button", { name: "GitHub" }))
     const github = within(appPanel("GitHub"))
 
-    await user.click(github.getByRole("button", { name: "Reset…" }))
-    expect(github.getByText("Remove all access?")).toBeVisible()
-    await user.click(github.getByRole("button", { name: "Remove all" }))
-    expect(actions.resetGitHubAccess).toHaveBeenCalledOnce()
+    await user.click(github.getByRole("button", { name: "Clear repositories…" }))
+    expect(github.getByText("Clear repositories from every sandbox?")).toBeVisible()
+    await user.click(github.getByRole("button", { name: "Clear repositories" }))
+    expect(actions.clearGitHubRepositoryAccess).toHaveBeenCalledOnce()
     expect(github.queryByRole("table", { name: "Selected repositories for dev" })).not.toBeInTheDocument()
     expect(github.queryByRole("table", { name: "Selected repositories for playgrounds" })).not.toBeInTheDocument()
     expect(github.queryByRole("table", { name: "Selected repositories for personal" })).not.toBeInTheDocument()
-    expect(github.getByRole("status")).toHaveTextContent("Removing all GitHub access…")
+    expect(github.getByRole("status")).toHaveTextContent("Clearing repository access…")
     unmount()
 
     const disabled = renderApplication(

@@ -141,7 +141,7 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
   const [connectionState, setConnectionState] = useState(source.github.state)
   const [accessEnabled, setAccessEnabled] = useState(source.github.accessEnabled ?? true)
   const [operation, setOperation] = useState<GitHubManagementOperation>(source.github.operation ?? { status: "idle" })
-  const [confirmingReset, setConfirmingReset] = useState(false)
+  const [confirmingClear, setConfirmingClear] = useState(false)
   const catalogAvailable = source.github.repositoryCatalogStatus?.status !== "unavailable"
   const editorBusy = operation.status === "saving"
   const editorDisabled = editorBusy || !accessEnabled
@@ -159,7 +159,7 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
     // oxlint-disable-next-line react/set-state-in-effect
     setOperation(source.github.operation ?? { status: "idle" })
     // oxlint-disable-next-line react/set-state-in-effect
-    setConfirmingReset(false)
+    setConfirmingClear(false)
   }, [source.github.accessEnabled, source.github.operation, source.github.state, sourceDraft])
 
   function markDirty(nextDraft: GitHubDraft) {
@@ -192,14 +192,14 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
     actions.setGitHubAccessEnabled?.(nextEnabled)
   }
 
-  function confirmReset() {
-    setConfirmingReset(false)
+  function confirmClear() {
+    setConfirmingClear(false)
     setDraft((current) => ({
       ...current,
       selections: Object.fromEntries(source.workspaces.map(({ machine }) => [machine.name, []])),
     }))
-    setOperation({ status: "saving", message: "Removing all GitHub access…", canCancel: true })
-    actions.resetGitHubAccess?.()
+    setOperation({ status: "saving", message: "Clearing repository access…", canCancel: true })
+    actions.clearGitHubRepositoryAccess?.()
   }
 
   const catalogNotice = source.github.repositoryCatalogStatus?.status === "unavailable" ? (
@@ -210,18 +210,18 @@ export function GitHubPage({ source, actions }: { source: ApplicationSource; act
     </div>
   ) : undefined
 
-  const connectedActions = confirmingReset ? (
+  const connectedActions = confirmingClear ? (
     <>
-      <span className="text-xs text-muted-foreground">Remove all access?</span>
-      <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingReset(false)}>Cancel</Button>
-      <Button type="button" variant="destructive" size="xs" onClick={confirmReset}>Remove all</Button>
+      <span className="text-xs text-muted-foreground">Clear repositories from every sandbox?</span>
+      <Button type="button" variant="ghost" size="xs" onClick={() => setConfirmingClear(false)}>Cancel</Button>
+      <Button type="button" variant="destructive" size="xs" onClick={confirmClear}>Clear repositories</Button>
     </>
   ) : (
     <>
       <Button type="button" variant="outline" size="xs" disabled={editorBusy} onClick={toggleAccess}>{accessEnabled ? "Disable access" : "Enable access"}</Button>
-      <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => setConfirmingReset(true)}>
+      <Button type="button" variant="ghost" size="xs" disabled={editorBusy} onClick={() => setConfirmingClear(true)}>
         <RotateCcw className="size-3" aria-hidden="true" />
-        Reset…
+        Clear repositories…
       </Button>
     </>
   )

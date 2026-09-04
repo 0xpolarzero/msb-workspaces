@@ -234,7 +234,7 @@ export interface ApplicationActions {
   setGitHubAccessEnabled?: (enabled: boolean) => void
   saveGitHubConfiguration?: (configuration: ApplicationGitHubConfiguration) => void
   cancelGitHubConfiguration?: () => void
-  resetGitHubAccess?: () => void
+  clearGitHubRepositoryAccess?: () => void
   retryGitHubConfiguration?: () => void
   retryGitHubRepositoryCatalog?: () => void
 }
