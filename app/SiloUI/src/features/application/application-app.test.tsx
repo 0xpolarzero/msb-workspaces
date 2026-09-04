@@ -191,16 +191,31 @@ describe("application", () => {
 
     await user.click(sandboxSections.getByRole("button", { name: "Activity" }))
     const activity = panel.getByRole("list", { name: "Recent activity" })
+    expect(activity.closest('[data-slot="card"]')).toBeNull()
+    expect(panel.queryByRole("heading", { name: "Activity" })).not.toBeInTheDocument()
     expect(within(activity).queryByText("dev")).not.toBeInTheDocument()
     expect(within(activity).getByText("playgrounds")).toBeVisible()
     expect(within(activity).getByText("personal")).toBeVisible()
+    const activityRows = within(activity).getAllByRole("listitem")
+    expect(activityRows).toHaveLength(2)
+    expect(activityRows[0]).toHaveTextContent("Stop succeededWorkspace state was preserved.playgroundsYesterday")
+    expect(within(activityRows[0]).getByLabelText("playgrounds, Stopped")).toBeVisible()
+    expect(activityRows[0].querySelector('[data-activity-content]')).toHaveClass("grid", "gap-0.5")
+    expect(activityRows[0].querySelector('[data-activity-meta]')).toHaveClass("items-end")
 
     await user.click(filters.getByRole("button", { name: "Clear" }))
     expect(panel.getByText("No sandboxes selected")).toBeVisible()
     expect(filters.getByRole("button", { name: "Clear" })).toBeDisabled()
 
     await user.click(filters.getByRole("button", { name: "All" }))
-    expect(panel.getByRole("list", { name: "Recent activity" })).toBeVisible()
+    const allActivity = panel.getByRole("list", { name: "Recent activity" })
+    expect(allActivity).toBeVisible()
+    expect(within(allActivity).getAllByRole("listitem").map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Start succeeded"),
+      expect.stringContaining("Stop succeeded"),
+      expect.stringContaining("Push completed"),
+      expect.stringContaining("Backup completed"),
+    ])
     expect(filters.getAllByRole("button", { name: /^Remove / })).toHaveLength(3)
     expect(filters.getByRole("button", { name: "All" })).toBeDisabled()
   })
@@ -251,6 +266,19 @@ describe("application", () => {
     const copiedURL = within(rows[0]).getByRole("button", { name: "URL copied" })
     expect(copiedURL).toHaveAttribute("data-copy-status", "copied")
     expect(copiedURL.querySelector("svg")).toHaveClass("lucide-check")
+  })
+
+  it("shows the newest activity first and keeps failure context in its row", async () => {
+    const application = renderApplication("bootstrap-failure")
+    const sandboxSections = within(within(appNavigation()).getByRole("group", { name: "Sandbox sections" }))
+
+    await application.user.click(sandboxSections.getByRole("button", { name: "Activity" }))
+
+    const activity = within(appPanel("Sandboxes")).getByRole("list", { name: "Recent activity" })
+    const firstRow = within(activity).getAllByRole("listitem")[0]
+    expect(firstRow).toHaveTextContent("Start failedCandidate networking did not become ready.dev3m ago")
+    expect(firstRow.querySelector("svg")).toHaveClass("lucide-triangle-alert", "text-destructive")
+    expect(within(firstRow).getByLabelText("dev, Failed")).toBeVisible()
   })
 
   it.each([

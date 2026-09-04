@@ -103,6 +103,7 @@ export interface ApplicationActivity {
   id: string
   title: string
   detail: string
+  occurredAt: string
   time: string
   tone: "success" | "neutral" | "danger"
 }

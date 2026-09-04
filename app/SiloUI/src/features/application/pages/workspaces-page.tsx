@@ -7,7 +7,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { DetailCard, WorkspaceBadge } from "@/features/application/components/application-ui"
+import { WorkspaceBadge } from "@/features/application/components/application-ui"
 import type { ApplicationFileEntry, ApplicationWorkspace, RepositoryPushOperation, WorkspaceDetailSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
@@ -475,26 +475,28 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
 
 function ActivityLog({ workspaces }: { workspaces: ApplicationWorkspace[] }) {
   if (workspaces.length === 0) return <EmptyState title="No sandboxes selected" description="Select at least one sandbox to see its activity." />
-  const activities = workspaces.flatMap((workspace) => workspace.activities.map((activity) => ({ ...activity, workspace: workspace.machine.name })))
+  const activities = workspaces
+    .flatMap((workspace) => workspace.activities.map((activity) => ({ ...activity, workspace: workspace.machine.name, workspaceState: workspace.state })))
+    .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt))
+
+  if (activities.length === 0) return <EmptyState title="No recent activity" description="Activity from the selected sandboxes will appear here." />
 
   return (
-    <DetailCard title="Activity">
-      {activities.length > 0 ? (
-        <div className="divide-y divide-border" role="list" aria-label="Recent activity">
-          {activities.map((item) => (
-            <div key={`${item.workspace}:${item.id}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
-              {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
-              <div className="min-w-0">
-                <div className="text-sm font-medium">{item.title}</div>
-                <div className="mt-0.5 text-xs font-medium text-muted-foreground">{item.workspace}</div>
-                <div className="mt-0.5 text-xs text-muted-foreground">{item.detail}</div>
-              </div>
-              <span className="text-xs text-muted-foreground">{item.time}</span>
-            </div>
-          ))}
+    <div className="divide-y divide-border overflow-hidden rounded-lg border border-border" role="list" aria-label="Recent activity">
+      {activities.map((item) => (
+        <div key={`${item.workspace}:${item.id}`} role="listitem" className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 bg-card px-3 py-2.5">
+          {item.tone === "danger" ? <TriangleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" /> : item.tone === "success" ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" /> : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
+          <div className="grid min-w-0 gap-0.5" data-activity-content>
+            <div className="text-sm font-medium">{item.title}</div>
+            <div className="text-xs text-muted-foreground">{item.detail}</div>
+          </div>
+          <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
+            <WorkspaceBadge name={item.workspace} state={item.workspaceState} />
+            <span className="text-xs text-muted-foreground">{item.time}</span>
+          </div>
         </div>
-      ) : <p className="text-sm text-muted-foreground">No recent activity.</p>}
-    </DetailCard>
+      ))}
+    </div>
   )
 }
 

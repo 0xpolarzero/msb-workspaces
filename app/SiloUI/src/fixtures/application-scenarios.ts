@@ -93,8 +93,8 @@ const baseWorkspaces: ApplicationWorkspace[] = [
       "19:18:37  worker    Connected to queue",
     ],
     activities: [
-      { id: "dev-start", title: "Start succeeded", detail: "Workspace services passed verification.", time: "2h ago", tone: "success" },
-      { id: "dev-push", title: "Push completed", detail: "Pushed 3 commits from acme/silo.", time: "Yesterday", tone: "neutral" },
+      { id: "dev-start", title: "Start succeeded", detail: "Workspace services passed verification.", occurredAt: "2026-09-04T12:00:00Z", time: "2h ago", tone: "success" },
+      { id: "dev-push", title: "Push completed", detail: "Pushed 3 commits from acme/silo.", occurredAt: "2026-09-03T16:00:00Z", time: "Yesterday", tone: "neutral" },
     ],
     githubRepositories: ["acme/silo", "acme/design-system"],
     secretNames: ["PACKAGE_TOKEN", "DATABASE_URL"],
@@ -114,7 +114,7 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     ],
     ports: [],
     logs: ["17:02:11  silo  Workspace stopped cleanly"],
-    activities: [{ id: "playgrounds-stop", title: "Stop succeeded", detail: "Workspace state was preserved.", time: "Yesterday", tone: "neutral" }],
+    activities: [{ id: "playgrounds-stop", title: "Stop succeeded", detail: "Workspace state was preserved.", occurredAt: "2026-09-03T17:02:11Z", time: "Yesterday", tone: "neutral" }],
     githubRepositories: ["acme/platform-tools"],
     secretNames: ["PACKAGE_TOKEN"],
   },
@@ -133,7 +133,7 @@ const baseWorkspaces: ApplicationWorkspace[] = [
     ],
     ports: [],
     logs: ["09:41:02  silo  Workspace stopped cleanly"],
-    activities: [{ id: "personal-backup", title: "Backup completed", detail: "Archive verification passed.", time: "4 days ago", tone: "success" }],
+    activities: [{ id: "personal-backup", title: "Backup completed", detail: "Archive verification passed.", occurredAt: "2026-08-31T09:41:02Z", time: "4 days ago", tone: "success" }],
     githubRepositories: ["taylor/docs-site"],
     secretNames: [],
   },
@@ -155,7 +155,7 @@ function workspacesForScenario(scenario: ScenarioName): ApplicationWorkspace[] {
       stateDetail: "Start failed 3m ago",
       attention: { level: "error", message: "Candidate networking did not become ready." },
       freshness: "stale",
-      activities: [{ id: "dev-failure", title: "Start failed", detail: "Candidate networking did not become ready.", time: "3m ago", tone: "danger" }, ...workspace.activities],
+      activities: [{ id: "dev-failure", title: "Start failed", detail: "Candidate networking did not become ready.", occurredAt: "2026-09-04T13:57:00Z", time: "3m ago", tone: "danger" }, ...workspace.activities],
     } : workspace)
   }
   return baseWorkspaces
