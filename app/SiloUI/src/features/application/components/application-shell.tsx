@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react"
-import { Activity, Bell, Boxes, ChevronRight, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
+import { Activity, Bell, Boxes, ChevronRight, CircleAlert, File, GitFork, HardDrive, KeyRound, LayoutDashboard, Network, Settings2, SlidersHorizontal, Terminal } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
@@ -30,6 +30,7 @@ function NavigationButton({
   label,
   icon: Icon,
   active,
+  tone = "default",
   reserveDisclosure = false,
   onClick,
 }: {
@@ -37,6 +38,7 @@ function NavigationButton({
   label: string
   icon: typeof Boxes
   active: boolean
+  tone?: "default" | "danger"
   reserveDisclosure?: boolean
   onClick: () => void
 }) {
@@ -45,12 +47,18 @@ function NavigationButton({
       id={`application-nav-${id}`}
       type="button"
       data-navigation-level="primary"
+      data-navigation-tone={tone}
       aria-current={active ? "page" : undefined}
       aria-controls={`application-panel-${id}`}
       onClick={onClick}
       className={cn(
-        "flex h-10 min-w-fit flex-none items-center justify-center gap-2 rounded-md px-3 py-2 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]",
-        active && "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
+        "flex h-10 min-w-fit flex-none items-center justify-center gap-2 rounded-md px-3 py-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]",
+        tone === "danger"
+          ? "text-destructive hover:bg-destructive/[0.07] hover:text-destructive"
+          : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        active && (tone === "danger"
+          ? "bg-destructive/10 font-medium text-destructive"
+          : "bg-sidebar-accent font-medium text-sidebar-accent-foreground"),
         reserveDisclosure && "pr-10",
       )}
     >
@@ -139,6 +147,7 @@ export function ApplicationShell({
   activeTab,
   workspaceSection,
   settingsSection,
+  showSystemIssue,
   onTabChange,
   onWorkspaceSectionChange,
   onSettingsSectionChange,
@@ -147,6 +156,7 @@ export function ApplicationShell({
   activeTab: ApplicationTab
   workspaceSection: WorkspaceSection
   settingsSection: SettingsSection
+  showSystemIssue: boolean
   onTabChange: (tab: ApplicationTab) => void
   onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
@@ -197,6 +207,16 @@ export function ApplicationShell({
             </div>
             <div className="flex gap-1 md:mt-auto md:grid md:w-full">
               <div className="mx-3 my-2 hidden border-t border-border md:block" aria-hidden="true" />
+              {showSystemIssue && (
+                <NavigationButton
+                  id="system"
+                  label="System issue"
+                  icon={CircleAlert}
+                  active={activeTab === "system"}
+                  tone="danger"
+                  onClick={() => selectTab("system")}
+                />
+              )}
               <DisclosureNavigationItem
                 id="settings"
                 label="Settings"

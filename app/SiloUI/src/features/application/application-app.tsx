@@ -9,6 +9,7 @@ import { GitHubPage } from "@/features/application/pages/github-page"
 import { NotificationsPage } from "@/features/application/pages/notifications-page"
 import { OverviewPage } from "@/features/application/pages/overview-page"
 import { SecretsPage } from "@/features/application/pages/secrets-page"
+import { SystemIssuePage } from "@/features/application/pages/system-issue-page"
 import { WorkspacesPage } from "@/features/application/pages/workspaces-page"
 
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
@@ -30,7 +31,10 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     // The native bridge clears or replaces the pending operation alongside its authoritative snapshot.
     // oxlint-disable-next-line react/set-state-in-effect
     setSandboxConfigurationOperation(source.sandboxConfigurationOperation)
-  }, [source.workspaces, source.sandboxConfigurationOperation])
+    // The destination only exists while the global issue remains active.
+    // oxlint-disable-next-line react/set-state-in-effect
+    setActiveTab((current) => current === "system" && !source.runtimeRepairRequired ? "workspaces" : current)
+  }, [source.workspaces, source.sandboxConfigurationOperation, source.runtimeRepairRequired])
 
   function updateMachines(machines: SetupMachineConfiguration[]) {
     const candidate = { schemaVersion: 1 as const, machines }
@@ -50,6 +54,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       activeTab={activeTab}
       workspaceSection={workspaceSection}
       settingsSection={settingsSection}
+      showSystemIssue={source.runtimeRepairRequired}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
@@ -71,6 +76,11 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={activeTab !== "github"}><GitHubPage source={applicationSource} /></section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={activeTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
       <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={activeTab !== "backup"}><BackupPage source={applicationSource} /></section>
+      {source.runtimeRepairRequired && (
+        <section id="application-panel-system" role="region" aria-labelledby="application-nav-system" hidden={activeTab !== "system"}>
+          <SystemIssuePage actions={actions} />
+        </section>
+      )}
       <section id="application-panel-settings" role="region" aria-labelledby="application-nav-settings" hidden={activeTab !== "settings"}>
         <div hidden={settingsSection !== "general"}><GeneralPage source={applicationSource} /></div>
         <div hidden={settingsSection !== "notifications"}><NotificationsPage /></div>

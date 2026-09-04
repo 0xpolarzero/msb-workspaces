@@ -6,7 +6,7 @@ import type {
   SiloProtocolError,
 } from "@/contracts/silo"
 
-export type ApplicationTab = "workspaces" | "github" | "secrets" | "backup" | "settings"
+export type ApplicationTab = "workspaces" | "github" | "secrets" | "backup" | "system" | "settings"
 export type SettingsSection = "general" | "notifications"
 export type WorkspaceSection = "overview" | "files" | "logs" | "network" | "activity"
 export type WorkspaceDetailSection = Exclude<WorkspaceSection, "overview">

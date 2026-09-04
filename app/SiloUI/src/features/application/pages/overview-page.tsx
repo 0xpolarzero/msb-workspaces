@@ -1,9 +1,8 @@
 import { CircleAlert, Loader2, Pause, Play, RotateCw, Square } from "lucide-react"
 
-import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import type { SetupMachineConfiguration, SiloProgressEvent } from "@/contracts/silo"
-import { InlineNotice, WorkspaceStateLabel } from "@/features/application/components/application-ui"
+import { WorkspaceStateLabel } from "@/features/application/components/application-ui"
 import type {
   ApplicationActions,
   ApplicationSource,
@@ -266,15 +265,6 @@ export function OverviewPage({
             actions: <WorkspaceActions machine={machine} state={state} actions={actions} disabled={configurationLocked} />,
           }
         }}
-        footer={source.runtimeRepairRequired ? (
-          <InlineNotice
-            title="Silo installation needs repair"
-            tone="danger"
-            action={<Button variant="outline" size="sm" onClick={actions.repairRuntime}>Repair…</Button>}
-          >
-            The bundled runtime could not be verified. Existing sandbox information remains visible.
-          </InlineNotice>
-        ) : undefined}
       />
     </div>
   )

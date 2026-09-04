@@ -303,7 +303,7 @@ describe("application", () => {
     }))
   })
 
-  it("routes compact lifecycle and repair actions with the exact sandbox", async () => {
+  it("routes compact lifecycle actions with the exact sandbox", async () => {
     const running = renderApplication()
     const overview = within(appPanel("Sandboxes"))
     const list = overview.getByRole("list", { name: "Configured sandboxes" })
@@ -333,15 +333,55 @@ describe("application", () => {
     expect(running.actions.stopWorkspace).not.toHaveBeenCalledWith("playgrounds")
     expect(running.actions.restartWorkspace).not.toHaveBeenCalledWith("playgrounds")
     running.unmount()
+  })
 
+  it("routes a global runtime failure to a dedicated item above Settings", async () => {
     const failed = renderApplication("dependency-failure")
-    const failedOverview = within(appPanel("Sandboxes"))
-    const failedList = failedOverview.getByRole("list", { name: "Configured sandboxes" })
-    const repair = failedOverview.getByRole("alert")
-    expect(repair).toHaveTextContent("Silo installation needs repair")
-    expect(failedList.compareDocumentPosition(repair) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    await failed.user.click(failedOverview.getByRole("button", { name: "Repair…" }))
+    const navigationElement = appNavigation()
+    const navigation = within(navigationElement)
+    const primaryItems = [...navigationElement.querySelectorAll<HTMLElement>("[data-navigation-level='primary']")]
+
+    expect(primaryItems.map(({ textContent }) => textContent)).toEqual([
+      "Sandboxes",
+      "GitHub",
+      "Secrets",
+      "Backup",
+      "System issue",
+      "Settings",
+    ])
+    expect(primaryItems.at(-2)).toHaveAttribute("data-navigation-tone", "danger")
+    expect(within(appPanel("Sandboxes")).queryByText("Silo installation needs repair")).not.toBeInTheDocument()
+
+    await failed.user.click(navigation.getByRole("button", { name: "System issue" }))
+
+    expect(navigation.getByRole("button", { name: "System issue" })).toHaveAttribute("aria-current", "page")
+    const systemIssue = within(appPanel("System issue"))
+    expect(systemIssue.getByRole("heading", { name: "System issue", level: 2 })).toBeVisible()
+    expect(systemIssue.getByRole("heading", { name: "Silo installation needs repair", level: 3 })).toBeVisible()
+    expect(systemIssue.getByText("Reinstall the bundled Silo runtime and verify its exact command identity.")).toBeVisible()
+    expect(systemIssue.getByText("Sandbox configuration, host integration, and GitHub setup are not changed.")).toBeVisible()
+
+    await failed.user.click(systemIssue.getByRole("button", { name: "Repair Installation" }))
     expect(failed.actions.repairRuntime).toHaveBeenCalledOnce()
+  })
+
+  it("removes a resolved system issue and returns to Sandboxes", async () => {
+    const source = applicationSourceForScenario("dependency-failure")
+    const application = renderApplication("dependency-failure", source)
+    const navigation = within(appNavigation())
+
+    await application.user.click(navigation.getByRole("button", { name: "System issue" }))
+    expect(appPanel("System issue")).toBeVisible()
+
+    application.rerender(
+      <ApplicationApp
+        source={{ ...source, runtimeRepairRequired: false }}
+        actions={application.actions}
+      />,
+    )
+
+    expect(navigation.queryByRole("button", { name: "System issue" })).not.toBeInTheDocument()
+    expect(within(appPanel("Sandboxes")).getByRole("list", { name: "Configured sandboxes" })).toBeVisible()
   })
 
   it("renders the native app domains in the polished Silo shell", async () => {
