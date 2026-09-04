@@ -357,7 +357,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
           </Popover>
         </div>
 
-        <SandboxList label="Configured sandboxes" className="min-h-0 flex-1" data-testid="machine-list">
+        <SandboxList label="Configured sandboxes" className="max-h-full min-h-0" data-testid="machine-list">
             {displayMachines.map((machine, index) => {
               const isEditing = editor?.draft.id === machine.id
               const presentation = getRowPresentation?.(machine)

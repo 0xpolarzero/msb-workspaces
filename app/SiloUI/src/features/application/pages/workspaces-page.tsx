@@ -330,14 +330,14 @@ function Logs({ workspaces, query, onQueryChange }: { workspaces: ApplicationWor
         />
       </div>
       {filteredRows.length > 0 ? (
-        <div role="table" aria-label="Logs" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border text-xs">
+        <div role="table" aria-label="Logs" className="flex max-h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border text-xs">
           <div role="row" className="grid shrink-0 grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] gap-3 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground">
             <span role="columnheader">Time</span>
             <span role="columnheader">Message</span>
             <span role="columnheader">Sandbox</span>
             <span role="columnheader" className="sr-only">Actions</span>
           </div>
-          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain bg-card" data-table-scroll="logs">
+          <div className="min-h-0 divide-y divide-border overflow-y-auto overscroll-contain bg-card" data-table-scroll="logs">
             {filteredRows.map((row) => (
               <div key={row.id} role="row" className="group/log-row grid grid-cols-[5.5rem_minmax(0,1fr)_7rem_1.5rem] items-center gap-3 px-3 py-2 transition-colors hover:bg-muted/55 focus-within:bg-muted/55">
                 <span role="cell" className="font-mono text-muted-foreground">{row.timestamp}</span>
@@ -377,8 +377,8 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border">
-        <div role="table" aria-label="Network" className="flex min-h-0 w-full flex-1 flex-col text-xs">
+      <div className="flex max-h-full min-h-0 self-start flex-col overflow-hidden rounded-lg border border-border">
+        <div role="table" aria-label="Network" className="flex min-h-0 w-full flex-col text-xs">
           <div role="row" className="grid shrink-0 grid-cols-[3.5rem_6rem_minmax(0,1fr)_3.5rem] items-center gap-2 border-b border-border bg-muted/45 px-3 py-2 font-medium text-muted-foreground sm:grid-cols-[4rem_minmax(0,1fr)_6.5rem_7rem_3.5rem] sm:gap-3">
             <span role="columnheader">Port</span>
             <span role="columnheader" className="hidden sm:block">URL</span>
@@ -386,7 +386,7 @@ function Network({ workspaces, browser }: { workspaces: ApplicationWorkspace[]; 
             <span role="columnheader">Sandbox</span>
             <span role="columnheader" className="sr-only">Actions</span>
           </div>
-          <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain bg-card" data-table-scroll="network">
+          <div className="min-h-0 divide-y divide-border overflow-y-auto overscroll-contain bg-card" data-table-scroll="network">
             {rows.map(({ workspace, port }) => {
               const url = `http://${workspace.host}:${port.port}`
               const state = port.listening === true ? "Listening" : port.listening === false ? "Configured" : "Unknown"
@@ -479,7 +479,7 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
       />
 
       {activities.length > 0 ? (
-        <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto overscroll-contain rounded-lg border border-border" role="list" aria-label="Recent activity">
+        <div className="max-h-full min-h-0 divide-y divide-border overflow-y-auto overscroll-contain rounded-lg border border-border" role="list" aria-label="Recent activity">
           {activities.map((item) => {
             const category = activityCategoryPresentation[item.category]
             const CategoryIcon = category.icon
