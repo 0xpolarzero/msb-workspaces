@@ -470,7 +470,6 @@ export function applicationSourceForScenario(
     preferences: {
       launchAtLogin: true,
       startWorkspacesAtLaunch: false,
-      pollingCadence: "30",
       terminal: "Terminal",
       editor: "Visual Studio Code",
       browser: "Safari",

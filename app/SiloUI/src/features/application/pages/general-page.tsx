@@ -1,9 +1,8 @@
 import { useState } from "react"
-import { Accessibility, Eye, Power } from "lucide-react"
+import { Accessibility, Power } from "lucide-react"
 
 import { ListCard, ListRow, ListRowDetails, ListRowIcon } from "@/components/list-row"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import type { ApplicationSource } from "@/features/application/model/application-source"
 import { ApplicationPreferenceFields } from "@/features/preferences/components/application-preference-fields"
@@ -41,7 +40,6 @@ export function GeneralPage({
     const initial = source.workspaces.find(({ machine }) => machine.name === "dev") ?? source.workspaces[0]
     return new Set(initial ? [initial.machine.id] : [])
   })
-  const [pollingCadence, setPollingCadence] = useState(source.preferences.pollingCadence)
 
   function toggleStartupWorkspace(workspaceID: string, checked: boolean) {
     setStartupWorkspaces((current) => {
@@ -70,10 +68,6 @@ export function GeneralPage({
             )}
           </div>
         </ListCard>
-      </section>
-      <section className="grid gap-2">
-        <h3 className="text-xs font-medium">Observation</h3>
-        <ListCard><SettingRow icon={Eye} title="Polling cadence" description="How often Silo refreshes hidden app state." control={<Select value={pollingCadence} onValueChange={(value) => setPollingCadence(value as "15" | "30" | "60")}><SelectTrigger className="h-7 w-32 shrink-0 text-[11px]" aria-label="Polling cadence"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="15">15 seconds</SelectItem><SelectItem value="30">30 seconds</SelectItem><SelectItem value="60">60 seconds</SelectItem></SelectContent></Select>} /></ListCard>
       </section>
       <section className="grid gap-2">
         <h3 className="text-xs font-medium">Applications</h3>

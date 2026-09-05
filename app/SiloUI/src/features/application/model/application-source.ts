@@ -215,7 +215,6 @@ export interface ApplicationSource {
   preferences: ApplicationPreferenceSelection & {
     launchAtLogin: boolean
     startWorkspacesAtLaunch: boolean
-    pollingCadence: "15" | "30" | "60"
     reduceMotion: boolean
   }
 }
