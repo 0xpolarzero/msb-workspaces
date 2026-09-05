@@ -90,10 +90,44 @@ describe("application", () => {
     expect(appPanel("Backup")).toBeVisible()
   })
 
+  it("keeps busy and warning indicators visible in the collapsed sidebar", async () => {
+    const { user } = renderApplication("running", applicationSourceForScenario("running", undefined, "warning", undefined, undefined, "pushing"))
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }))
+    const navigation = within(appNavigation())
+    const files = navigation.getByRole("button", { name: "Files" })
+    expect(files).toHaveAttribute("aria-busy", "true")
+    expect(files.querySelectorAll("svg")).toHaveLength(1)
+    expect(files.querySelector("svg")).toHaveAttribute("data-navigation-loading-indicator")
+    expect(navigation.getByRole("status", { name: "0 sandbox errors, 3 sandbox warnings" })).toBeInTheDocument()
+  })
+
+  it.each(["past", "future"] as const)("removes a resolved issue from the %s navigation history", async (position) => {
+    const application = renderApplication("running", applicationSourceForScenario("running", undefined, undefined, undefined, "verifying"))
+    const navigation = within(appNavigation())
+    await application.user.click(navigation.getByRole("button", { name: "Files" }))
+    await application.user.click(navigation.getByRole("button", { name: "System issue" }))
+    await application.user.click(navigation.getByRole("button", { name: "Backup" }))
+    const back = screen.getByRole("button", { name: "Go back" })
+    const forward = screen.getByRole("button", { name: "Go forward" })
+    if (position === "future") {
+      await application.user.click(back)
+      await application.user.click(back)
+    }
+    application.rerender(<ApplicationApp source={applicationSourceForScenario("running", undefined, undefined, undefined, "succeeded")} actions={application.actions} />)
+    if (position === "past") {
+      await application.user.click(back)
+      expect(within(appPanel("Sandboxes")).getByRole("list", { name: "Repositories" })).toBeVisible()
+    }
+    await application.user.click(forward)
+    expect(appPanel("Backup")).toBeVisible()
+    expect(forward).toBeDisabled()
+    expect(navigation.queryByRole("button", { name: "System issue" })).not.toBeInTheDocument()
+  })
+
   it("focuses the command input with Command-K without losing the current page", async () => {
     const { user } = renderApplication()
     await user.click(within(appNavigation()).getByRole("button", { name: "Backup" }))
-    const input = screen.getByRole("textbox", { name: "Search or jump to" })
+    const input = screen.getByRole<HTMLInputElement>("textbox", { name: "Search or jump to" })
     expect(screen.getByText("⌘ K", { selector: "kbd" })).toBeVisible()
     await user.keyboard("{Meta>}k{/Meta}")
     expect(input).toHaveFocus()
@@ -139,13 +173,13 @@ describe("application", () => {
     const navigation = appNavigation()
     const primaryItems = [...navigation.querySelectorAll<HTMLElement>("[data-navigation-level='primary']")]
     expect(primaryItems.map(({ textContent }) => textContent)).toEqual(["Sandboxes", "GitHub", "Secrets", "Backup", "Settings"])
-    for (const item of primaryItems) expect(item).toHaveClass("flex-none", "md:w-full")
+    for (const item of primaryItems) expect(item).toHaveClass("flex-none", "w-full")
 
     expect(within(navigation).getByRole("button", { name: "Sandboxes" })).toHaveAttribute("aria-current", "page")
     const sandboxSections = within(navigation).getByRole("group", { name: "Sandbox sections" })
     expect(within(sandboxSections).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Overview", "Files", "Logs", "Network", "Activity"])
     expect(within(sandboxSections).getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page")
-    expect(sandboxSections).toHaveClass("md:ml-3", "md:w-[calc(100%-0.75rem)]", "md:border-l", "md:pl-2")
+    expect(sandboxSections).toHaveClass("ml-3", "w-[calc(100%-0.75rem)]", "border-l", "pl-2")
 
     const overview = within(appPanel("Sandboxes"))
     expect(overview.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument()
@@ -1103,6 +1137,11 @@ describe("application", () => {
     expect(within(navigation.getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page")
     expect(sandboxes.getByRole("status")).toHaveTextContent("Installation repaired")
     expect(sandboxes.getByRole("list", { name: "Configured sandboxes" })).toBeVisible()
+    await application.user.click(screen.getByRole("button", { name: "Go back" }))
+    expect(sandboxes.getByRole("list", { name: "Repositories" })).toBeVisible()
+    await application.user.click(screen.getByRole("button", { name: "Go forward" }))
+    expect(sandboxes.getByRole("list", { name: "Configured sandboxes" })).toBeVisible()
+    expect(screen.queryByRole("region", { name: "System issue" })).not.toBeInTheDocument()
   })
 
   it("removes the repair confirmation after four seconds", () => {

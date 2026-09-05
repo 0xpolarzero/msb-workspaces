@@ -7,9 +7,10 @@ interface SiloWindowProps {
   label: string
   children: ReactNode
   className?: string
+  titleBar?: ReactNode
 }
 
-export function SiloWindow({ title, label, children, className }: SiloWindowProps) {
+export function SiloWindow({ title, label, children, className, titleBar }: SiloWindowProps) {
   return (
     <main className="grid min-h-dvh place-items-center bg-muted/50 p-0 sm:p-4">
       <section
@@ -19,7 +20,7 @@ export function SiloWindow({ title, label, children, className }: SiloWindowProp
         )}
         aria-label={label}
       >
-        <header className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-border bg-muted/30 px-3">
+        {titleBar ?? <header className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-border bg-muted/30 px-3">
           <div className="flex gap-1.5" aria-hidden="true">
             <span className="size-2.5 rounded-full bg-red-400" />
             <span className="size-2.5 rounded-full bg-amber-400" />
@@ -27,7 +28,7 @@ export function SiloWindow({ title, label, children, className }: SiloWindowProp
           </div>
           <h1 className="text-xs font-medium">{title}</h1>
           <div />
-        </header>
+        </header>}
         {children}
       </section>
     </main>

@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type { BackupFixtureMode } from "@/fixtures/application-backup"
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { ApplicationShell, type ApplicationNavigationLoading } from "@/features/application/components/application-shell"
-import type { ApplicationActions, ApplicationSource, ApplicationTab, RepositoryPushOperation, RuntimeRepairPresentation, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
+import type { ApplicationActions, ApplicationSource, RepositoryPushOperation, RuntimeRepairPresentation, SandboxConfigurationOperation } from "@/features/application/model/application-source"
+import { useApplicationNavigation } from "@/features/application/model/use-application-navigation"
 import { BackupPage } from "@/features/application/pages/backup-page"
 import { GeneralPage } from "@/features/application/pages/general-page"
 import { GitHubPage } from "@/features/application/pages/github-page"
@@ -65,11 +66,10 @@ function navigationLoadingState(source: ApplicationSource, githubBusy: boolean, 
 
 export function ApplicationApp({ source, actions, backupPreviewMode }: { source: ApplicationSource; actions: ApplicationActions; backupPreviewMode?: BackupFixtureMode }) {
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
-  const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
+  const navigation = useApplicationNavigation(Boolean(activeRuntimeRepair))
+  const { tab: activeTab, workspaceSection, settingsSection } = navigation
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
   const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState<Set<string>>(() => new Set())
-  const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>("overview")
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
   const [logQuery, setLogQuery] = useState("")
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
   const [repositoryPushOperations, setRepositoryPushOperations] = useState<RepositoryPushOperation[]>(source.repositoryPushOperations)
@@ -86,9 +86,8 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
   }))
   const previousRuntimeRepairStatus = useRef<RuntimeRepairPresentation["status"] | undefined>(undefined)
   const repairConfirmationTimer = useRef<number | null>(null)
-  const resolvedSystemSelection = activeTab === "system" && !activeRuntimeRepair
-  const visibleTab = resolvedSystemSelection ? "workspaces" : activeTab
-  const visibleWorkspaceSection = resolvedSystemSelection && source.runtimeRepair?.status === "succeeded" ? "overview" : workspaceSection
+  const visibleTab = activeTab
+  const visibleWorkspaceSection = workspaceSection
   const applicationSource = {
     ...source,
     workspaces,
@@ -120,10 +119,7 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
       editor: source.preferences.editor,
       browser: source.preferences.browser,
     })
-    // The destination only exists while the global issue remains active.
-    // oxlint-disable-next-line react/set-state-in-effect
-    setActiveTab((current) => current === "system" && !activeRuntimeRepair ? "workspaces" : current)
-  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, source.preferences.terminal, source.preferences.editor, source.preferences.browser, activeRuntimeRepair])
+  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, source.preferences.terminal, source.preferences.editor, source.preferences.browser])
 
   useEffect(() => {
     const status = source.runtimeRepair?.status
@@ -142,10 +138,6 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
     if (status !== "succeeded" || previousStatus === "succeeded") return
 
     // A successful repair is a transient result, not a navigation destination.
-    if (activeTab === "system") {
-      // oxlint-disable-next-line react/set-state-in-effect
-      setWorkspaceSection("overview")
-    }
     // oxlint-disable-next-line react/set-state-in-effect
     setRepairConfirmationVisible(true)
     if (repairConfirmationTimer.current !== null) window.clearTimeout(repairConfirmationTimer.current)
@@ -204,9 +196,13 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
       systemIssueStatus={activeRuntimeRepair?.status ?? null}
       workspaceAttention={workspaceAttentionCounts(applicationSource)}
       navigationLoading={navigationLoadingState(applicationSource, githubBusy, backupBusy)}
-      onTabChange={setActiveTab}
-      onWorkspaceSectionChange={setWorkspaceSection}
-      onSettingsSectionChange={setSettingsSection}
+      onTabChange={navigation.selectTab}
+      onWorkspaceSectionChange={navigation.selectWorkspaceSection}
+      onSettingsSectionChange={navigation.selectSettingsSection}
+      canGoBack={navigation.canGoBack}
+      canGoForward={navigation.canGoForward}
+      onGoBack={navigation.goBack}
+      onGoForward={navigation.goForward}
     >
       <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={visibleTab !== "workspaces"} className="h-full min-h-0 overflow-hidden">
         {visibleWorkspaceSection === "overview" ? (
