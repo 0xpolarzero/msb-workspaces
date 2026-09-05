@@ -173,17 +173,17 @@ export function SystemIssuePage({ issue, actions }: { issue: ActiveRuntimeRepair
         {(footerNote || issue.status === "needed" || issue.status === "repairing" || issue.status === "failed") && (
           <CardFooter className="flex-wrap justify-between gap-3 bg-muted/25">
             {footerNote && <p className="min-w-0 flex-1 text-xs text-muted-foreground">{footerNote}</p>}
-            {issue.status === "needed" && <Button onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Repair Installation</Button>}
-            {issue.status === "repairing" && <Button variant="outline" disabled aria-label="Repair in progress"><Loader2 className="animate-spin" aria-hidden="true" />Repairing…</Button>}
+            {issue.status === "needed" && <Button size="sm" onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Repair Installation</Button>}
+            {issue.status === "repairing" && <Button variant="outline" size="sm" disabled aria-label="Repair in progress"><Loader2 className="animate-spin" aria-hidden="true" />Repairing…</Button>}
             {issue.status === "failed" && (
               <div className="flex flex-wrap items-center gap-2">
-                <Button variant="outline" asChild>
+                <Button variant="outline" size="sm" asChild>
                   <a href={siloIssuesURL} target="_blank" rel="noreferrer">
                     <ExternalLink aria-hidden="true" />
                     Open GitHub Issues
                   </a>
                 </Button>
-                <Button onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Retry Repair</Button>
+                <Button size="sm" onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Retry Repair</Button>
               </div>
             )}
           </CardFooter>

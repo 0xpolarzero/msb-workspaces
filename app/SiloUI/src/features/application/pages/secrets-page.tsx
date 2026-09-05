@@ -36,7 +36,7 @@ export function SecretsPage({ source }: { source: ApplicationSource }) {
           <h2 className="text-xs font-medium">Secrets</h2>
           <p className="text-[11px] text-muted-foreground">{secrets.length} configured</p>
         </div>
-        <Button type="button" variant="outline" size="sm" aria-label="Add secret">
+        <Button type="button" variant="outline" size="xs" aria-label="Add secret">
           <Plus aria-hidden="true" data-icon="inline-start" /> Add
         </Button>
       </header>

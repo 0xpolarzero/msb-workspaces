@@ -329,7 +329,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
           </div>
           <Popover open={addOpen} onOpenChange={setAddOpen}>
             <PopoverTrigger asChild>
-              <Button type="button" variant="outline" size="sm" aria-haspopup="menu" disabled={interactionDisabled} onClick={beginOperation}>
+              <Button type="button" variant="outline" size="xs" aria-haspopup="menu" disabled={interactionDisabled} onClick={beginOperation}>
                 <Plus aria-hidden="true" data-icon="inline-start" /> Add
               </Button>
             </PopoverTrigger>
