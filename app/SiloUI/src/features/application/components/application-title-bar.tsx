@@ -62,7 +62,7 @@ export function ApplicationTitleBar({
         </div>
       </div>
       {collapsed && <span aria-hidden="true" className="h-5 w-px shrink-0 bg-border" />}
-      <div className="flex min-w-0 flex-1 items-center px-3">
+      <div className="flex min-w-0 flex-1 items-center px-4 sm:px-6">
         <div className="relative w-full max-w-md">
           <Search aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
