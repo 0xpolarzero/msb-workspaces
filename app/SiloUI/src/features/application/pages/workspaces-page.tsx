@@ -227,7 +227,7 @@ function Files({
                         <ListRow
                           data-repository-header
                           icon={<ListRowIcon aria-hidden="true"><GitBranch className="size-3.5" /></ListRowIcon>}
-                          title={<span className="truncate text-xs font-medium">{repository.path}</span>}
+                          title={<span className="truncate">{repository.path}</span>}
                           detail={`${repository.branch} · ${repository.ahead} ahead, ${repository.behind} behind`}
                           actions={<WorkspaceBadge name={workspace.machine.name} state={workspace.state} />}
                         />
@@ -516,7 +516,7 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
                             : <Activity className="size-3.5" />}
                   </ListRowIcon>
                 }
-                title={<div className="min-w-0 text-xs font-medium break-words">{item.title}</div>}
+                title={<div className="min-w-0 break-words">{item.title}</div>}
                 detailClassName="whitespace-normal"
                 detail={
                   <div className="min-w-0 space-y-1" data-activity-content>

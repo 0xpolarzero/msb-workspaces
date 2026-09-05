@@ -137,7 +137,7 @@ export function SystemIssuePage({ issue, actions }: { issue: ActiveRuntimeRepair
               <Icon className={cn("size-3.5", issue.status === "repairing" && "animate-spin motion-reduce:animate-none")} />
             </ListRowIcon>
           }
-          title={<h3 className="text-xs font-medium">{header.title}</h3>}
+          title={<h3>{header.title}</h3>}
           detail={header.description}
           detailClassName="whitespace-normal"
           actions={issue.status !== "unavailable" && (

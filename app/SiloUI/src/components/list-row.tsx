@@ -32,8 +32,8 @@ export function ListRow({
       {leading}
       {icon}
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-1.5">{title}</div>
-        <div className={cn("truncate text-[10px] text-muted-foreground", detailClassName)}>{detail}</div>
+        <div className="flex min-w-0 items-center gap-1.5 text-[13px] leading-4 font-medium">{title}</div>
+        <div className={cn("truncate text-[11px] leading-4 text-muted-foreground", detailClassName)}>{detail}</div>
       </div>
       {actions}
     </div>

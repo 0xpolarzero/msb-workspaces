@@ -30,7 +30,7 @@ export function NotificationsPage() {
         <ListRow
           className="hover:bg-muted/35 focus-within:bg-muted/35"
           icon={<ListRowIcon aria-hidden="true"><Bell className="size-3.5" /></ListRowIcon>}
-          title={<h3 className="text-xs font-medium">Enable notifications</h3>}
+          title={<h3>Enable notifications</h3>}
           detail="Silo can send alerts while its window is closed."
           detailClassName="whitespace-normal"
           actions={<Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enable notifications" />}
@@ -44,7 +44,7 @@ export function NotificationsPage() {
               key={id}
               className="hover:bg-muted/35 focus-within:bg-muted/35"
               icon={<ListRowIcon aria-hidden="true"><Icon className="size-3.5" /></ListRowIcon>}
-              title={<h4 className="text-xs font-medium">{label}</h4>}
+              title={<h4>{label}</h4>}
               detail={detail}
               detailClassName="whitespace-normal"
               actions={<Switch checked={selectedCategories.has(id)} onCheckedChange={(checked) => setCategory(id, checked)} disabled={!enabled} aria-label={label} />}

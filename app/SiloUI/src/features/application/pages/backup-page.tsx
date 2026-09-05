@@ -198,7 +198,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                 className="hover:bg-muted/35 focus-within:bg-muted/35"
                 icon={<ListRowIcon aria-hidden="true"><Archive className="size-3.5" /></ListRowIcon>}
                 title={<>
-                  <h3 className="truncate text-xs font-medium">Create backup</h3>
+                  <h3 className="truncate">Create backup</h3>
                   <Tooltip>
                     <TooltipTrigger asChild><Button type="button" variant="ghost" size="icon-xs" className="size-4 text-muted-foreground" aria-label="What a backup includes"><Info aria-hidden="true" /></Button></TooltipTrigger>
                     <TooltipContent>Includes sandbox code, VM state, databases, Docker data, and guest-side credentials. macOS Keychain credentials are excluded.</TooltipContent>
@@ -227,7 +227,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
               <ListRow
                 className="hover:bg-muted/35 focus-within:bg-muted/35"
                 icon={<ListRowIcon aria-hidden="true"><RotateCcw className="size-3.5" /></ListRowIcon>}
-                title={<h3 className="truncate text-xs font-medium">Restore archive</h3>}
+                title={<h3 className="truncate">Restore archive</h3>}
                 detail="Replaces all sandbox state and leaves sandboxes stopped."
                 detailClassName="whitespace-normal"
                 actions={<Button ref={restoreButton} type="button" variant="outline" size="xs" disabled={controlsDisabled} onClick={pickArchive}>Choose archive…</Button>}
@@ -261,7 +261,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
               <ListRow
                 className="hover:bg-muted/35 focus-within:bg-muted/35"
                 icon={<ListRowIcon className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" role="img" aria-label="Backup completed"><Check className="size-3.5" aria-hidden="true" /></ListRowIcon>}
-                title={<span className="truncate text-xs font-medium" title={archive.name}>{archive.name}</span>}
+                title={<span className="truncate" title={archive.name}>{archive.name}</span>}
                 detail={<>{archive.completedLabel} · {archive.size} · {archive.sandboxes.length} sandboxes</>}
                 actions={<Button type="button" variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={`Details for ${archive.name}`} aria-expanded={expandedArchive === archive.name} onClick={() => setExpandedArchive(expandedArchive === archive.name ? null : archive.name)}><ChevronDown aria-hidden="true" className={expandedArchive === archive.name ? "rotate-180" : ""} /></Button>}
               />

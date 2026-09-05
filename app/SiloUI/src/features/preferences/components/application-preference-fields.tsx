@@ -21,7 +21,7 @@ function ApplicationPreferenceRow({
     <ListRow
       className={compact ? "hover:bg-muted/35 focus-within:bg-muted/35" : "gap-3 px-0 py-3 first:pt-0 last:pb-0"}
       icon={compact ? <ListRowIcon aria-hidden="true"><Icon className="size-3.5" /></ListRowIcon> : <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
-      title={<div className={compact ? "text-xs font-medium" : "text-sm font-medium"}>{title}</div>}
+      title={<div className={compact ? undefined : "text-sm"}>{title}</div>}
       detail={description}
       detailClassName={compact ? "whitespace-normal" : "mt-0.5 whitespace-normal text-xs"}
       actions={<div className={compact ? "w-40 max-w-[45%] shrink-0" : "w-48 shrink-0"}>{control}</div>}
@@ -95,4 +95,3 @@ export function ApplicationPreferenceFields({
     </>
   )
 }
-

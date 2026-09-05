@@ -14,7 +14,7 @@ function SettingRow({ icon: Icon, title, description, control }: { icon: typeof 
     <ListRow
       className="hover:bg-muted/35 focus-within:bg-muted/35"
       icon={<ListRowIcon aria-hidden="true"><Icon className="size-3.5" /></ListRowIcon>}
-      title={<h4 className="text-xs font-medium">{title}</h4>}
+      title={<h4>{title}</h4>}
       detail={description}
       detailClassName="whitespace-normal"
       actions={control}

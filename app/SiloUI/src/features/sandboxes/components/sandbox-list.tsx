@@ -95,7 +95,7 @@ export function SandboxListRow({
       icon={icon ?? <SandboxIcon kind={kind} state={iconState} />}
       title={
         <>
-          <span className="truncate text-xs font-medium" title={name}>{name}</span>
+          <span className="truncate" title={name}>{name}</span>
           <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase text-muted-foreground">{kind}</span>
           {badge}
         </>

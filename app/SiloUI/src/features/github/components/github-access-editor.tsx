@@ -225,7 +225,7 @@ export function GitHubAccessEditor({
                   : <GitBranch className={compactConnection ? "size-3.5" : "size-4"} />}
             </ListRowIcon>
           }
-          title={<h3 className={compactConnection ? "text-xs font-medium" : "text-sm font-medium"}>{connectionState === "connected" ? connectedTitle : connectionState === "connecting" ? "Connecting to GitHub…" : "Not connected"}</h3>}
+          title={<h3 className={compactConnection ? undefined : "text-sm"}>{connectionState === "connected" ? connectedTitle : connectionState === "connecting" ? "Connecting to GitHub…" : "Not connected"}</h3>}
           detail={connectionState === "connected" ? connectedDetail : connectionState === "connecting" ? "Completing the secure browser authorization." : "Connect to select private repositories and push permissions."}
           detailClassName={compactConnection ? "whitespace-normal" : "mt-0.5 whitespace-normal text-xs"}
           actions={connectionState !== "connecting" && (
