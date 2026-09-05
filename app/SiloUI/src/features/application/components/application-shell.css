@@ -64,6 +64,11 @@
   translate: -50% -50%;
 }
 
+.sidebar-icon-badge[data-navigation-loading-indicator] {
+  /* Align the outer right edge, including the spinner's 2px halo. */
+  left: calc(50% + 3px);
+}
+
 .sidebar-brand {
   padding-inline: 12px;
   transition: padding var(--sidebar-motion), gap var(--sidebar-motion);
