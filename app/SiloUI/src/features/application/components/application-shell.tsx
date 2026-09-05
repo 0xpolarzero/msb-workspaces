@@ -171,7 +171,8 @@ function SubNavigation<Section extends string>({
   onSelect: (section: Section) => void
 }) {
   return (
-    <div role="group" aria-label={label} className={cn("grid gap-1 border-l border-border", collapsed ? "ml-1 w-[calc(100%-0.25rem)] pl-1" : "ml-3 w-[calc(100%-0.75rem)] pl-2")}>
+    <div role="group" aria-label={label} className={cn("relative grid gap-1", collapsed ? "w-full" : "ml-3 w-[calc(100%-0.75rem)] border-l border-border pl-2")}>
+      {collapsed && <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-1 border-l border-border" />}
       {items.map(({ id, label: itemLabel, icon: Icon }) => (
         <NavigationTooltip key={id} label={itemLabel} collapsed={collapsed}>
         <button
