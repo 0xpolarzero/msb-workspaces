@@ -37,7 +37,7 @@ function NavigationLoadingIndicator({ loading, collapsed }: { loading: boolean; 
   if (!loading) return null
   return <Loader2 data-navigation-loading-indicator aria-hidden="true" className={cn(
     "shrink-0 animate-spin motion-reduce:animate-none",
-    collapsed ? "absolute top-1/2 right-0 size-2 -translate-y-1/2" : "size-3.5",
+    collapsed ? "absolute -top-1 -right-1 size-2 rounded-full bg-sidebar ring-2 ring-sidebar" : "size-3.5",
   )} />
 }
 
@@ -97,9 +97,12 @@ function NavigationButton({
         reserveDisclosure && !collapsed && "pr-10",
       )}
     >
-      <Icon aria-hidden="true" className="size-4 shrink-0" />
+      <span className="relative flex shrink-0">
+        <Icon aria-hidden="true" className="size-4" />
+        {collapsed && <NavigationLoadingIndicator loading={loading} collapsed />}
+      </span>
       <span className={collapsed ? "sr-only" : "flex-1 text-left"}>{label}</span>
-      <NavigationLoadingIndicator loading={loading} collapsed={collapsed} />
+      {!collapsed && <NavigationLoadingIndicator loading={loading} collapsed={false} />}
     </button>
     </NavigationTooltip>
   )
@@ -182,7 +185,10 @@ function SubNavigation<Section extends string>({
             active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
-          <Icon aria-hidden="true" className={cn("shrink-0", collapsed ? "size-3" : "size-3.5")} />
+          <span className="relative flex shrink-0">
+            <Icon aria-hidden="true" className={collapsed ? "size-3" : "size-3.5"} />
+            {collapsed && <NavigationLoadingIndicator loading={loading?.[id] ?? false} collapsed />}
+          </span>
           <span className={collapsed ? "sr-only" : "flex-1 text-left"}>{itemLabel}</span>
           {collapsed && attention?.section === id && <span
             role="status"
@@ -223,7 +229,7 @@ function SubNavigation<Section extends string>({
               </TooltipProvider>
               </span>
             )}
-          <NavigationLoadingIndicator loading={loading?.[id] ?? false} collapsed={collapsed} />
+          {!collapsed && <NavigationLoadingIndicator loading={loading?.[id] ?? false} collapsed={false} />}
         </button>
         </NavigationTooltip>
       ))}
