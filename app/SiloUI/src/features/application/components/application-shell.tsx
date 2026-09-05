@@ -33,9 +33,12 @@ const settingsItems = [
   { id: "notifications", label: "Notifications", icon: Bell },
 ] as const
 
-function NavigationLoadingIndicator({ loading }: { loading: boolean }) {
+function NavigationLoadingIndicator({ loading, collapsed }: { loading: boolean; collapsed: boolean }) {
   if (!loading) return null
-  return <Loader2 data-navigation-loading-indicator aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
+  return <Loader2 data-navigation-loading-indicator aria-hidden="true" className={cn(
+    "shrink-0 animate-spin motion-reduce:animate-none",
+    collapsed ? "absolute top-1/2 right-0 size-2 -translate-y-1/2" : "size-3.5",
+  )} />
 }
 
 function NavigationTooltip({ label, collapsed, children }: { label: string; collapsed: boolean; children: ReactNode }) {
@@ -94,9 +97,9 @@ function NavigationButton({
         reserveDisclosure && !collapsed && "pr-10",
       )}
     >
-      {!(collapsed && loading) && <Icon aria-hidden="true" className="size-4 shrink-0" />}
+      <Icon aria-hidden="true" className="size-4 shrink-0" />
       <span className={collapsed ? "sr-only" : "flex-1 text-left"}>{label}</span>
-      <NavigationLoadingIndicator loading={loading} />
+      <NavigationLoadingIndicator loading={loading} collapsed={collapsed} />
     </button>
     </NavigationTooltip>
   )
@@ -165,7 +168,7 @@ function SubNavigation<Section extends string>({
   onSelect: (section: Section) => void
 }) {
   return (
-    <div role="group" aria-label={label} className={cn("grid gap-1", collapsed ? "w-full" : "ml-3 w-[calc(100%-0.75rem)] border-l border-border pl-2")}>
+    <div role="group" aria-label={label} className={cn("grid gap-1 border-l border-border", collapsed ? "ml-1 w-[calc(100%-0.25rem)] pl-1" : "ml-3 w-[calc(100%-0.75rem)] pl-2")}>
       {items.map(({ id, label: itemLabel, icon: Icon }) => (
         <NavigationTooltip key={id} label={itemLabel} collapsed={collapsed}>
         <button
@@ -175,11 +178,11 @@ function SubNavigation<Section extends string>({
           onClick={() => onSelect(id)}
           className={cn(
             "relative flex h-8 w-full min-w-0 items-center gap-2 rounded-md text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70",
-            collapsed ? "justify-center px-0" : "justify-start px-2.5",
+            collapsed ? "h-7 justify-center px-0" : "justify-start px-2.5",
             active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
-          {!(collapsed && loading?.[id]) && <Icon aria-hidden="true" className="size-3.5 shrink-0" />}
+          <Icon aria-hidden="true" className={cn("shrink-0", collapsed ? "size-3" : "size-3.5")} />
           <span className={collapsed ? "sr-only" : "flex-1 text-left"}>{itemLabel}</span>
           {collapsed && attention?.section === id && <span
             role="status"
@@ -220,7 +223,7 @@ function SubNavigation<Section extends string>({
               </TooltipProvider>
               </span>
             )}
-          <NavigationLoadingIndicator loading={loading?.[id] ?? false} />
+          <NavigationLoadingIndicator loading={loading?.[id] ?? false} collapsed={collapsed} />
         </button>
         </NavigationTooltip>
       ))}

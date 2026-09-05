@@ -91,13 +91,19 @@ describe("application", () => {
   })
 
   it("keeps busy and warning indicators visible in the collapsed sidebar", async () => {
-    const { user } = renderApplication("running", applicationSourceForScenario("running", undefined, "warning", undefined, undefined, "pushing"))
+    const { user } = renderApplication("running", applicationSourceForScenario("running", "connecting", "warning", undefined, undefined, "pushing"))
     await user.click(screen.getByRole("button", { name: "Collapse sidebar" }))
     const navigation = within(appNavigation())
-    const files = navigation.getByRole("button", { name: "Files" })
-    expect(files).toHaveAttribute("aria-busy", "true")
-    expect(files.querySelectorAll("svg")).toHaveLength(1)
-    expect(files.querySelector("svg")).toHaveAttribute("data-navigation-loading-indicator")
+    for (const label of ["Files", "GitHub"]) {
+      const button = navigation.getByRole("button", { name: label })
+      expect(button).toHaveAttribute("aria-busy", "true")
+      const icons = button.querySelectorAll("svg")
+      expect(icons).toHaveLength(2)
+      expect(icons[0]).not.toHaveAttribute("data-navigation-loading-indicator")
+      expect(icons[0]).not.toHaveClass("animate-spin")
+      expect(icons[1]).toHaveAttribute("data-navigation-loading-indicator")
+      expect(icons[1]).toHaveClass("size-2")
+    }
     expect(navigation.getByRole("status", { name: "0 sandbox errors, 3 sandbox warnings" })).toBeInTheDocument()
   })
 
