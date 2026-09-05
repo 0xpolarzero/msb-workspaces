@@ -5,7 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { BackupPage } from "@/features/application/pages/backup-page"
 import { applicationSourceForScenario } from "@/fixtures/application-scenarios"
 
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+function selectArchive(name = "silo-2026-09-02.silo-backup") {
+  fireEvent.change(screen.getByLabelText("Backup archive file"), { target: { files: [new File(["fixture archive"], name)] } })
+}
 
 async function finishOperation() {
   for (let step = 0; step < 4; step += 1) {
@@ -14,23 +22,54 @@ async function finishOperation() {
 }
 
 describe("BackupPage", () => {
-  it("previews destination capacity, cancels drafts, and saves a valid choice", async () => {
+  it("opens the native folder picker, preserves cancelled choices, and uses the selected folder", async () => {
     const user = userEvent.setup()
+    const picker = vi.fn()
+      .mockRejectedValueOnce(new DOMException("Cancelled", "AbortError"))
+      .mockResolvedValueOnce({ name: "My backups" })
+    vi.stubGlobal("showDirectoryPicker", picker)
     render(<BackupPage source={applicationSourceForScenario("running")} />)
-
     await user.click(screen.getByRole("button", { name: "Change backup destination" }))
-    await user.click(screen.getByRole("radio", { name: /USB Drive/ }))
-    expect(screen.getByRole("button", { name: "Use folder" })).toBeDisabled()
-    expect(screen.getByRole("alert")).toHaveTextContent("Not enough space")
-    await user.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(picker).toHaveBeenCalledWith({ id: "silo-backup-destination", mode: "read" })
     expect(screen.getByText("External SSD / Silo Backups")).toBeVisible()
-
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+    expect(screen.queryByRole("group", { name: "Backup destination" })).not.toBeInTheDocument()
     await user.click(screen.getByRole("button", { name: "Change backup destination" }))
-    await user.click(screen.getByRole("radio", { name: /Macintosh HD/ }))
-    await user.click(screen.getByRole("button", { name: "Use folder" }))
-    expect(screen.getByText("~/Backups/silo")).toBeVisible()
+    expect(screen.getByText("My backups")).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Back up" }))
-    expect(screen.getByRole("group", { name: "Review backup" })).toHaveTextContent("~/Backups/silo")
+    expect(screen.getByRole("group", { name: "Review backup" })).toHaveTextContent("My backups")
+    expect(screen.getByRole("group", { name: "Review backup" })).not.toHaveTextContent("GB available")
+  })
+
+  it("uses the native directory input when the directory handle API is unavailable", () => {
+    vi.stubGlobal("showDirectoryPicker", undefined)
+    render(<BackupPage source={applicationSourceForScenario("running")} />)
+    const input = screen.getByLabelText("Backup destination folder") as HTMLInputElement
+    const click = vi.spyOn(input, "click").mockImplementation(() => undefined)
+    fireEvent.click(screen.getByRole("button", { name: "Change backup destination" }))
+    expect(click).toHaveBeenCalledOnce()
+    expect(input.webkitdirectory).toBe(true)
+    const file = new File(["fixture"], "archive.silo-backup")
+    Object.defineProperty(file, "webkitRelativePath", { value: "Local backups/archive.silo-backup" })
+    fireEvent.change(input, { target: { files: [file] } })
+    expect(screen.getByText("Local backups")).toBeVisible()
+    fireEvent.change(input, { target: { files: [] } })
+    expect(screen.getByText("Local backups")).toBeVisible()
+  })
+
+  it("opens the native archive picker and reviews the selected file directly", () => {
+    render(<BackupPage source={applicationSourceForScenario("running")} />)
+    const input = screen.getByLabelText("Backup archive file") as HTMLInputElement
+    const click = vi.spyOn(input, "click").mockImplementation(() => undefined)
+    fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
+    expect(click).toHaveBeenCalledOnce()
+    expect(input).toHaveAttribute("accept", ".silo-backup")
+    fireEvent.change(input, { target: { files: [] } })
+    expect(screen.queryByRole("group", { name: "Review restore" })).not.toBeInTheDocument()
+    selectArchive("my-backup.silo-backup")
+    expect(screen.getByRole("group", { name: "Review restore" })).toHaveTextContent("my-backup.silo-backup")
+    expect(screen.queryByRole("button", { name: "Use archive" })).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Restore backup" })).toBeDisabled()
   })
 
   it("requires review, locks other actions while running, and adds only a completed backup to history", async () => {
@@ -86,7 +125,7 @@ describe("BackupPage", () => {
     const onRestoreComplete = vi.fn()
     render(<BackupPage source={applicationSourceForScenario("running")} onRestoreComplete={onRestoreComplete} />)
     fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+    selectArchive()
     const review = screen.getByRole("group", { name: "Review restore" })
     expect(review).toHaveTextContent("Checksum verified")
     expect(review).toHaveTextContent("All restored sandboxes will stay stopped")
@@ -108,17 +147,17 @@ describe("BackupPage", () => {
     const source = applicationSourceForScenario("running")
     const { rerender } = render(<BackupPage source={source} previewMode="invalid-archive" />)
     fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+    selectArchive()
     expect(screen.getByRole("alert")).toHaveTextContent("Checksum mismatch")
     expect(screen.queryByRole("button", { name: "Restore backup" })).not.toBeInTheDocument()
 
     rerender(<BackupPage source={source} />)
     fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+    selectArchive()
     fireEvent.change(screen.getByRole("textbox", { name: "Type RESTORE to confirm" }), { target: { value: "RESTORE" } })
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
     fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+    selectArchive()
     expect(screen.getByRole("button", { name: "Restore backup" })).toBeDisabled()
   })
 
@@ -132,8 +171,6 @@ describe("BackupPage", () => {
     const details = within(screen.getByRole("group", { name: "Archive details for silo-2026-09-02.silo-backup" }))
     expect(details.getByText("External SSD / Silo Backups")).toBeVisible()
     fireEvent.click(details.getByRole("button", { name: "Restore…" }))
-    expect(screen.getByRole("radio", { name: /silo-2026-09-02.silo-backup/ })).toBeChecked()
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
     expect(screen.getByRole("group", { name: "Review restore" })).toHaveTextContent("silo-2026-09-02.silo-backup")
     fireEvent.keyDown(screen.getByRole("textbox", { name: "Type RESTORE to confirm" }), { key: "Escape" })
     expect(screen.queryByRole("group", { name: "Review restore" })).not.toBeInTheDocument()
@@ -163,14 +200,14 @@ describe("BackupPage", () => {
     const onBusyChange = vi.fn()
     const { unmount } = render(<BackupPage source={applicationSourceForScenario("running")} previewMode="restore-failed" onRestoreComplete={onRestoreComplete} onBusyChange={onBusyChange} />)
     fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+    selectArchive()
     fireEvent.change(screen.getByRole("textbox", { name: "Type RESTORE to confirm" }), { target: { value: "RESTORE" } })
     fireEvent.click(screen.getByRole("button", { name: "Restore backup" }))
     await finishOperation()
     expect(screen.getByRole("alert")).toHaveTextContent("Restore failed")
     expect(onRestoreComplete).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole("button", { name: "Choose another archive" }))
-    fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+    selectArchive()
     fireEvent.change(screen.getByRole("textbox", { name: "Type RESTORE to confirm" }), { target: { value: "RESTORE" } })
     fireEvent.click(screen.getByRole("button", { name: "Restore backup" }))
     unmount()

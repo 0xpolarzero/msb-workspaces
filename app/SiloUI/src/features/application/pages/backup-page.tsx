@@ -8,16 +8,14 @@ import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { ApplicationSource } from "@/features/application/model/application-source"
 import {
-  backupDestinationChoices, backupProgressSteps, backupRequiredGB, initialBackupArchive, restoreProgressSteps,
+  backupProgressSteps, backupRequiredGB, initialBackupArchive, restoreProgressSteps,
   type BackupArchive, type BackupFixtureMode,
 } from "@/fixtures/application-backup"
 
 type Operation = "backup" | "restore"
 type Flow =
   | { kind: "idle" }
-  | { kind: "destination"; draft: string }
   | { kind: "backup-review" }
-  | { kind: "archive-picker"; archive: BackupArchive }
   | { kind: "restore-review"; archive: BackupArchive; confirmation: string }
   | { kind: "invalid-archive"; archive: BackupArchive }
   | { kind: "running"; operation: Operation; archive: BackupArchive; runningNames: string[]; step: number }
@@ -41,18 +39,21 @@ function InlinePanel({ label, children }: { label: string; children: ReactNode }
 }
 
 function BackupPageContent({ source, previewMode = "success", onBusyChange, onRestoreComplete, onRestartRequired }: BackupPageProps) {
-  const destinations = backupDestinationChoices(source.backup.destination)
-  const [destination, setDestination] = useState(destinations[0])
+  const [destination, setDestination] = useState(source.backup.destination)
+  const [pickingFolder, setPickingFolder] = useState(false)
+  const [pickerError, setPickerError] = useState<string | null>(null)
   const [archives, setArchives] = useState<BackupArchive[]>(() => [initialBackupArchive(source)])
   const [flow, setFlow] = useState<Flow>({ kind: "idle" })
   const [expandedArchive, setExpandedArchive] = useState<string | null>(null)
+  const folderInput = useRef<HTMLInputElement>(null)
+  const archiveInput = useRef<HTMLInputElement>(null)
   const backupButton = useRef<HTMLButtonElement>(null)
   const restoreButton = useRef<HTMLButtonElement>(null)
   const busy = flow.kind === "running"
+  const controlsDisabled = busy || pickingFolder
   const localSandboxes = source.workspaces.filter(({ machine }) => machine.kind === "vm")
   const runningNames = localSandboxes.filter(({ state }) => state === "running").map(({ machine }) => machine.name)
-  const backupExpanded = flow.kind === "destination" || flow.kind === "backup-review" || ((flow.kind === "running" || flow.kind === "result") && flow.operation === "backup")
-  const restoreExpanded = flow.kind !== "idle" && !backupExpanded
+  const backupExpanded = flow.kind === "backup-review" || ((flow.kind === "running" || flow.kind === "result") && flow.operation === "backup")
 
   useEffect(() => {
     onBusyChange?.(busy)
@@ -86,14 +87,42 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
   function startBackup() {
     const archive: BackupArchive = {
       name: `silo-${new Date().toISOString().slice(0, 10)}-${String(archives.length).padStart(3, "0")}.silo-backup`,
-      completedLabel: "Just now", size: source.backup.compressedSize, destination: destination.path,
+      completedLabel: "Just now", size: source.backup.compressedSize, destination,
       sandboxes: localSandboxes.map(({ machine }) => machine.name),
     }
     setFlow({ kind: "running", operation: "backup", archive, runningNames, step: 0 })
   }
 
-  function pickArchive(archive = archives[0]) {
-    setFlow({ kind: "archive-picker", archive })
+  async function pickDestination() {
+    setPickerError(null)
+    const pickerWindow = window as Window & {
+      showDirectoryPicker?: (options: { id: string; mode: "read" }) => Promise<FileSystemDirectoryHandle>
+    }
+    if (!pickerWindow.showDirectoryPicker) {
+      folderInput.current?.click()
+      return
+    }
+    setPickingFolder(true)
+    try {
+      // Only the folder name is used in this UI preview; no files are read or written.
+      const folder = await pickerWindow.showDirectoryPicker({ id: "silo-backup-destination", mode: "read" })
+      setDestination(folder.name)
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setPickerError("Could not open the folder picker. Try again.")
+      }
+    } finally {
+      setPickingFolder(false)
+    }
+  }
+
+  function reviewArchive(archive: BackupArchive) {
+    setFlow(previewMode === "invalid-archive" ? { kind: "invalid-archive", archive } : { kind: "restore-review", archive, confirmation: "" })
+  }
+
+  function pickArchive() {
+    setPickerError(null)
+    archiveInput.current?.click()
   }
 
   function operationPanel(operation: Operation) {
@@ -119,7 +148,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
           <p className="text-[11px] text-muted-foreground">{failed
             ? operation === "backup" ? "The destination disconnected while writing. No archive was saved; the previous sandbox running state was restored." : "The restored data could not be verified. Your previous sandbox state was recovered."
             : operation === "backup" ? "Archive saved and checksum verified." : "All restored sandboxes are stopped. Start them from Overview when ready."}</p>
-          {!failed && <p className="break-all text-[10px] text-muted-foreground">{flow.archive.destination} / {flow.archive.name}</p>}
+          {!failed && <p className="break-all text-[10px] text-muted-foreground">{[flow.archive.destination, flow.archive.name].filter(Boolean).join(" / ")}</p>}
           {flow.outcome === "restart-required" && <p className="text-[11px] text-amber-700 dark:text-amber-400">Restart {flow.runningNames.join(", ")} to return to the previous running state. Your backup is valid.</p>}
         </div>
       </div>
@@ -135,6 +164,35 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
       <div className="mx-auto grid w-full max-w-4xl gap-4 px-4 py-5 sm:px-6 sm:py-6" onKeyDown={(event) => {
         if (event.key === "Escape" && flow.kind !== "idle" && !busy) { event.preventDefault(); closeFlow() }
       }}>
+        <input
+          ref={(element) => { folderInput.current = element; if (element) element.webkitdirectory = true }}
+          type="file" hidden aria-label="Backup destination folder" disabled={controlsDisabled}
+          onChange={(event) => {
+            const input = event.currentTarget
+            const name = input.webkitEntries?.[0]?.name || input.files?.[0]?.webkitRelativePath.split("/")[0]
+            if (name) setDestination(name)
+            input.value = ""
+          }}
+        />
+        <input
+          ref={archiveInput} type="file" accept=".silo-backup" hidden aria-label="Backup archive file" disabled={controlsDisabled}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0]
+            event.currentTarget.value = ""
+            if (!file) return
+            if (!file.name.endsWith(".silo-backup")) {
+              setPickerError("Choose a .silo-backup archive.")
+              return
+            }
+            setPickerError(null)
+            // Archive contents and validation remain fixtures; selecting a file does not read it.
+            reviewArchive({
+              ...initialBackupArchive(source), name: file.name, destination: "", completedLabel: "Selected archive",
+              size: file.size >= 1024 ** 3 ? `${(file.size / 1024 ** 3).toFixed(1)} GB` : `${(file.size / 1024 ** 2).toFixed(1)} MB`,
+            })
+          }}
+        />
+        {pickerError && <p role="alert" className="text-[11px] text-destructive">{pickerError}</p>}
         <section className="grid gap-2">
           <h2 className="text-xs font-medium">Backup</h2>
           <ul className="divide-y divide-border overflow-hidden rounded-md border border-border" aria-label="Backup controls">
@@ -149,37 +207,17 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                     <TooltipContent>Includes sandbox code, VM state, databases, Docker data, and guest-side credentials. macOS Keychain credentials are excluded.</TooltipContent>
                   </Tooltip>
                 </>}
-                detail={<span title={destination.path}>{destination.path}</span>}
+                detail={<span title={destination}>{destination}</span>}
                 actions={<div className="flex shrink-0 items-center gap-1">
-                  <Button type="button" variant="ghost" size="xs" aria-label="Change backup destination" disabled={busy} aria-expanded={flow.kind === "destination"} aria-controls="backup-details" onClick={() => setFlow({ kind: "destination", draft: destination.path })}>Change…</Button>
-                  <Button ref={backupButton} type="button" variant="outline" size="xs" disabled={busy || localSandboxes.length === 0} aria-expanded={backupExpanded && flow.kind !== "destination"} aria-controls="backup-details" onClick={() => setFlow({ kind: "backup-review" })}>Back up</Button>
+                  <Button type="button" variant="ghost" size="xs" aria-label="Change backup destination" disabled={controlsDisabled} onClick={pickDestination}>Change…</Button>
+                  <Button ref={backupButton} type="button" variant="outline" size="xs" disabled={controlsDisabled || localSandboxes.length === 0} aria-expanded={backupExpanded} aria-controls="backup-details" onClick={() => setFlow({ kind: "backup-review" })}>Back up</Button>
                 </div>}
               />
               <div id="backup-details">
-                {flow.kind === "destination" && <InlinePanel label="Backup destination">
-                  <fieldset className="grid gap-1">
-                    <legend className="mb-2 font-medium">Choose a destination</legend>
-                    {destinations.map((choice) => <label key={choice.path} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1.5 hover:bg-muted/50 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
-                      <input autoFocus={choice.path === destination.path} type="radio" name="backup-destination" className="size-3 accent-primary" checked={flow.draft === choice.path} onChange={() => setFlow({ kind: "destination", draft: choice.path })} />
-                      <span className="min-w-0 flex-1"><span className="block text-[11px] font-medium">{choice.name}</span><span className="block truncate text-[10px] text-muted-foreground">{choice.path}</span></span>
-                      <span className="shrink-0 text-[10px] text-muted-foreground">{choice.availableGB} GB free</span>
-                    </label>)}
-                  </fieldset>
-                  {(destinations.find(({ path }) => path === flow.draft)?.availableGB ?? 0) < backupRequiredGB
-                    ? <p role="alert" className="text-[11px] text-destructive">Not enough space. This backup needs approximately {backupRequiredGB} GB.</p>
-                    : <p className="text-[11px] text-muted-foreground">Approximately {backupRequiredGB} GB required. Choosing a folder does not start a backup.</p>}
-                  <div className="flex justify-end gap-1">
-                    <Button variant="ghost" size="xs" onClick={closeFlow}>Cancel</Button>
-                    <Button variant="outline" size="xs" disabled={(destinations.find(({ path }) => path === flow.draft)?.availableGB ?? 0) < backupRequiredGB} onClick={() => {
-                      const selected = destinations.find(({ path }) => path === flow.draft)
-                      if (selected && selected.availableGB >= backupRequiredGB) { setDestination(selected); closeFlow() }
-                    }}>Use folder</Button>
-                  </div>
-                </InlinePanel>}
                 {flow.kind === "backup-review" && <InlinePanel label="Review backup">
                   <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]">
-                    <dt className="text-muted-foreground">Destination</dt><dd className="break-all">{destination.path}</dd>
-                    <dt className="text-muted-foreground">Space</dt><dd>About {backupRequiredGB} GB required · {destination.availableGB} GB available</dd>
+                    <dt className="text-muted-foreground">Destination</dt><dd className="break-all">{destination}</dd>
+                    <dt className="text-muted-foreground">Space</dt><dd>About {backupRequiredGB} GB required</dd>
                     <dt className="text-muted-foreground">Sandboxes</dt><dd>{localSandboxes.map(({ machine }) => machine.name).join(", ")}</dd>
                   </dl>
                   <p className="text-[11px] text-muted-foreground">{runningNames.length > 0 ? `${runningNames.join(", ")} will stop briefly and restart after the backup. Stopped sandboxes will stay stopped.` : "All sandboxes are stopped and will stay stopped after the backup."}</p>
@@ -195,19 +233,9 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                 title={<h3 className="truncate text-xs font-medium">Restore archive</h3>}
                 detail="Replaces all sandbox state and leaves sandboxes stopped."
                 detailClassName="whitespace-normal"
-                actions={<Button ref={restoreButton} type="button" variant="outline" size="xs" disabled={busy} aria-expanded={restoreExpanded} aria-controls="restore-details" onClick={() => pickArchive()}>Choose archive…</Button>}
+                actions={<Button ref={restoreButton} type="button" variant="outline" size="xs" disabled={controlsDisabled} onClick={pickArchive}>Choose archive…</Button>}
               />
               <div id="restore-details">
-                {flow.kind === "archive-picker" && <InlinePanel label="Choose an archive">
-                  <fieldset className="grid gap-1">
-                    <legend className="mb-2 font-medium">Available archives</legend>
-                    {archives.map((archive) => <label key={archive.name} className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-1 py-1.5 hover:bg-muted/50 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-ring">
-                      <input autoFocus={archive.name === flow.archive.name} type="radio" name="restore-archive" className="size-3 shrink-0 accent-primary" checked={flow.archive.name === archive.name} onChange={() => pickArchive(archive)} />
-                      <span className="min-w-0"><span className="block truncate text-[11px] font-medium">{archive.name}</span><span className="block truncate text-[10px] text-muted-foreground">{archive.destination} · {archive.size}</span></span>
-                    </label>)}
-                  </fieldset>
-                  <div className="flex justify-end gap-1"><Button variant="ghost" size="xs" onClick={closeFlow}>Cancel</Button><Button variant="outline" size="xs" onClick={() => setFlow(previewMode === "invalid-archive" ? { kind: "invalid-archive", archive: flow.archive } : { kind: "restore-review", archive: flow.archive, confirmation: "" })}>Use archive</Button></div>
-                </InlinePanel>}
                 {flow.kind === "invalid-archive" && <InlinePanel label="Archive validation">
                   <div role="alert" className="space-y-1"><p className="font-medium text-destructive">Checksum mismatch</p><p className="text-[11px] text-muted-foreground">This archive is incomplete or damaged. Choose another copy. No sandbox data has changed.</p></div>
                   <div className="flex justify-end gap-1"><Button variant="ghost" size="xs" onClick={closeFlow}>Cancel</Button><Button variant="outline" size="xs" onClick={() => pickArchive()}>Choose another archive</Button></div>
@@ -240,7 +268,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
               />
               {expandedArchive === archive.name && <InlinePanel label={`Archive details for ${archive.name}`}>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]"><dt className="text-muted-foreground">Location</dt><dd className="break-all">{archive.destination}</dd><dt className="text-muted-foreground">Sandboxes</dt><dd>{archive.sandboxes.join(", ")}</dd></dl>
-                <div className="flex justify-end"><Button variant="outline" size="xs" disabled={busy} onClick={() => pickArchive(archive)}>Restore…</Button></div>
+                <div className="flex justify-end"><Button variant="outline" size="xs" disabled={controlsDisabled} onClick={() => reviewArchive(archive)}>Restore…</Button></div>
               </InlinePanel>}
             </li>)}
           </ul>

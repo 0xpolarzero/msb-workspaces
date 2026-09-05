@@ -51,7 +51,7 @@ describe("application", () => {
       const backup = navigation.getByRole("button", { name: "Backup" })
       fireEvent.click(backup)
       fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
-      fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+      fireEvent.change(screen.getByLabelText("Backup archive file"), { target: { files: [new File(["fixture archive"], "restore.silo-backup")] } })
       fireEvent.change(screen.getByRole("textbox", { name: "Type RESTORE to confirm" }), { target: { value: "RESTORE" } })
       fireEvent.click(screen.getByRole("button", { name: "Restore backup" }))
       expect(backup).toHaveAttribute("aria-busy", "true")

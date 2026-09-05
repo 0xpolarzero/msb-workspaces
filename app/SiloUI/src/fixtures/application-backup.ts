@@ -26,14 +26,6 @@ export function initialBackupArchive(source: ApplicationSource): BackupArchive {
   }
 }
 
-export function backupDestinationChoices(destination: string) {
-  return [
-    { path: destination, name: "External SSD", availableGB: 412 },
-    { path: "~/Backups/silo", name: "Macintosh HD", availableGB: 186 },
-    { path: "USB Drive / Silo Backups", name: "USB Drive", availableGB: 12 },
-  ].filter((choice, index, choices) => choices.findIndex(({ path }) => path === choice.path) === index)
-}
-
 export const backupRequiredGB = 48
 
 export const backupProgressSteps = [
