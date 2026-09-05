@@ -812,6 +812,52 @@ describe("application", () => {
     }))
   })
 
+  it("shows pending secret changes on the affected VM until the source confirms they are active", async () => {
+    const source = applicationSourceForScenario("running")
+    source.secrets.push({ id: "service-token", name: "SERVICE_TOKEN", workspaces: ["dev"], allowedDomains: [], state: "restart-required" })
+    const { user, actions, rerender } = renderApplication("running", source)
+    const overview = within(appPanel("Sandboxes"))
+    const label = overview.getByRole("note", { name: "Restart required for dev" })
+    expect(label).toHaveTextContent("Restart required")
+    expect(overview.getAllByRole("note")).toHaveLength(1)
+
+    await user.hover(label)
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Restart dev to apply secret changes: DATABASE_URL, SERVICE_TOKEN.")
+    await user.unhover(label)
+    await user.click(overview.getByRole("button", { name: "Restart dev" }))
+    expect(actions.restartWorkspace).toHaveBeenCalledWith("dev")
+    expect(label).toBeVisible()
+
+    rerender(<ApplicationApp source={{ ...source, secrets: source.secrets.map((secret) => ({ ...secret, state: "active" })) }} actions={actions} />)
+    expect(overview.queryByRole("note", { name: "Restart required for dev" })).not.toBeInTheDocument()
+  })
+
+  it("explains pending secrets on keyboard focus and uses next-start wording for a stopped VM", async () => {
+    const source = applicationSourceForScenario("running", undefined, "stopped")
+    renderApplication("running", source)
+    const overview = within(appPanel("Sandboxes"))
+    const label = overview.getByRole("note", { name: "Secret changes apply on next start for dev" })
+    expect(label).toHaveTextContent("Applies on next start")
+    act(() => label.focus())
+    expect(label).toHaveFocus()
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Start dev to apply secret changes: DATABASE_URL.")
+    expect(overview.queryByRole("note", { name: "Restart required for dev" })).not.toBeInTheDocument()
+  })
+
+  it("does not show a VM secret restart label on an SSH machine", () => {
+    const source = applicationSourceForScenario("running")
+    source.workspaces[0].machine = {
+      id: source.workspaces[0].machine.id,
+      kind: "ssh",
+      name: "dev",
+      host: "remote.example.test",
+      user: "developer",
+      port: 22,
+    }
+    renderApplication("running", source)
+    expect(within(appPanel("Sandboxes")).queryByRole("note")).not.toBeInTheDocument()
+  })
+
   it("routes compact lifecycle actions with the exact sandbox", async () => {
     const running = renderApplication()
     const overview = within(appPanel("Sandboxes"))

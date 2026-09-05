@@ -56,6 +56,7 @@ function SandboxIcon({ kind, state }: { kind: "vm" | "ssh"; state: SandboxIconSt
 export function SandboxListRow({
   name,
   kind,
+  badge,
   iconState = "normal",
   detail,
   detailClassName,
@@ -68,6 +69,7 @@ export function SandboxListRow({
 }: {
   name: string
   kind: "vm" | "ssh"
+  badge?: ReactNode
   iconState?: SandboxIconState
   detail: ReactNode
   detailClassName?: string
@@ -97,6 +99,7 @@ export function SandboxListRow({
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-xs font-medium" title={name}>{name}</span>
           <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase text-muted-foreground">{kind}</span>
+          {badge}
         </div>
         <div className={cn(
           "truncate text-[10px] text-muted-foreground",

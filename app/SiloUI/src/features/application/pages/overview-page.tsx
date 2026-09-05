@@ -1,6 +1,7 @@
 import { CircleAlert, CircleCheck, Loader2, Pause, Play, RotateCw, Square } from "lucide-react"
 
 import { Progress } from "@/components/ui/progress"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { SetupMachineConfiguration, SiloProgressEvent } from "@/contracts/silo"
 import { WorkspaceStateLabel } from "@/features/application/components/application-ui"
 import type {
@@ -206,6 +207,27 @@ function WorkspaceActions({ machine, state, actions, disabled = false }: { machi
   )
 }
 
+function SecretChangesLabel({ workspace, state, secrets }: { workspace: string; state: WorkspaceState; secrets: string[] }) {
+  const stopped = state === "stopped"
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          role="note"
+          tabIndex={0}
+          aria-label={stopped ? `Secret changes apply on next start for ${workspace}` : `Restart required for ${workspace}`}
+          className="shrink-0 cursor-help rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 outline-none focus-visible:ring-2 focus-visible:ring-ring/60 dark:text-amber-400"
+        >
+          {stopped ? "Applies on next start" : "Restart required"}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="break-words">
+        {stopped ? "Start" : "Restart"} {workspace} to apply secret changes: {secrets.join(", ")}.
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 export function OverviewPage({
   source,
   actions,
@@ -248,6 +270,12 @@ export function OverviewPage({
           getRowPresentation={(machine) => {
             const workspace = workspaces.get(machine.id)
             const state = workspace?.state ?? "stopped"
+            const pendingSecrets = machine.kind === "vm"
+              ? source.secrets.filter((secret) => secret.state === "restart-required" && secret.workspaces.includes(machine.name)).map((secret) => secret.name)
+              : []
+            const badge = pendingSecrets.length > 0
+              ? <SecretChangesLabel workspace={machine.name} state={state} secrets={pendingSecrets} />
+              : undefined
             const visualState = iconState(workspace)
             const configuration = workspace && configurationOperation
               ? configurationRowView(workspace, committedWorkspaces.get(machine.id), configurationOperation)
@@ -255,6 +283,7 @@ export function OverviewPage({
             if (configuration) {
               const failed = configuration.status === "failed"
               return {
+                badge,
                 busy: !failed,
                 suppressInteractions: true,
                 icon: <ConfigurationIcon failed={failed} />,
@@ -269,6 +298,7 @@ export function OverviewPage({
               }
             }
             return {
+              badge,
               iconState: visualState,
               tone: rowTone(workspace),
               detail: (

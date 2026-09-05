@@ -29,6 +29,7 @@ interface MachineEditorState {
 }
 
 export interface MachineRowPresentation {
+  badge?: ReactNode
   detail?: ReactNode
   detailClassName?: string
   icon?: ReactNode
@@ -361,6 +362,7 @@ export function MachineList({ machines, onMachinesChange, getRowPresentation, so
                     <SandboxListRow
                       name={machine.name}
                       kind={machine.kind}
+                      badge={presentation?.badge}
                       iconState={presentation?.iconState}
                       icon={presentation?.icon}
                       tone={presentation?.tone}
