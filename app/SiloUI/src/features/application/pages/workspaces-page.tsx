@@ -218,31 +218,30 @@ function Files({
           <CollapsibleContent className="file-pane-content-motion min-h-0 flex-1" data-files-pane-content="repositories">
             <div className="h-full overflow-y-auto overscroll-contain px-2 pt-2" data-files-pane-scroll="repositories">
               {repositories.length > 0 ? (
-                <div className="divide-y divide-border" role="list" aria-label="Repositories">
+                <ListCard role="list" aria-label="Repositories">
                   {repositories.map(({ workspace, repository }) => {
                     const operation = pushOperations.get(`${workspace.machine.name}:${repository.path}`)
                     const push = () => onPushRepository(workspace.machine.name, repository.path, operation?.commitCount ?? repository.ahead)
                     return (
-                      <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="grid grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 py-2.5 first:pt-0 last:pb-0">
-                        <GitBranch className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />
-                        <div className="min-w-0">
-                          <div className="flex min-w-0 items-start justify-between gap-2" data-repository-header>
-                            <div className="truncate text-sm font-medium">{repository.path}</div>
-                            <WorkspaceBadge name={workspace.machine.name} state={workspace.state} />
+                      <div key={`${workspace.machine.id}:${repository.path}`} role="listitem" aria-busy={operation?.status === "pushing" || undefined} className="transition-colors hover:bg-muted/35 focus-within:bg-muted/35">
+                        <ListRow
+                          data-repository-header
+                          icon={<ListRowIcon aria-hidden="true"><GitBranch className="size-3.5" /></ListRowIcon>}
+                          title={<span className="truncate text-xs font-medium">{repository.path}</span>}
+                          detail={`${repository.branch} · ${repository.ahead} ahead, ${repository.behind} behind`}
+                          actions={<WorkspaceBadge name={workspace.machine.name} state={workspace.state} />}
+                        />
+                        {(operation || repository.ahead > 0) && (
+                          <div className="flex min-h-6 items-start pr-2 pb-2 pl-10" data-repository-actions>
+                            {operation
+                              ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
+                              : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
                           </div>
-                          <div className="mt-0.5 text-xs text-muted-foreground">{repository.branch} · {repository.ahead} ahead, {repository.behind} behind</div>
-                          {(operation || repository.ahead > 0) && (
-                            <div className="mt-2 flex min-h-6 items-start" data-repository-actions>
-                              {operation
-                                ? <RepositoryPushFeedback operation={operation} workspace={workspace.machine.name} repositoryPath={repository.path} onRetry={push} onDismiss={onDismissRepositoryPush} />
-                                : <Button variant="outline" size="xs" onClick={push}>Push {commitLabel(repository.ahead)}</Button>}
-                            </div>
-                          )}
-                        </div>
+                        )}
                       </div>
                     )
                   })}
-                </div>
+                </ListCard>
               ) : <p className="text-xs text-muted-foreground">No repositories checked out.</p>}
             </div>
           </CollapsibleContent>
