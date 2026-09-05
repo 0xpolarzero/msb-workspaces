@@ -26,7 +26,7 @@ describe("SecretsPage", () => {
     await user.click(list.getByRole("button", { name: "Confirm removal of PACKAGE_TOKEN" }))
     expect(list.queryByText("PACKAGE_TOKEN")).not.toBeInTheDocument()
     expect(list.getByText("DATABASE_URL")).toBeVisible()
-    expect(list.getByText("Restart required")).toBeVisible()
+    expect(list.getByText("Restart to apply")).toBeVisible()
     expect(screen.getByText("1 configured")).toBeVisible()
 
     await user.click(list.getByRole("button", { name: "Remove DATABASE_URL" }))

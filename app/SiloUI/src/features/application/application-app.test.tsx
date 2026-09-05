@@ -1323,7 +1323,7 @@ describe("application", () => {
     expect(secrets.queryByRole("alert")).not.toBeInTheDocument()
     const secretList = within(secrets.getByRole("list", { name: "Configured secrets" }))
     const pendingSecret = secretList.getAllByRole("listitem").find((row) => row.textContent?.includes("DATABASE_URL"))!
-    expect(within(pendingSecret).getByText("Restart required")).toBeVisible()
+    expect(within(pendingSecret).getByText("Restart to apply")).toBeVisible()
 
     await user.click(navigation.getByRole("button", { name: "Backup" }))
     expect(within(appPanel("Backup")).getByText("silo-2026-09-02.silo-backup")).toBeVisible()

@@ -55,7 +55,7 @@ export function SecretsPage({ source }: { source: ApplicationSource }) {
                       <h3 className="break-all font-mono text-xs font-medium">{secret.name}</h3>
                       {secret.state === "restart-required" && (
                         <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
-                          <RotateCw className="size-3" aria-hidden="true" />Restart required
+                          <RotateCw className="size-3" aria-hidden="true" />Restart to apply
                         </span>
                       )}
                     </div>
