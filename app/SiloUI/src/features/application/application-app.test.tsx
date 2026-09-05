@@ -43,6 +43,35 @@ function appPanel(name: string) {
 }
 
 describe("application", () => {
+  it("keeps restore progress across navigation and reflects stopped sandboxes when it completes", async () => {
+    vi.useFakeTimers()
+    const application = renderApplication()
+    try {
+      const navigation = within(appNavigation())
+      const backup = navigation.getByRole("button", { name: "Backup" })
+      fireEvent.click(backup)
+      fireEvent.click(screen.getByRole("button", { name: "Choose archive…" }))
+      fireEvent.click(screen.getByRole("button", { name: "Use archive" }))
+      fireEvent.change(screen.getByRole("textbox", { name: "Type RESTORE to confirm" }), { target: { value: "RESTORE" } })
+      fireEvent.click(screen.getByRole("button", { name: "Restore backup" }))
+      expect(backup).toHaveAttribute("aria-busy", "true")
+      fireEvent.click(navigation.getByRole("button", { name: "Overview" }))
+      for (let step = 0; step < 4; step += 1) {
+        await act(async () => { await vi.advanceTimersByTimeAsync(1_600) })
+      }
+      expect(backup).not.toHaveAttribute("aria-busy", "true")
+      const overview = within(appPanel("Sandboxes"))
+      expect(overview.getByRole("button", { name: "Start dev" })).toBeEnabled()
+      expect(overview.getByRole("button", { name: "Stop dev" })).toBeDisabled()
+      expect(application.actions.stopWorkspace).not.toHaveBeenCalled()
+      fireEvent.click(backup)
+      expect(within(appPanel("Backup")).getByRole("status")).toHaveTextContent("Restore completed")
+    } finally {
+      application.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it("opens on the nested sandbox Overview with compact navigation", () => {
     renderApplication()
 

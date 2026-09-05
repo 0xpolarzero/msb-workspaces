@@ -10,6 +10,7 @@ import {
   systemIssueFixtureModeFromSearch,
   workspaceFixtureModeFromSearch,
 } from "@/fixtures/application-scenarios"
+import { backupFixtureModeFromSearch } from "@/fixtures/application-backup"
 import { FixtureSelector } from "@/fixtures/fixture-selector"
 import { activityFixtureModeFromSearch, activityFixtureStepCount } from "@/fixtures/application-activity"
 import { githubStateFromSearch, onboardingScenarios, repositoryFixtures, scenarioFromSearch } from "@/fixtures/scenarios"
@@ -25,6 +26,7 @@ export default function App() {
   const repositoryPushMode = import.meta.env.DEV ? repositoryPushFixtureModeFromSearch(window.location.search) : undefined
   const githubManagementMode = import.meta.env.DEV ? githubManagementFixtureModeFromSearch(window.location.search) : undefined
   const activityMode = import.meta.env.DEV ? activityFixtureModeFromSearch(window.location.search) : undefined
+  const backupMode = import.meta.env.DEV ? backupFixtureModeFromSearch(window.location.search) : undefined
   const [activityStep, setActivityStep] = useState(0)
   const [source, setSource] = useState(onboardingScenarios[scenario])
 
@@ -47,6 +49,7 @@ export default function App() {
       {surface === "app" ? (
         <ApplicationApp
           key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}:${systemIssueMode ?? "source"}:${repositoryPushMode ?? "source"}:${activityMode ?? "source"}:${githubManagementMode ?? "source"}`}
+          backupPreviewMode={backupMode}
           source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode, activityStep, githubManagementMode)}
           actions={{
             repairRuntime: () => undefined,
@@ -76,7 +79,7 @@ export default function App() {
           }}
         />
       )}
-      {import.meta.env.DEV && <FixtureSelector surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} systemIssueMode={systemIssueMode} repositoryPushMode={repositoryPushMode} githubManagementMode={githubManagementMode} activityMode={activityMode} />}
+      {import.meta.env.DEV && <FixtureSelector backupMode={backupMode} surface={surface} scenario={scenario} githubState={githubState} workspaceMode={workspaceMode} sandboxConfigurationMode={sandboxConfigurationMode} systemIssueMode={systemIssueMode} repositoryPushMode={repositoryPushMode} githubManagementMode={githubManagementMode} activityMode={activityMode} />}
     </>
   )
 }

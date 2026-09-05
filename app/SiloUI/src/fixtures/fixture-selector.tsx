@@ -1,3 +1,4 @@
+import { backupFixtureModes, type BackupFixtureMode } from "@/fixtures/application-backup"
 import type { GitHubFixtureState, ScenarioName } from "@/fixtures/scenarios"
 import { githubFixtureStates, scenarioNames } from "@/fixtures/scenarios"
 import { activityFixtureModes, type ActivityFixtureMode } from "@/fixtures/application-activity"
@@ -18,7 +19,7 @@ import { surfaceNames } from "@/fixtures/surfaces"
 
 import { ThemeToggle } from "@/features/onboarding/components/theme-toggle"
 
-export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, githubManagementMode, activityMode }: {
+export function FixtureSelector({ surface, scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, githubManagementMode, activityMode, backupMode }: {
   surface: SurfaceName
   scenario: ScenarioName
   githubState?: GitHubFixtureState
@@ -27,6 +28,7 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
   systemIssueMode?: SystemIssueFixtureMode
   repositoryPushMode?: RepositoryPushFixtureMode
   githubManagementMode?: GitHubManagementFixtureMode
+  backupMode?: BackupFixtureMode
   activityMode?: ActivityFixtureMode
 }) {
   function selectFixture(parameter: string, value: string) {
@@ -121,6 +123,17 @@ export function FixtureSelector({ surface, scenario, githubState, workspaceMode,
             >
               <option value="source">source</option>
               {githubManagementFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-2">
+            Backup
+            <select
+              aria-label="Backup operation fixture"
+              className="rounded border border-border bg-background px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              value={backupMode ?? "success"}
+              onChange={(event) => selectFixture("backup-operation", event.target.value)}
+            >
+              {backupFixtureModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
             </select>
           </label>
         </>

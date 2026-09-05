@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import type { BackupFixtureMode } from "@/fixtures/application-backup"
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { ApplicationShell, type ApplicationNavigationLoading } from "@/features/application/components/application-shell"
 import type { ApplicationActions, ApplicationSource, ApplicationTab, RepositoryPushOperation, RuntimeRepairPresentation, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
@@ -36,7 +37,7 @@ function workspaceAttentionCounts(source: Pick<ApplicationSource, "workspaces" |
   }, { errors: 0, warnings: 0 })
 }
 
-function navigationLoadingState(source: ApplicationSource, githubBusy: boolean): ApplicationNavigationLoading {
+function navigationLoadingState(source: ApplicationSource, githubBusy: boolean, backupBusy: boolean): ApplicationNavigationLoading {
   const runningCategories = new Set(source.activities
     .filter(({ status }) => status === "running")
     .map(({ category }) => category))
@@ -48,7 +49,7 @@ function navigationLoadingState(source: ApplicationSource, githubBusy: boolean):
     tabs: {
       github: githubBusy || githubSourceBusy || runningCategories.has("github"),
       secrets: runningCategories.has("secrets"),
-      backup: runningCategories.has("backup"),
+      backup: backupBusy || runningCategories.has("backup"),
       system: source.runtimeRepair?.status === "repairing" || runningCategories.has("system"),
     },
     workspaceSections: {
@@ -62,7 +63,7 @@ function navigationLoadingState(source: ApplicationSource, githubBusy: boolean):
   }
 }
 
-export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
+export function ApplicationApp({ source, actions, backupPreviewMode }: { source: ApplicationSource; actions: ApplicationActions; backupPreviewMode?: BackupFixtureMode }) {
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
@@ -73,6 +74,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
   const [repositoryPushOperations, setRepositoryPushOperations] = useState<RepositoryPushOperation[]>(source.repositoryPushOperations)
   const [repairConfirmationVisible, setRepairConfirmationVisible] = useState(source.runtimeRepair?.status === "succeeded")
+  const [backupBusy, setBackupBusy] = useState(false)
   const [githubBusy, setGitHubBusy] = useState(
     source.github.state === "connecting"
       || (source.github.workspaceOperations ?? []).some(({ status }) => status === "applying"),
@@ -182,6 +184,18 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
     setRepositoryPushOperations((current) => current.filter((operation) => operation.workspace !== workspace || operation.repositoryPath !== repositoryPath))
   }, [])
 
+  const restoreBackupPreview = useCallback(() => {
+    setWorkspaces((current) => current.map((workspace) => workspace.machine.kind === "vm"
+      ? { ...workspace, state: "stopped", stateDetail: "Stopped after restore" }
+      : workspace))
+  }, [])
+
+  const backupRestartPreview = useCallback((sandboxes: string[]) => {
+    setWorkspaces((current) => current.map((workspace) => workspace.machine.kind === "vm" && sandboxes.includes(workspace.machine.name)
+      ? { ...workspace, state: "stopped", stateDetail: "Stopped after backup" }
+      : workspace))
+  }, [])
+
   return (
     <ApplicationShell
       activeTab={visibleTab}
@@ -189,7 +203,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       settingsSection={settingsSection}
       systemIssueStatus={activeRuntimeRepair?.status ?? null}
       workspaceAttention={workspaceAttentionCounts(applicationSource)}
-      navigationLoading={navigationLoadingState(applicationSource, githubBusy)}
+      navigationLoading={navigationLoadingState(applicationSource, githubBusy, backupBusy)}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
@@ -217,7 +231,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         <GitHubPage source={applicationSource} actions={actions} onBusyChange={setGitHubBusy} />
       </section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={visibleTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
-      <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} /></section>
+      <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} previewMode={backupPreviewMode} onBusyChange={setBackupBusy} onRestoreComplete={restoreBackupPreview} onRestartRequired={backupRestartPreview} /></section>
       {activeRuntimeRepair && (
         <section id="application-panel-system" role="region" aria-labelledby="application-nav-system" hidden={visibleTab !== "system"}>
           <SystemIssuePage issue={activeRuntimeRepair} actions={actions} />
