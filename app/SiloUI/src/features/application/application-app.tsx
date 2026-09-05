@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import type { SetupMachineConfiguration } from "@/contracts/silo"
-import { ApplicationShell } from "@/features/application/components/application-shell"
+import { ApplicationShell, type ApplicationNavigationLoading } from "@/features/application/components/application-shell"
 import type { ApplicationActions, ApplicationSource, ApplicationTab, RepositoryPushOperation, RuntimeRepairPresentation, SandboxConfigurationOperation, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { BackupPage } from "@/features/application/pages/backup-page"
 import { GeneralPage } from "@/features/application/pages/general-page"
@@ -36,6 +36,32 @@ function workspaceAttentionCounts(source: Pick<ApplicationSource, "workspaces" |
   }, { errors: 0, warnings: 0 })
 }
 
+function navigationLoadingState(source: ApplicationSource, githubBusy: boolean): ApplicationNavigationLoading {
+  const runningCategories = new Set(source.activities
+    .filter(({ status }) => status === "running")
+    .map(({ category }) => category))
+  const activityBusy = runningCategories.size > 0
+  const githubSourceBusy = source.github.state === "connecting"
+    || (source.github.workspaceOperations ?? []).some(({ status }) => status === "applying")
+
+  return {
+    tabs: {
+      github: githubBusy || githubSourceBusy || runningCategories.has("github"),
+      secrets: runningCategories.has("secrets"),
+      backup: runningCategories.has("backup"),
+      system: source.runtimeRepair?.status === "repairing" || runningCategories.has("system"),
+    },
+    workspaceSections: {
+      overview: source.sandboxConfigurationOperation?.status === "applying"
+        || source.workspaces.some(({ state }) => state === "starting")
+        || runningCategories.has("sandbox"),
+      files: source.repositoryPushOperations.some(({ status }) => status === "pushing")
+        || runningCategories.has("git"),
+      activity: activityBusy,
+    },
+  }
+}
+
 export function ApplicationApp({ source, actions }: { source: ApplicationSource; actions: ApplicationActions }) {
   const activeRuntimeRepair = source.runtimeRepair?.status === "succeeded" ? null : source.runtimeRepair
   const [activeTab, setActiveTab] = useState<ApplicationTab>("workspaces")
@@ -47,6 +73,10 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
   const [repositoryPushOperations, setRepositoryPushOperations] = useState<RepositoryPushOperation[]>(source.repositoryPushOperations)
   const [repairConfirmationVisible, setRepairConfirmationVisible] = useState(source.runtimeRepair?.status === "succeeded")
+  const [githubBusy, setGitHubBusy] = useState(
+    source.github.state === "connecting"
+      || (source.github.workspaceOperations ?? []).some(({ status }) => status === "applying"),
+  )
   const [applicationPreferences, setApplicationPreferences] = useState<ApplicationPreferenceSelection>(() => ({
     terminal: source.preferences.terminal,
     editor: source.preferences.editor,
@@ -159,6 +189,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
       settingsSection={settingsSection}
       systemIssueStatus={activeRuntimeRepair?.status ?? null}
       workspaceAttention={workspaceAttentionCounts(applicationSource)}
+      navigationLoading={navigationLoadingState(applicationSource, githubBusy)}
       onTabChange={setActiveTab}
       onWorkspaceSectionChange={setWorkspaceSection}
       onSettingsSectionChange={setSettingsSection}
@@ -183,7 +214,7 @@ export function ApplicationApp({ source, actions }: { source: ApplicationSource;
         )}
       </section>
       <section id="application-panel-github" role="region" aria-labelledby="application-nav-github" hidden={visibleTab !== "github"} className="h-full min-h-0 overflow-hidden">
-        <GitHubPage source={applicationSource} actions={actions} />
+        <GitHubPage source={applicationSource} actions={actions} onBusyChange={setGitHubBusy} />
       </section>
       <section id="application-panel-secrets" role="region" aria-labelledby="application-nav-secrets" hidden={visibleTab !== "secrets"}><SecretsPage source={applicationSource} /></section>
       <section id="application-panel-backup" role="region" aria-labelledby="application-nav-backup" hidden={visibleTab !== "backup"}><BackupPage source={applicationSource} /></section>

@@ -83,6 +83,51 @@ describe("application", () => {
     expect(within(overview).getByRole("status", { name: label })).toHaveTextContent(count)
   })
 
+  it("shows spinners on every sidebar destination with active work", () => {
+    const cases: Array<{
+      label: string
+      source: ApplicationSource
+      section?: "workspace"
+    }> = [
+      { label: "Overview", source: applicationSourceForScenario("running", undefined, "starting"), section: "workspace" },
+      { label: "Overview", source: applicationSourceForScenario("running", undefined, undefined, "add-verifying"), section: "workspace" },
+      { label: "Files", source: applicationSourceForScenario("running", undefined, undefined, undefined, undefined, "pushing"), section: "workspace" },
+      { label: "Files", source: applicationSourceForScenario("running", undefined, undefined, undefined, undefined, undefined, "git-live"), section: "workspace" },
+      { label: "Activity", source: applicationSourceForScenario("running", undefined, undefined, undefined, undefined, undefined, "backup-live"), section: "workspace" },
+      { label: "GitHub", source: applicationSourceForScenario("running", "connecting") },
+      { label: "GitHub", source: applicationSourceForScenario("running", "connected", undefined, undefined, undefined, undefined, undefined, 0, "applying") },
+      { label: "Secrets", source: applicationSourceForScenario("running", undefined, undefined, undefined, undefined, undefined, "secrets-live") },
+      { label: "Backup", source: applicationSourceForScenario("running", undefined, undefined, undefined, undefined, undefined, "backup-live") },
+      { label: "System issue", source: applicationSourceForScenario("running", undefined, undefined, undefined, "installing") },
+    ]
+
+    for (const { label, source, section } of cases) {
+      const application = renderApplication("running", source)
+      const navigation = within(appNavigation())
+      const button = section === "workspace"
+        ? within(navigation.getByRole("group", { name: "Sandbox sections" })).getByRole("button", { name: label })
+        : navigation.getByRole("button", { name: label })
+
+      expect(button).toHaveAttribute("aria-busy", "true")
+      expect(button.querySelector("svg")).toHaveClass("animate-spin")
+      application.unmount()
+    }
+  })
+
+  it("keeps idle and completed sidebar destinations static", () => {
+    const source = applicationSourceForScenario("running", "connected", undefined, undefined, undefined, "succeeded", "backup-live", 4, "succeeded")
+    renderApplication("running", source)
+    const navigation = within(appNavigation())
+    const sandboxSections = within(navigation.getByRole("group", { name: "Sandbox sections" }))
+
+    for (const label of ["Overview", "Files", "Logs", "Network", "Activity"]) {
+      expect(sandboxSections.getByRole("button", { name: label })).not.toHaveAttribute("aria-busy")
+    }
+    for (const label of ["GitHub", "Secrets", "Backup", "Settings"]) {
+      expect(navigation.getByRole("button", { name: label })).not.toHaveAttribute("aria-busy")
+    }
+  })
+
   it("lets each caret expand or collapse without navigating", async () => {
     const { user } = renderApplication()
     const navigation = within(appNavigation())
@@ -1010,6 +1055,7 @@ describe("application", () => {
     await user.tab()
     expect(actions.saveGitHubConfiguration).toHaveBeenCalledOnce()
     expect(github.getByRole("status")).toHaveTextContent("Applying Git identity…")
+    expect(within(appNavigation()).getByRole("button", { name: "GitHub" })).toHaveAttribute("aria-busy", "true")
 
     const picker = github.getByRole("combobox", { name: "Add repository to playgrounds" })
     await user.type(picker, "design")
@@ -1051,6 +1097,7 @@ describe("application", () => {
     expect(github.queryByLabelText("Add repository to dev")).not.toBeInTheDocument()
     await disconnected.user.click(github.getByRole("button", { name: "Connect GitHub" }))
     expect(disconnected.actions.connectGitHub).toHaveBeenCalledOnce()
+    expect(within(appNavigation()).getByRole("button", { name: "GitHub" })).toHaveAttribute("aria-busy", "true")
     disconnected.unmount()
 
     const connecting = renderApplication("running", applicationSourceForScenario("running", "connecting"))

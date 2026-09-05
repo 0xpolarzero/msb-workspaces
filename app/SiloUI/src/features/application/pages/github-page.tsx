@@ -118,9 +118,11 @@ function WorkspaceSyncFeedback({
 export function GitHubPage({
   source,
   actions,
+  onBusyChange,
 }: {
   source: ApplicationSource
   actions: ApplicationActions
+  onBusyChange?: (busy: boolean) => void
 }) {
   const sourceDraft = useMemo(
     () => draftFromSource(source.github.workspaces, source.github.hostIdentity, source.workspaces),
@@ -134,6 +136,11 @@ export function GitHubPage({
   const identityIntent = useRef<WorkspaceIdentities>(copyDraft(sourceDraft).identities)
   const catalogAvailable = source.github.repositoryCatalogStatus?.status !== "unavailable"
   const applying = Object.values(workspaceOperations).some((operation) => operation.status === "applying")
+  const busy = connectionState === "connecting" || applying
+
+  useEffect(() => {
+    onBusyChange?.(busy)
+  }, [busy, onBusyChange])
 
   useEffect(() => {
     // The bridge-provided snapshot is authoritative after a completed mutation.

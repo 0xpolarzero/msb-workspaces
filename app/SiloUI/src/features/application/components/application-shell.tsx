@@ -7,6 +7,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import type { ActiveRuntimeRepairPresentation, ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
+export interface ApplicationNavigationLoading {
+  tabs?: Partial<Record<ApplicationTab, boolean>>
+  workspaceSections?: Partial<Record<WorkspaceSection, boolean>>
+  settingsSections?: Partial<Record<SettingsSection, boolean>>
+}
+
 const primaryItems = [
   { id: "github", label: "GitHub", icon: GitFork },
   { id: "secrets", label: "Secrets", icon: KeyRound },
@@ -26,13 +32,18 @@ const settingsItems = [
   { id: "notifications", label: "Notifications", icon: Bell },
 ] as const
 
+function NavigationIcon({ icon: Icon, loading, className }: { icon: typeof Boxes; loading: boolean; className: string }) {
+  const DisplayIcon = loading ? Loader2 : Icon
+  return <DisplayIcon aria-hidden="true" className={cn(className, loading && "animate-spin")} />
+}
+
 function NavigationButton({
   id,
   label,
   icon: Icon,
   active,
   tone = "default",
-  iconClassName,
+  loading = false,
   reserveDisclosure = false,
   onClick,
 }: {
@@ -41,7 +52,7 @@ function NavigationButton({
   icon: typeof Boxes
   active: boolean
   tone?: "default" | "danger" | "warning"
-  iconClassName?: string
+  loading?: boolean
   reserveDisclosure?: boolean
   onClick: () => void
 }) {
@@ -53,6 +64,7 @@ function NavigationButton({
       data-navigation-tone={tone}
       aria-current={active ? "page" : undefined}
       aria-controls={`application-panel-${id}`}
+      aria-busy={loading || undefined}
       onClick={onClick}
       className={cn(
         "flex h-10 min-w-fit flex-none items-center justify-center gap-2 rounded-md px-3 py-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:min-w-0 md:w-full md:justify-start md:text-[13px]",
@@ -69,7 +81,7 @@ function NavigationButton({
         reserveDisclosure && "pr-10",
       )}
     >
-      <Icon className={cn("size-4", iconClassName)} />
+      <NavigationIcon icon={Icon} loading={loading} className="size-4" />
       <span className="md:flex-1 md:text-left">{label}</span>
     </button>
   )
@@ -122,6 +134,7 @@ function SubNavigation<Section extends string>({
   section,
   active,
   attention,
+  loading,
   onSelect,
 }: {
   label: string
@@ -129,22 +142,24 @@ function SubNavigation<Section extends string>({
   section: Section
   active: boolean
   attention?: { section: Section; errors: number; warnings: number } | null
+  loading?: Partial<Record<Section, boolean>>
   onSelect: (section: Section) => void
 }) {
   return (
     <div role="group" aria-label={label} className="flex gap-1 md:ml-3 md:grid md:w-[calc(100%-0.75rem)] md:border-l md:border-border md:pl-2">
-      {items.map(({ id, label: itemLabel, icon: Icon }) => (
+      {items.map(({ id, label: itemLabel, icon }) => (
         <button
           key={id}
           type="button"
           aria-current={active && section === id ? "page" : undefined}
+          aria-busy={loading?.[id] || undefined}
           onClick={() => onSelect(id)}
           className={cn(
             "flex h-8 min-w-fit items-center justify-center gap-2 rounded-md px-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start",
             active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
-          <Icon className="size-3.5" />
+          <NavigationIcon icon={icon} loading={loading?.[id] ?? false} className="size-3.5" />
           <span className="md:flex-1 md:text-left">{itemLabel}</span>
           {attention?.section === id && (
             <span className="flex shrink-0 items-center gap-1">
@@ -192,6 +207,7 @@ export function ApplicationShell({
   settingsSection,
   systemIssueStatus,
   workspaceAttention,
+  navigationLoading,
   onTabChange,
   onWorkspaceSectionChange,
   onSettingsSectionChange,
@@ -202,6 +218,7 @@ export function ApplicationShell({
   settingsSection: SettingsSection
   systemIssueStatus: ActiveRuntimeRepairPresentation["status"] | null
   workspaceAttention: { errors: number; warnings: number }
+  navigationLoading?: ApplicationNavigationLoading
   onTabChange: (tab: ApplicationTab) => void
   onWorkspaceSectionChange: (section: WorkspaceSection) => void
   onSettingsSectionChange: (section: SettingsSection) => void
@@ -243,6 +260,7 @@ export function ApplicationShell({
                   attention={workspaceAttention.errors > 0 || workspaceAttention.warnings > 0
                     ? { section: "overview", ...workspaceAttention }
                     : null}
+                  loading={navigationLoading?.workspaceSections}
                   onSelect={(section) => {
                     onWorkspaceSectionChange(section)
                     selectTab("workspaces")
@@ -250,7 +268,7 @@ export function ApplicationShell({
                 />
               </DisclosureNavigationItem>
               {primaryItems.map(({ id, label, icon }) => (
-                <NavigationButton key={id} id={id} label={label} icon={icon} active={activeTab === id} onClick={() => selectTab(id)} />
+                <NavigationButton key={id} id={id} label={label} icon={icon} active={activeTab === id} loading={navigationLoading?.tabs?.[id]} onClick={() => selectTab(id)} />
               ))}
             </div>
             <div className="flex gap-1 md:mt-auto md:grid md:w-full">
@@ -259,8 +277,8 @@ export function ApplicationShell({
                 <NavigationButton
                   id="system"
                   label="System issue"
-                  icon={systemIssueStatus === "repairing" ? Loader2 : CircleAlert}
-                  iconClassName={systemIssueStatus === "repairing" ? "animate-spin" : undefined}
+                  icon={CircleAlert}
+                  loading={navigationLoading?.tabs?.system}
                   active={activeTab === "system"}
                   tone={systemIssueStatus === "repairing" ? "warning" : "danger"}
                   onClick={() => selectTab("system")}
@@ -280,6 +298,7 @@ export function ApplicationShell({
                   items={settingsItems}
                   section={settingsSection}
                   active={activeTab === "settings"}
+                  loading={navigationLoading?.settingsSections}
                   onSelect={(section) => {
                     onSettingsSectionChange(section)
                     selectTab("settings")
