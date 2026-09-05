@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, PanelLeft, Search } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { cn } from "@/lib/utils"
 
 function ToolbarButton({ label, ...props }: ComponentProps<typeof Button> & { label: string }) {
   return <Tooltip>
@@ -43,9 +44,12 @@ export function ApplicationTitleBar({
   }, [])
 
   return (
-    <header aria-label="Window toolbar" className="flex h-11 shrink-0 items-center border-b border-border">
+    <header aria-label="Window toolbar" className="flex h-11 shrink-0 items-center border-b border-border bg-background">
       <h1 className="sr-only">Silo</h1>
-      <div className="flex h-full w-[max(var(--sidebar-width),12.5rem)] shrink-0 items-center gap-3 border-r border-border bg-sidebar px-3">
+      <div className={cn(
+        "flex h-full shrink-0 items-center gap-3 pl-3",
+        collapsed ? "pr-2" : "w-[max(var(--sidebar-width),12.5rem)] border-r border-border bg-sidebar pr-3",
+      )}>
         <div className="flex shrink-0 items-center gap-2" aria-hidden="true" data-window-controls>
           <span className="size-3.5 rounded-full border border-[#e0443e] bg-[#ff5f57]" />
           <span className="size-3.5 rounded-full border border-[#dea123] bg-[#febc2e]" />
@@ -57,6 +61,7 @@ export function ApplicationTitleBar({
           <ToolbarButton label="Go forward" disabled={!canGoForward} onClick={onGoForward}><ArrowRight /></ToolbarButton>
         </div>
       </div>
+      {collapsed && <span aria-hidden="true" className="h-5 w-px shrink-0 bg-border" />}
       <div className="flex min-w-0 flex-1 items-center px-3">
         <div className="relative w-full max-w-md">
           <Search aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
