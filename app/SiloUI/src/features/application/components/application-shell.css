@@ -121,7 +121,8 @@
 
 .sidebar-subnav-guide {
   left: 0;
-  transition: left var(--sidebar-motion);
+  opacity: 1;
+  transition: opacity 120ms ease;
 }
 
 .silo-sidebar[data-collapsed="true"] .sidebar-subnav {
@@ -131,7 +132,7 @@
 }
 
 .silo-sidebar[data-collapsed="true"] .sidebar-subnav-guide {
-  left: 4px;
+  opacity: 0;
 }
 
 .silo-sidebar .sidebar-secondary {

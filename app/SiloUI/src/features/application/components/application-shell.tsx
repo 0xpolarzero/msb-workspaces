@@ -132,7 +132,7 @@ function DisclosureNavigationItem({
   const menuID = `${id}-sections`
 
   return (
-    <div className="grid w-full gap-1">
+    <div className="grid w-full grid-cols-1 gap-1">
       <div className="relative w-full">
         <NavigationButton id={id} label={label} icon={icon} active={active} collapsed={collapsed} reserveDisclosure onClick={onSelect} />
         <button
@@ -173,7 +173,7 @@ function SubNavigation<Section extends string>({
   onSelect: (section: Section) => void
 }) {
   return (
-    <div role="group" aria-label={label} className="sidebar-subnav relative grid gap-1">
+    <div role="group" aria-label={label} className="sidebar-subnav relative grid grid-cols-1 gap-1">
       <span aria-hidden="true" className="sidebar-subnav-guide pointer-events-none absolute inset-y-0 border-l border-border" />
       {items.map(({ id, label: itemLabel, icon: Icon }) => (
         <NavigationTooltip key={id} label={itemLabel} collapsed={collapsed}>
@@ -320,7 +320,7 @@ export function ApplicationShell({
             <span className="sidebar-label text-base font-semibold tracking-tight">Silo</span>
           </div>
           <div className="flex w-full flex-1 flex-col items-start gap-1">
-            <div className="grid w-full gap-1">
+            <div className="grid w-full grid-cols-1 gap-1">
               <DisclosureNavigationItem
                 id="workspaces"
                 label="Sandboxes"
@@ -351,7 +351,7 @@ export function ApplicationShell({
                 <NavigationButton key={id} id={id} label={label} icon={icon} active={activeTab === id} collapsed={collapsed} loading={navigationLoading?.tabs?.[id]} onClick={() => selectTab(id)} />
               ))}
             </div>
-            <div className="mt-auto grid w-full gap-1">
+            <div className="mt-auto grid w-full grid-cols-1 gap-1">
               <div className="sidebar-footer-divider my-2 border-t border-border" aria-hidden="true" />
               {systemIssueStatus && (
                 <NavigationButton
