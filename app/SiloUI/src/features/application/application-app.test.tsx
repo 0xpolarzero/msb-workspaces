@@ -109,7 +109,11 @@ describe("application", () => {
         : navigation.getByRole("button", { name: label })
 
       expect(button).toHaveAttribute("aria-busy", "true")
-      expect(button.querySelector("svg")).toHaveClass("animate-spin")
+      const icons = button.querySelectorAll("svg")
+      expect(icons).toHaveLength(2)
+      expect(icons[0]).not.toHaveClass("animate-spin")
+      expect(icons[1]).toHaveAttribute("data-navigation-loading-indicator")
+      expect(icons[1]).toHaveClass("animate-spin")
       application.unmount()
     }
   })

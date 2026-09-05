@@ -32,9 +32,9 @@ const settingsItems = [
   { id: "notifications", label: "Notifications", icon: Bell },
 ] as const
 
-function NavigationIcon({ icon: Icon, loading, className }: { icon: typeof Boxes; loading: boolean; className: string }) {
-  const DisplayIcon = loading ? Loader2 : Icon
-  return <DisplayIcon aria-hidden="true" className={cn(className, loading && "animate-spin")} />
+function NavigationLoadingIndicator({ loading }: { loading: boolean }) {
+  if (!loading) return null
+  return <Loader2 data-navigation-loading-indicator aria-hidden="true" className="size-3.5 shrink-0 animate-spin" />
 }
 
 function NavigationButton({
@@ -81,8 +81,9 @@ function NavigationButton({
         reserveDisclosure && "pr-10",
       )}
     >
-      <NavigationIcon icon={Icon} loading={loading} className="size-4" />
+      <Icon aria-hidden="true" className="size-4" />
       <span className="md:flex-1 md:text-left">{label}</span>
+      <NavigationLoadingIndicator loading={loading} />
     </button>
   )
 }
@@ -147,7 +148,7 @@ function SubNavigation<Section extends string>({
 }) {
   return (
     <div role="group" aria-label={label} className="flex gap-1 md:ml-3 md:grid md:w-[calc(100%-0.75rem)] md:border-l md:border-border md:pl-2">
-      {items.map(({ id, label: itemLabel, icon }) => (
+      {items.map(({ id, label: itemLabel, icon: Icon }) => (
         <button
           key={id}
           type="button"
@@ -159,7 +160,7 @@ function SubNavigation<Section extends string>({
             active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
-          <NavigationIcon icon={icon} loading={loading?.[id] ?? false} className="size-3.5" />
+          <Icon aria-hidden="true" className="size-3.5" />
           <span className="md:flex-1 md:text-left">{itemLabel}</span>
           {attention?.section === id && (
             <span className="flex shrink-0 items-center gap-1">
@@ -193,8 +194,9 @@ function SubNavigation<Section extends string>({
                   </Tooltip>
                 )}
               </TooltipProvider>
-            </span>
-          )}
+              </span>
+            )}
+          <NavigationLoadingIndicator loading={loading?.[id] ?? false} />
         </button>
       ))}
     </div>
