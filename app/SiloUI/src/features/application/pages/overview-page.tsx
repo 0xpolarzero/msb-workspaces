@@ -1,5 +1,6 @@
 import { CircleAlert, CircleCheck, Loader2, Pause, Play, RotateCw, Square } from "lucide-react"
 
+import { ListRowIcon } from "@/components/list-row"
 import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { SetupMachineConfiguration, SiloProgressEvent } from "@/contracts/silo"
@@ -139,14 +140,14 @@ function configurationRowView(
 
 function ConfigurationIcon({ failed }: { failed: boolean }) {
   return (
-    <span className={failed
-      ? "mt-1 grid size-7 shrink-0 self-start place-items-center rounded-md bg-destructive/10 text-destructive"
-      : "mt-1 grid size-7 shrink-0 self-start place-items-center rounded-md bg-muted text-muted-foreground"}
+    <ListRowIcon aria-hidden="true" className={failed
+      ? "mt-1 self-start bg-destructive/10 text-destructive"
+      : "mt-1 self-start"}
     >
       {failed
         ? <CircleAlert className="size-3.5" aria-hidden="true" />
         : <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />}
-    </span>
+    </ListRowIcon>
   )
 }
 

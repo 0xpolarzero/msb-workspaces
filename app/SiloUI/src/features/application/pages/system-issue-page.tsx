@@ -3,10 +3,9 @@ import { AlertCircle, Check, Circle, CircleAlert, ExternalLink, Loader2, RotateC
 
 import { CopyButton } from "@/components/copy-button"
 import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
+import { ListCard, ListRow, ListRowDetails, ListRowIcon } from "@/components/list-row"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { PageHeader } from "@/features/application/components/application-ui"
 import type { ActiveRuntimeRepairPresentation, ApplicationActions, RuntimeRepairPhase } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
 
@@ -44,23 +43,22 @@ function StepIcon({ state }: { state: StepState }) {
 
 function RepairProgress({ issue }: { issue: ActiveRuntimeRepairPresentation }) {
   return (
-    <ol className="grid gap-2" aria-label="Repair progress">
+    <ol className="grid gap-1" aria-label="Repair progress">
       {repairSteps.map((step, index) => {
         const state = stepState(issue, index)
         return (
-          <li key={step.phase} data-step-state={state} className="grid grid-cols-[1.75rem_minmax(0,1fr)_auto] items-center gap-2 text-sm">
-            <span className={cn(
-              "grid size-7 place-items-center rounded-full",
+          <li key={step.phase} data-step-state={state} className="grid grid-cols-[1.75rem_minmax(0,1fr)_auto] items-center gap-2 text-[11px]">
+            <ListRowIcon aria-hidden="true" className={cn(
               state === "complete" && "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
               state === "active" && "bg-amber-500/10 text-amber-700 dark:text-amber-400",
               state === "failed" && "bg-destructive/10 text-destructive",
               state === "waiting" && "bg-muted text-muted-foreground/65",
             )}>
               <StepIcon state={state} />
-            </span>
+            </ListRowIcon>
             <span className={cn("font-medium", state === "waiting" && "text-muted-foreground")}>{step.label}</span>
             <span className={cn(
-              "text-xs",
+              "text-[10px]",
               state === "complete" && "text-emerald-700 dark:text-emerald-400",
               state === "active" && "text-amber-700 dark:text-amber-400",
               state === "failed" && "text-destructive",
@@ -107,7 +105,7 @@ function issueHeader(issue: ActiveRuntimeRepairPresentation) {
     return {
       icon: Loader2,
       title: "Repairing installation",
-      description: undefined,
+      description: `Step ${issue.completedSteps + 1} of ${issue.totalSteps}`,
       tone: "warning" as const,
     }
   }
@@ -124,71 +122,46 @@ export function SystemIssuePage({ issue, actions }: { issue: ActiveRuntimeRepair
   const header = issueHeader(issue)
   const Icon = header.icon
   const showsProgress = issue.status === "repairing" || (issue.status === "failed" && issue.phase !== undefined)
-  const showsContent = issue.status === "failed" || showsProgress
   const footerNote = issue.status === "unavailable"
     ? issue.recovery
     : "Sandbox data, host integration, and GitHub access are not changed."
 
   return (
-    <div className="mx-auto grid w-full max-w-2xl gap-6 px-4 py-5 sm:px-6 sm:py-6">
-      <PageHeader title="System issue" />
-
-      <Card
-        size="sm"
-        className={cn(
-          header.tone === "danger" && "ring-destructive/25",
-          header.tone === "warning" && "ring-amber-500/25",
-        )}
-        role={header.tone === "danger" ? "alert" : "status"}
-        aria-live="polite"
-      >
-        <CardHeader className="grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3">
-          <span className={cn(
-            "grid size-8 place-items-center rounded-lg",
-            header.description && "row-span-2",
-            header.tone === "danger" && "bg-destructive/10 text-destructive",
-            header.tone === "warning" && "bg-amber-500/10 text-amber-700 dark:text-amber-400",
-          )}>
-            <Icon className={cn("size-4", issue.status === "repairing" && "animate-spin")} aria-hidden="true" />
-          </span>
-          <CardTitle><h3>{header.title}</h3></CardTitle>
-          {header.description && <CardDescription>{header.description}</CardDescription>}
-        </CardHeader>
-
-        {showsContent && (
-          <CardContent className="grid gap-4 border-t border-border pt-3">
-            {showsProgress && <RepairProgress issue={issue} />}
-            {issue.status === "repairing" && (
-              <p className="text-xs text-muted-foreground">Step {issue.completedSteps + 1} of {issue.totalSteps}</p>
-            )}
-            {issue.status === "failed" && (
-              <>
-                <p className="text-sm text-muted-foreground">{issue.recovery}</p>
-                {issue.diagnosticDetails && <TechnicalDetails details={issue.diagnosticDetails} />}
-              </>
-            )}
-          </CardContent>
-        )}
-
-        {(footerNote || issue.status === "needed" || issue.status === "repairing" || issue.status === "failed") && (
-          <CardFooter className="flex-wrap justify-between gap-3 bg-muted/25">
-            {footerNote && <p className="min-w-0 flex-1 text-xs text-muted-foreground">{footerNote}</p>}
-            {issue.status === "needed" && <Button size="sm" onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Repair Installation</Button>}
-            {issue.status === "repairing" && <Button variant="outline" size="sm" disabled aria-label="Repair in progress"><Loader2 className="animate-spin" aria-hidden="true" />Repairing…</Button>}
-            {issue.status === "failed" && (
-              <div className="flex flex-wrap items-center gap-2">
-                <Button variant="outline" size="sm" asChild>
-                  <a href={siloIssuesURL} target="_blank" rel="noreferrer">
-                    <ExternalLink aria-hidden="true" />
-                    Open GitHub Issues
-                  </a>
-                </Button>
-                <Button size="sm" onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Retry Repair</Button>
-              </div>
-            )}
-          </CardFooter>
-        )}
-      </Card>
+    <div className="mx-auto grid w-full max-w-4xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
+      <h2 className="text-xs font-medium">System issue</h2>
+      <ListCard role={header.tone === "danger" ? "alert" : "status"} aria-live="polite">
+        <ListRow
+          className="grid grid-cols-[auto_minmax(0,1fr)] gap-y-2 hover:bg-muted/35 focus-within:bg-muted/35 sm:flex"
+          icon={
+            <ListRowIcon aria-hidden="true" className={header.tone === "danger" ? "bg-destructive/10 text-destructive" : "bg-amber-500/10 text-amber-700 dark:text-amber-400"}>
+              <Icon className={cn("size-3.5", issue.status === "repairing" && "animate-spin motion-reduce:animate-none")} />
+            </ListRowIcon>
+          }
+          title={<h3 className="text-xs font-medium">{header.title}</h3>}
+          detail={header.description}
+          detailClassName="whitespace-normal"
+          actions={issue.status !== "unavailable" && (
+            <div className="col-start-2 shrink-0">
+              {issue.status === "needed" && <Button variant="outline" size="xs" onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Repair Installation</Button>}
+              {issue.status === "repairing" && <Button variant="outline" size="xs" disabled aria-label="Repair in progress">Repairing…</Button>}
+              {issue.status === "failed" && <Button variant="outline" size="xs" onClick={actions.repairRuntime}><RotateCw aria-hidden="true" />Retry Repair</Button>}
+            </div>
+          )}
+        />
+        <ListRowDetails label="Installation repair details">
+          {showsProgress && <RepairProgress issue={issue} />}
+          {issue.status === "failed" && (
+            <>
+              <p className="text-[11px] text-muted-foreground">{issue.recovery}</p>
+              {issue.diagnosticDetails && <TechnicalDetails details={issue.diagnosticDetails} />}
+            </>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="min-w-0 flex-1 text-[10px] text-muted-foreground">{footerNote}</p>
+            {issue.status === "failed" && <Button variant="ghost" size="xs" asChild><a href={siloIssuesURL} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" />Open GitHub Issues</a></Button>}
+          </div>
+        </ListRowDetails>
+      </ListCard>
     </div>
   )
 }
