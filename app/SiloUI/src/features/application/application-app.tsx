@@ -71,6 +71,7 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
   const [workspaces, setWorkspaces] = useState(() => source.workspaces.map((workspace) => ({ ...workspace, machine: { ...workspace.machine } })))
   const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState<Set<string>>(() => new Set())
   const [logQuery, setLogQuery] = useState("")
+  const [reduceMotion, setReduceMotion] = useState(source.preferences.reduceMotion)
   const [sandboxConfigurationOperation, setSandboxConfigurationOperation] = useState<SandboxConfigurationOperation | null>(source.sandboxConfigurationOperation)
   const [repositoryPushOperations, setRepositoryPushOperations] = useState<RepositoryPushOperation[]>(source.repositoryPushOperations)
   const [repairConfirmationVisible, setRepairConfirmationVisible] = useState(source.runtimeRepair?.status === "succeeded")
@@ -119,7 +120,9 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
       editor: source.preferences.editor,
       browser: source.preferences.browser,
     })
-  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, source.preferences.terminal, source.preferences.editor, source.preferences.browser])
+    // oxlint-disable-next-line react/set-state-in-effect
+    setReduceMotion(source.preferences.reduceMotion)
+  }, [source.workspaces, source.sandboxConfigurationOperation, source.repositoryPushOperations, source.preferences.terminal, source.preferences.editor, source.preferences.browser, source.preferences.reduceMotion])
 
   useEffect(() => {
     const status = source.runtimeRepair?.status
@@ -203,6 +206,7 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
       canGoForward={navigation.canGoForward}
       onGoBack={navigation.goBack}
       onGoForward={navigation.goForward}
+      reduceMotion={reduceMotion}
     >
       <section id="application-panel-workspaces" role="region" aria-labelledby="application-nav-workspaces" hidden={visibleTab !== "workspaces"} className="h-full min-h-0 overflow-hidden">
         {visibleWorkspaceSection === "overview" ? (
@@ -235,7 +239,7 @@ export function ApplicationApp({ source, actions, backupPreviewMode }: { source:
       )}
       <section id="application-panel-settings" role="region" aria-labelledby="application-nav-settings" hidden={visibleTab !== "settings"}>
         <div hidden={settingsSection !== "general"}>
-          <GeneralPage source={applicationSource} applicationPreferences={applicationPreferences} onApplicationPreferencesChange={setApplicationPreferences} />
+          <GeneralPage source={applicationSource} applicationPreferences={applicationPreferences} onApplicationPreferencesChange={setApplicationPreferences} reduceMotion={reduceMotion} onReduceMotionChange={setReduceMotion} />
         </div>
         <div hidden={settingsSection !== "notifications"}><NotificationsPage /></div>
       </section>

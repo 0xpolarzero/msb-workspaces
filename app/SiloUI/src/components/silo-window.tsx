@@ -8,9 +8,10 @@ interface SiloWindowProps {
   children: ReactNode
   className?: string
   titleBar?: ReactNode
+  reduceMotion?: boolean
 }
 
-export function SiloWindow({ title, label, children, className, titleBar }: SiloWindowProps) {
+export function SiloWindow({ title, label, children, className, titleBar, reduceMotion }: SiloWindowProps) {
   return (
     <main className="grid min-h-dvh place-items-center bg-muted/50 p-0 sm:p-4">
       <section
@@ -19,6 +20,7 @@ export function SiloWindow({ title, label, children, className, titleBar }: Silo
           className,
         )}
         aria-label={label}
+        data-reduce-motion={reduceMotion || undefined}
       >
         {titleBar ?? <header className="grid h-10 shrink-0 grid-cols-[1fr_auto_1fr] items-center border-b border-border bg-muted/30 px-3">
           <div className="flex gap-1.5" aria-hidden="true">

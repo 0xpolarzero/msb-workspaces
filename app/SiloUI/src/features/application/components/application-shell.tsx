@@ -5,8 +5,10 @@ import { SiloMark } from "@/components/silo-mark"
 import { SiloWindow } from "@/components/silo-window"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApplicationTitleBar } from "@/features/application/components/application-title-bar"
+import { useSidebarDisclosure } from "@/features/application/model/use-sidebar-disclosure"
 import type { ActiveRuntimeRepairPresentation, ApplicationTab, SettingsSection, WorkspaceSection } from "@/features/application/model/application-source"
 import { cn } from "@/lib/utils"
+import "./application-shell.css"
 
 export interface ApplicationNavigationLoading {
   tabs?: Partial<Record<ApplicationTab, boolean>>
@@ -42,10 +44,9 @@ function NavigationLoadingIndicator({ loading, collapsed }: { loading: boolean; 
 }
 
 function NavigationTooltip({ label, collapsed, children }: { label: string; collapsed: boolean; children: ReactNode }) {
-  if (!collapsed) return children
   return <Tooltip>
     <TooltipTrigger asChild>{children}</TooltipTrigger>
-    <TooltipContent side="right">{label}</TooltipContent>
+    {collapsed && <TooltipContent side="right">{label}</TooltipContent>}
   </Tooltip>
 }
 
@@ -82,8 +83,7 @@ function NavigationButton({
       aria-busy={loading || undefined}
       onClick={onClick}
       className={cn(
-        "relative flex h-10 w-full min-w-0 flex-none items-center gap-2 rounded-md py-2 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70",
-        collapsed ? "justify-center px-0" : "justify-start px-3",
+        "sidebar-primary relative flex h-10 w-full min-w-0 flex-none items-center gap-2 rounded-md py-2 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70",
         tone === "danger"
           ? "text-destructive hover:bg-destructive/[0.07] hover:text-destructive"
           : tone === "warning"
@@ -94,14 +94,14 @@ function NavigationButton({
           : tone === "warning"
             ? "bg-amber-500/10 font-medium text-amber-800 dark:text-amber-300"
           : "bg-sidebar-accent font-medium text-sidebar-accent-foreground"),
-        reserveDisclosure && !collapsed && "pr-10",
+        reserveDisclosure && "sidebar-primary-with-disclosure",
       )}
     >
       <span className="relative flex shrink-0">
         <Icon aria-hidden="true" className="size-4" />
         {collapsed && <NavigationLoadingIndicator loading={loading} collapsed />}
       </span>
-      <span className={collapsed ? "sr-only" : "flex-1 text-left"}>{label}</span>
+      <span className="sidebar-label flex-1 text-left">{label}</span>
       {!collapsed && <NavigationLoadingIndicator loading={loading} collapsed={false} />}
     </button>
     </NavigationTooltip>
@@ -135,16 +135,18 @@ function DisclosureNavigationItem({
     <div className="grid w-full gap-1">
       <div className="relative w-full">
         <NavigationButton id={id} label={label} icon={icon} active={active} collapsed={collapsed} reserveDisclosure onClick={onSelect} />
-        {!collapsed && <button
+        <button
           type="button"
           aria-label={`${expanded ? "Collapse" : "Expand"} ${label} menu`}
           aria-expanded={expanded}
           aria-controls={menuID}
+          aria-hidden={collapsed || undefined}
+          tabIndex={collapsed ? -1 : undefined}
           onClick={onToggle}
-          className="absolute top-1 right-1 z-10 grid size-8 place-items-center rounded-md text-foreground/65 hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70"
+          className="sidebar-disclosure absolute top-1 right-1 z-10 grid size-8 place-items-center rounded-md text-foreground/65 hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70"
         >
           <ChevronRight className={cn("size-4 transition-transform", expanded && "rotate-90")} />
-        </button>}
+        </button>
       </div>
       {expanded && <div id={menuID}>{children}</div>}
     </div>
@@ -171,8 +173,8 @@ function SubNavigation<Section extends string>({
   onSelect: (section: Section) => void
 }) {
   return (
-    <div role="group" aria-label={label} className={cn("relative grid gap-1", collapsed ? "w-full" : "ml-3 w-[calc(100%-0.75rem)] border-l border-border pl-2")}>
-      {collapsed && <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-1 border-l border-border" />}
+    <div role="group" aria-label={label} className="sidebar-subnav relative grid gap-1">
+      <span aria-hidden="true" className="sidebar-subnav-guide pointer-events-none absolute inset-y-0 border-l border-border" />
       {items.map(({ id, label: itemLabel, icon: Icon }) => (
         <NavigationTooltip key={id} label={itemLabel} collapsed={collapsed}>
         <button
@@ -181,16 +183,15 @@ function SubNavigation<Section extends string>({
           aria-busy={loading?.[id] || undefined}
           onClick={() => onSelect(id)}
           className={cn(
-            "relative flex h-8 w-full min-w-0 items-center gap-2 rounded-md text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70",
-            collapsed ? "justify-center px-0" : "justify-start px-2.5",
+            "sidebar-secondary relative flex h-8 w-full min-w-0 items-center gap-2 rounded-md text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70",
             active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
           <span className="relative flex shrink-0">
-            <Icon aria-hidden="true" className={collapsed ? "size-3" : "size-3.5"} />
+            <Icon aria-hidden="true" className="sidebar-section-icon" />
             {collapsed && <NavigationLoadingIndicator loading={loading?.[id] ?? false} collapsed />}
           </span>
-          <span className={collapsed ? "sr-only" : "flex-1 text-left"}>{itemLabel}</span>
+          <span className="sidebar-label flex-1 text-left">{itemLabel}</span>
           {collapsed && attention?.section === id && <span
             role="status"
             aria-label={`${attention.errors} sandbox errors, ${attention.warnings} sandbox warnings`}
@@ -252,6 +253,7 @@ export function ApplicationShell({
   canGoForward,
   onGoBack,
   onGoForward,
+  reduceMotion = false,
   children,
 }: {
   activeTab: ApplicationTab
@@ -267,11 +269,26 @@ export function ApplicationShell({
   canGoForward: boolean
   onGoBack: () => void
   onGoForward: () => void
+  reduceMotion?: boolean
   children: ReactNode
 }) {
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(activeTab === "workspaces")
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(activeTab === "settings")
-  const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 767px)").matches ?? false)
+  const {
+    collapsed: pinnedCollapsed,
+    previewing,
+    sidebarRef,
+    toggleRef,
+    toggle,
+    enterToggle,
+    leaveToggle,
+    enterSidebar,
+    leaveSidebar,
+    usePointer,
+    useKeyboard,
+    blurSidebar,
+  } = useSidebarDisclosure()
+  const collapsed = pinnedCollapsed && !previewing
 
   function selectTab(tab: ApplicationTab) {
     if (tab === "workspaces") setWorkspaceMenuOpen(true)
@@ -281,14 +298,26 @@ export function ApplicationShell({
 
   return (
     <TooltipProvider delayDuration={300}>
-    <SiloWindow title="Silo" label="Silo" className={collapsed ? "[--sidebar-width:3.5rem]" : "[--sidebar-width:13.5rem]"} titleBar={
-      <ApplicationTitleBar collapsed={collapsed} onToggleSidebar={() => setCollapsed((current) => !current)} canGoBack={canGoBack} canGoForward={canGoForward} onGoBack={onGoBack} onGoForward={onGoForward} />
+    <SiloWindow title="Silo" label="Silo" reduceMotion={reduceMotion} className={cn("silo-application", pinnedCollapsed && "sidebar-pinned-collapsed")} titleBar={
+      <ApplicationTitleBar collapsed={pinnedCollapsed} previewing={previewing} toggleRef={toggleRef} onToggleSidebar={toggle} onPreviewEnter={enterToggle} onPreviewLeave={leaveToggle} canGoBack={canGoBack} canGoForward={canGoForward} onGoBack={onGoBack} onGoForward={onGoForward} />
     }>
-      <div className="grid min-h-0 flex-1 grid-cols-[var(--sidebar-width)_minmax(0,1fr)]">
-        <nav id="application-sidebar" aria-label="Silo navigation" data-collapsed={collapsed} className={cn("flex min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-sidebar py-4", collapsed ? "px-2" : "px-3")}>
-          <div className={cn("mb-4 flex shrink-0 items-center gap-3 border-b border-border pb-4", collapsed ? "justify-center" : "px-3")}>
-            <SiloMark className="size-8" />
-            <span className={collapsed ? "sr-only" : "text-base font-semibold tracking-tight"}>Silo</span>
+      <div className="sidebar-layout grid min-h-0 flex-1" data-sidebar-layout={pinnedCollapsed ? "collapsed" : "expanded"}>
+        <nav
+          ref={sidebarRef}
+          id="application-sidebar"
+          aria-label="Silo navigation"
+          data-collapsed={collapsed}
+          data-previewing={previewing}
+          onPointerEnter={enterSidebar}
+          onPointerLeave={leaveSidebar}
+          onPointerDown={usePointer}
+          onKeyDown={useKeyboard}
+          onBlurCapture={blurSidebar}
+          className="silo-sidebar flex min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-sidebar py-4"
+        >
+          <div className="sidebar-brand mb-4 flex shrink-0 items-center gap-3 overflow-hidden border-b border-border pb-4">
+            <SiloMark className="size-8 shrink-0" />
+            <span className="sidebar-label text-base font-semibold tracking-tight">Silo</span>
           </div>
           <div className="flex w-full flex-1 flex-col items-start gap-1">
             <div className="grid w-full gap-1">
@@ -323,7 +352,7 @@ export function ApplicationShell({
               ))}
             </div>
             <div className="mt-auto grid w-full gap-1">
-              <div className={cn("my-2 border-t border-border", !collapsed && "mx-3")} aria-hidden="true" />
+              <div className="sidebar-footer-divider my-2 border-t border-border" aria-hidden="true" />
               {systemIssueStatus && (
                 <NavigationButton
                   id="system"

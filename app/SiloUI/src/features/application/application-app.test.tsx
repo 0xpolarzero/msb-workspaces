@@ -55,7 +55,7 @@ describe("application", () => {
     for (const label of ["Overview", "Files", "Logs", "Network", "Activity", "GitHub", "Secrets", "Backup", "Settings"]) {
       const button = navigation.getByRole("button", { name: label })
       expect(button.querySelector("svg")).toBeInTheDocument()
-      expect(within(button).getByText(label)).toHaveClass("sr-only")
+      expect(button).toHaveAccessibleName(label)
     }
     await user.click(navigation.getByRole("button", { name: "Settings" }))
     await user.click(navigation.getByRole("button", { name: "Notifications" }))
@@ -201,7 +201,7 @@ describe("application", () => {
     const sandboxSections = within(navigation).getByRole("group", { name: "Sandbox sections" })
     expect(within(sandboxSections).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Overview", "Files", "Logs", "Network", "Activity"])
     expect(within(sandboxSections).getByRole("button", { name: "Overview" })).toHaveAttribute("aria-current", "page")
-    expect(sandboxSections).toHaveClass("ml-3", "w-[calc(100%-0.75rem)]", "border-l", "pl-2")
+    expect(sandboxSections).toHaveClass("sidebar-subnav")
 
     const overview = within(appPanel("Sandboxes"))
     expect(overview.queryByRole("heading", { name: "Overview" })).not.toBeInTheDocument()
@@ -1495,6 +1495,8 @@ describe("application", () => {
     expect(settings.getByRole("switch", { name: "Sandbox health" })).toBeDisabled()
 
     await user.click(settingsNavigation.getByRole("button", { name: "General" }))
+    await user.click(settings.getByRole("switch", { name: "Reduce motion" }))
+    expect(screen.getByRole("region", { name: "Silo" })).toHaveAttribute("data-reduce-motion", "true")
     await user.click(settings.getByRole("switch", { name: "Start sandboxes at launch" }))
     const playgrounds = settings.getByRole("checkbox", { name: "playgrounds" })
     await user.click(playgrounds)
@@ -1508,6 +1510,9 @@ describe("application", () => {
     await user.click(navigation.getByRole("button", { name: "Settings" }))
     expect(settings.getByRole("checkbox", { name: "playgrounds" })).toBeChecked()
     expect(settings.getByRole("combobox", { name: "Browser" })).toHaveTextContent("Firefox")
+    expect(settings.getByRole("switch", { name: "Reduce motion" })).toBeChecked()
+    await user.click(settings.getByRole("switch", { name: "Reduce motion" }))
+    expect(screen.getByRole("region", { name: "Silo" })).not.toHaveAttribute("data-reduce-motion")
 
     await user.click(settingsNavigation.getByRole("button", { name: "Notifications" }))
     expect(settings.getByRole("switch", { name: "Enable notifications" })).not.toBeChecked()

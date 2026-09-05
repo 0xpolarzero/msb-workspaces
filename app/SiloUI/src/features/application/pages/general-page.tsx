@@ -26,10 +26,14 @@ export function GeneralPage({
   source,
   applicationPreferences,
   onApplicationPreferencesChange,
+  reduceMotion,
+  onReduceMotionChange,
 }: {
   source: ApplicationSource
   applicationPreferences: ApplicationPreferenceSelection
   onApplicationPreferencesChange: (preferences: ApplicationPreferenceSelection) => void
+  reduceMotion: boolean
+  onReduceMotionChange: (enabled: boolean) => void
 }) {
   const [launchAtLogin, setLaunchAtLogin] = useState(source.preferences.launchAtLogin)
   const [startAtLaunch, setStartAtLaunch] = useState(source.preferences.startWorkspacesAtLaunch)
@@ -38,7 +42,6 @@ export function GeneralPage({
     return new Set(initial ? [initial.machine.id] : [])
   })
   const [pollingCadence, setPollingCadence] = useState(source.preferences.pollingCadence)
-  const [reduceMotion, setReduceMotion] = useState(source.preferences.reduceMotion)
 
   function toggleStartupWorkspace(workspaceID: string, checked: boolean) {
     setStartupWorkspaces((current) => {
@@ -80,7 +83,7 @@ export function GeneralPage({
       </section>
       <section className="grid gap-2">
         <h3 className="text-xs font-medium">Accessibility</h3>
-        <ListCard><SettingRow icon={Accessibility} title="Reduce motion" description="Disable nonessential interface animation." control={<Switch checked={reduceMotion} onCheckedChange={setReduceMotion} aria-label="Reduce motion" />} /></ListCard>
+        <ListCard><SettingRow icon={Accessibility} title="Reduce motion" description="Disable nonessential interface animation." control={<Switch checked={reduceMotion} onCheckedChange={onReduceMotionChange} aria-label="Reduce motion" />} /></ListCard>
       </section>
     </div>
   )
