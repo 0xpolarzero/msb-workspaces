@@ -1,6 +1,7 @@
 import type { ComponentProps, ReactNode } from "react"
 import { CircleAlert, Monitor, Server, TriangleAlert } from "lucide-react"
 
+import { ListRow, ListRowIcon } from "@/components/list-row"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -28,10 +29,8 @@ export function SandboxListItem({ className, ...props }: ComponentProps<"li">) {
 
 function SandboxIcon({ kind, state }: { kind: "vm" | "ssh"; state: SandboxIconState }) {
   return (
-    <span
+    <ListRowIcon
       className={cn(
-        "grid size-7 shrink-0 place-items-center rounded-md",
-        state === "normal" && "bg-muted text-muted-foreground",
         state === "warning" && "bg-amber-500/10 text-amber-600 dark:text-amber-400",
         state === "error" && "bg-destructive/10 text-destructive",
       )}
@@ -49,7 +48,7 @@ function SandboxIcon({ kind, state }: { kind: "vm" | "ssh"; state: SandboxIconSt
       ) : (
         <Server className="size-3.5" aria-hidden="true" />
       )}
-    </span>
+    </ListRowIcon>
   )
 }
 
@@ -81,9 +80,9 @@ export function SandboxListRow({
   tone?: SandboxRowTone
 }) {
   return (
-    <div
+    <ListRow
       className={cn(
-        "sandbox-row flex min-w-0 items-center gap-1.5 px-2 py-2 transition-colors",
+        "sandbox-row",
         !tone && "hover:bg-muted/35 focus-within:bg-muted/35",
         tone === "running" && "bg-emerald-500/[0.035] hover:bg-emerald-500/[0.07] focus-within:bg-emerald-500/[0.07]",
         tone === "starting" && "bg-amber-500/[0.035] hover:bg-amber-500/[0.07] focus-within:bg-amber-500/[0.07]",
@@ -92,33 +91,34 @@ export function SandboxListRow({
         tone === "error" && "bg-destructive/[0.035] hover:bg-destructive/[0.07] focus-within:bg-destructive/[0.07]",
       )}
       data-sandbox-row-tone={tone}
-    >
-      {leading}
-      {icon ?? <SandboxIcon kind={kind} state={iconState} />}
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-1.5">
+      leading={leading}
+      icon={icon ?? <SandboxIcon kind={kind} state={iconState} />}
+      title={
+        <>
           <span className="truncate text-xs font-medium" title={name}>{name}</span>
           <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase text-muted-foreground">{kind}</span>
           {badge}
-        </div>
-        <div className={cn(
-          "truncate text-[10px] text-muted-foreground",
-          iconState === "warning" && "text-amber-700 dark:text-amber-400",
-          iconState === "error" && "text-destructive",
-          detailClassName,
-        )}>{detail}</div>
-      </div>
-      {hoverActions && (
-        <div
-          className="sandbox-hover-actions flex shrink-0 items-center gap-0.5 transition-opacity"
-          aria-label={`Manage ${name}`}
-          data-sandbox-hover-actions=""
-        >
-          {hoverActions}
-        </div>
+        </>
+      }
+      detail={detail}
+      detailClassName={cn(
+        iconState === "warning" && "text-amber-700 dark:text-amber-400",
+        iconState === "error" && "text-destructive",
+        detailClassName,
       )}
-      {actions && <div className={cn("flex shrink-0 items-center gap-0.5", actionsClassName)} aria-label={`Controls for ${name}`}>{actions}</div>}
-    </div>
+      actions={<>
+        {hoverActions && (
+          <div
+            className="sandbox-hover-actions flex shrink-0 items-center gap-0.5 transition-opacity"
+            aria-label={`Manage ${name}`}
+            data-sandbox-hover-actions=""
+          >
+            {hoverActions}
+          </div>
+        )}
+        {actions && <div className={cn("flex shrink-0 items-center gap-0.5", actionsClassName)} aria-label={`Controls for ${name}`}>{actions}</div>}
+      </>}
+    />
   )
 }
 
