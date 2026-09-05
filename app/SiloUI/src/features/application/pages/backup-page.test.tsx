@@ -29,12 +29,12 @@ describe("BackupPage", () => {
       .mockResolvedValueOnce({ name: "My backups" })
     vi.stubGlobal("showDirectoryPicker", picker)
     render(<BackupPage source={applicationSourceForScenario("running")} />)
-    await user.click(screen.getByRole("button", { name: "Change backup destination" }))
+    await user.click(screen.getByRole("button", { name: "Select destination" }))
     expect(picker).toHaveBeenCalledWith({ id: "silo-backup-destination", mode: "read" })
     expect(screen.getByText("External SSD / Silo Backups")).toBeVisible()
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()
     expect(screen.queryByRole("group", { name: "Backup destination" })).not.toBeInTheDocument()
-    await user.click(screen.getByRole("button", { name: "Change backup destination" }))
+    await user.click(screen.getByRole("button", { name: "Select destination" }))
     expect(screen.getByText("My backups")).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Back up" }))
     expect(screen.getByRole("group", { name: "Review backup" })).toHaveTextContent("My backups")
@@ -46,7 +46,7 @@ describe("BackupPage", () => {
     render(<BackupPage source={applicationSourceForScenario("running")} />)
     const input = screen.getByLabelText("Backup destination folder") as HTMLInputElement
     const click = vi.spyOn(input, "click").mockImplementation(() => undefined)
-    fireEvent.click(screen.getByRole("button", { name: "Change backup destination" }))
+    fireEvent.click(screen.getByRole("button", { name: "Select destination" }))
     expect(click).toHaveBeenCalledOnce()
     expect(input.webkitdirectory).toBe(true)
     const file = new File(["fixture"], "archive.silo-backup")
@@ -83,7 +83,7 @@ describe("BackupPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start backup" }))
     expect(screen.getByRole("progressbar", { name: "Backup progress" })).toBeVisible()
     expect(screen.getByRole("button", { name: "Choose archive…" })).toBeDisabled()
-    expect(screen.getByRole("button", { name: "Change backup destination" })).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Select destination" })).toBeDisabled()
     expect(onBusyChange).toHaveBeenLastCalledWith(true)
     expect(history.getAllByRole("listitem")).toHaveLength(1)
 
@@ -106,7 +106,7 @@ describe("BackupPage", () => {
     expect(within(screen.getByRole("list", { name: "Recent backups" })).getAllByRole("listitem")).toHaveLength(1)
     fireEvent.click(screen.getByRole("button", { name: "Review and retry" }))
     expect(screen.getByRole("group", { name: "Review backup" })).toBeVisible()
-    expect(screen.getByRole("button", { name: "Change backup destination" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "Select destination" })).toBeEnabled()
   })
 
   it("shows a valid archive with a separate restart warning when a sandbox cannot restart", async () => {

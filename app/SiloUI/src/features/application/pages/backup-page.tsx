@@ -209,7 +209,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                 </>}
                 detail={<span title={destination}>{destination}</span>}
                 actions={<div className="flex shrink-0 items-center gap-1">
-                  <Button type="button" variant="ghost" size="xs" aria-label="Change backup destination" disabled={controlsDisabled} onClick={pickDestination}>Change…</Button>
+                  <Button type="button" variant="ghost" size="xs" aria-label="Select destination" disabled={controlsDisabled} onClick={pickDestination}>Select destination…</Button>
                   <Button ref={backupButton} type="button" variant="outline" size="xs" disabled={controlsDisabled || localSandboxes.length === 0} aria-expanded={backupExpanded} aria-controls="backup-details" onClick={() => setFlow({ kind: "backup-review" })}>Back up</Button>
                 </div>}
               />
