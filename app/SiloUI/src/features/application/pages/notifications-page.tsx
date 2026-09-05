@@ -1,9 +1,8 @@
 import { useState } from "react"
 import { Bell, CircleAlert, HardDrive, HeartPulse } from "lucide-react"
 
-import { Card, CardContent } from "@/components/ui/card"
+import { ListCard, ListRow, ListRowIcon } from "@/components/list-row"
 import { Switch } from "@/components/ui/switch"
-import { PageHeader, SectionHeader } from "@/features/application/components/application-ui"
 
 const categories = [
   { id: "health", label: "Sandbox health", detail: "State changes and failed health checks.", icon: HeartPulse },
@@ -25,28 +24,33 @@ export function NotificationsPage() {
   }
 
   return (
-    <div className="mx-auto grid w-full max-w-3xl gap-6 px-4 py-5 sm:px-6 sm:py-6">
-      <PageHeader title="Notifications" description="Choose which Silo events can notify you outside the app." />
-      <Card size="sm">
-        <CardContent className="flex items-center gap-3">
-          <span className="grid size-8 place-items-center rounded-lg bg-muted text-muted-foreground"><Bell className="size-4" /></span>
-          <div className="min-w-0 flex-1"><div className="text-sm font-medium">Enable notifications</div><div className="mt-0.5 text-xs text-muted-foreground">Silo can send alerts while its window is closed.</div></div>
-          <Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enable notifications" />
-        </CardContent>
-      </Card>
-      <section className="grid gap-3">
-        <SectionHeader title="Alert categories" />
-        <Card size="sm">
-          <CardContent className="divide-y divide-border">
-            {categories.map(({ id, label, detail, icon: Icon }) => (
-              <div key={id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                <Icon className="size-4 text-muted-foreground" />
-                <div className="min-w-0 flex-1"><div className="text-sm font-medium">{label}</div><div className="mt-0.5 text-xs text-muted-foreground">{detail}</div></div>
-                <Switch checked={selectedCategories.has(id)} onCheckedChange={(checked) => setCategory(id, checked)} disabled={!enabled} aria-label={label} />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
+    <div className="mx-auto grid w-full max-w-4xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
+      <h2 className="text-xs font-medium">Notifications</h2>
+      <ListCard>
+        <ListRow
+          className="hover:bg-muted/35 focus-within:bg-muted/35"
+          icon={<ListRowIcon aria-hidden="true"><Bell className="size-3.5" /></ListRowIcon>}
+          title={<h3 className="text-xs font-medium">Enable notifications</h3>}
+          detail="Silo can send alerts while its window is closed."
+          detailClassName="whitespace-normal"
+          actions={<Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enable notifications" />}
+        />
+      </ListCard>
+      <section className="grid gap-2">
+        <h3 className="text-xs font-medium">Alert categories</h3>
+        <ListCard>
+          {categories.map(({ id, label, detail, icon: Icon }) => (
+            <ListRow
+              key={id}
+              className="hover:bg-muted/35 focus-within:bg-muted/35"
+              icon={<ListRowIcon aria-hidden="true"><Icon className="size-3.5" /></ListRowIcon>}
+              title={<h4 className="text-xs font-medium">{label}</h4>}
+              detail={detail}
+              detailClassName="whitespace-normal"
+              actions={<Switch checked={selectedCategories.has(id)} onCheckedChange={(checked) => setCategory(id, checked)} disabled={!enabled} aria-label={label} />}
+            />
+          ))}
+        </ListCard>
       </section>
     </div>
   )

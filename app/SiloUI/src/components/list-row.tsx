@@ -2,6 +2,14 @@ import type { ComponentProps, ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
 
+export function ListCard({ className, ...props }: ComponentProps<"div">) {
+  return <div className={cn("divide-y divide-border overflow-hidden rounded-md border border-border", className)} {...props} />
+}
+
+export function ListRowDetails({ label, className, ...props }: { label: string } & ComponentProps<"div">) {
+  return <div role="group" aria-label={label} className={cn("mx-2 grid gap-3 border-t border-border py-3 pr-1 pl-8 text-xs", className)} {...props} />
+}
+
 export function ListRow({
   icon,
   title,

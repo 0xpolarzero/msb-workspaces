@@ -1,22 +1,24 @@
 import { useState } from "react"
 import { Accessibility, Eye, Power } from "lucide-react"
 
+import { ListCard, ListRow, ListRowDetails, ListRowIcon } from "@/components/list-row"
 import { Checkbox } from "@/components/ui/checkbox"
-import { Card, CardContent } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { PageHeader, SectionHeader } from "@/features/application/components/application-ui"
 import type { ApplicationSource } from "@/features/application/model/application-source"
 import { ApplicationPreferenceFields } from "@/features/preferences/components/application-preference-fields"
 import type { ApplicationPreferenceSelection } from "@/features/preferences/model/application-preferences"
 
 function SettingRow({ icon: Icon, title, description, control }: { icon: typeof Power; title: string; description: string; control: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-      <Icon className="size-4 text-muted-foreground" />
-      <div className="min-w-0 flex-1"><div className="text-sm font-medium">{title}</div><div className="mt-0.5 text-xs text-muted-foreground">{description}</div></div>
-      <div className="w-48 shrink-0">{control}</div>
-    </div>
+    <ListRow
+      className="hover:bg-muted/35 focus-within:bg-muted/35"
+      icon={<ListRowIcon aria-hidden="true"><Icon className="size-3.5" /></ListRowIcon>}
+      title={<h4 className="text-xs font-medium">{title}</h4>}
+      detail={description}
+      detailClassName="whitespace-normal"
+      actions={control}
+    />
   )
 }
 
@@ -48,39 +50,37 @@ export function GeneralPage({
   }
 
   return (
-    <div className="mx-auto grid w-full max-w-3xl gap-6 px-4 py-5 sm:px-6 sm:py-6">
-      <PageHeader title="General" description="Control startup, observation, and application preferences." />
-      <section className="grid gap-3">
-        <SectionHeader title="Startup" />
-        <Card size="sm">
-          <CardContent className="divide-y divide-border">
-            <SettingRow icon={Power} title="Launch Silo at login" description="Keep workspace status and notifications available." control={<div className="flex justify-end"><Switch checked={launchAtLogin} onCheckedChange={setLaunchAtLogin} aria-label="Launch Silo at login" /></div>} />
-            <SettingRow icon={Power} title="Start sandboxes at launch" description="Start selected sandboxes when Silo opens." control={<div className="flex justify-end"><Switch checked={startAtLaunch} onCheckedChange={setStartAtLaunch} aria-label="Start sandboxes at launch" /></div>} />
+    <div className="mx-auto grid w-full max-w-4xl gap-4 px-4 py-5 sm:px-6 sm:py-6">
+      <h2 className="text-xs font-medium">General</h2>
+      <section className="grid gap-2">
+        <h3 className="text-xs font-medium">Startup</h3>
+        <ListCard>
+          <SettingRow icon={Power} title="Launch Silo at login" description="Keep workspace status and notifications available." control={<Switch checked={launchAtLogin} onCheckedChange={setLaunchAtLogin} aria-label="Launch Silo at login" />} />
+          <div>
+            <SettingRow icon={Power} title="Start sandboxes at launch" description="Start selected sandboxes when Silo opens." control={<Switch checked={startAtLaunch} onCheckedChange={setStartAtLaunch} aria-label="Start sandboxes at launch" />} />
             {startAtLaunch && (
-              <div className="grid gap-2 py-3 pl-7">
+              <ListRowDetails label="Sandboxes to start at launch" className="gap-2">
                 {source.workspaces.map((workspace) => (
-                  <label key={workspace.machine.id} className="flex items-center gap-2 text-sm"><Checkbox checked={startupWorkspaces.has(workspace.machine.id)} onCheckedChange={(checked) => toggleStartupWorkspace(workspace.machine.id, checked === true)} />{workspace.machine.name}</label>
+                  <label key={workspace.machine.id} className="flex items-center gap-2 text-xs"><Checkbox checked={startupWorkspaces.has(workspace.machine.id)} onCheckedChange={(checked) => toggleStartupWorkspace(workspace.machine.id, checked === true)} />{workspace.machine.name}</label>
                 ))}
-              </div>
+              </ListRowDetails>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </ListCard>
       </section>
-      <section className="grid gap-3">
-        <SectionHeader title="Observation" />
-        <Card size="sm"><CardContent><SettingRow icon={Eye} title="Polling cadence" description="How often Silo refreshes hidden app state." control={<Select value={pollingCadence} onValueChange={(value) => setPollingCadence(value as "15" | "30" | "60")}><SelectTrigger aria-label="Polling cadence"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="15">15 seconds</SelectItem><SelectItem value="30">30 seconds</SelectItem><SelectItem value="60">60 seconds</SelectItem></SelectContent></Select>} /></CardContent></Card>
+      <section className="grid gap-2">
+        <h3 className="text-xs font-medium">Observation</h3>
+        <ListCard><SettingRow icon={Eye} title="Polling cadence" description="How often Silo refreshes hidden app state." control={<Select value={pollingCadence} onValueChange={(value) => setPollingCadence(value as "15" | "30" | "60")}><SelectTrigger className="h-7 w-32 shrink-0 text-[11px]" aria-label="Polling cadence"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="15">15 seconds</SelectItem><SelectItem value="30">30 seconds</SelectItem><SelectItem value="60">60 seconds</SelectItem></SelectContent></Select>} /></ListCard>
       </section>
-      <section className="grid gap-3">
-        <SectionHeader title="Applications" />
-        <Card size="sm">
-          <CardContent className="divide-y divide-border">
-            <ApplicationPreferenceFields value={applicationPreferences} onChange={onApplicationPreferencesChange} />
-          </CardContent>
-        </Card>
+      <section className="grid gap-2">
+        <h3 className="text-xs font-medium">Applications</h3>
+        <ListCard>
+          <ApplicationPreferenceFields compact value={applicationPreferences} onChange={onApplicationPreferencesChange} />
+        </ListCard>
       </section>
-      <section className="grid gap-3">
-        <SectionHeader title="Accessibility" />
-        <Card size="sm"><CardContent><SettingRow icon={Accessibility} title="Reduce motion" description="Disable nonessential interface animation." control={<div className="flex justify-end"><Switch checked={reduceMotion} onCheckedChange={setReduceMotion} aria-label="Reduce motion" /></div>} /></CardContent></Card>
+      <section className="grid gap-2">
+        <h3 className="text-xs font-medium">Accessibility</h3>
+        <ListCard><SettingRow icon={Accessibility} title="Reduce motion" description="Disable nonessential interface animation." control={<Switch checked={reduceMotion} onCheckedChange={setReduceMotion} aria-label="Reduce motion" />} /></ListCard>
       </section>
     </div>
   )

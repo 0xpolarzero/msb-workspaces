@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Archive, Check, ChevronDown, Info, LoaderCircle, RotateCcw, TriangleAlert } from "lucide-react"
 
-import { ListRow, ListRowIcon } from "@/components/list-row"
+import { ListCard, ListRow, ListRowDetails, ListRowIcon } from "@/components/list-row"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
@@ -32,10 +32,6 @@ interface BackupPageProps {
 export function BackupPage(props: BackupPageProps) {
   // A replacement backup snapshot clears local previews and their pending timers.
   return <BackupPageContent key={`${JSON.stringify(props.source.backup)}:${props.previewMode ?? "success"}`} {...props} />
-}
-
-function InlinePanel({ label, children }: { label: string; children: ReactNode }) {
-  return <div role="group" aria-label={label} className="mx-2 grid gap-3 border-t border-border py-3 pr-1 pl-8 text-xs">{children}</div>
 }
 
 function BackupPageContent({ source, previewMode = "success", onBusyChange, onRestoreComplete, onRestartRequired }: BackupPageProps) {
@@ -129,7 +125,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
     if ((flow.kind !== "running" && flow.kind !== "result") || flow.operation !== operation) return null
     if (flow.kind === "running") {
       const step = (operation === "backup" ? backupProgressSteps : restoreProgressSteps)[flow.step]
-      return <InlinePanel label={operation === "backup" ? "Backup in progress" : "Restore in progress"}>
+      return <ListRowDetails label={operation === "backup" ? "Backup in progress" : "Restore in progress"}>
         <div className="flex items-start gap-2" role="status">
           <LoaderCircle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 animate-spin motion-reduce:animate-none text-muted-foreground" />
           <div className="min-w-0 flex-1"><p className="font-medium">{step.title}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{step.detail}</p></div>
@@ -137,10 +133,10 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
         </div>
         <Progress value={step.progress} aria-label={operation === "backup" ? "Backup progress" : "Restore progress"} />
         <p className="text-[10px] text-muted-foreground">Keep Silo open until this finishes.</p>
-      </InlinePanel>
+      </ListRowDetails>
     }
     const failed = flow.outcome === "failed"
-    return <InlinePanel label={operation === "backup" ? "Backup result" : "Restore result"}>
+    return <ListRowDetails label={operation === "backup" ? "Backup result" : "Restore result"}>
       <div role={failed ? "alert" : "status"} className="flex items-start gap-2">
         {failed ? <TriangleAlert aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-destructive" /> : <Check aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />}
         <div className="min-w-0 space-y-1">
@@ -156,7 +152,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
         <Button variant="ghost" size="xs" onClick={closeFlow}>{failed ? "Dismiss" : "Done"}</Button>
         {failed && <Button variant="outline" size="xs" onClick={() => operation === "backup" ? setFlow({ kind: "backup-review" }) : pickArchive()}>{operation === "backup" ? "Review and retry" : "Choose another archive"}</Button>}
       </div>
-    </InlinePanel>
+    </ListRowDetails>
   }
 
   return (
@@ -195,7 +191,8 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
         {pickerError && <p role="alert" className="text-[11px] text-destructive">{pickerError}</p>}
         <section className="grid gap-2">
           <h2 className="text-xs font-medium">Backup</h2>
-          <ul className="divide-y divide-border overflow-hidden rounded-md border border-border" aria-label="Backup controls">
+          <ListCard>
+          <ul className="divide-y divide-border" aria-label="Backup controls">
             <li>
               <ListRow
                 className="hover:bg-muted/35 focus-within:bg-muted/35"
@@ -214,7 +211,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                 </div>}
               />
               <div id="backup-details">
-                {flow.kind === "backup-review" && <InlinePanel label="Review backup">
+                {flow.kind === "backup-review" && <ListRowDetails label="Review backup">
                   <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]">
                     <dt className="text-muted-foreground">Destination</dt><dd className="break-all">{destination}</dd>
                     <dt className="text-muted-foreground">Space</dt><dd>About {backupRequiredGB} GB required</dd>
@@ -222,7 +219,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                   </dl>
                   <p className="text-[11px] text-muted-foreground">{runningNames.length > 0 ? `${runningNames.join(", ")} will stop briefly and restart after the backup. Stopped sandboxes will stay stopped.` : "All sandboxes are stopped and will stay stopped after the backup."}</p>
                   <div className="flex justify-end gap-1"><Button variant="ghost" size="xs" onClick={closeFlow}>Cancel</Button><Button autoFocus variant="outline" size="xs" onClick={startBackup}>Start backup</Button></div>
-                </InlinePanel>}
+                </ListRowDetails>}
                 {operationPanel("backup")}
               </div>
             </li>
@@ -236,11 +233,11 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                 actions={<Button ref={restoreButton} type="button" variant="outline" size="xs" disabled={controlsDisabled} onClick={pickArchive}>Choose archive…</Button>}
               />
               <div id="restore-details">
-                {flow.kind === "invalid-archive" && <InlinePanel label="Archive validation">
+                {flow.kind === "invalid-archive" && <ListRowDetails label="Archive validation">
                   <div role="alert" className="space-y-1"><p className="font-medium text-destructive">Checksum mismatch</p><p className="text-[11px] text-muted-foreground">This archive is incomplete or damaged. Choose another copy. No sandbox data has changed.</p></div>
                   <div className="flex justify-end gap-1"><Button variant="ghost" size="xs" onClick={closeFlow}>Cancel</Button><Button variant="outline" size="xs" onClick={() => pickArchive()}>Choose another archive</Button></div>
-                </InlinePanel>}
-                {flow.kind === "restore-review" && <InlinePanel label="Review restore">
+                </ListRowDetails>}
+                {flow.kind === "restore-review" && <ListRowDetails label="Review restore">
                   <div className="space-y-1"><p className="break-all text-[11px] font-medium">{flow.archive.name}</p><p className="text-[10px] text-muted-foreground">{flow.archive.completedLabel} · {flow.archive.size} · {flow.archive.sandboxes.length} sandboxes</p><p className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400"><Check aria-hidden="true" className="size-3" />Checksum verified</p></div>
                   <p className="text-[11px] text-muted-foreground">Replaces current sandbox data with {flow.archive.sandboxes.join(", ")} from this archive. Changes since the backup will be lost. All restored sandboxes will stay stopped.</p>
                   <div className="flex flex-wrap items-end justify-between gap-3">
@@ -249,15 +246,17 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                       if (flow.confirmation === "RESTORE") setFlow({ kind: "running", operation: "restore", archive: flow.archive, runningNames, step: 0 })
                     }}>Restore backup</Button></div>
                   </div>
-                </InlinePanel>}
+                </ListRowDetails>}
                 {operationPanel("restore")}
               </div>
             </li>
           </ul>
+          </ListCard>
         </section>
         <section className="grid gap-2" aria-labelledby="backup-history-heading">
           <h3 id="backup-history-heading" className="text-xs font-medium">Recent backups</h3>
-          <ul className="divide-y divide-border overflow-hidden rounded-md border border-border" aria-label="Recent backups">
+          <ListCard>
+          <ul className="divide-y divide-border" aria-label="Recent backups">
             {archives.map((archive) => <li key={archive.name}>
               <ListRow
                 className="hover:bg-muted/35 focus-within:bg-muted/35"
@@ -266,12 +265,13 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                 detail={<>{archive.completedLabel} · {archive.size} · {archive.sandboxes.length} sandboxes</>}
                 actions={<Button type="button" variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={`Details for ${archive.name}`} aria-expanded={expandedArchive === archive.name} onClick={() => setExpandedArchive(expandedArchive === archive.name ? null : archive.name)}><ChevronDown aria-hidden="true" className={expandedArchive === archive.name ? "rotate-180" : ""} /></Button>}
               />
-              {expandedArchive === archive.name && <InlinePanel label={`Archive details for ${archive.name}`}>
+              {expandedArchive === archive.name && <ListRowDetails label={`Archive details for ${archive.name}`}>
                 <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]"><dt className="text-muted-foreground">Location</dt><dd className="break-all">{archive.destination}</dd><dt className="text-muted-foreground">Sandboxes</dt><dd>{archive.sandboxes.join(", ")}</dd></dl>
                 <div className="flex justify-end"><Button variant="outline" size="xs" disabled={controlsDisabled} onClick={() => reviewArchive(archive)}>Restore…</Button></div>
-              </InlinePanel>}
+              </ListRowDetails>}
             </li>)}
           </ul>
+          </ListCard>
         </section>
       </div>
     </TooltipProvider>
