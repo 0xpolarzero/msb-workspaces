@@ -1,9 +1,9 @@
 import { useId, useMemo, useState, type ReactNode } from "react"
 import { Check, GitBranch, Info, LoaderCircle, RotateCcw, Search, Trash2, X } from "lucide-react"
 
+import { ListCard, ListRow, ListRowIcon } from "@/components/list-row"
 import { InlineConfirmation } from "@/components/inline-confirmation"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
@@ -165,6 +165,7 @@ export interface GitHubAccessEditorProps {
   onWorkspaceIdentityChange: (workspace: string, identity: GitHubIdentity) => void
   onCommitWorkspaceIdentity?: (workspace: string, identity: GitHubIdentity) => void
   onResetWorkspaceIdentity: (workspace: string) => void
+  compactConnection?: boolean
   connectedTitle?: ReactNode
   connectedDetail?: ReactNode
   connectedActions?: ReactNode
@@ -190,6 +191,7 @@ export function GitHubAccessEditor({
   onWorkspaceIdentityChange,
   onCommitWorkspaceIdentity,
   onResetWorkspaceIdentity,
+  compactConnection = false,
   connectedTitle = "Connected to GitHub",
   connectedDetail = "Repository credentials are scoped to each workspace.",
   connectedActions,
@@ -206,41 +208,33 @@ export function GitHubAccessEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      {connectionState === "disconnected" && (
-        <Card className="shrink-0 py-0">
-          <CardContent className="flex flex-col items-start gap-3 p-4 sm:flex-row sm:items-center">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><GitBranch className="size-4" /></span>
-            <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium">Not connected</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">Connect to select private repositories and push permissions.</p>
+      <ListCard
+        className={compactConnection || connectionState !== "connected" ? "shrink-0" : "shrink-0 overflow-visible rounded-none border-0"}
+        role={connectionState === "connecting" ? "status" : undefined}
+        aria-live={connectionState === "connecting" ? "polite" : undefined}
+      >
+        <ListRow
+          className={`grid grid-cols-[auto_minmax(0,1fr)] gap-y-2 sm:flex ${compactConnection ? "hover:bg-muted/35 focus-within:bg-muted/35" : connectionState === "connected" ? "gap-x-3 p-0" : "gap-x-3 p-4"}`}
+          icon={
+            <ListRowIcon
+              aria-hidden="true"
+              className={`${compactConnection ? "" : "size-9 rounded-full"} ${connectionState === "connected" ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : ""}`}
+            >
+              {connectionState === "connected" ? <Check className={compactConnection ? "size-3.5" : "size-4"} />
+                : connectionState === "connecting" ? <LoaderCircle className={`${compactConnection ? "size-3.5" : "size-4"} animate-spin motion-reduce:animate-none`} />
+                  : <GitBranch className={compactConnection ? "size-3.5" : "size-4"} />}
+            </ListRowIcon>
+          }
+          title={<h3 className={compactConnection ? "text-xs font-medium" : "text-sm font-medium"}>{connectionState === "connected" ? connectedTitle : connectionState === "connecting" ? "Connecting to GitHub…" : "Not connected"}</h3>}
+          detail={connectionState === "connected" ? connectedDetail : connectionState === "connecting" ? "Completing the secure browser authorization." : "Connect to select private repositories and push permissions."}
+          detailClassName={compactConnection ? "whitespace-normal" : "mt-0.5 whitespace-normal text-xs"}
+          actions={connectionState !== "connecting" && (
+            <div className={`col-start-2 flex shrink-0 flex-wrap items-center ${compactConnection ? "gap-1" : "gap-2"}`}>
+              {connectionState === "connected" ? connectedActions : <Button type="button" size={compactConnection ? "xs" : "default"} variant={compactConnection ? "outline" : "default"} onClick={onConnect}>Connect GitHub</Button>}
             </div>
-            <Button type="button" className="sm:self-center" onClick={onConnect}>Connect GitHub</Button>
-          </CardContent>
-        </Card>
-      )}
-
-      {connectionState === "connecting" && (
-        <Card className="shrink-0 py-0" role="status" aria-live="polite">
-          <CardContent className="flex items-center gap-3 p-4">
-            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><LoaderCircle className="size-4 animate-spin" /></span>
-            <div>
-              <h3 className="text-sm font-medium">Connecting to GitHub…</h3>
-              <p className="mt-0.5 text-xs text-muted-foreground">Completing the secure browser authorization.</p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {connectionState === "connected" && (
-        <div className="grid shrink-0 grid-cols-[2.25rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 sm:grid-cols-[2.25rem_minmax(0,1fr)_auto]">
-          <span className="grid size-9 place-items-center rounded-full bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"><Check className="size-4" /></span>
-          <div className="min-w-0 flex-1">
-            <h3 className="text-sm font-medium">{connectedTitle}</h3>
-            <div className="mt-0.5 text-xs text-muted-foreground">{connectedDetail}</div>
-          </div>
-          {connectedActions && <div className="col-start-2 flex min-w-0 flex-wrap items-center gap-2 sm:col-start-3 sm:row-start-1 sm:flex-nowrap">{connectedActions}</div>}
-        </div>
-      )}
+          )}
+        />
+      </ListCard>
 
       {!currentHostGitIdentity && (
         <p id="host-git-identity-unavailable" className="shrink-0 text-xs text-muted-foreground">
