@@ -146,7 +146,7 @@ function DisclosureNavigationItem({
           <ChevronRight className={cn("size-4 transition-transform", expanded && "rotate-90")} />
         </button>}
       </div>
-      {(expanded || collapsed) && <div id={menuID}>{children}</div>}
+      {expanded && <div id={menuID}>{children}</div>}
     </div>
   )
 }
@@ -181,7 +181,7 @@ function SubNavigation<Section extends string>({
           onClick={() => onSelect(id)}
           className={cn(
             "relative flex h-8 w-full min-w-0 items-center gap-2 rounded-md text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70",
-            collapsed ? "h-7 justify-center px-0" : "justify-start px-2.5",
+            collapsed ? "justify-center px-0" : "justify-start px-2.5",
             active && section === id && "bg-muted font-medium text-foreground",
           )}
         >
@@ -286,7 +286,7 @@ export function ApplicationShell({
       <div className="grid min-h-0 flex-1 grid-cols-[var(--sidebar-width)_minmax(0,1fr)]">
         <nav id="application-sidebar" aria-label="Silo navigation" data-collapsed={collapsed} className={cn("flex min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-sidebar py-4", collapsed ? "px-2" : "px-3")}>
           <div className={cn("mb-4 flex shrink-0 items-center gap-3 border-b border-border pb-4", collapsed ? "justify-center" : "px-3")}>
-            <SiloMark className={collapsed ? "size-7" : "size-8"} />
+            <SiloMark className="size-8" />
             <span className={collapsed ? "sr-only" : "text-base font-semibold tracking-tight"}>Silo</span>
           </div>
           <div className="flex w-full flex-1 flex-col items-start gap-1">

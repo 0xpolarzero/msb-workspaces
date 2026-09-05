@@ -51,16 +51,32 @@ describe("application", () => {
     expect(screen.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-expanded", "false")
     expect(appNavigation()).toHaveAttribute("data-collapsed", "true")
     expect(navigation.queryByRole("button", { name: "Collapse Sandboxes menu" })).not.toBeInTheDocument()
-    for (const label of ["Overview", "Files", "Logs", "Network", "Activity", "GitHub", "Secrets", "Backup", "General", "Notifications"]) {
+    expect(navigation.queryByRole("group", { name: "Settings sections" })).not.toBeInTheDocument()
+    for (const label of ["Overview", "Files", "Logs", "Network", "Activity", "GitHub", "Secrets", "Backup", "Settings"]) {
       const button = navigation.getByRole("button", { name: label })
       expect(button.querySelector("svg")).toBeInTheDocument()
       expect(within(button).getByText(label)).toHaveClass("sr-only")
     }
+    await user.click(navigation.getByRole("button", { name: "Settings" }))
     await user.click(navigation.getByRole("button", { name: "Notifications" }))
     expect(within(appPanel("Settings")).getByRole("heading", { name: "Notifications", level: 2 })).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Expand sidebar" }))
     expect(appNavigation()).toHaveAttribute("data-collapsed", "false")
     expect(navigation.getByRole("button", { name: "Notifications" })).toHaveAttribute("aria-current", "page")
+  })
+
+  it("preserves closed sandbox and open settings menus when toggling sidebar width", async () => {
+    const { user } = renderApplication()
+    const navigation = within(appNavigation())
+    await user.click(navigation.getByRole("button", { name: "Collapse Sandboxes menu" }))
+    await user.click(navigation.getByRole("button", { name: "Settings" }))
+
+    for (const toggle of ["Collapse sidebar", "Expand sidebar"]) {
+      await user.click(screen.getByRole("button", { name: toggle }))
+      expect(navigation.queryByRole("group", { name: "Sandbox sections" })).not.toBeInTheDocument()
+      expect(navigation.getByRole("group", { name: "Settings sections" })).toBeVisible()
+      expect(navigation.getByRole("button", { name: "General" })).toHaveAttribute("aria-current", "page")
+    }
   })
 
   it("navigates backward and forward through pages and nested sections, replacing the forward branch after a new visit", async () => {
