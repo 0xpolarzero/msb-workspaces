@@ -19,7 +19,7 @@ export function StatusBadge({ indicator, children, className, ...props }: Status
       <span data-slot="status-badge-indicator" className="grid size-2 shrink-0 place-items-center" aria-hidden="true">
         {indicator}
       </span>
-      <span data-slot="status-badge-label" className="min-w-0 truncate">{children}</span>
+      <span data-slot="status-badge-label" className="min-w-0 -translate-y-px truncate">{children}</span>
     </span>
   )
 }
