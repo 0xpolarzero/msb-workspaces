@@ -57,6 +57,13 @@
   box-shadow: 12px 0 24px -16px rgb(0 0 0 / 35%);
 }
 
+.sidebar-icon-badge {
+  position: absolute;
+  top: calc(50% - 6px);
+  left: calc(50% + 6px);
+  translate: -50% -50%;
+}
+
 .sidebar-brand {
   padding-inline: 12px;
   transition: padding var(--sidebar-motion), gap var(--sidebar-motion);
