@@ -4,6 +4,7 @@ import { Activity, Archive, Box, Check, ChevronRight, CircleAlert, CircleCheck, 
 import { CopyButton } from "@/components/copy-button"
 import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import { FilterCombobox, type FilterOption } from "@/components/filter-combobox"
+import { ListCard, ListRow, ListRowIcon } from "@/components/list-row"
 import { StatusBadge } from "@/components/status-badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -481,55 +482,67 @@ function ActivityLog({ workspaces, sourceActivities }: { workspaces: Application
       />
 
       {activities.length > 0 ? (
-        <div className="max-h-full min-h-0 divide-y divide-border overflow-y-auto overscroll-contain rounded-lg border border-border" role="list" aria-label="Recent activity">
+        <ListCard className="max-h-full min-h-0 overflow-y-auto overscroll-contain" role="list" aria-label="Recent activity">
           {activities.map((item) => {
             const category = activityCategoryPresentation[item.category]
             const CategoryIcon = category.icon
             const workspace = item.workspace ? workspacesByName.get(item.workspace) : undefined
             return (
-              <div
+              <ListRow
                 key={item.id}
                 role="listitem"
                 aria-busy={item.status === "running" || undefined}
                 data-activity-id={item.id}
                 data-activity-status={item.status}
                 className={cn(
-                  "grid grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-3 bg-card px-3 py-2.5 transition-colors hover:bg-muted/35",
+                  "hover:bg-muted/35",
                   item.status === "running" && "bg-primary/[0.025]",
                   item.tone === "warning" && "bg-amber-500/[0.035]",
                   item.tone === "danger" && "bg-destructive/[0.025]",
                 )}
-              >
-                {item.status === "running"
-                  ? <Loader2 className="mt-0.5 size-4 animate-spin text-primary" aria-hidden="true" />
-                  : item.tone === "danger"
-                    ? <CircleAlert className="mt-0.5 size-4 text-destructive" aria-hidden="true" />
-                    : item.tone === "warning"
-                      ? <TriangleAlert className="mt-0.5 size-4 text-amber-600 dark:text-amber-400" aria-hidden="true" />
-                      : item.tone === "success"
-                        ? <Check className="mt-0.5 size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                        : <Activity className="mt-0.5 size-4 text-muted-foreground" aria-hidden="true" />}
-                <div className="grid min-w-0 gap-1" data-activity-content>
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <div className="text-sm font-medium">{item.title}</div>
-                    <span className="text-xs text-muted-foreground">{item.time}</span>
+                icon={
+                  <ListRowIcon aria-hidden="true" className={cn(
+                    item.tone === "success" && "bg-emerald-500/10",
+                    item.tone === "warning" && "bg-amber-500/10",
+                    item.tone === "danger" && "bg-destructive/10",
+                  )}>
+                    {item.status === "running"
+                      ? <Loader2 className="size-3.5 animate-spin text-primary motion-reduce:animate-none" />
+                      : item.tone === "danger"
+                        ? <CircleAlert className="size-3.5 text-destructive" />
+                        : item.tone === "warning"
+                          ? <TriangleAlert className="size-3.5 text-amber-600 dark:text-amber-400" />
+                          : item.tone === "success"
+                            ? <Check className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                            : <Activity className="size-3.5" />}
+                  </ListRowIcon>
+                }
+                title={<div className="min-w-0 text-xs font-medium break-words">{item.title}</div>}
+                detailClassName="whitespace-normal"
+                detail={
+                  <div className="min-w-0 space-y-1" data-activity-content>
+                    <p>{item.detail}</p>
+                    {item.status === "running" && item.progress !== undefined && (
+                      <div className="flex max-w-sm items-center gap-2 pt-1">
+                        <Progress value={item.progress * 100} aria-label={item.progressLabel ?? `${item.title} progress`} />
+                        <span className="w-8 shrink-0 text-right text-[10px] tabular-nums">{Math.round(item.progress * 100)}%</span>
+                      </div>
+                    )}
                   </div>
-                  <div className="text-xs text-muted-foreground">{item.detail}</div>
-                  {item.status === "running" && item.progress !== undefined && (
-                    <div className="mt-0.5 flex max-w-sm items-center gap-2">
-                      <Progress value={item.progress * 100} aria-label={item.progressLabel ?? `${item.title} progress`} />
-                      <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(item.progress * 100)}%</span>
+                }
+                actions={
+                  <div className="flex max-w-[40%] shrink-0 flex-col items-end gap-1" data-activity-meta>
+                    <time dateTime={item.occurredAt} className="text-[10px] text-muted-foreground">{item.time}</time>
+                    <div className="flex flex-wrap justify-end gap-1">
+                      {item.workspace && workspace && <WorkspaceBadge name={item.workspace} state={workspace.state} />}
+                      <StatusBadge indicator={<CategoryIcon className="size-2.5" />} aria-label={`Category: ${category.label}`}>{category.label}</StatusBadge>
                     </div>
-                  )}
-                </div>
-                <div className="flex min-w-0 flex-col items-end gap-1" data-activity-meta>
-                  {item.workspace && workspace && <WorkspaceBadge name={item.workspace} state={workspace.state} />}
-                  <StatusBadge indicator={<CategoryIcon className="size-2.5" />} aria-label={`Category: ${category.label}`}>{category.label}</StatusBadge>
-                </div>
-              </div>
+                  </div>
+                }
+              />
             )
           })}
-        </div>
+        </ListCard>
       ) : (
         <EmptyState
           title={allActivities.length === 0 ? "No recent activity" : "No matching activity"}

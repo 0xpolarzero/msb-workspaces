@@ -353,12 +353,13 @@ describe("application", () => {
     expect(within(activity).getByText("Backup completed")).toBeVisible()
     const activityRows = within(activity).getAllByRole("listitem")
     expect(activityRows).toHaveLength(2)
-    expect(activityRows[0]).toHaveTextContent("Stop verified2m agoA fresh observation confirmed that the sandbox is stopped.playgroundsSandbox")
+    expect(within(activityRows[0]).getByText("Stop verified")).toBeVisible()
+    expect(within(activityRows[0]).getByText("A fresh observation confirmed that the sandbox is stopped.")).toBeVisible()
     expect(within(activityRows[0]).getByLabelText("playgrounds, Stopped")).toBeVisible()
     const activityContent = activityRows[0].querySelector('[data-activity-content]') as HTMLElement
     const activityMeta = activityRows[0].querySelector('[data-activity-meta]') as HTMLElement
-    expect(activityContent).toHaveClass("grid", "gap-1")
-    expect(activityContent).toHaveTextContent("2m ago")
+    expect(activityMeta).toHaveTextContent("2m ago")
+    expect(activityContent).not.toHaveTextContent("2m ago")
     expect(activityContent).not.toContainElement(within(activityRows[0]).getByLabelText("Category: Sandbox"))
     expect(activityMeta).toHaveClass("items-end")
     expect(activityMeta).toContainElement(within(activityRows[0]).getByLabelText("Category: Sandbox"))
@@ -474,7 +475,9 @@ describe("application", () => {
 
     const activity = within(appPanel("Sandboxes")).getByRole("list", { name: "Recent activity" })
     const firstRow = within(activity).getAllByRole("listitem")[0]
-    expect(firstRow).toHaveTextContent("Start failed3m agoCandidate networking did not become ready.devSandbox")
+    expect(within(firstRow).getByText("Start failed")).toBeVisible()
+    expect(within(firstRow).getByText("Candidate networking did not become ready.")).toBeVisible()
+    expect(within(firstRow).getByText("3m ago")).toBeVisible()
     expect(firstRow.querySelector("svg")).toHaveClass("lucide-circle-alert", "text-destructive")
     expect(within(firstRow).getByLabelText("dev, Failed")).toBeVisible()
   })
