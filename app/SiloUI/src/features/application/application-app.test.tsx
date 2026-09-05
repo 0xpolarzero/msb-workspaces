@@ -43,6 +43,67 @@ function appPanel(name: string) {
 }
 
 describe("application", () => {
+  it("collapses the sidebar to labelled icons and keeps every destination usable", async () => {
+    const { user } = renderApplication()
+    const navigation = within(appNavigation())
+
+    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }))
+    expect(screen.getByRole("button", { name: "Expand sidebar" })).toHaveAttribute("aria-expanded", "false")
+    expect(appNavigation()).toHaveAttribute("data-collapsed", "true")
+    expect(navigation.queryByRole("button", { name: "Collapse Sandboxes menu" })).not.toBeInTheDocument()
+    for (const label of ["Overview", "Files", "Logs", "Network", "Activity", "GitHub", "Secrets", "Backup", "General", "Notifications"]) {
+      const button = navigation.getByRole("button", { name: label })
+      expect(button.querySelector("svg")).toBeInTheDocument()
+      expect(within(button).getByText(label)).toHaveClass("sr-only")
+    }
+    await user.click(navigation.getByRole("button", { name: "Notifications" }))
+    expect(within(appPanel("Settings")).getByRole("heading", { name: "Notifications", level: 2 })).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Expand sidebar" }))
+    expect(appNavigation()).toHaveAttribute("data-collapsed", "false")
+    expect(navigation.getByRole("button", { name: "Notifications" })).toHaveAttribute("aria-current", "page")
+  })
+
+  it("navigates backward and forward through pages and nested sections, replacing the forward branch after a new visit", async () => {
+    const { user } = renderApplication()
+    const navigation = within(appNavigation())
+    const back = screen.getByRole("button", { name: "Go back" })
+    const forward = screen.getByRole("button", { name: "Go forward" })
+    expect(back).toBeDisabled()
+    expect(forward).toBeDisabled()
+
+    await user.click(navigation.getByRole("button", { name: "Files" }))
+    await user.click(navigation.getByRole("button", { name: "Backup" }))
+    await user.click(navigation.getByRole("button", { name: "Settings" }))
+    await user.click(navigation.getByRole("button", { name: "Notifications" }))
+    await user.click(back)
+    expect(within(appPanel("Settings")).getByRole("heading", { name: "General", level: 2 })).toBeVisible()
+    await user.click(back)
+    expect(appPanel("Backup")).toBeVisible()
+    await user.click(back)
+    expect(within(appPanel("Sandboxes")).getByRole("list", { name: "Repositories" })).toBeVisible()
+    await user.click(forward)
+    expect(appPanel("Backup")).toBeVisible()
+    await user.click(navigation.getByRole("button", { name: "Secrets" }))
+    expect(forward).toBeDisabled()
+    await user.click(navigation.getByRole("button", { name: "Secrets" }))
+    await user.click(back)
+    expect(appPanel("Backup")).toBeVisible()
+  })
+
+  it("focuses the command input with Command-K without losing the current page", async () => {
+    const { user } = renderApplication()
+    await user.click(within(appNavigation()).getByRole("button", { name: "Backup" }))
+    const input = screen.getByRole("textbox", { name: "Search or jump to" })
+    expect(screen.getByText("⌘ K", { selector: "kbd" })).toBeVisible()
+    await user.keyboard("{Meta>}k{/Meta}")
+    expect(input).toHaveFocus()
+    await user.type(input, "dev")
+    await user.keyboard("{Meta>}k{/Meta}")
+    expect(input.selectionStart).toBe(0)
+    expect(input.selectionEnd).toBe(3)
+    expect(appPanel("Backup")).toBeVisible()
+  })
+
   it("keeps restore progress across navigation and reflects stopped sandboxes when it completes", async () => {
     vi.useFakeTimers()
     const application = renderApplication()
@@ -257,9 +318,9 @@ describe("application", () => {
     const devBadge = within(devRepository).getByLabelText("dev, Running")
     expect(devBadge).toBeVisible()
     expect(devBadge).toHaveAttribute("data-slot", "status-badge")
-    expect(devBadge).toHaveClass("h-5", "items-center", "justify-center", "text-[10px]", "leading-none")
+    expect(devBadge).toHaveClass("h-5", "items-center", "justify-center", "text-[10px]")
     expect(devBadge.querySelector('[data-slot="status-badge-indicator"]')).toHaveClass("grid", "size-2", "place-items-center")
-    expect(devBadge.querySelector('[data-slot="status-badge-label"]')).toHaveClass("-translate-y-px", "leading-none")
+    expect(devBadge.querySelector('[data-slot="status-badge-label"]')).toHaveTextContent("dev")
     expect(devRepository.querySelector('[data-workspace-state-dot="running"]')).toHaveClass("bg-emerald-500")
     expect(within(playgroundsRepository).getByLabelText("playgrounds, Stopped")).toBeVisible()
     expect(playgroundsRepository.querySelector('[data-workspace-state-dot="stopped"]')).toHaveClass("bg-muted-foreground/55")
