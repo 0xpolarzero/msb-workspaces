@@ -126,4 +126,56 @@ describe("sidebar hover preview", () => {
     wait(200)
     expect(sidebar).toHaveAttribute("data-collapsed", "true")
   })
+
+  it("does not reveal previously hovered tooltips when the sidebar collapses", () => {
+    const { toggle } = renderSidebar()
+    fireEvent.click(toggle)
+
+    for (const name of ["Files", "GitHub", "Backup"]) {
+      const item = screen.getByRole("button", { name })
+      fireEvent.pointerMove(item)
+      wait(350)
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
+      fireEvent.pointerLeave(item)
+      fireEvent.pointerMove(screen.getByRole("button", { name: "Page content" }), { clientX: 500, clientY: 500 })
+    }
+
+    fireEvent.click(toggle)
+    wait(350)
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
+  })
+
+  it("dismisses tooltips hovered during a temporary sidebar preview", () => {
+    const { toggle } = renderSidebar()
+    fireEvent.pointerEnter(toggle)
+    wait(200)
+    fireEvent.pointerLeave(toggle)
+    const item = screen.getByRole("button", { name: "Files" })
+    fireEvent.pointerEnter(item)
+    fireEvent.pointerMove(item)
+    wait(350)
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
+
+    fireEvent.pointerLeave(item)
+    fireEvent.pointerMove(screen.getByRole("button", { name: "Page content" }), { clientX: 500, clientY: 500 })
+    wait(350)
+    expect(toggle).toHaveAccessibleName("Expand sidebar")
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
+  })
+
+  it("keeps collapsed tooltips available on hover and keyboard focus", () => {
+    renderSidebar()
+    const item = screen.getByRole("button", { name: "Files" })
+    fireEvent.pointerMove(item)
+    wait(350)
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Files")
+    fireEvent.pointerLeave(item)
+    fireEvent.pointerMove(screen.getByRole("button", { name: "Page content" }), { clientX: 500, clientY: 500 })
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
+
+    act(() => item.focus())
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Files")
+    fireEvent.keyDown(item, { key: "Escape" })
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument()
+  })
 })

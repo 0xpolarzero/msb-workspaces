@@ -44,9 +44,10 @@ function NavigationLoadingIndicator({ loading, collapsed }: { loading: boolean; 
 }
 
 function NavigationTooltip({ label, collapsed, children }: { label: string; collapsed: boolean; children: ReactNode }) {
+  // Hidden content still needs Radix's dismissal handlers to clear its open state.
   return <Tooltip>
     <TooltipTrigger asChild>{children}</TooltipTrigger>
-    {collapsed && <TooltipContent side="right">{label}</TooltipContent>}
+    <TooltipContent side="right" hidden={!collapsed}>{label}</TooltipContent>
   </Tooltip>
 }
 

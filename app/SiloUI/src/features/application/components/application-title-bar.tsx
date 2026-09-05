@@ -9,7 +9,7 @@ function ToolbarButton({ label, showTooltip = true, ...props }: ComponentProps<t
     <TooltipTrigger asChild>
       <Button variant="ghost" size="icon-sm" className="size-7 text-muted-foreground hover:text-foreground disabled:opacity-35 [&_svg]:size-4" aria-label={label} {...props} />
     </TooltipTrigger>
-    {showTooltip && <TooltipContent side="bottom">{label}</TooltipContent>}
+    <TooltipContent side="bottom" hidden={!showTooltip}>{label}</TooltipContent>
   </Tooltip>
 }
 
