@@ -22,6 +22,48 @@ async function finishOperation() {
 }
 
 describe("BackupPage", () => {
+  it("starts with no backup history and requires a destination before creating the first archive", async () => {
+    vi.useFakeTimers()
+    const source = applicationSourceForScenario("running")
+    const picker = vi.fn()
+      .mockRejectedValueOnce(new DOMException("Cancelled", "AbortError"))
+      .mockResolvedValueOnce({ name: "First backups" })
+    vi.stubGlobal("showDirectoryPicker", picker)
+    render(<BackupPage source={{ ...source, backup: { ...source.backup, destination: "", lastArchive: "", completedLabel: "", compressedSize: "" } }} />)
+    const history = within(screen.getByRole("list", { name: "Recent backups" }))
+    expect(history.getByText("No backups yet")).toBeVisible()
+    expect(history.queryByRole("img", { name: "Backup completed" })).not.toBeInTheDocument()
+    expect(screen.getByText("Select a destination to save your backups.")).toBeVisible()
+    expect(screen.getByRole("button", { name: "Back up" })).toBeDisabled()
+
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select destination" })) })
+    expect(screen.getByRole("button", { name: "Back up" })).toBeDisabled()
+    expect(screen.queryByRole("group", { name: "Review backup" })).not.toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Select destination" })) })
+    expect(screen.getByRole("button", { name: "Back up" })).toBeEnabled()
+    fireEvent.click(screen.getByRole("button", { name: "Back up" }))
+    expect(screen.getByRole("group", { name: "Review backup" })).toHaveTextContent("First backups")
+    fireEvent.click(screen.getByRole("button", { name: "Start backup" }))
+    expect(history.getByText("No backups yet")).toBeVisible()
+    await finishOperation()
+    expect(history.queryByText("No backups yet")).not.toBeInTheDocument()
+    expect(history.getAllByRole("img", { name: "Backup completed" })).toHaveLength(1)
+    expect(history.getByText("Just now · 3 sandboxes")).toBeVisible()
+  })
+
+  it("uses the current virtual machine names in fixture archive details", () => {
+    const source = applicationSourceForScenario("running")
+    render(<BackupPage source={{ ...source, workspaces: [
+      { ...source.workspaces[0], machine: { ...source.workspaces[0].machine, name: "design" } },
+      { ...source.workspaces[1], machine: { id: "remote", kind: "ssh", name: "remote", host: "remote.example.com", user: "developer", port: 22 } },
+    ] }} />)
+    fireEvent.click(screen.getByRole("button", { name: `Details for ${source.backup.lastArchive}` }))
+    const details = within(screen.getByRole("group", { name: `Archive details for ${source.backup.lastArchive}` }))
+    expect(details.getByText("design")).toBeVisible()
+    expect(details.queryByText("remote")).not.toBeInTheDocument()
+    expect(details.queryByText(/dev|playgrounds|personal/)).not.toBeInTheDocument()
+  })
+
   it("opens the native folder picker, preserves cancelled choices, and uses the selected folder", async () => {
     const user = userEvent.setup()
     const picker = vi.fn()

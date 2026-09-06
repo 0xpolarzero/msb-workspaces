@@ -38,7 +38,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
   const [destination, setDestination] = useState(source.backup.destination)
   const [pickingFolder, setPickingFolder] = useState(false)
   const [pickerError, setPickerError] = useState<string | null>(null)
-  const [archives, setArchives] = useState<BackupArchive[]>(() => [initialBackupArchive(source)])
+  const [archives, setArchives] = useState<BackupArchive[]>(() => source.backup.lastArchive ? [initialBackupArchive(source)] : [])
   const [flow, setFlow] = useState<Flow>({ kind: "idle" })
   const [expandedArchive, setExpandedArchive] = useState<string | null>(null)
   const folderInput = useRef<HTMLInputElement>(null)
@@ -81,6 +81,7 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
   }
 
   function startBackup() {
+    if (!destination || localSandboxes.length === 0) return
     const archive: BackupArchive = {
       name: `silo-${new Date().toISOString().slice(0, 10)}-${String(archives.length).padStart(3, "0")}.silo-backup`,
       completedLabel: "Just now", size: source.backup.compressedSize, destination,
@@ -204,10 +205,10 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
                     <TooltipContent>Includes sandbox code, VM state, databases, Docker data, and guest-side credentials. macOS Keychain credentials are excluded.</TooltipContent>
                   </Tooltip>
                 </>}
-                detail={<span title={destination}>{destination}</span>}
+                detail={<span title={destination || undefined}>{destination || "Select a destination to save your backups."}</span>}
                 actions={<div className="flex shrink-0 items-center gap-1">
                   <Button type="button" variant="ghost" size="xs" aria-label="Select destination" disabled={controlsDisabled} onClick={pickDestination}>Select destination…</Button>
-                  <Button ref={backupButton} type="button" variant="outline" size="xs" disabled={controlsDisabled || localSandboxes.length === 0} aria-expanded={backupExpanded} aria-controls="backup-details" onClick={() => setFlow({ kind: "backup-review" })}>Back up</Button>
+                  <Button ref={backupButton} type="button" variant="outline" size="xs" disabled={controlsDisabled || !destination || localSandboxes.length === 0} aria-expanded={backupExpanded} aria-controls="backup-details" onClick={() => setFlow({ kind: "backup-review" })}>Back up</Button>
                 </div>}
               />
               <div id="backup-details">
@@ -257,12 +258,17 @@ function BackupPageContent({ source, previewMode = "success", onBusyChange, onRe
           <h3 id="backup-history-heading" className="text-xs font-medium">Recent backups</h3>
           <ListCard>
           <ul className="divide-y divide-border" aria-label="Recent backups">
+            {archives.length === 0 && <li><ListRow
+              icon={<ListRowIcon aria-hidden="true"><Archive className="size-3.5" /></ListRowIcon>}
+              title="No backups yet"
+              detail="Completed backups will appear here."
+            /></li>}
             {archives.map((archive) => <li key={archive.name}>
               <ListRow
                 className="hover:bg-muted/35 focus-within:bg-muted/35"
                 icon={<ListRowIcon className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" role="img" aria-label="Backup completed"><Check className="size-3.5" aria-hidden="true" /></ListRowIcon>}
                 title={<span className="truncate" title={archive.name}>{archive.name}</span>}
-                detail={<>{archive.completedLabel} · {archive.size} · {archive.sandboxes.length} sandboxes</>}
+                detail={[archive.completedLabel, archive.size, `${archive.sandboxes.length} sandboxes`].filter(Boolean).join(" · ")}
                 actions={<Button type="button" variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={`Details for ${archive.name}`} aria-expanded={expandedArchive === archive.name} onClick={() => setExpandedArchive(expandedArchive === archive.name ? null : archive.name)}><ChevronDown aria-hidden="true" className={expandedArchive === archive.name ? "rotate-180" : ""} /></Button>}
               />
               {expandedArchive === archive.name && <ListRowDetails label={`Archive details for ${archive.name}`}>
