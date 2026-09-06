@@ -64,6 +64,23 @@ describe("onboarding shell", () => {
     expect(screen.getByRole("tab", { name: "GitHub" })).toHaveAccessibleName("GitHub")
   })
 
+  it("moves status into a corner badge when collapsed while retaining the step icon", () => {
+    renderShell({ viewModel: projectOnboarding(onboardingScenarios.running, "connecting") })
+    const step = screen.getByRole("tab", { name: "GitHub" })
+    const icon = step.querySelector("svg.lucide-git-fork")
+    const iconContainer = icon?.parentElement
+    expect(iconContainer).not.toContainElement(step.querySelector("svg.lucide-loader-circle"))
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }))
+    expect(step.querySelector("svg.lucide-git-fork")).toBe(icon)
+    expect(iconContainer).toContainElement(step.querySelector("svg.lucide-loader-circle"))
+    expect(step).toHaveAccessibleDescription("In progress")
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand sidebar" }))
+    expect(step.querySelector("svg.lucide-git-fork")).toBe(icon)
+    expect(iconContainer).not.toContainElement(step.querySelector("svg.lucide-loader-circle"))
+  })
+
   it("shows collapsed step tooltips without leaving one behind after hover preview", () => {
     const { sidebar } = renderShell()
     fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }))

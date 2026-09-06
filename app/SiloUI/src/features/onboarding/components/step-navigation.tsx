@@ -21,15 +21,17 @@ const statusLabels: Record<PresentationStatus, string> = {
   waiting: "Waiting",
 }
 
-function StepStatus({ status }: { status: PresentationStatus }) {
+function StepStatus({ status, collapsed }: { status: PresentationStatus; collapsed: boolean }) {
   if (status === "waiting") return null
   const Icon = status === "succeeded" ? Check : status === "failed" ? CircleAlert : LoaderCircle
-  return <Icon aria-hidden="true" className={cn(
-    "absolute -top-1 -right-1 size-2 rounded-full bg-sidebar ring-2 ring-sidebar",
+  const indicator = <Icon aria-hidden="true" className={cn(
+    "shrink-0",
+    collapsed ? "absolute -top-1 -right-1 size-2 rounded-full bg-sidebar ring-2 ring-sidebar" : "size-3.5",
     status === "failed" && "text-destructive",
     status === "running" && "animate-spin text-foreground",
     status === "succeeded" && "text-emerald-600 dark:text-emerald-400",
   )} />
+  return collapsed ? indicator : <span className="grid size-5 shrink-0 place-items-center">{indicator}</span>
 }
 
 interface StepNavigationProps extends ComponentProps<"nav"> {
@@ -66,9 +68,10 @@ export function StepNavigation({ status, collapsed, completed, ...props }: StepN
               >
                 <span className="relative flex shrink-0">
                   <Icon aria-hidden="true" className="size-4" />
-                  <StepStatus status={status[id]} />
+                  {collapsed && <StepStatus status={status[id]} collapsed />}
                 </span>
                 <span className="sidebar-label flex-1 text-left">{label}</span>
+                {!collapsed && <StepStatus status={status[id]} collapsed={false} />}
                 <span id={`setup-step-${id}-status`} className="sr-only">{statusLabels[status[id]]}</span>
               </TabsTrigger>
             </TooltipTrigger>
