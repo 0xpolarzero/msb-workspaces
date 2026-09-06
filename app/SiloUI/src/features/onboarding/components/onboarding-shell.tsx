@@ -58,7 +58,7 @@ export function OnboardingShell({ activeStep, viewModel, onStepChange, onBack, o
           onBlurCapture={blurSidebar}
         />
         <div className="flex min-h-0 min-w-0 flex-col">
-          <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+          <div className="relative min-h-0 flex-1 overflow-hidden">{children}</div>
           <OnboardingFooter activeStep={activeStep} viewModel={viewModel} onBack={onBack} onContinue={onContinue} completed={completed} onOpenApp={onOpenApp} />
         </div>
       </Tabs>

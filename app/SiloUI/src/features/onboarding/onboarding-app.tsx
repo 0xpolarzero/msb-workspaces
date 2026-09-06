@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
 
 import { TabsContent } from "@/components/ui/tabs"
 import { SetupComplete } from "@/features/onboarding/components/setup-complete"
@@ -24,6 +24,20 @@ interface OnboardingAppProps {
   initialGitHubConnectionState?: GitHubConnectionState
   repositoryOptions?: readonly string[]
   onOpenApp?: () => void
+}
+
+function OnboardingPanel({ step, activeStep, children }: { step: OnboardingStep; activeStep: OnboardingStep; children: ReactNode }) {
+  const active = step === activeStep
+  // Retain layout as well as state: display:none restarts disclosure animations
+  // and can clamp the panel's scroll offset when the step becomes visible again.
+  return <TabsContent
+    forceMount
+    value={step}
+    aria-hidden={!active}
+    inert={!active}
+    style={{ visibility: active ? "visible" : "hidden" }}
+    className="absolute inset-0 mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none sm:px-6 sm:py-6 [scrollbar-gutter:stable]"
+  >{children}</TabsContent>
 }
 
 function repositoryKey(repository: string): string {
@@ -231,18 +245,18 @@ export function OnboardingApp({
       completed={finished}
       onOpenApp={onOpenApp}
     >
-      <TabsContent forceMount value="dependencies" hidden={activeStep !== "dependencies"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
+      <OnboardingPanel step="dependencies" activeStep={activeStep}>
         <DependenciesStep
           groups={viewModel.dependencies}
           applicationPreferences={applicationPreferences}
           onApplicationPreferencesChange={setApplicationPreferences}
           onRepairRuntime={actions.repairRuntime}
         />
-      </TabsContent>
-      <TabsContent forceMount value="workspaces" hidden={activeStep !== "workspaces"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
+      </OnboardingPanel>
+      <OnboardingPanel step="workspaces" activeStep={activeStep}>
         <WorkspacesStep machines={machines} progress={viewModel.workspaceProgress} onMachinesChange={saveMachines} onRetry={actions.retryWorkspaceSetup} />
-      </TabsContent>
-      <TabsContent forceMount value="github" hidden={activeStep !== "github"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
+      </OnboardingPanel>
+      <OnboardingPanel step="github" activeStep={activeStep}>
         <GitHubStep
           workspaces={machineWorkspaceViews}
           connectionState={githubConnectionState}
@@ -255,8 +269,8 @@ export function OnboardingApp({
           onWorkspaceIdentityChange={updateWorkspaceIdentity}
           onResetWorkspaceIdentity={resetWorkspaceIdentity}
         />
-      </TabsContent>
-      <TabsContent forceMount value="review" hidden={activeStep !== "review"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
+      </OnboardingPanel>
+      <OnboardingPanel step="review" activeStep={activeStep}>
         {finished ? <SetupComplete machines={machines} githubSummary={githubSummary} /> : <ReviewStep
           onEditStep={setActiveStep}
           workspaceRetryable={viewModel.workspaceProgress.retryable}
@@ -268,7 +282,7 @@ export function OnboardingApp({
           errorRecovery={viewModel.error?.recovery ?? undefined}
           onRetryWorkspaceSetup={actions.retryWorkspaceSetup}
         />}
-      </TabsContent>
+      </OnboardingPanel>
     </OnboardingShell>
   )
 }
