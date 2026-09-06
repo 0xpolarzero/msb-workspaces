@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { TabsContent } from "@/components/ui/tabs"
+import { SetupComplete } from "@/features/onboarding/components/setup-complete"
 import type { SetupMachineConfiguration } from "@/contracts/silo"
 import { OnboardingShell } from "@/features/onboarding/components/onboarding-shell"
 import type {
@@ -22,6 +23,7 @@ interface OnboardingAppProps {
   actions: OnboardingActions
   initialGitHubConnectionState?: GitHubConnectionState
   repositoryOptions?: readonly string[]
+  onOpenApp?: () => void
 }
 
 function repositoryKey(repository: string): string {
@@ -112,6 +114,7 @@ export function OnboardingApp({
   actions,
   initialGitHubConnectionState,
   repositoryOptions,
+  onOpenApp,
 }: OnboardingAppProps) {
   const [activeStep, setActiveStep] = useState<OnboardingStep>("dependencies")
   const [githubConnectionState, setGithubConnectionState] = useState<GitHubConnectionState>(
@@ -176,6 +179,7 @@ export function OnboardingApp({
   }
 
   function continueSetup() {
+    if (finished) return
     if (activeStep === "review") {
       if (viewModel.finishEnabled) {
         actions.finishSetup({
@@ -224,8 +228,10 @@ export function OnboardingApp({
       onStepChange={setActiveStep}
       onBack={() => move(-1)}
       onContinue={continueSetup}
+      completed={finished}
+      onOpenApp={onOpenApp}
     >
-      <TabsContent value="dependencies" className="mt-0 outline-none">
+      <TabsContent forceMount value="dependencies" hidden={activeStep !== "dependencies"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
         <DependenciesStep
           groups={viewModel.dependencies}
           applicationPreferences={applicationPreferences}
@@ -233,10 +239,10 @@ export function OnboardingApp({
           onRepairRuntime={actions.repairRuntime}
         />
       </TabsContent>
-      <TabsContent value="workspaces" className="mt-0 h-full min-h-0 overflow-hidden outline-none">
-        <WorkspacesStep key={activeStep} machines={machines} progress={viewModel.workspaceProgress} onMachinesChange={saveMachines} onRetry={actions.retryWorkspaceSetup} />
+      <TabsContent forceMount value="workspaces" hidden={activeStep !== "workspaces"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
+        <WorkspacesStep machines={machines} progress={viewModel.workspaceProgress} onMachinesChange={saveMachines} onRetry={actions.retryWorkspaceSetup} />
       </TabsContent>
-      <TabsContent value="github" className="mt-0 h-full outline-none">
+      <TabsContent forceMount value="github" hidden={activeStep !== "github"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
         <GitHubStep
           workspaces={machineWorkspaceViews}
           connectionState={githubConnectionState}
@@ -250,8 +256,9 @@ export function OnboardingApp({
           onResetWorkspaceIdentity={resetWorkspaceIdentity}
         />
       </TabsContent>
-      <TabsContent value="review" className="mt-0 outline-none">
-        <ReviewStep
+      <TabsContent forceMount value="review" hidden={activeStep !== "review"} className="mt-0 h-full min-h-0 overflow-y-auto px-4 py-5 outline-none data-[state=inactive]:hidden sm:px-6 sm:py-6 [scrollbar-gutter:stable]">
+        {finished ? <SetupComplete machines={machines} githubSummary={githubSummary} /> : <ReviewStep
+          onEditStep={setActiveStep}
           workspaceRetryable={viewModel.workspaceProgress.retryable}
           queueItems={viewModel.queueItems}
           machines={machines}
@@ -260,8 +267,7 @@ export function OnboardingApp({
           errorMessage={viewModel.error?.message}
           errorRecovery={viewModel.error?.recovery ?? undefined}
           onRetryWorkspaceSetup={actions.retryWorkspaceSetup}
-        />
-        {finished && <p className="mt-3 text-center text-sm font-medium text-emerald-600" role="status">Setup complete</p>}
+        />}
       </TabsContent>
     </OnboardingShell>
   )
