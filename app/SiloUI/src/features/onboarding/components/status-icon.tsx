@@ -14,10 +14,10 @@ export function StatusIcon({ status, waitingLabel, className }: StatusIconProps)
     return <Check aria-label="Complete" className={cn("size-4 text-emerald-600 dark:text-emerald-400", className)} />
   }
   if (status === "failed") {
-    return <AlertCircle aria-label="Needs action" className={cn("size-4 text-destructive", className)} />
+    return <AlertCircle aria-label="Failed" className={cn("size-4 text-destructive", className)} />
   }
   if (status === "running") {
-    return <LoaderCircle aria-label="In progress" className={cn("size-4 animate-spin text-primary", className)} />
+    return <LoaderCircle aria-label="In progress" className={cn("size-4 animate-spin motion-reduce:animate-none text-amber-700 dark:text-amber-400", className)} />
   }
   return (
     <span

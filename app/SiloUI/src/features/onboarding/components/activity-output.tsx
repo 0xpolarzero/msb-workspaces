@@ -5,20 +5,21 @@ import { CopyButton } from "@/components/copy-button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { DisclosureIndicator, disclosureTriggerStateClass } from "@/components/disclosure-indicator"
 import type { SiloProgressEvent } from "@/contracts/silo"
+import { cn } from "@/lib/utils"
 
 function eventLine(event: SiloProgressEvent): string {
   return [event.phase, event.workspace, event.message].filter(Boolean).join("  ")
 }
 
-export function ActivityOutput({ events }: { events: SiloProgressEvent[] }) {
-  const [open, setOpen] = useState(true)
+export function ActivityOutput({ events, embedded = false }: { events: SiloProgressEvent[]; embedded?: boolean }) {
+  const [open, setOpen] = useState(false)
   const output = useMemo(() => events.map(eventLine).join("\n"), [events])
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="activity-output-collapsible collapsible-motion group rounded-lg border border-border bg-card">
-      <div className="grid grid-cols-[1.25rem_minmax(0,1fr)_1.5rem_1.5rem] items-center gap-1 px-3 py-2" role="group" aria-label="Live activity controls">
-        <TerminalSquare className="size-4" aria-hidden="true" />
-        <span className="text-xs font-medium">Live activity</span>
+    <Collapsible open={open} onOpenChange={setOpen} className={cn("activity-output-collapsible collapsible-motion group", !embedded && "rounded-md border border-border")}>
+      <div className="grid grid-cols-[1.25rem_minmax(0,1fr)_1.5rem_1.5rem] items-center gap-1 px-2 py-1.5 text-muted-foreground" role="group" aria-label="Live activity controls">
+        <TerminalSquare className="size-3.5" aria-hidden="true" />
+        <span className="text-[11px] font-medium">Live activity</span>
         <CopyButton
           variant="ghost"
           size="icon-xs"
@@ -34,7 +35,7 @@ export function ActivityOutput({ events }: { events: SiloProgressEvent[] }) {
         </CollapsibleTrigger>
       </div>
       <CollapsibleContent className="activity-output-content collapsible-content-motion">
-        <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-zinc-950 px-3 py-2.5 font-mono text-[11px] leading-5 text-zinc-200 select-text dark:bg-black" aria-label="Sandbox activity">{output || "No activity yet."}</pre>
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-zinc-950 px-3 py-2.5 font-mono text-[11px] leading-5 text-zinc-200 select-text dark:bg-black" aria-label="Sandbox activity">{output || "No activity yet."}</pre>
       </CollapsibleContent>
     </Collapsible>
   )
