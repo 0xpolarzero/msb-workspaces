@@ -6,7 +6,7 @@ import {
 import { parseOnboardingSource, type OnboardingSource } from "@/features/onboarding/model/onboarding-source"
 import { productionMachineDefaults } from "@/features/onboarding/model/machine-configuration"
 
-export const scenarioNames = ["running", "complete", "dependency-failure", "bootstrap-failure"] as const
+export const scenarioNames = ["running", "complete", "dependency-failure", "bootstrap-failure", "stress-running"] as const
 export type ScenarioName = (typeof scenarioNames)[number]
 
 export const githubFixtureStates = ["disconnected", "connecting", "connected"] as const
@@ -22,7 +22,7 @@ export const repositoryFixtures = [
 const revision = "9f3b7f095c93fced946f31c2847ad6f147e9d35ca91949845f959819f547440d"
 const requestId = "setup-bootstrap-20260903"
 
-const bootstrapConfiguration = {
+const stressBootstrapConfiguration = {
   schemaVersion: 1,
   workspaces: [
     { name: "dev", cpu: 8, cpuCeiling: 12, memoryGiB: 32, memoryCeilingGiB: 48, workspaceStorageGiB: 120, runtimeStorageGiB: 100 },
@@ -38,6 +38,19 @@ const bootstrapConfiguration = {
     { name: "customer-demo", cpu: 6, cpuCeiling: 8, memoryGiB: 16, memoryCeilingGiB: 32, workspaceStorageGiB: 80, runtimeStorageGiB: 60 },
     { name: "security-review", cpu: 8, cpuCeiling: 12, memoryGiB: 32, memoryCeilingGiB: 48, workspaceStorageGiB: 100, runtimeStorageGiB: 80 },
   ],
+} satisfies SiloBootstrapConfiguration
+
+const bootstrapConfiguration = {
+  schemaVersion: 1,
+  workspaces: productionMachineDefaults.map((machine) => ({
+    name: machine.name,
+    cpu: machine.cpus,
+    cpuCeiling: machine.maxCPUs,
+    memoryGiB: machine.memoryGiB,
+    memoryCeilingGiB: machine.maxMemoryGiB,
+    workspaceStorageGiB: machine.workspaceStorageGiB,
+    runtimeStorageGiB: machine.runtimeStorageGiB,
+  })),
 } satisfies SiloBootstrapConfiguration
 
 const passingPreflightChecks = [
@@ -75,28 +88,35 @@ function progress(
   }
 }
 
-const configuredWorkspaceEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
-  progress(`Configuring sandbox '${name}'.`, "workspace-configuration", name, 0),
-  progress(`Sandbox '${name}' is configured.`, "workspace-configuration", name, 1),
-])
+function configuredEvents(configuration: SiloBootstrapConfiguration) {
+  return configuration.workspaces.flatMap(({ name }) => [
+    progress(`Configuring sandbox '${name}'.`, "workspace-configuration", name, 0),
+    progress(`Sandbox '${name}' is configured.`, "workspace-configuration", name, 1),
+  ])
+}
 
-const networkedWorkspaceEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
-  progress(`Starting candidate networking for '${name}'.`, "workspace-networking", name, 0),
-  progress(`Candidate networking is ready for '${name}'.`, "workspace-networking", name, 1),
-])
+function networkedEvents(configuration: SiloBootstrapConfiguration) {
+  return configuration.workspaces.flatMap(({ name }) => [
+    progress(`Starting candidate networking for '${name}'.`, "workspace-networking", name, 0),
+    progress(`Candidate networking is ready for '${name}'.`, "workspace-networking", name, 1),
+  ])
+}
 
-const completedWorkspaceEvents = ["dev", "playgrounds", "personal"].flatMap((workspace) => [
-  progress(`Verifying '${workspace}'.`, "workspace-verification", workspace, 0),
-  progress(`Verification passed for '${workspace}'.`, "workspace-verification", workspace, 1),
-])
+function verifyingEvents(configuration: SiloBootstrapConfiguration, readyCount: number) {
+  const currentWorkspace = configuration.workspaces[readyCount].name
+  return [
+    ...configuredEvents(configuration),
+    ...networkedEvents(configuration),
+    ...configuration.workspaces.slice(0, readyCount).flatMap(({ name }) => [
+      progress(`Verifying '${name}'.`, "workspace-verification", name, 0),
+      progress(`Verification passed for '${name}'.`, "workspace-verification", name, 1),
+    ]),
+    progress("Internal verification path is not safe for display.", "workspace-verification", currentWorkspace, 0, false),
+    progress(`Verifying '${currentWorkspace}'.`, "workspace-verification", currentWorkspace, 0),
+  ]
+}
 
-const runningEvents = [
-  ...configuredWorkspaceEvents,
-  ...networkedWorkspaceEvents,
-  ...completedWorkspaceEvents,
-  progress("Internal verification path is not safe for display.", "workspace-verification", "docs-build", 0, false),
-  progress("Verifying 'docs-build'.", "workspace-verification", "docs-build", 0),
-] satisfies SiloProgressEvent[]
+const runningEvents = verifyingEvents(bootstrapConfiguration, 2)
 
 const completeEvents = bootstrapConfiguration.workspaces.flatMap(({ name }) => [
   progress(`Sandbox '${name}' is configured.`, "workspace-configuration", name, 1),
@@ -191,17 +211,17 @@ const dependencyFailureSource = {
   },
 } satisfies OnboardingSource
 
-const bootstrapFailureMessage = "Candidate networking could not become ready for 'client-alpha-integration'."
+const bootstrapFailureMessage = "Candidate networking could not become ready for 'playgrounds'."
 const bootstrapFailureSource = {
   ...runningSource,
   progressEvents: [
-    ...configuredWorkspaceEvents,
-    ...bootstrapConfiguration.workspaces.slice(0, 4).flatMap(({ name }) => [
+    ...configuredEvents(bootstrapConfiguration),
+    ...bootstrapConfiguration.workspaces.slice(0, 1).flatMap(({ name }) => [
       progress(`Starting candidate networking for '${name}'.`, "workspace-networking", name, 0),
       progress(`Candidate networking is ready for '${name}'.`, "workspace-networking", name, 1),
     ]),
-    progress("Starting candidate networking for 'client-alpha-integration'.", "workspace-networking", "client-alpha-integration", 0),
-    progress("Candidate networking failed for 'client-alpha-integration'.", "workspace-networking", "client-alpha-integration", 0),
+    progress("Starting candidate networking for 'playgrounds'.", "workspace-networking", "playgrounds", 0),
+    progress("Candidate networking failed for 'playgrounds'.", "workspace-networking", "playgrounds", 0),
   ],
   bootstrapState: {
     ...runningSource.bootstrapState,
@@ -210,10 +230,28 @@ const bootstrapFailureSource = {
   error: {
     code: "SILO_CANDIDATE_NETWORKING_FAILED",
     message: bootstrapFailureMessage,
-    recovery: "Repair sandbox startup or SSH forwarding for 'client-alpha-integration', then resume Setup.",
-    workspace: "client-alpha-integration",
+    recovery: "Repair sandbox startup or SSH forwarding for 'playgrounds', then resume Setup.",
+    workspace: "playgrounds",
     retryable: true,
   },
+} satisfies OnboardingSource
+
+// A separate, coherent fixture for long names, scrolling, and larger setup queues.
+const stressRunningSource = {
+  ...runningSource,
+  machineConfigurations: stressBootstrapConfiguration.workspaces.map((workspace, index) => ({
+    id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    kind: "vm" as const,
+    name: workspace.name,
+    cpus: workspace.cpu,
+    maxCPUs: workspace.cpuCeiling,
+    memoryGiB: workspace.memoryGiB,
+    maxMemoryGiB: workspace.memoryCeilingGiB,
+    workspaceStorageGiB: workspace.workspaceStorageGiB,
+    runtimeStorageGiB: workspace.runtimeStorageGiB,
+  })),
+  bootstrapConfiguration: stressBootstrapConfiguration,
+  progressEvents: verifyingEvents(stressBootstrapConfiguration, 3),
 } satisfies OnboardingSource
 
 export const onboardingScenarios: Record<ScenarioName, OnboardingSource> = {
@@ -221,6 +259,7 @@ export const onboardingScenarios: Record<ScenarioName, OnboardingSource> = {
   complete: parseOnboardingSource(completeSource),
   "dependency-failure": parseOnboardingSource(dependencyFailureSource),
   "bootstrap-failure": parseOnboardingSource(bootstrapFailureSource),
+  "stress-running": parseOnboardingSource(stressRunningSource),
 }
 
 export function scenarioFromSearch(search: string): ScenarioName {
