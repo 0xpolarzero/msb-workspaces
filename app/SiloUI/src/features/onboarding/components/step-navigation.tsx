@@ -1,49 +1,79 @@
-import { Check, LoaderCircle, Minus, TriangleAlert } from "lucide-react"
+import type { ComponentProps } from "react"
+import { Boxes, Check, CircleAlert, ClipboardCheck, GitFork, LoaderCircle, PackageCheck } from "lucide-react"
 
 import { SiloMark } from "@/components/silo-mark"
 import { TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { OnboardingStep, PresentationStatus } from "@/features/onboarding/model/onboarding-state"
 
-const steps: { id: OnboardingStep; label: string }[] = [
-  { id: "dependencies", label: "Dependencies" },
-  { id: "workspaces", label: "Sandboxes" },
-  { id: "github", label: "GitHub" },
-  { id: "review", label: "Review" },
-]
+const steps = [
+  { id: "dependencies", label: "Dependencies", icon: PackageCheck },
+  { id: "workspaces", label: "Sandboxes", icon: Boxes },
+  { id: "github", label: "GitHub", icon: GitFork },
+  { id: "review", label: "Review", icon: ClipboardCheck },
+] as const
 
-function StepMark({ status }: { status: PresentationStatus }) {
-  if (status === "succeeded") return <Check className="size-4" aria-label="Complete" />
-  if (status === "failed") return <TriangleAlert className="size-4" aria-label="Needs action" />
-  if (status === "running") return <LoaderCircle className="size-4 animate-spin" aria-label="In progress" />
-  return <Minus className="size-4" aria-hidden="true" />
+const statusLabels: Record<PresentationStatus, string> = {
+  succeeded: "Complete",
+  failed: "Failed",
+  running: "In progress",
+  waiting: "Waiting",
 }
 
-export function StepNavigation({ status }: { status: Record<OnboardingStep, PresentationStatus> }) {
+function StepStatus({ status }: { status: PresentationStatus }) {
+  if (status === "waiting") return null
+  const Icon = status === "succeeded" ? Check : status === "failed" ? CircleAlert : LoaderCircle
+  return <Icon aria-hidden="true" className={cn(
+    "absolute -top-1 -right-1 size-2 rounded-full bg-sidebar ring-2 ring-sidebar",
+    status === "failed" && "text-destructive",
+    status === "running" && "animate-spin text-foreground",
+    status === "succeeded" && "text-emerald-600 dark:text-emerald-400",
+  )} />
+}
+
+interface StepNavigationProps extends ComponentProps<"nav"> {
+  status: Record<OnboardingStep, PresentationStatus>
+  collapsed: boolean
+  completed: boolean
+}
+
+export function StepNavigation({ status, collapsed, completed, ...props }: StepNavigationProps) {
   return (
-    <nav aria-label="Setup steps" className="min-w-0 overflow-x-auto border-b border-border bg-sidebar px-3 py-2 md:border-r md:border-b-0 md:px-3 md:py-5">
-      <div className="mb-5 hidden items-center gap-3 border-b border-border px-3 pb-5 md:flex">
-        <SiloMark className="size-8 text-foreground" />
-        <span className="text-base font-semibold tracking-tight text-foreground">Silo</span>
+    <nav
+      {...props}
+      id="onboarding-sidebar"
+      aria-label="Setup steps"
+      data-collapsed={collapsed}
+      className="silo-sidebar flex min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto border-r border-border bg-sidebar py-4"
+    >
+      <div className="sidebar-brand mb-4 flex shrink-0 items-center gap-3 overflow-hidden border-b border-border pb-4">
+        <SiloMark className="size-8 shrink-0" />
+        <span className="sidebar-label text-base font-semibold tracking-tight">Silo</span>
       </div>
-      <TabsList className="grid h-auto w-full min-w-0 grid-cols-4 gap-1 bg-transparent p-0 md:flex md:flex-col md:items-stretch" aria-label="Setup steps">
-        {steps.map((step) => (
-          <TabsTrigger
-            key={step.id}
-            value={step.id}
-            data-appearance="borderless"
-            className="h-10 min-w-0 justify-center gap-1 rounded-md border-0 bg-transparent px-2 py-2 text-[10px] text-muted-foreground shadow-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70 md:w-full md:justify-start md:gap-2 md:px-3.5 md:py-2.5 md:text-[13px]"
-          >
-            <span className={cn(
-              "grid size-5 shrink-0 place-items-center",
-              status[step.id] === "failed" && "text-destructive",
-              status[step.id] === "running" && "text-primary",
-              status[step.id] === "succeeded" && "text-emerald-600 dark:text-emerald-400",
-            )}>
-              <StepMark status={status[step.id]} />
-            </span>
-            {step.label}
-          </TabsTrigger>
+      <TabsList className="flex h-auto w-full min-w-0 flex-col items-stretch justify-start gap-1 bg-transparent p-0" aria-label="Setup steps">
+        {steps.map(({ id, label, icon: Icon }) => (
+          <Tooltip key={id}>
+            <TooltipTrigger asChild>
+              <TabsTrigger
+                value={id}
+                disabled={completed}
+                aria-label={label}
+                aria-describedby={`setup-step-${id}-status`}
+                aria-busy={status[id] === "running" || undefined}
+                data-appearance="borderless"
+                className="sidebar-primary relative flex h-10 w-full min-w-0 flex-none items-center gap-2 rounded-md border-0 bg-transparent py-2 text-[13px] text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/70"
+              >
+                <span className="relative flex shrink-0">
+                  <Icon aria-hidden="true" className="size-4" />
+                  <StepStatus status={status[id]} />
+                </span>
+                <span className="sidebar-label flex-1 text-left">{label}</span>
+                <span id={`setup-step-${id}-status`} className="sr-only">{statusLabels[status[id]]}</span>
+              </TabsTrigger>
+            </TooltipTrigger>
+            <TooltipContent side="right" hidden={!collapsed}>{label} · {statusLabels[status[id]]}</TooltipContent>
+          </Tooltip>
         ))}
       </TabsList>
     </nav>

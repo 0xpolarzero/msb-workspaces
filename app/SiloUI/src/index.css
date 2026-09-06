@@ -157,12 +157,6 @@ html.dark {
   }
 }
 
-@media (min-width: 48rem) {
-  [data-appearance="borderless"] {
-    min-height: 2.75rem;
-  }
-}
-
 .collapsible-content-motion {
   overflow: hidden;
 }
@@ -235,7 +229,23 @@ html.dark {
   from, to { overflow-y: hidden; }
 }
 
+.silo-window[data-reduce-motion="true"],
+.silo-window[data-reduce-motion="true"] * {
+  transition-duration: 0s !important;
+  transition-delay: 0s !important;
+  animation: none !important;
+  scroll-behavior: auto !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .silo-window,
+  .silo-window * {
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+
   .collapsible-content-motion,
   .file-pane-content-motion {
     animation: none !important;
