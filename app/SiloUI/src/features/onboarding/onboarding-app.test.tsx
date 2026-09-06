@@ -480,7 +480,7 @@ describe("onboarding", () => {
     renderScenario("dependency-failure")
 
     expect(screen.getByText("silo-ssh-proxy")).toBeVisible()
-    expect(screen.getByText("Use Repair… to reinstall the bundled Silo runtime.")).toBeVisible()
+    expect(screen.queryByText("Use Repair… to reinstall the bundled Silo runtime.")).not.toBeInTheDocument()
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled()
     const disclosure = screen.getByRole("button", { name: /Silo tools/ })
     expectDisclosureIndicator(disclosure)

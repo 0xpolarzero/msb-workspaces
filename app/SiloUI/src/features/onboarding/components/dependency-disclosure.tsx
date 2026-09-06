@@ -58,7 +58,7 @@ export function DependencyDisclosure({ group, onRepairRuntime }: { group: Depend
                 key={name}
                 title={check.id === "silo-runtime" ? "Silo runtime needs repair" : `${check.title} needs attention`}
                 detail={check.detail}
-                recovery={check.remediation ?? undefined}
+                recovery={check.id === "silo-runtime" ? undefined : check.remediation ?? undefined}
                 action={check.id === "silo-runtime" && (
                   <Button type="button" variant="outline" size="xs" onClick={onRepairRuntime}>
                     <RotateCw aria-hidden="true" />Repair…

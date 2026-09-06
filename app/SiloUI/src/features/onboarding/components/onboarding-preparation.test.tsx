@@ -36,7 +36,7 @@ describe("onboarding preparation interactions", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true")
     const notice = screen.getByRole("alert")
     expect(within(notice).getByText("Silo runtime needs repair")).toBeVisible()
-    expect(within(notice).getByText("Use Repair… to reinstall the bundled Silo runtime.")).toBeVisible()
+    expect(within(notice).queryByRole("group", { name: "Silo runtime needs repair details" })).not.toBeInTheDocument()
     await user.click(within(notice).getByRole("button", { name: "Repair…" }))
     expect(repair).toHaveBeenCalledOnce()
     expect(trigger).toHaveAttribute("aria-expanded", "true")
