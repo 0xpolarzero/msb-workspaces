@@ -90,7 +90,8 @@
 }
 
 .silo-sidebar .sidebar-primary {
-  padding-inline: 12px;
+  padding-left: 12px;
+  padding-right: 10px;
 }
 
 .silo-sidebar .sidebar-primary-with-disclosure {

@@ -37,10 +37,11 @@ const settingsItems = [
 
 function NavigationLoadingIndicator({ loading, collapsed }: { loading: boolean; collapsed: boolean }) {
   if (!loading) return null
-  return <Loader2 data-navigation-loading-indicator aria-hidden="true" className={cn(
+  const spinner = <Loader2 data-navigation-loading-indicator aria-hidden="true" className={cn(
     "shrink-0 animate-spin motion-reduce:animate-none",
     collapsed ? "absolute -top-1 -right-1 size-2 rounded-full bg-sidebar ring-2 ring-sidebar" : "size-3.5",
   )} />
+  return collapsed ? spinner : <span className="grid size-5 shrink-0 place-items-center">{spinner}</span>
 }
 
 function NavigationTooltip({ label, collapsed, children }: { label: string; collapsed: boolean; children: ReactNode }) {
