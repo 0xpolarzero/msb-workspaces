@@ -39,7 +39,7 @@ function NavigationLoadingIndicator({ loading, collapsed }: { loading: boolean; 
   if (!loading) return null
   return <Loader2 data-navigation-loading-indicator aria-hidden="true" className={cn(
     "shrink-0 animate-spin motion-reduce:animate-none",
-    collapsed ? "sidebar-icon-badge size-2 rounded-full bg-sidebar ring-2 ring-sidebar" : "size-3.5",
+    collapsed ? "absolute -top-1 -right-1 size-2 rounded-full bg-sidebar ring-2 ring-sidebar" : "size-3.5",
   )} />
 }
 
@@ -191,13 +191,13 @@ function SubNavigation<Section extends string>({
           <span className="relative flex shrink-0">
             <Icon aria-hidden="true" className="sidebar-section-icon" />
             {collapsed && <NavigationLoadingIndicator loading={loading?.[id] ?? false} collapsed />}
-            {collapsed && attention?.section === id && <span
-              role="status"
-              aria-label={`${attention.errors} sandbox errors, ${attention.warnings} sandbox warnings`}
-              className={cn("sidebar-icon-badge size-1.5 rounded-full", attention.errors > 0 ? "bg-destructive" : "bg-amber-500")}
-            />}
           </span>
           <span className="sidebar-label flex-1 text-left">{itemLabel}</span>
+          {collapsed && attention?.section === id && <span
+            role="status"
+            aria-label={`${attention.errors} sandbox errors, ${attention.warnings} sandbox warnings`}
+            className={cn("absolute top-1 right-1 size-1.5 rounded-full", attention.errors > 0 ? "bg-destructive" : "bg-amber-500")}
+          />}
           {!collapsed && attention?.section === id && (
             <span className="flex shrink-0 items-center gap-1">
               <TooltipProvider delayDuration={150}>
