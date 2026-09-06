@@ -10,7 +10,7 @@ import { githubStateFromSearch, onboardingScenarios, repositoryFixtures } from "
 import { FixtureSelector } from "@/fixtures/fixture-selector"
 
 function renderScenario(name: keyof typeof onboardingScenarios = "running", githubState?: GitHubConnectionState) {
-  render(<FixtureSelector surface="onboarding" scenario="running" />)
+  render(<FixtureSelector surface="onboarding" scenario={name} />)
   return render(<OnboardingApp source={onboardingScenarios[name]} initialGitHubConnectionState={githubState} repositoryOptions={repositoryFixtures} actions={{
     saveMachineConfiguration: vi.fn(),
     repairRuntime: vi.fn(),
@@ -100,13 +100,13 @@ describe("onboarding", () => {
     for (const tab of tabs) expect(tab).toHaveAttribute("data-appearance", "borderless")
   })
 
-  it("supports arrow-key navigation across the responsive tab list", async () => {
+  it("supports vertical arrow-key navigation across the setup sidebar", async () => {
     const user = userEvent.setup()
     renderScenario()
     const dependencies = screen.getByRole("tab", { name: /Dependencies/ })
 
-    dependencies.focus()
-    await user.keyboard("{ArrowRight}")
+    await user.click(dependencies)
+    await user.keyboard("{ArrowDown}")
 
     expect(screen.getByRole("tab", { name: /Sandboxes/ })).toHaveAttribute("aria-selected", "true")
     expectHiddenPanelHeading("Creating your sandboxes")
@@ -118,9 +118,10 @@ describe("onboarding", () => {
 
     for (const step of ["GitHub", "Review"]) {
       await user.click(screen.getByRole("tab", { name: new RegExp(step) }))
-      expect(screen.queryByLabelText("Sandbox progress")).not.toBeInTheDocument()
-      expect(screen.queryByText(/Creating sandboxes ·/)).not.toBeInTheDocument()
-      expect(within(screen.getByRole("tab", { name: /Sandboxes/ })).getByLabelText("In progress")).toBeVisible()
+      const panel = screen.getByRole("tabpanel")
+      expect(within(panel).queryByRole("progressbar", { name: "Sandbox setup progress" })).not.toBeInTheDocument()
+      expect(screen.getByRole("tab", { name: /Sandboxes/ })).toHaveAccessibleDescription("In progress")
+      expect(screen.getByRole("tab", { name: /Sandboxes/ })).toHaveAttribute("aria-busy", "true")
     }
   })
 
@@ -134,8 +135,8 @@ describe("onboarding", () => {
     expect(within(githubFooter).getAllByRole("button").map(({ textContent }) => textContent)).toEqual(["Back", "Continue"])
     expect(within(githubFooter).getByRole("button", { name: "Continue" })).toBeEnabled()
     expect(within(githubFooter).queryByRole("button", { name: /skip/i })).not.toBeInTheDocument()
-    expect(within(githubTab).queryByLabelText("Complete")).not.toBeInTheDocument()
-    expect(within(githubTab).queryByLabelText("In progress")).not.toBeInTheDocument()
+    expect(githubTab).toHaveAccessibleDescription("Waiting")
+    expect(githubTab).not.toHaveAttribute("aria-busy", "true")
 
     await user.click(within(githubFooter).getByRole("button", { name: "Continue" }))
     expectHiddenPanelHeading("Review setup")
@@ -149,8 +150,8 @@ describe("onboarding", () => {
 
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     const githubTab = screen.getByRole("tab", { name: /GitHub/ })
-    expect(within(githubTab).getByLabelText("In progress")).toBeVisible()
-    expect(within(githubTab).queryByLabelText("Complete")).not.toBeInTheDocument()
+    expect(githubTab).toHaveAccessibleDescription("In progress")
+    expect(githubTab).toHaveAttribute("aria-busy", "true")
     const continueButton = screen.getByRole("button", { name: "Continue" })
     expect(continueButton).toBeEnabled()
 
@@ -164,11 +165,11 @@ describe("onboarding", () => {
 
     await user.click(screen.getByRole("tab", { name: /GitHub/ }))
     const githubTab = screen.getByRole("tab", { name: /GitHub/ })
-    expect(within(githubTab).getByLabelText("Complete")).toBeVisible()
-    expect(within(githubTab).queryByLabelText("In progress")).not.toBeInTheDocument()
+    expect(githubTab).toHaveAccessibleDescription("Complete")
+    expect(githubTab).not.toHaveAttribute("aria-busy", "true")
 
     await user.click(screen.getByRole("button", { name: "Remove acme/silo from dev" }))
-    expect(within(githubTab).getByLabelText("Complete")).toBeVisible()
+    expect(githubTab).toHaveAccessibleDescription("Complete")
     const continueButton = screen.getByRole("button", { name: "Continue" })
     expect(continueButton).toBeEnabled()
     await user.click(continueButton)
@@ -489,71 +490,44 @@ describe("onboarding", () => {
     expect(screen.getByText("silo-ssh-proxy")).toBeVisible()
   })
 
-  it("filters unsafe activity and renders a bounded many-workspace list", async () => {
+  it("keeps stress-fixture activity collapsed until requested and filters unsafe output", async () => {
     const user = userEvent.setup()
-    renderScenario()
+    renderScenario("stress-running")
     await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
 
-    expect(screen.getByLabelText("Sandbox activity")).toHaveTextContent("Verifying 'docs-build'.")
-    const elapsedTime = screen.getByLabelText("Elapsed time")
-    expect(elapsedTime.parentElement).toHaveTextContent("docs-build02:18")
-    expect(elapsedTime).toHaveTextContent("02:18")
-    expect(screen.queryByText(/elapsed/i)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Internal verification path/)).not.toBeInTheDocument()
-    const list = screen.getByTestId("machine-list")
-    expect(within(list).getByText("dev")).toBeVisible()
-    expect(within(list).getByText("personal")).toBeVisible()
-    expect(within(list).queryByText("client-alpha-integration")).not.toBeInTheDocument()
-    expect(screen.getByText("27 of 36 operations complete")).toBeVisible()
-    expect(screen.getByText("3 configured · 3 VM · 0 SSH")).toBeVisible()
-    const activityControls = screen.getByRole("group", { name: "Live activity controls" })
-    const activityCard = activityControls.parentElement
-    const activitySlot = activityCard?.parentElement
-    expect(activityCard).toHaveAttribute("data-state", "open")
-    expect(activitySlot).toHaveClass("mt-4", "shrink-0")
-    expect(activitySlot?.children).toHaveLength(1)
-    expect(activitySlot?.firstElementChild).toBe(activityCard)
-    const activityContent = activityCard?.children[1]
-    const [activityIcon, activityLabel, copyButton, disclosureButton] = [...activityControls.children]
-    const activityButtons = within(activityControls).getAllByRole("button")
-    expect(activityIcon).toHaveClass("lucide-square-terminal")
-    expect(activityLabel).toHaveTextContent("Live activity")
-    expect(copyButton).toBe(activityButtons[0])
-    expect(disclosureButton).toBe(activityButtons[1])
-    expect(activityButtons.map((button) => button.getAttribute("aria-label"))).toEqual(["Copy activity", "Collapse activity"])
-    expect(within(activityControls).getAllByRole("button", { expanded: true })).toHaveLength(1)
-    expect(activityControls.querySelector("button button")).not.toBeInTheDocument()
-    expect(activityButtons[0].textContent).toBe("")
-    expect(activityButtons[0].querySelector("svg")).not.toBeNull()
-    expect(within(activityControls).queryByText(/^(Copy|Copied|Copy failed)$/)).not.toBeInTheDocument()
-    const copy = vi.spyOn(navigator.clipboard, "writeText")
-    await user.click(screen.getByRole("button", { name: "Copy activity" }))
-    expect(copy).toHaveBeenCalledWith(expect.stringContaining("Verifying 'docs-build'."))
-    expect(copy).not.toHaveBeenCalledWith(expect.stringContaining("Internal verification path"))
-    const copiedActivity = screen.getByRole("button", { name: "Activity copied" })
-    expect(copiedActivity).toHaveAttribute("data-copy-status", "copied")
-    expect(copiedActivity.querySelector("svg")).toHaveClass("lucide-check")
-    expect(activityButtons[0].textContent).toBe("")
-    expect(activityButtons[0].querySelector("svg")).not.toBeNull()
-    expect(within(activityControls).queryByText(/^(Copy|Copied|Copy failed)$/)).not.toBeInTheDocument()
-    const disclosure = screen.getByRole("button", { name: "Collapse activity" })
-    expectDisclosureIndicator(disclosure)
-    await user.click(disclosure)
-    expect(screen.queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
-    expect(disclosure).toHaveAttribute("aria-expanded", "false")
-    expect(activityCard).toHaveAttribute("data-state", "closed")
-    expect(activityContent).toHaveAttribute("data-state", "closed")
-    expect(activityContent).toHaveAttribute("hidden")
-    expect(activityContent?.children).toHaveLength(0)
-    expect(activityCard?.firstElementChild).toBe(activityControls)
-    expect(activitySlot?.firstElementChild).toBe(activityCard)
-    expect(activitySlot?.style.minHeight).toBe("")
-    const expand = screen.getByRole("button", { name: "Expand activity" })
+    const panel = within(screen.getByRole("tabpanel"))
+    expect(panel.queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
+    expect(panel.getByLabelText("Elapsed time")).toHaveTextContent("02:18")
+    expect(panel.getByText("27 of 36 operations complete")).toBeVisible()
+    expect(panel.getByText("12 configured · 12 VM · 0 SSH")).toBeVisible()
+    const list = panel.getByRole("list", { name: "Configured sandboxes" })
+    expect(within(list).getAllByRole("listitem")).toHaveLength(12)
+    expect(within(list).getByText("client-alpha-integration")).toBeVisible()
+    const working = within(list).getByText("docs-build").closest("li")!
+    expect(within(working).getByText("In progress")).toBeVisible()
+
+    const expand = panel.getByRole("button", { name: "Expand activity" })
+    expectDisclosureIndicator(expand)
+    expect(expand).toHaveAttribute("aria-expanded", "false")
     await user.click(expand)
     expect(expand).toHaveAttribute("aria-expanded", "true")
-    expect(screen.getByLabelText("Sandbox activity")).toBeVisible()
-    expect(activityContent).not.toHaveAttribute("hidden")
-    expect(activityContent?.children).toHaveLength(1)
+    expect(panel.getByLabelText("Sandbox activity")).toHaveTextContent("Verifying 'docs-build'.")
+    expect(panel.queryByText(/Internal verification path/)).not.toBeInTheDocument()
+
+    const controls = panel.getByRole("group", { name: "Live activity controls" })
+    expect(within(controls).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Copy activity", "Collapse activity"])
+    const copy = vi.spyOn(navigator.clipboard, "writeText")
+    await user.click(within(controls).getByRole("button", { name: "Copy activity" }))
+    expect(copy).toHaveBeenCalledWith(expect.stringContaining("Verifying 'docs-build'."))
+    expect(copy).not.toHaveBeenCalledWith(expect.stringContaining("Internal verification path"))
+    expect(within(controls).getByRole("button", { name: "Activity copied" })).toHaveAttribute("data-copy-status", "copied")
+
+    await user.click(within(controls).getByRole("button", { name: "Collapse activity" }))
+    expect(panel.queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
+    expect(panel.getByRole("button", { name: "Expand activity" })).toHaveAttribute("aria-expanded", "false")
+    expect(list).toBeVisible()
+    await user.click(panel.getByRole("button", { name: "Expand activity" }))
+    expect(panel.getByLabelText("Sandbox activity")).toBeVisible()
   })
 
   it("reports a clipboard denial without an unhandled interaction failure", async () => {
@@ -675,8 +649,8 @@ describe("onboarding", () => {
     const user = userEvent.setup()
     renderScenario("bootstrap-failure")
     await user.click(screen.getByRole("tab", { name: /Review/ }))
-    expect(screen.getByRole("alert")).toHaveTextContent("Candidate networking could not become ready for 'client-alpha-integration'.")
-    expect(screen.getByRole("alert")).toHaveTextContent("Repair sandbox startup or SSH forwarding for 'client-alpha-integration', then resume Setup.")
+    expect(screen.getByRole("alert")).toHaveTextContent("Candidate networking could not become ready for 'playgrounds'.")
+    expect(screen.getByRole("alert")).toHaveTextContent("Repair sandbox startup or SSH forwarding for 'playgrounds', then resume Setup.")
     expect(screen.getByRole("button", { name: "Finish" })).toBeDisabled()
   })
 
@@ -783,8 +757,9 @@ describe("onboarding", () => {
       user: "deploy",
       port: 2222,
     })
-    expect(screen.getByText("deploy@staging.example.com:2222")).toBeVisible()
-    expect(screen.queryByText(/connected/i)).not.toBeInTheDocument()
+    const panel = within(screen.getByRole("tabpanel"))
+    expect(panel.getByText("deploy@staging.example.com:2222")).toBeVisible()
+    expect(panel.queryByText(/connected/i)).not.toBeInTheDocument()
   })
 
   it("restores an existing VM exactly on Cancel and persists a valid edit on Save", async () => {
@@ -814,7 +789,7 @@ describe("onboarding", () => {
     const dragHandle = screen.getByRole("button", { name: "Reorder dev" })
     expect(dragHandle).toHaveAccessibleName("Reorder dev")
     expect(dragHandle).not.toHaveAttribute("title")
-    fireEvent.focus(dragHandle)
+    await user.click(dragHandle)
     await user.keyboard("{ArrowDown}")
     fireEvent.blur(dragHandle)
     await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument())
@@ -1002,8 +977,9 @@ describe("onboarding", () => {
     await user.click(screen.getByRole("button", { name: "Reorder remote" }))
     await user.keyboard("{ArrowUp}{ArrowUp}{ArrowUp}")
 
-    const activity = screen.getByRole("button", { name: "Collapse activity" })
-    await user.click(activity)
+    await user.click(screen.getByRole("button", { name: "Expand activity" }))
+    expect(screen.getByLabelText("Sandbox activity")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Collapse activity" }))
     expect(screen.queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
     expect(screen.getByTestId("machine-list")).toBeVisible()
 
@@ -1015,6 +991,9 @@ describe("onboarding", () => {
       expect.stringContaining("playgroundsvm4 CPU · 32 GB RAM"),
       expect.stringContaining("personalvm6 CPU · 16 GB RAM"),
     ])
+    await user.click(screen.getByRole("tab", { name: /Sandboxes/ }))
+    expect(screen.getByRole("button", { name: "Expand activity" })).toHaveAttribute("aria-expanded", "false")
+    expect(within(screen.getByRole("tabpanel")).queryByLabelText("Sandbox activity")).not.toBeInTheDocument()
   })
 
   it("switches the theme from the fixture controls and persists the choice", async () => {

@@ -36,9 +36,9 @@ describe("Silo contract fixtures", () => {
       requestId: "setup-bootstrap-20260903",
       phase: "verification",
       step: "workspace-verification",
-      workspace: "docs-build",
+      workspace: "personal",
       fraction: 0,
-      message: "Verifying 'docs-build'.",
+      message: "Verifying 'personal'.",
       safeForDisplay: true,
     })
     expect(event?.revision).toMatch(/^[0-9a-f]{64}$/)
