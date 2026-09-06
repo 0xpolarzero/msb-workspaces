@@ -2,6 +2,8 @@ import { useEffect, useState } from "react"
 
 import { ApplicationApp } from "@/features/application/application-app"
 import { OnboardingApp } from "@/features/onboarding/onboarding-app"
+import type { OnboardingCompletionRequest } from "@/features/onboarding/model/onboarding-source"
+import { applicationPreviewAfterSetup } from "@/fixtures/onboarding-handoff"
 import {
   applicationSourceForScenario,
   githubManagementFixtureModeFromSearch,
@@ -17,7 +19,8 @@ import { githubStateFromSearch, onboardingScenarios, repositoryFixtures, scenari
 import { surfaceFromSearch } from "@/fixtures/surfaces"
 
 export default function App() {
-  const surface = surfaceFromSearch(window.location.search)
+  const [surface, setSurface] = useState(() => surfaceFromSearch(window.location.search))
+  const [completedSetup, setCompletedSetup] = useState<OnboardingCompletionRequest | null>(null)
   const scenario = scenarioFromSearch(window.location.search)
   const githubState = import.meta.env.DEV ? githubStateFromSearch(window.location.search) : undefined
   const workspaceMode = import.meta.env.DEV ? workspaceFixtureModeFromSearch(window.location.search) : undefined
@@ -50,7 +53,7 @@ export default function App() {
         <ApplicationApp
           key={`${scenario}:${githubState ?? "source"}:${workspaceMode ?? "source"}:${sandboxConfigurationMode ?? "source"}:${systemIssueMode ?? "source"}:${repositoryPushMode ?? "source"}:${activityMode ?? "source"}:${githubManagementMode ?? "source"}`}
           backupPreviewMode={backupMode}
-          source={applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode, activityStep, githubManagementMode)}
+          source={completedSetup ? applicationPreviewAfterSetup(completedSetup) : applicationSourceForScenario(scenario, githubState, workspaceMode, sandboxConfigurationMode, systemIssueMode, repositoryPushMode, activityMode, activityStep, githubManagementMode)}
           actions={{
             repairRuntime: () => undefined,
             saveMachineConfiguration: (_request) => undefined,
@@ -71,11 +74,17 @@ export default function App() {
           source={source}
           initialGitHubConnectionState={githubState}
           repositoryOptions={repositoryFixtures}
+          onOpenApp={() => {
+            const url = new URL(window.location.href)
+            url.searchParams.set("view", "app")
+            window.history.replaceState(null, "", url)
+            setSurface("app")
+          }}
           actions={{
             saveMachineConfiguration: (request) => setSource((current) => ({ ...current, machineConfigurations: request.machines })),
             repairRuntime: () => setSource(onboardingScenarios.running),
             retryWorkspaceSetup: () => setSource(onboardingScenarios.running),
-            finishSetup: (_request) => undefined,
+            finishSetup: setCompletedSetup,
           }}
         />
       )}
